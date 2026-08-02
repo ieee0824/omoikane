@@ -9,6 +9,38 @@
       "baseline_supported": true
     },
     {
+      "id": "cssom.offset-parent",
+      "area": "layout",
+      "description": "HTMLElement.offsetParent resolves positioned ancestors and hidden boxes",
+      "setup": "globalThis.__offsetParentHost = document.createElement('div'); __offsetParentHost.style.position = 'relative'; globalThis.__offsetParentChild = document.createElement('div'); __offsetParentHost.appendChild(__offsetParentChild); globalThis.__offsetParentHidden = document.createElement('div'); __offsetParentHidden.style.display = 'none'; __offsetParentHost.appendChild(__offsetParentHidden); document.body.appendChild(__offsetParentHost)",
+      "probe": "__offsetParentChild.offsetParent === __offsetParentHost && __offsetParentHidden.offsetParent === null && document.createElement('div').offsetParent === null",
+      "baseline_supported": false
+    },
+    {
+      "id": "dom.form-controls-collection",
+      "area": "forms",
+      "description": "HTMLFormElement.elements exposes live item and namedItem access",
+      "setup": "globalThis.__formProbe = document.createElement('form'); globalThis.__formControl = document.createElement('input'); __formControl.name = 'field'; __formProbe.appendChild(__formControl)",
+      "probe": "__formProbe.elements.item(0) === __formControl && __formProbe.elements.namedItem('field') === __formControl && Array.from(__formProbe.elements)[0] === __formControl",
+      "baseline_supported": false
+    },
+    {
+      "id": "dom.toggle-attribute",
+      "area": "dom",
+      "description": "Element.toggleAttribute reflects boolean force and returns the resulting presence",
+      "setup": "globalThis.__toggleProbe = document.createElement('div')",
+      "probe": "__toggleProbe.toggleAttribute('hidden') === true && __toggleProbe.toggleAttribute('hidden') === false && __toggleProbe.toggleAttribute('hidden', undefined) === false && __toggleProbe.toggleAttribute('hidden', true) === true && __toggleProbe.hasAttribute('hidden') && __toggleProbe.getAttribute('hidden') === ''",
+      "baseline_supported": false
+    },
+    {
+      "id": "css.compositing-properties",
+      "area": "css",
+      "description": "3D and compositing CSS properties validate through CSS.supports and computed style",
+      "setup": "globalThis.__compositingProbe = document.createElement('div'); __compositingProbe.style.cssText = 'transform-style: preserve-3d; backface-visibility: hidden; mix-blend-mode: multiply; isolation: isolate'; document.body.appendChild(__compositingProbe)",
+      "probe": "CSS.supports('transform-style', 'preserve-3d') && CSS.supports('backface-visibility', 'hidden') && CSS.supports('mix-blend-mode', 'multiply') && CSS.supports('isolation', 'isolate') && getComputedStyle(__compositingProbe).transformStyle === 'preserve-3d' && getComputedStyle(__compositingProbe).backfaceVisibility === 'hidden' && getComputedStyle(__compositingProbe).mixBlendMode === 'multiply' && getComputedStyle(__compositingProbe).isolation === 'isolate'",
+      "baseline_supported": false
+    },
+    {
       "id": "css.selector-list-pseudos",
       "area": "css",
       "description": ":is(), :where(), and selector-list :not() share Selectors Level 4 matching",
@@ -189,6 +221,20 @@
       "baseline_supported": true
     },
     {
+      "id": "performance.navigation-entry",
+      "area": "scheduling",
+      "description": "Initial navigation timing is exposed as a PerformanceNavigationTiming entry",
+      "probe": "performance.getEntriesByType('navigation').length === 1 && performance.getEntriesByType('navigation')[0] instanceof PerformanceNavigationTiming && typeof performance.getEntriesByType('navigation')[0].name === 'string' && performance.getEntriesByType('navigation')[0].entryType === 'navigation'",
+      "baseline_supported": false
+    },
+    {
+      "id": "performance.resource-timing-core",
+      "area": "scheduling",
+      "description": "Resource Timing classes, filtering, buffer controls, and clearing are exposed",
+      "probe": "typeof PerformanceResourceTiming === 'function' && typeof performance.clearResourceTimings === 'function' && typeof performance.setResourceTimingBufferSize === 'function' && PerformanceObserver.supportedEntryTypes.includes('resource')",
+      "baseline_supported": false
+    },
+    {
       "id": "performance.observer-user-timing",
       "area": "scheduling",
       "description": "PerformanceObserver delivers buffered User Timing entries",
@@ -222,8 +268,8 @@
       "id": "css.scope-cascade-rule",
       "area": "cssom",
       "description": "@scope boundaries control cascade and expose CSSScopeRule",
-      "setup": "(() => { const root = document.createElement('section'); root.className = 'surface-scope'; root.innerHTML = '<div id=surface-scoped></div>'; document.body.appendChild(root); const style = document.createElement('style'); style.textContent = '@scope (.surface-scope) { :scope > #surface-scoped { width: 29px; } }'; document.head.appendChild(style); })()",
-      "probe": "getComputedStyle(document.getElementById('surface-scoped')).width === '29px' && (() => { const rule = document.styleSheets[document.styleSheets.length - 1].cssRules[0]; return rule instanceof CSSScopeRule && rule.start === '.surface-scope' && rule.end === null; })()",
+      "setup": "(() => { const root = document.createElement('section'); root.className = 'surface-scope'; root.innerHTML = '<div id=surface-scoped></div>'; document.body.appendChild(root); const style = document.createElement('style'); style.textContent = '@scope (.surface-scope) { :scope > #surface-scoped { width: 29px; } }'; document.head.appendChild(style); globalThis.__surfaceScopeSheet = style.sheet; })()",
+      "probe": "getComputedStyle(document.getElementById('surface-scoped')).width === '29px' && (() => { const rule = __surfaceScopeSheet.cssRules[0]; return rule instanceof CSSScopeRule && rule.start === '.surface-scope' && rule.end === null; })()",
       "baseline_supported": false
     },
     {
@@ -240,6 +286,14 @@
       "description": "2D transforms affect painted DOM geometry without changing layout size",
       "setup": "globalThis.__transformProbe = document.createElement('div'); __transformProbe.style.cssText = 'position:absolute;left:0;top:0;width:100px;height:50px;transform-origin:0 0;transform:translateX(100px) rotate(90deg)'; document.body.appendChild(__transformProbe)",
       "probe": "CSS.supports('transform', 'translateX(100px) rotate(90deg)') && (() => { const rect = __transformProbe.getBoundingClientRect(); return rect.left === 50 && rect.top === 0 && rect.width === 50 && rect.height === 100 && __transformProbe.offsetWidth === 100 && __transformProbe.offsetHeight === 50; })()",
+      "baseline_supported": false
+    },
+    {
+      "id": "css.transforms-3d-perspective-geometry",
+      "area": "cssom",
+      "description": "3D transform functions project DOM geometry while preserving untransformed layout size",
+      "setup": "globalThis.__transform3dProbe = document.createElement('div'); __transform3dProbe.style.cssText = 'position:absolute;left:0;top:0;width:100px;height:50px;transform-origin:50% 50%;transform:perspective(500px) rotateY(30deg) translateZ(20px)'; document.body.appendChild(__transform3dProbe)",
+      "probe": "CSS.supports('transform', 'matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)') && CSS.supports('transform', 'perspective(500px) rotateY(30deg)') && (() => { const rect = __transform3dProbe.getBoundingClientRect(); const computed = getComputedStyle(__transform3dProbe).transform; return computed.includes('perspective') && Number.isFinite(rect.left) && Number.isFinite(rect.width) && rect.width > 70 && rect.width < 110 && __transform3dProbe.offsetWidth === 100 && __transform3dProbe.offsetHeight === 50; })()",
       "baseline_supported": false
     },
     {
@@ -343,9 +397,9 @@
     {
       "id": "network.web-transport",
       "area": "realtime",
-      "description": "WebTransport is exposed",
-      "probe": "typeof WebTransport === 'function'",
-      "baseline_supported": false
+      "description": "WebTransport exposes deterministic sessions, datagrams and stream hooks",
+      "probe": "typeof WebTransport === 'function' && typeof WebTransportError === 'function' && typeof WebTransportCloseInfo === 'function' && typeof WebTransportBidirectionalStream === 'function' && typeof WebTransport.createPair === 'function'",
+      "baseline_supported": true
     },
     {
       "id": "storage.local-storage-roundtrip",
@@ -359,15 +413,19 @@
       "id": "storage.indexed-db",
       "area": "storage",
       "description": "IndexedDB is exposed",
-      "probe": "typeof indexedDB === 'object' && typeof IDBDatabase === 'function'",
+      "setup": "globalThis.__indexedDbSurfaceProbe = { done: false, value: '' }; const request = indexedDB.open('omoikane-surface-db', 1); request.onupgradeneeded = event => event.target.result.createObjectStore('items', { keyPath: 'id' }); request.onsuccess = event => { const tx = event.target.result.transaction('items', 'readwrite'); tx.objectStore('items').put({ id: 1, value: 'ok' }).onsuccess = () => { const read = event.target.result.transaction('items').objectStore('items').get(1); read.onsuccess = result => { __indexedDbSurfaceProbe.done = true; __indexedDbSurfaceProbe.value = result.target.result.value; }; }; };",
+      "run_tasks": true,
+      "probe": "typeof indexedDB === 'object' && typeof IDBDatabase === 'function' && __indexedDbSurfaceProbe.done === true && __indexedDbSurfaceProbe.value === 'ok'",
       "baseline_supported": false
     },
     {
       "id": "storage.cache-storage",
       "area": "storage",
-      "description": "Cache Storage is exposed",
-      "probe": "typeof caches === 'object' && typeof Cache === 'function'",
-      "baseline_supported": false
+      "description": "Cache Storage exposes asynchronous open/put/match snapshots",
+      "setup": "globalThis.__cacheSurfaceProbe = { done: false, value: '' }; caches.open('omoikane-surface-cache').then(cache => cache.put('/surface-cache?probe=1', new Response('ok', { headers: { 'X-Cache-Probe': 'yes' } })).then(() => cache.match('/surface-cache?probe=1'))).then(response => response.text()).then(value => { __cacheSurfaceProbe.done = true; __cacheSurfaceProbe.value = value; }, () => { __cacheSurfaceProbe.done = false; })",
+      "run_tasks": true,
+      "probe": "typeof caches === 'object' && typeof Cache === 'function' && typeof CacheStorage === 'function' && __cacheSurfaceProbe.done === true && __cacheSurfaceProbe.value === 'ok'",
+      "baseline_supported": true
     },
     {
       "id": "workers.dedicated-worker",
@@ -380,14 +438,27 @@
       "id": "workers.shared-worker",
       "area": "workers",
       "description": "Shared workers are exposed",
-      "probe": "typeof SharedWorker === 'function'",
+      "setup": "globalThis.__sharedWorkerSurface = { done: false }; const source = encodeURIComponent('onconnect = event => { const port = event.ports[0]; port.onmessage = message => port.postMessage(message.data); };'); __sharedWorkerSurface.worker = new SharedWorker('data:text/javascript,' + source, { name: 'omoikane-surface-shared-worker' }); __sharedWorkerSurface.worker.port.onmessage = event => { __sharedWorkerSurface.done = event.data === 'ok'; }; __sharedWorkerSurface.worker.port.postMessage('ok')",
+      "run_tasks": true,
+      "probe": "typeof SharedWorker === 'function' && typeof __sharedWorkerSurface.worker.port.postMessage === 'function' && __sharedWorkerSurface.done === true",
       "baseline_supported": false
     },
     {
       "id": "workers.service-worker",
       "area": "workers",
       "description": "Service worker container is exposed",
-      "probe": "navigator.serviceWorker && typeof navigator.serviceWorker.register === 'function'",
+      "setup": "globalThis.__serviceWorkerSurface = { done: false }; navigator.serviceWorker.register('/surface-worker.js', { scope: '/surface/' }).then(registration => navigator.serviceWorker.getRegistration('/surface/page.html').then(found => { __serviceWorkerSurface.done = found === registration && registration.active && registration.active.state === 'activated'; }), () => { __serviceWorkerSurface.done = false; })",
+      "run_tasks": true,
+      "probe": "navigator.serviceWorker && typeof navigator.serviceWorker.register === 'function' && __serviceWorkerSurface.done === true",
+      "baseline_supported": false
+    },
+    {
+      "id": "workers.worklet",
+      "area": "workers",
+      "description": "Worklet addModule runs in an isolated global with deterministic registration",
+      "setup": "globalThis.__workletSurface = { done: false }; globalThis.__workletSurfaceSource = encodeURIComponent(\"registerWorklet('surface'); queueMicrotask(() => registerPaint('surface-paint', class {}));\"); __workletSurface.promise = CSS.paintWorklet.addModule('data:text/javascript,' + __workletSurfaceSource).then(() => { __workletSurface.done = CSS.paintWorklet instanceof Worklet && CSS.paintWorklet.moduleCount === 1 && CSS.paintWorklet.registeredNames.join(',') === 'surface,surface-paint'; }, () => { __workletSurface.done = false; });",
+      "run_tasks": true,
+      "probe": "typeof Worklet === 'function' && typeof WorkletGlobalScope === 'function' && CSS.paintWorklet instanceof Worklet && __workletSurface.done === true",
       "baseline_supported": false
     },
     {
@@ -460,8 +531,9 @@
     {
       "id": "security.web-crypto",
       "area": "security",
-      "description": "Web Crypto and random values are exposed",
-      "probe": "typeof Crypto === 'function' && crypto instanceof Crypto && typeof crypto.getRandomValues === 'function' && typeof crypto.randomUUID === 'function' && crypto.subtle instanceof SubtleCrypto && typeof crypto.subtle.digest === 'function'",
+      "description": "Web Crypto key lifecycle and HMAC operations are exposed",
+      "setup": "globalThis.__cryptoSurface = { done: false }; (async () => { const key = await crypto.subtle.importKey('raw', new Uint8Array([1,2,3,4]), { name: 'HMAC', hash: 'SHA-256' }, true, ['sign','verify']); const signature = await crypto.subtle.sign('HMAC', key, new Uint8Array([9,8,7])); const verified = await crypto.subtle.verify('HMAC', key, signature, new Uint8Array([9,8,7])); const jwk = await crypto.subtle.exportKey('jwk', key); __cryptoSurface.done = key instanceof CryptoKey && key.type === 'secret' && key.algorithm.name === 'HMAC' && key.algorithm.hash.name === 'SHA-256' && key.usages.includes('sign') && verified && jwk.kty === 'oct'; })().catch(() => { __cryptoSurface.done = false; })",
+      "probe": "typeof Crypto === 'function' && crypto instanceof Crypto && typeof crypto.getRandomValues === 'function' && typeof crypto.randomUUID === 'function' && crypto.subtle instanceof SubtleCrypto && typeof crypto.subtle.digest === 'function' && typeof CryptoKey === 'function' && typeof CryptoKeyPair === 'function' && typeof crypto.subtle.generateKey === 'function' && typeof crypto.subtle.importKey === 'function' && typeof crypto.subtle.exportKey === 'function' && typeof crypto.subtle.sign === 'function' && typeof crypto.subtle.verify === 'function' && __cryptoSurface.done === true",
       "baseline_supported": false
     },
     {
@@ -476,6 +548,13 @@
       "area": "graphics",
       "description": "Canvas elements expose a 2D drawing context",
       "probe": "typeof HTMLCanvasElement === 'function' && typeof document.createElement('canvas').getContext === 'function' && document.createElement('canvas').getContext('2d') !== null",
+      "baseline_supported": true
+    },
+    {
+      "id": "graphics.offscreen-canvas",
+      "area": "graphics",
+      "description": "OffscreenCanvas exposes 2D pixels and ImageBitmap snapshots",
+      "probe": "typeof OffscreenCanvas === 'function' && typeof ImageBitmap === 'function' && (() => { try { const canvas = new OffscreenCanvas(2, 1); const context = canvas.getContext('2d'); context.fillStyle = 'red'; context.fillRect(0, 0, 1, 1); const bitmap = canvas.transferToImageBitmap(); return context instanceof OffscreenCanvasRenderingContext2D && bitmap instanceof ImageBitmap && bitmap.width === 2 && bitmap.height === 1 && typeof canvas.convertToBlob === 'function'; } catch (_) { return false; } })()",
       "baseline_supported": true
     },
     {
@@ -497,42 +576,49 @@
       "area": "media",
       "description": "Audio/video elements implement media playback controls",
       "probe": "typeof HTMLMediaElement === 'function' && typeof document.createElement('video').play === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "media.web-audio",
       "area": "media",
       "description": "Web Audio is exposed",
-      "probe": "typeof AudioContext === 'function'",
-      "baseline_supported": false
+      "probe": "typeof AudioContext === 'function' && typeof AudioNode === 'function' && typeof AudioParam === 'function' && (() => { const context = new AudioContext(); const gain = context.createGain(); return context.state === 'suspended' && gain.gain instanceof AudioParam && gain.connect(context.destination) === context.destination; })()",
+      "baseline_supported": true
     },
     {
       "id": "platform.clipboard",
       "area": "platform",
       "description": "Clipboard API is exposed",
-      "probe": "navigator.clipboard && typeof navigator.clipboard.readText === 'function'",
-      "baseline_supported": false
+      "probe": "typeof Clipboard === 'function' && navigator.clipboard instanceof Clipboard && typeof navigator.clipboard.readText === 'function' && typeof navigator.clipboard.writeText === 'function'",
+      "baseline_supported": true
     },
     {
       "id": "platform.notifications",
       "area": "platform",
       "description": "Notifications API is exposed",
-      "probe": "typeof Notification === 'function'",
-      "baseline_supported": false
+      "probe": "typeof Notification === 'function' && ['default', 'granted', 'denied'].includes(Notification.permission) && typeof Notification.requestPermission === 'function'",
+      "baseline_supported": true
     },
     {
       "id": "platform.geolocation",
       "area": "platform",
       "description": "Geolocation API is exposed",
-      "probe": "navigator.geolocation && typeof navigator.geolocation.getCurrentPosition === 'function'",
-      "baseline_supported": false
+      "probe": "typeof Geolocation === 'function' && typeof GeolocationCoordinates === 'function' && typeof GeolocationPosition === 'function' && typeof GeolocationPositionError === 'function' && navigator.geolocation instanceof Geolocation && typeof navigator.geolocation.getCurrentPosition === 'function' && typeof navigator.geolocation.watchPosition === 'function' && typeof navigator.geolocation.clearWatch === 'function' && GeolocationPositionError.PERMISSION_DENIED === 1 && GeolocationPositionError.POSITION_UNAVAILABLE === 2 && GeolocationPositionError.TIMEOUT === 3",
+      "baseline_supported": true
+    },
+    {
+      "id": "platform.permissions",
+      "area": "platform",
+      "description": "Permissions API query and PermissionStatus lifecycle are exposed",
+      "probe": "typeof Permissions === 'function' && typeof PermissionStatus === 'function' && navigator.permissions instanceof Permissions && typeof navigator.permissions.query === 'function' && (() => { const status = Object.create(PermissionStatus.prototype); return 'state' in status && 'onchange' in status; })()",
+      "baseline_supported": true
     },
     {
       "id": "platform.webrtc",
       "area": "platform",
       "description": "WebRTC peer connections are exposed",
-      "probe": "typeof RTCPeerConnection === 'function'",
-      "baseline_supported": false
+      "probe": "typeof RTCPeerConnection === 'function' && typeof RTCSessionDescription === 'function' && typeof RTCIceCandidate === 'function' && typeof RTCDataChannel === 'function' && typeof RTCPeerConnection.createPair === 'function'",
+      "baseline_supported": true
     },
     {
       "id": "dom.active-element",

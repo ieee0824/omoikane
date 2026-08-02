@@ -27,6 +27,7 @@ boa_gc = { git = "https://github.com/ieee0824/boa", rev = "5da9b8f757d1ef8558514
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
+hmac = "0.12"
 jpeg-decoder = "0.3"
 png = "0.17"
 rustls = "0.23"

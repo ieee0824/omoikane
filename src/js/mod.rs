@@ -7,8 +7,10 @@ use std::path::Path;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
+use std::time::Duration;
 
 use base64::Engine as _;
 use boa_engine::JsString;
@@ -27,7 +29,7 @@ use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
-    parse_selector_list,
+    parse_scope_prelude, parse_selector_list,
 };
 use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disabled};
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
@@ -49,6 +51,26 @@ use event_loop::{EventLoop, Task};
 /// [`JsRuntime::record_task_error`].
 const MAX_TASK_ERRORS: usize = 32;
 const MAX_CSP_VIOLATIONS: usize = 1024;
+const DOM_CONTENT_LOADED_SCRIPT: &str = concat!(
+    "document.__readyState = 'interactive'; ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) { void 0; } ",
+    "document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true })); ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }",
+);
+const LOAD_SCRIPT: &str = concat!(
+    "document.__readyState = 'complete'; ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } ",
+    "window.dispatchEvent(new Event('load', { bubbles: false })); ",
+    "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
+    "__omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }",
+);
 
 thread_local! {
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
@@ -62,7 +84,20 @@ thread_local! {
     /// posted-message path).
     static BROADCAST_CHANNEL_REGISTRY: RefCell<Vec<BroadcastChannelRegistration>> =
         const { RefCell::new(Vec::new()) };
+    /// Same-thread registry for classic `SharedWorker` runtimes.  Shared
+    /// workers are deliberately kept on the owning Boa thread: only
+    /// structured-clone wires cross the registry, never a `JsValue`.
+    static SHARED_WORKER_REGISTRY: RefCell<Vec<Rc<RefCell<SharedWorkerRuntime>>>> =
+        const { RefCell::new(Vec::new()) };
+    static NEXT_SHARED_WORKER_ID: Cell<u64> = const { Cell::new(1) };
+    static NEXT_SHARED_WORKER_CONNECTION_ID: Cell<u64> = const { Cell::new(1) };
 }
+
+/// Host clipboard storage shared by all page runtimes in this process.
+/// `HostState` and Boa values remain thread-affine, but the text snapshot is
+/// intentionally synchronized so runtimes hosted on different threads still
+/// observe the same clipboard.
+static HOST_CLIPBOARD: OnceLock<HostClipboard> = OnceLock::new();
 
 struct ActiveHostGuard(Option<Rc<RefCell<HostState>>>);
 
@@ -382,6 +417,8 @@ enum TimerPayload {
     },
     /// A connected iframe/object resource load, followed by `load` dispatch.
     ResourceLoad { node_id: usize },
+    /// A geolocation request whose timeout has elapsed.
+    GeolocationTimeout { request_id: u64 },
 }
 
 /// A top-level navigation requested by script in the current browsing context.
@@ -664,6 +701,7 @@ impl TimerPayload {
             Self::Source(_) => "source",
             Self::Callback { .. } => "callback",
             Self::ResourceLoad { .. } => "resource-load",
+            Self::GeolocationTimeout { .. } => "geolocation-timeout",
         }
     }
 }
@@ -689,6 +727,17 @@ struct HostState {
     suppressed_task_errors: usize,
     location_href: String,
     navigator_user_agent: String,
+    clipboard: HostClipboard,
+    clipboard_permission_granted: bool,
+    notification_permission: String,
+    /// Permission and deterministic provider state for the Window geolocation
+    /// environment.  The provider is intentionally opt-in: an embedder can
+    /// inject a fixed position for tests, while an unset provider reports
+    /// `POSITION_UNAVAILABLE` rather than consulting host-global state.
+    geolocation_permission_granted: bool,
+    geolocation_position: Option<GeolocationPositionData>,
+    next_geolocation_request_id: u64,
+    geolocation_requests: HashMap<u64, GeolocationRequest>,
     http_client: Client,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
@@ -778,6 +827,13 @@ struct HostState {
     worker_owner_bound: bool,
     worker_owner_object: Option<JsValue>,
     worker_startup_outgoing: VecDeque<String>,
+    /// Shared-worker globals identify themselves so the event-loop pump does
+    /// not recursively execute the registry entry currently being serviced.
+    shared_worker_id: Option<u64>,
+    /// Page-owned `SharedWorkerPort` endpoint references keyed by a
+    /// process-local connection id.  The endpoint remains in its own Boa
+    /// realm; native delivery only retains it until the port is closed.
+    shared_worker_ports: HashMap<u64, JsValue>,
     /// `BroadcastChannel` endpoint references owned by this realm, keyed by a
     /// per-realm numeric id.  Modern realms store a `WeakRef` here so native
     /// registration does not keep an otherwise unreachable channel alive;
@@ -786,6 +842,19 @@ struct HostState {
     broadcast_channels: HashMap<u64, JsValue>,
     broadcast_channel_metadata: HashMap<u64, BroadcastChannelMetadata>,
     next_broadcast_channel_id: u64,
+    /// One isolated WorkletGlobalScope shared by Worklet instances in this
+    /// browsing context (including `CSS.paintWorklet`). The runtime is lazily
+    /// constructed on the first `addModule()` call.
+    worklet_runtime: Option<WorkletRuntimeHandle>,
+    next_worklet_id: u64,
+    /// Worklet globals point back to their owning page only through this
+    /// control-plane handle. It is cleared during teardown so the cycle does
+    /// not keep a navigated page alive.
+    worklet_owner: Option<Rc<RefCell<HostState>>>,
+    worklet_id: Option<u64>,
+    worklet_terminated: bool,
+    worklet_modules: HashSet<String>,
+    worklet_registrations: HashSet<String>,
     /// Constructable stylesheets adopted by a Document or ShadowRoot. The
     /// JavaScript wrapper keeps stylesheet objects; this native snapshot lets
     /// the synchronous style resolver include their parsed text without
@@ -806,15 +875,131 @@ unsafe impl Trace for HostState {
         for owner in self.worker_owner_objects.values() {
             unsafe { owner.trace(tracer) };
         }
+        for request in self.geolocation_requests.values() {
+            unsafe { request.success.trace(tracer) };
+            if let Some(error) = &request.error {
+                unsafe { error.trace(tracer) };
+            }
+        }
         if let Some(dialog) = &self.pending_javascript_dialog {
             unsafe { dialog.suspension.trace(tracer) };
         }
         for channel in self.broadcast_channels.values() {
             unsafe { channel.trace(tracer) };
         }
+        for port in self.shared_worker_ports.values() {
+            unsafe { port.trace(tracer) };
+        }
     }
 
     fn run_finalizer(&self) {}
+}
+
+#[derive(Clone, Debug, Default)]
+struct HostClipboard(Arc<Mutex<String>>);
+
+impl HostClipboard {
+    fn read_text(&self) -> String {
+        match self.0.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn write_text(&self, text: String) {
+        match self.0.lock() {
+            Ok(mut guard) => *guard = text,
+            Err(poisoned) => *poisoned.into_inner() = text,
+        }
+    }
+}
+
+fn host_clipboard() -> HostClipboard {
+    HOST_CLIPBOARD.get_or_init(HostClipboard::default).clone()
+}
+
+/// A deterministic position supplied by an embedder or a regression test.
+///
+/// The JavaScript API exposes the corresponding read-only fields through a
+/// `GeolocationPosition` object.  Optional values use `None` to model the
+/// nullable WebIDL members (`altitude`, `altitudeAccuracy`, `heading`, and
+/// `speed`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeolocationPositionData {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub accuracy: f64,
+    pub altitude: Option<f64>,
+    pub altitude_accuracy: Option<f64>,
+    pub heading: Option<f64>,
+    pub speed: Option<f64>,
+    /// Unix epoch milliseconds reported as `GeolocationPosition.timestamp`.
+    /// A non-finite value is replaced with the runtime's current epoch time.
+    pub timestamp_ms: f64,
+}
+
+impl GeolocationPositionData {
+    /// Creates a position with only the required coordinates and accuracy.
+    /// Optional members default to `null`; timestamp is filled by the runtime
+    /// when the position is installed.
+    pub fn new(latitude: f64, longitude: f64, accuracy: f64) -> Self {
+        Self {
+            latitude,
+            longitude,
+            accuracy,
+            altitude: None,
+            altitude_accuracy: None,
+            heading: None,
+            speed: None,
+            timestamp_ms: f64::NAN,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GeolocationRequest {
+    success: JsValue,
+    error: Option<JsValue>,
+    /// `Some(id)` for `watchPosition`; `None` for one-shot requests.
+    watch_id: Option<u32>,
+    /// `None` represents the default infinite timeout.
+    timeout_ms: Option<u64>,
+    /// `None` represents an infinite maximum age.
+    maximum_age_ms: Option<u64>,
+    pending: bool,
+    timeout_timer_id: Option<u64>,
+}
+
+#[derive(Debug)]
+enum GeolocationOutcome {
+    Success(GeolocationPositionData),
+    Error { code: u32, message: String },
+}
+
+fn geolocation_json_number(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".to_string()
+    }
+}
+
+fn geolocation_json_optional(value: Option<f64>) -> String {
+    value.map(geolocation_json_number).unwrap_or_else(|| "null".to_string())
+}
+
+fn geolocation_position_json(position: &GeolocationPositionData) -> String {
+    format!(
+        "{{\"coords\":{{\"latitude\":{},\"longitude\":{},\"accuracy\":{},\"altitude\":{},\"altitudeAccuracy\":{},\"heading\":{},\"speed\":{}}},\"timestamp\":{}}}",
+        geolocation_json_number(position.latitude),
+        geolocation_json_number(position.longitude),
+        geolocation_json_number(position.accuracy),
+        geolocation_json_optional(position.altitude),
+        geolocation_json_optional(position.altitude_accuracy),
+        geolocation_json_optional(position.heading),
+        geolocation_json_optional(position.speed),
+        geolocation_json_number(position.timestamp_ms),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -858,6 +1043,48 @@ struct WorkerRuntime {
     startup_error: Option<String>,
     terminated: bool,
 }
+
+/// The key used by the same-thread `SharedWorker` registry.  A worker is
+/// shared only when its resolved script URL, name, and origin all match.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SharedWorkerKey {
+    /// Shared workers are only constructible for an eligible tuple origin;
+    /// opaque/no-origin callers are rejected before a key is created.
+    origin: StorageOrigin,
+    url: String,
+    name: String,
+}
+
+/// One page-to-shared-worker connection.  The page endpoint is retained only
+/// in the page's realm; the shared runtime receives the numeric id and clone
+/// wire through its event loop.
+struct SharedWorkerConnection {
+    owner_state: Weak<RefCell<HostState>>,
+    owner_port: Option<JsValue>,
+    owner_origin: String,
+    pending_to_owner: VecDeque<String>,
+    /// A startup failure is delivered once the page binds its `SharedWorker`
+    /// object.  Keeping it on the connection lets every caller observe the
+    /// same failed shared runtime without exposing a native error directly
+    /// from the constructor.
+    startup_error: Option<String>,
+    closed: bool,
+}
+
+/// State for one classic shared worker.  Its `JsRuntime` is independent of
+/// every connecting page and remains in the thread-local registry while at
+/// least one connection is alive.
+struct SharedWorkerRuntime {
+    key: SharedWorkerKey,
+    runtime: Rc<RefCell<JsRuntime>>,
+    startup_error: Option<String>,
+    connections: HashMap<u64, SharedWorkerConnection>,
+}
+
+/// The deterministic Worklet runtime owned by a page global. Worklet modules
+/// execute in a separate Boa realm; only module metadata crosses back to the
+/// page, so no `JsValue` from the isolated global can leak into the Window.
+type WorkletRuntimeHandle = Rc<RefCell<JsRuntime>>;
 
 /// A loaded sub-browsing-context document owned by an `<iframe>` element.
 #[derive(Debug)]
@@ -967,6 +1194,13 @@ impl HostState {
             base_url: location_href.parse::<crate::http::Url>().ok(),
             location_href,
             navigator_user_agent: default_user_agent(),
+            clipboard: host_clipboard(),
+            clipboard_permission_granted: true,
+            notification_permission: "default".to_string(),
+            geolocation_permission_granted: true,
+            geolocation_position: None,
+            next_geolocation_request_id: 1,
+            geolocation_requests: HashMap::new(),
             http_client: Client::new(),
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
@@ -1011,9 +1245,18 @@ impl HostState {
             worker_owner_bound: false,
             worker_owner_object: None,
             worker_startup_outgoing: VecDeque::new(),
+            shared_worker_id: None,
+            shared_worker_ports: HashMap::new(),
             broadcast_channels: HashMap::new(),
             broadcast_channel_metadata: HashMap::new(),
             next_broadcast_channel_id: 1,
+            worklet_runtime: None,
+            next_worklet_id: 1,
+            worklet_owner: None,
+            worklet_id: None,
+            worklet_terminated: false,
+            worklet_modules: HashSet::new(),
+            worklet_registrations: HashSet::new(),
             adopted_stylesheets: HashMap::new(),
         };
         state.register_tree(&document);
@@ -1562,7 +1805,13 @@ impl HostState {
             }
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
             if let Some((scope, order)) = scope {
-                resolver.add_scoped_stylesheet_in_order(Origin::Author, sheet, scope, order);
+                resolver.add_scoped_stylesheet_in_order_with_implicit_scope_root(
+                    Origin::Author,
+                    sheet,
+                    scope,
+                    order,
+                    implicit_scope_root,
+                );
             } else if let Some(implicit_scope_root) = implicit_scope_root {
                 resolver.add_stylesheet_with_implicit_scope_root(
                     Origin::Author,
@@ -1868,13 +2117,24 @@ fn owner_document_for_node(node: &NodeHandle) -> Option<NodeHandle> {
 #[derive(Clone)]
 pub struct SandboxConfig {
     /// Maximum execution time per eval() call (default: 5 seconds).
+    ///
+    /// Boa's synchronous evaluator cannot be interrupted by a wall-clock
+    /// callback, so this remains the embedder-facing time budget while the
+    /// deterministic VM iteration guard below provides the hard stop.
     pub timeout: std::time::Duration,
+    /// Maximum loop iterations executed by one JavaScript evaluation.
+    ///
+    /// The Boa fork exposes this as a runtime limit. It is deliberately
+    /// deterministic and applies to synchronous and asynchronous evaluation,
+    /// preventing an infinite loop from monopolizing a page task.
+    pub max_loop_iterations: u64,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             timeout: std::time::Duration::from_secs(5),
+            max_loop_iterations: 1_000_000,
         }
     }
 }
@@ -2006,6 +2266,14 @@ impl JsRuntime {
         };
         register_host_bindings(&mut runtime.context, &runtime.host_state)?;
         runtime.eval(DOM_BOOTSTRAP)?;
+        // DOM bootstrap is runtime initialization rather than page code. Apply
+        // the caller's budget only after it has completed so a deliberately
+        // small limit (for example in a test or a short-lived page task) cannot
+        // abort construction before the runtime is usable.
+        runtime
+            .context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(runtime.sandbox.max_loop_iterations);
         // Parsed resource elements are already connected before the JS wrapper
         // exists. Queue their loads only after bootstrap so dispatch can wrap
         // the target element when the macrotask runs.
@@ -2042,6 +2310,8 @@ impl JsRuntime {
             worker.outgoing.clear();
             worker.runtime.host_state.borrow_mut().worker_terminated = true;
         }
+        terminate_shared_worker_connections(&self.host_state);
+        terminate_worklet_runtime(&self.host_state);
         self.host_state
             .borrow_mut()
             .worker_owner_objects
@@ -2055,6 +2325,21 @@ impl JsRuntime {
             if worker.terminated || worker.runtime.host_state.borrow().worker_terminated { continue; }
             worker.runtime.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         }
+    }
+
+    fn advance_worklet_clocks(&mut self, elapsed_ms: u64) {
+        let Some(runtime) = self.host_state.borrow().worklet_runtime.clone() else {
+            return;
+        };
+        if runtime.borrow().host_state.borrow().worklet_terminated {
+            return;
+        }
+        runtime
+            .borrow_mut()
+            .host_state
+            .borrow_mut()
+            .event_loop
+            .advance(elapsed_ms);
     }
 
     fn run_worker_background_tasks(&mut self) {
@@ -2111,6 +2396,75 @@ impl JsRuntime {
                     .enqueue_worker_error(worker_id, None, error);
             }
         }
+    }
+
+    /// Pumps the page-owned WorkletGlobalScope between page tasks. Worklet
+    /// timers and posted microtasks stay in the isolated realm, but their
+    /// deterministic clock advances with the owner page's clock.
+    fn run_worklet_background_tasks(&mut self) {
+        if self.host_state.borrow().worklet_id.is_some() {
+            return;
+        }
+        let Some(runtime) = self.host_state.borrow().worklet_runtime.clone() else {
+            return;
+        };
+        let (result, errors, terminated) = {
+            let mut runtime = runtime.borrow_mut();
+            if runtime.host_state.borrow().worklet_terminated {
+                return;
+            }
+            let result = runtime.run_until_idle();
+            let errors = runtime.take_task_errors();
+            let terminated = runtime.host_state.borrow().worklet_terminated;
+            (result, errors, terminated)
+        };
+        if let Err(error) = result {
+            self.record_task_error(format!("[worklet] {error}"));
+        }
+        for error in errors {
+            self.record_task_error(format!("[worklet] {error}"));
+        }
+        if terminated {
+            terminate_worklet_runtime(&self.host_state);
+        }
+    }
+
+    /// Pumps every live shared worker owned by this Boa thread.  A shared
+    /// worker has its own runtime and therefore cannot be serviced by the
+    /// page's event-loop queues directly; running it between page tasks keeps
+    /// cross-realm messages deterministic while avoiding a background thread.
+    fn run_shared_worker_background_tasks(&mut self) {
+        if self.host_state.borrow().shared_worker_id.is_some() {
+            return;
+        }
+        let entries = SHARED_WORKER_REGISTRY.with(|registry| {
+            let mut registry = registry.borrow_mut();
+            prune_shared_worker_registry(&mut registry);
+            registry.iter().cloned().collect::<Vec<_>>()
+        });
+        for entry in entries {
+            let same_runtime = {
+                let shared = entry.borrow();
+                Rc::ptr_eq(&shared.runtime.borrow().host_state, &self.host_state)
+            };
+            if same_runtime {
+                continue;
+            }
+            let (runtime, has_connections) = {
+                let shared = entry.borrow();
+                (Rc::clone(&shared.runtime), !shared.connections.is_empty())
+            };
+            if !has_connections {
+                continue;
+            }
+            // Shared-worker failures are isolated from the owner page just as
+            // Dedicated Worker failures are.  The connection remains usable
+            // for subsequent tasks unless the worker explicitly closes.
+            let mut runtime = runtime.borrow_mut();
+            let _ = runtime.run_until_idle();
+            let _ = runtime.take_task_errors();
+        }
+        SHARED_WORKER_REGISTRY.with(|registry| prune_shared_worker_registry(&mut registry.borrow_mut()));
     }
 
     /// Returns the top-level Window scroll offset in CSS pixels.
@@ -2316,8 +2670,11 @@ impl JsRuntime {
     /// Evaluates JavaScript source code.
     ///
     /// Script errors are returned as `JsError`.
-    /// Note: `SandboxConfig.timeout` is stored but not yet enforced due to
-    /// boa 0.21 lacking a runtime interrupt API.
+    ///
+    /// The configured deterministic loop-iteration limit is enforced by the
+    /// Boa VM. A synchronous wall-clock interrupt is intentionally not claimed
+    /// here: callers that need cooperative cancellation should use
+    /// [`Self::eval_async`] and drop its future or cancel the owning page task.
     pub fn eval(&mut self, source: &str) -> JsResult<JsValue> {
         let result = self.with_active_host(|context| context.eval(Source::from_bytes(source)));
         // A synchronous evaluator cannot hand control to an embedder while a
@@ -2484,13 +2841,12 @@ impl JsRuntime {
         }
         immediate.extend(deferred);
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'interactive'; document.dispatchEvent(new Event('DOMContentLoaded'))".to_string(),
+            source: DOM_CONTENT_LOADED_SCRIPT.to_string(),
             label: "DOMContentLoaded".to_string(),
             script_node_id: None,
         });
         immediate.push(PageTaskSource::Classic {
-            source: "document.__readyState = 'complete'; window.dispatchEvent(new Event('load'))"
-                .to_string(),
+            source: LOAD_SCRIPT.to_string(),
             label: "load".to_string(),
             script_node_id: None,
         });
@@ -2748,6 +3104,135 @@ impl JsRuntime {
         self.host_state.borrow_mut().event_loop.clear_timer(id);
     }
 
+    /// Notifies live `PermissionStatus` objects in this realm after an
+    /// embedder-controlled permission transition.  The helper is intentionally
+    /// best-effort: a runtime may be in the middle of teardown, in which case
+    /// there are no page objects left to notify.
+    fn notify_permission_change(&mut self, name: &str, state: &str) {
+        let Ok(name) = serde_json::to_string(name) else { return };
+        let Ok(state) = serde_json::to_string(state) else { return };
+        let source = format!(
+            "if (typeof globalThis.__omoikane_permission_changed === 'function') {{ globalThis.__omoikane_permission_changed({name}, {state}); }}"
+        );
+        let _ = self.eval(&source);
+    }
+
+    /// Sets the deterministic Notification permission used by this runtime's
+    /// Window. This is an embedder/test hook and is not exposed to page JS.
+    pub fn set_notification_permission(&mut self, permission: &str) -> Result<(), String> {
+        if !matches!(permission, "default" | "granted" | "denied") {
+            return Err(format!(
+                "invalid notification permission {permission:?}; expected one of default, granted, denied"
+            ));
+        }
+        let changed = {
+            let mut state = self.host_state.borrow_mut();
+            if state.notification_permission == permission {
+                false
+            } else {
+                state.notification_permission = permission.to_string();
+                true
+            }
+        };
+        if changed {
+            let mapped = if permission == "default" { "prompt" } else { permission };
+            self.notify_permission_change("notifications", mapped);
+        }
+        Ok(())
+    }
+
+    /// Sets the deterministic Async Clipboard permission used by this
+    /// runtime. This is an embedder/test hook and is not exposed to page JS.
+    pub fn set_clipboard_permission(&mut self, granted: bool) {
+        let changed = {
+            let mut state = self.host_state.borrow_mut();
+            if state.clipboard_permission_granted == granted {
+                false
+            } else {
+                state.clipboard_permission_granted = granted;
+                true
+            }
+        };
+        if changed {
+            self.notify_permission_change(
+                "clipboard-read",
+                if granted { "granted" } else { "denied" },
+            );
+            self.notify_permission_change(
+                "clipboard-write",
+                if granted { "granted" } else { "denied" },
+            );
+        }
+    }
+
+    /// Sets or replaces the deterministic geolocation provider position.
+    ///
+    /// A position is delivered asynchronously to all active watches.  The
+    /// position remains cached for `maximumAge` checks on subsequent requests;
+    /// calling this method again refreshes that cache age.
+    pub fn set_geolocation_position(&mut self, mut position: GeolocationPositionData) {
+        let mut state = self.host_state.borrow_mut();
+        if !position.latitude.is_finite()
+            || !position.longitude.is_finite()
+            || !position.accuracy.is_finite()
+            || position.accuracy < 0.0
+        {
+            state.geolocation_position = None;
+            return;
+        }
+        if !position.timestamp_ms.is_finite() || position.timestamp_ms < 0.0 {
+            position.timestamp_ms = state.performance_time_origin + state.event_loop.now_ms() as f64;
+        }
+        state.geolocation_position = Some(position);
+        let request_ids: Vec<_> = state
+            .geolocation_requests
+            .iter()
+            .filter_map(|(request_id, request)| {
+                (!request.pending || request.timeout_timer_id.is_some()).then_some(*request_id)
+            })
+            .collect();
+        for request_id in request_ids {
+            wake_geolocation_request(&mut state, request_id);
+            schedule_geolocation_request(&mut state, request_id);
+        }
+    }
+
+    /// Removes the deterministic provider position. Active watches stay alive
+    /// and report `POSITION_UNAVAILABLE` (or timeout) on their next request.
+    pub fn clear_geolocation_position(&mut self) {
+        let mut state = self.host_state.borrow_mut();
+        state.geolocation_position = None;
+    }
+
+    /// Sets the permission result used by future and active geolocation
+    /// requests.  A denied state is delivered through the normal geolocation
+    /// task source, never synchronously from the setter.
+    pub fn set_geolocation_permission(&mut self, granted: bool) {
+        let changed = {
+            let mut state = self.host_state.borrow_mut();
+            let changed = state.geolocation_permission_granted != granted;
+            state.geolocation_permission_granted = granted;
+            let request_ids: Vec<_> = state
+                .geolocation_requests
+                .iter()
+                .filter_map(|(request_id, request)| {
+                    (!request.pending || request.timeout_timer_id.is_some()).then_some(*request_id)
+                })
+                .collect();
+            for request_id in request_ids {
+                wake_geolocation_request(&mut state, request_id);
+                schedule_geolocation_request(&mut state, request_id);
+            }
+            changed
+        };
+        if changed {
+            self.notify_permission_change(
+                "geolocation",
+                if granted { "granted" } else { "denied" },
+            );
+        }
+    }
+
     /// Advances the event loop clock and runs due macrotasks and pending jobs.
     ///
     /// Due timers fire in fire-time order (ties broken by registration order).
@@ -2757,7 +3242,10 @@ impl JsRuntime {
     pub fn tick(&mut self, elapsed_ms: u64) -> JsResult<()> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
+        self.advance_worklet_clocks(elapsed_ms);
         self.run_worker_background_tasks();
+        self.run_worklet_background_tasks();
+        self.run_shared_worker_background_tasks();
         self.run_until_idle()
     }
 
@@ -2772,6 +3260,8 @@ impl JsRuntime {
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
         self.run_worker_background_tasks();
+        self.run_worklet_background_tasks();
+        self.run_shared_worker_background_tasks();
         loop {
             if self.is_terminated_worker() {
                 break;
@@ -2782,6 +3272,8 @@ impl JsRuntime {
             };
             self.run_task(task)?;
             self.run_worker_background_tasks();
+            self.run_worklet_background_tasks();
+            self.run_shared_worker_background_tasks();
             if self.is_terminated_worker() {
                 break;
             }
@@ -2802,6 +3294,8 @@ impl JsRuntime {
             return Ok(());
         }
         self.run_jobs()?;
+        self.run_worklet_background_tasks();
+        self.run_shared_worker_background_tasks();
         loop {
             if self.is_terminated_worker() {
                 break;
@@ -2848,6 +3342,8 @@ impl JsRuntime {
             if self.is_terminated_worker() {
                 break;
             }
+            self.run_shared_worker_background_tasks();
+            self.run_worklet_background_tasks();
             self.run_jobs()?;
         }
         Ok(())
@@ -2877,10 +3373,14 @@ impl JsRuntime {
         let result = self
             .eval_async(
                 "if (!__omoikane_posted_message_port._closed) { \
-                 __omoikane_posted_message_port.dispatchEvent(new MessageEvent('message', { \
-                   data: __omoikane_posted_message_data, origin: '', source: null, ports: [] \
-                 })); \
-                 }",
+                     if (typeof __omoikane_posted_message_port._acceptMessage === 'function') { \
+                       __omoikane_posted_message_port._acceptMessage(__omoikane_posted_message_data); \
+                     } else { \
+                       __omoikane_posted_message_port.dispatchEvent(new MessageEvent('message', { \
+                         data: __omoikane_posted_message_data, origin: '', source: null, ports: [] \
+                       })); \
+                     } \
+                     }",
             )
             .await
             .map(|_| ());
@@ -3073,18 +3573,25 @@ impl JsRuntime {
             );
             return Ok(());
         }
+        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
+        let fetch_start = std::time::Instant::now();
         let fetched = {
             let mut state = self.host_state.borrow_mut();
             fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
         };
+        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
         let Some((effective_url, source)) = fetched else {
             self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
+            let dispatch = dispatch_resource_timing_script(
+                "error", node_id, &timing_name, false, elapsed_ms,
+            );
             let result = self
-                .eval_async(&format!("__omoikane_dispatch_resource_error({node_id})"))
+                .eval_async(&dispatch)
                 .await;
             self.record_error_from(&src, result);
             return Ok(());
         };
+        let redirected = resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
         if !self
             .host_state
             .borrow()
@@ -3094,10 +3601,13 @@ impl JsRuntime {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 &script_node,
                 ResourceType::Script,
-                effective_url,
+                effective_url.clone(),
+            );
+            let dispatch = dispatch_resource_timing_script(
+                "error", node_id, &effective_url, redirected, elapsed_ms,
             );
             let result = self
-                .eval_async(&format!("__omoikane_dispatch_resource_error({node_id})"))
+                .eval_async(&dispatch)
                 .await;
             self.record_error_from(&src, result);
             return Ok(());
@@ -3126,7 +3636,9 @@ impl JsRuntime {
             self.record_task_error(format!("[dynamic script: {src}; {context}] {error}"));
         }
         let dispatched = self
-            .eval_async(&format!("__omoikane_dispatch_resource_load({node_id})"))
+            .eval_async(&dispatch_resource_timing_script(
+                "load", node_id, &effective_url, redirected, elapsed_ms,
+            ))
             .await;
         self.record_error_from("resource load", dispatched);
         self.sync_module_csp_violations();
@@ -3173,6 +3685,16 @@ impl JsRuntime {
         self.host_state.borrow().event_loop.has_pending_timers()
     }
 
+    /// Returns true when geolocation callbacks are queued on their dedicated
+    /// task source. `run_timers` also drains these host tasks so embedders can
+    /// use one deterministic pump for all virtual-time work.
+    pub fn has_pending_geolocation_tasks(&self) -> bool {
+        self.host_state
+            .borrow()
+            .event_loop
+            .has_pending_geolocation_tasks()
+    }
+
     fn has_pending_css_transition_work(&self) -> bool {
         self.host_state.borrow().document_styles.values().any(|entry| {
             entry.dirty
@@ -3195,7 +3717,9 @@ impl JsRuntime {
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
+        self.advance_worklet_clocks(elapsed_ms);
         self.run_worker_background_tasks();
+        self.run_worklet_background_tasks();
         self.run_until_idle()?;
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
@@ -3266,7 +3790,9 @@ impl JsRuntime {
     async fn run_animation_frame_async(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
+        self.advance_worklet_clocks(elapsed_ms);
         self.run_worker_background_tasks();
+        self.run_worklet_background_tasks();
         self.run_until_idle_async().await?;
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
@@ -3390,12 +3916,17 @@ impl JsRuntime {
         let mut tasks_processed: usize = 0;
 
         while advanced < max_virtual_ms && tasks_processed < max_tasks {
-            if !self.has_pending_timers() && !self.has_pending_css_transition_work() {
+            if !self.has_pending_timers()
+                && !self.has_pending_geolocation_tasks()
+                && !self.has_pending_css_transition_work()
+            {
                 break;
             }
             self.host_state.borrow_mut().event_loop.advance(step);
             self.advance_worker_clocks(step);
+            self.advance_worklet_clocks(step);
             self.run_worker_background_tasks();
+            self.run_worklet_background_tasks();
             advanced = advanced.saturating_add(step);
 
             loop {
@@ -3413,12 +3944,15 @@ impl JsRuntime {
                     // remain available on demand for complex app bootstraps.
                     let task_kind = match &task {
                         Task::Timer(payload) => payload.kind(),
+                        Task::Geolocation { .. } => "geolocation",
                         Task::Navigation(_) => "navigation",
                         Task::PostedMessage { .. } => "posted-message",
                         Task::BroadcastChannelMessage { .. } => "broadcast-channel",
                         Task::WorkerMessage { .. }
                         | Task::WorkerOwnerMessage { .. }
-                        | Task::WorkerError { .. } => "worker",
+                        | Task::WorkerError { .. }
+                        | Task::SharedWorkerMessage { .. }
+                        | Task::SharedWorkerOwnerMessage { .. } => "worker",
                     };
                     let callback_start = std::time::Instant::now();
                     let callback_result = self.run_task(task);
@@ -3476,6 +4010,7 @@ impl JsRuntime {
         }
         match task {
             Task::Timer(payload) => self.run_timer_payload(payload),
+            Task::Geolocation { request_id } => self.run_geolocation_delivery(request_id, false),
             Task::Navigation(request) => {
                 self.host_state.borrow_mut().navigation_requests.push_back(request);
                 Ok(())
@@ -3488,11 +4023,15 @@ impl JsRuntime {
                     return Ok(());
                 }
                 let result = self.eval(
-                    "if (!__omoikane_posted_message_port._closed) { \
-                     __omoikane_posted_message_port.dispatchEvent(new MessageEvent('message', { \
-                       data: __omoikane_posted_message_data, origin: '', source: null, ports: [] \
-                     })); \
-                     }",
+                "if (!__omoikane_posted_message_port._closed) { \
+                 if (typeof __omoikane_posted_message_port._acceptMessage === 'function') { \
+                   __omoikane_posted_message_port._acceptMessage(__omoikane_posted_message_data); \
+                 } else { \
+                   __omoikane_posted_message_port.dispatchEvent(new MessageEvent('message', { \
+                     data: __omoikane_posted_message_data, origin: '', source: null, ports: [] \
+                   })); \
+                 } \
+                 }",
                 );
                 let cleanup_result = self.clear_posted_message_values();
                 self.record_error_from("posted message cleanup", cleanup_result);
@@ -3521,7 +4060,132 @@ impl JsRuntime {
             } => {
                 self.run_worker_error(worker_id, owner, message)
             }
+            Task::SharedWorkerMessage { connection_id, data } => {
+                self.run_shared_worker_message(connection_id, data)
+            }
+            Task::SharedWorkerOwnerMessage {
+                connection_id,
+                port,
+                data,
+                origin,
+            } => self.run_shared_worker_owner_message(connection_id, port, data, origin),
         }
+    }
+
+    fn run_geolocation_delivery(&mut self, request_id: u64, timed_out: bool) -> JsResult<()> {
+        let (success, error, watch_id, maximum_age_ms, timeout_ms, pending) = {
+            let state = self.host_state.borrow();
+            let Some(request) = state.geolocation_requests.get(&request_id) else {
+                return Ok(());
+            };
+            (
+                request.success.clone(),
+                request.error.clone(),
+                request.watch_id,
+                request.maximum_age_ms,
+                request.timeout_ms,
+                request.pending,
+            )
+        };
+        if !pending {
+            return Ok(());
+        }
+        let (outcome, timeout_timer_id) = {
+            let mut state = self.host_state.borrow_mut();
+            let fresh_position = geolocation_position_age_ms(&state)
+                .is_some_and(|age| maximum_age_ms.is_none_or(|maximum_age| age <= maximum_age));
+            let outcome = if !state.geolocation_permission_granted {
+                GeolocationOutcome::Error {
+                    code: 1,
+                    message: "User denied Geolocation.".to_string(),
+                }
+            } else if fresh_position {
+                GeolocationOutcome::Success(state.geolocation_position.clone().expect("fresh position"))
+            } else if timed_out || timeout_ms == Some(0) {
+                GeolocationOutcome::Error {
+                    code: 3,
+                    message: "The location request timed out.".to_string(),
+                }
+            } else {
+                GeolocationOutcome::Error {
+                    code: 2,
+                    message: "Unable to determine the user's location.".to_string(),
+                }
+            };
+            let timeout_timer_id = state
+                .geolocation_requests
+                .get_mut(&request_id)
+                .and_then(|request| {
+                    request.pending = false;
+                    request.timeout_timer_id.take()
+                });
+            if watch_id.is_none() {
+                state.geolocation_requests.remove(&request_id);
+            }
+            (outcome, timeout_timer_id)
+        };
+
+        if let Some(timer_id) = timeout_timer_id {
+            self.host_state.borrow_mut().event_loop.clear_timer(timer_id);
+        }
+        let payload = match &outcome {
+            GeolocationOutcome::Success(position) => geolocation_position_json(position),
+            GeolocationOutcome::Error { .. } => "null".to_string(),
+        };
+        let (status, code, message) = match outcome {
+            GeolocationOutcome::Success(_) => ("success", 0_u32, String::new()),
+            GeolocationOutcome::Error { code, message } => ("error", code, message),
+        };
+        let global = self.context.global_object();
+        global.set(
+            js_string!("__omoikane_geolocation_callback"),
+            success,
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_geolocation_error_callback"),
+            error.unwrap_or_else(JsValue::undefined),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_geolocation_status"),
+            JsValue::from(js_string!(status)),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_geolocation_payload"),
+            JsValue::from(js_string!(payload)),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_geolocation_error_code"),
+            JsValue::from(code as f64),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_geolocation_error_message"),
+            JsValue::from(js_string!(message)),
+            true,
+            &mut self.context,
+        )?;
+        let result = self.eval("__omoikane_dispatch_geolocation_task()");
+        for name in [
+            "__omoikane_geolocation_callback",
+            "__omoikane_geolocation_error_callback",
+            "__omoikane_geolocation_status",
+            "__omoikane_geolocation_payload",
+            "__omoikane_geolocation_error_code",
+            "__omoikane_geolocation_error_message",
+        ] {
+            let _ = global.set(js_string!(name), JsValue::undefined(), true, &mut self.context);
+        }
+        self.record_error_from("geolocation", result);
+        Ok(())
     }
 
     fn run_worker_message(&mut self, worker_id: u64, data: String) -> JsResult<()> {
@@ -3634,6 +4298,90 @@ impl JsRuntime {
         let cleanup = self.clear_worker_owner_values();
         self.record_error_from("worker error cleanup", cleanup);
         self.record_error_from("worker error", result);
+        Ok(())
+    }
+
+    fn run_shared_worker_message(&mut self, connection_id: u64, data: String) -> JsResult<()> {
+        if self.host_state.borrow().shared_worker_id.is_none() {
+            return Ok(());
+        }
+        let global = self.context.global_object();
+        global.set(
+            js_string!("__omoikane_shared_worker_message_connection"),
+            JsValue::from(js_string!(connection_id.to_string())),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_shared_worker_message_wire"),
+            JsValue::from(js_string!(data)),
+            true,
+            &mut self.context,
+        )?;
+        let result = self.eval(
+            "var __omoikane_shared_worker_message_port = __omoikane_get_shared_worker_port(__omoikane_shared_worker_message_connection); if (__omoikane_shared_worker_message_port && !__omoikane_shared_worker_message_port._closed) { try { __omoikane_shared_worker_message_port._queueMessage(__omoikane_decode_worker_message(__omoikane_shared_worker_message_wire)); } catch (error) { __omoikane_shared_worker_message_port.dispatchEvent(new MessageEvent('messageerror', { data: null, origin: location.origin, source: null, ports: [] })); } }",
+        );
+        let _ = global.set(
+            js_string!("__omoikane_shared_worker_message_connection"),
+            JsValue::undefined(),
+            true,
+            &mut self.context,
+        );
+        let _ = global.set(
+            js_string!("__omoikane_shared_worker_message_wire"),
+            JsValue::undefined(),
+            true,
+            &mut self.context,
+        );
+        self.record_error_from("shared worker message", result);
+        Ok(())
+    }
+
+    fn run_shared_worker_owner_message(
+        &mut self,
+        connection_id: u64,
+        port: JsValue,
+        data: String,
+        origin: String,
+    ) -> JsResult<()> {
+        if !self
+            .host_state
+            .borrow()
+            .shared_worker_ports
+            .contains_key(&connection_id)
+        {
+            return Ok(());
+        }
+        let global = self.context.global_object();
+        global.set(
+            js_string!("__omoikane_shared_worker_owner_port"),
+            port,
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_shared_worker_owner_wire"),
+            JsValue::from(js_string!(data)),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_shared_worker_owner_origin"),
+            JsValue::from(js_string!(origin)),
+            true,
+            &mut self.context,
+        )?;
+        let result = self.eval(
+            "var __omoikane_shared_worker_owner_target = __omoikane_shared_worker_owner_port; if (__omoikane_shared_worker_owner_target && !__omoikane_shared_worker_owner_target._closed) { try { __omoikane_shared_worker_owner_target._queueMessage(__omoikane_decode_worker_message(__omoikane_shared_worker_owner_wire)); } catch (error) { __omoikane_shared_worker_owner_target.dispatchEvent(new MessageEvent('messageerror', { data: null, origin: __omoikane_shared_worker_owner_origin, source: null, ports: [] })); } }",
+        );
+        for name in [
+            "__omoikane_shared_worker_owner_port",
+            "__omoikane_shared_worker_owner_wire",
+            "__omoikane_shared_worker_owner_origin",
+        ] {
+            let _ = global.set(js_string!(name), JsValue::undefined(), true, &mut self.context);
+        }
+        self.record_error_from("shared worker owner message", result);
         Ok(())
     }
 
@@ -3806,6 +4554,7 @@ impl JsRuntime {
                 // A script whose type Omoikane does not execute is not fetched and
                 // does not load, so it must not go on to dispatch `load` either.
                 let mut dispatch_load = should_dispatch;
+                let mut dispatch_timing: Option<(String, bool, f64)> = None;
                 if let Some((script_node, src, kind, base_url)) = dynamic_script {
                     let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
                     if kind == ScriptKind::NotExecutable {
@@ -3832,6 +4581,8 @@ impl JsRuntime {
                         if log_scripts {
                             eprintln!("[omoikane][script] loading dynamic {src} kind={kind:?}");
                         }
+                        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
+                        let fetch_start = std::time::Instant::now();
                         let fetched = {
                             let mut state = self.host_state.borrow_mut();
                             fetch_script_resource_with_client(
@@ -3840,6 +4591,7 @@ impl JsRuntime {
                                 &mut state.http_client,
                             )
                         };
+                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
                         match fetched {
                             // Every failure below is the page's, not the engine's:
                             // it is recorded and execution continues, exactly as
@@ -3854,8 +4606,8 @@ impl JsRuntime {
                                     "[dynamic script: {src}] failed to fetch"
                                 ));
                                 dispatch_load = false;
-                                let dispatched = self.eval(&format!(
-                                    "__omoikane_dispatch_resource_error({node_id})"
+                                let dispatched = self.eval(&dispatch_resource_timing_script(
+                                    "error", node_id, &timing_name, false, elapsed_ms,
                                 ));
                                 self.record_error_from(&src, dispatched);
                                 let jobs = self.run_jobs();
@@ -3868,20 +4620,31 @@ impl JsRuntime {
                                     .csp_policy_for_node(&script_node)
                                     .allows_reference(ResourceType::Script, &effective_url) =>
                             {
+                                let redirected = resource_reference_was_redirected(
+                                    &src,
+                                    &effective_url,
+                                    base_url.as_ref(),
+                                );
                                 self.host_state.borrow_mut().record_csp_violation_for_node(
                                     &script_node,
                                     ResourceType::Script,
-                                    effective_url,
+                                    effective_url.clone(),
                                 );
                                 dispatch_load = false;
-                                let dispatched = self.eval(&format!(
-                                    "__omoikane_dispatch_resource_error({node_id})"
+                                let dispatched = self.eval(&dispatch_resource_timing_script(
+                                    "error", node_id, &effective_url, redirected, elapsed_ms,
                                 ));
                                 self.record_error_from(&src, dispatched);
                                 let jobs = self.run_jobs();
                                 self.record_error_from(&src, jobs);
                             }
-                            Some((_, source)) => {
+                            Some((effective_url, source)) => {
+                                let redirected = resource_reference_was_redirected(
+                                    &src,
+                                    &effective_url,
+                                    base_url.as_ref(),
+                                );
+                                dispatch_timing = Some((effective_url, redirected, elapsed_ms));
                                 let marked = self
                                     .eval(&format!("__omoikane_set_current_script({node_id})"));
                                 self.record_error_from(&src, marked);
@@ -3916,13 +4679,19 @@ impl JsRuntime {
                     }
                 }
                 if dispatch_load {
-                    let dispatched =
-                        self.eval(&format!("__omoikane_dispatch_resource_load({node_id})"));
+                    let (timing_name, redirected, elapsed_ms) = dispatch_timing
+                        .unwrap_or_else(|| (String::new(), false, 0.0));
+                    let dispatched = self.eval(&dispatch_resource_timing_script(
+                        "load", node_id, &timing_name, redirected, elapsed_ms,
+                    ));
                     self.record_error_from("resource load", dispatched);
                     let jobs = self.run_jobs();
                     self.record_error_from("resource load", jobs);
                 }
                 Ok(())
+            }
+            TimerPayload::GeolocationTimeout { request_id } => {
+                self.run_geolocation_delivery(request_id, true)
             }
         }
     }
@@ -3933,9 +4702,7 @@ impl JsRuntime {
     /// and executing inline scripts). Listeners registered via
     /// `document.addEventListener('DOMContentLoaded', fn)` will be invoked.
     pub fn fire_dom_content_loaded(&mut self) -> JsResult<()> {
-        self.eval(
-            "document.__readyState = 'interactive'; document.dispatchEvent(new Event('DOMContentLoaded'))",
-        )?;
+        self.eval(DOM_CONTENT_LOADED_SCRIPT)?;
         self.run_jobs()
     }
 
@@ -3981,9 +4748,7 @@ impl JsRuntime {
     /// page's `<body onload="...">` handler runs at this point.
     pub fn fire_load(&mut self) -> JsResult<()> {
         // The load event does not bubble.
-        self.eval(
-            "document.__readyState = 'complete'; window.dispatchEvent(new Event('load', { bubbles: false }))",
-        )?;
+        self.eval(LOAD_SCRIPT)?;
         self.run_jobs()
     }
 
@@ -4084,15 +4849,33 @@ impl JsRuntime {
                             );
                             continue;
                         }
+                        let redirected = resource_reference_was_redirected(
+                            &src_url,
+                            &effective_url,
+                            base_url,
+                        );
+                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
+                        let _ = self.eval(&format!(
+                            "__omoikane_record_resource_timing({}, 'script', 200, false, {redirected}, {elapsed_ms})",
+                            serde_json::to_string(&effective_url)
+                                .unwrap_or_else(|_| "\"\"".to_string()),
+                        ));
                         if log_scripts {
                             eprintln!(
                                 "[omoikane][script] fetched {src_url} elapsed_ms={:.3}",
-                                fetch_start.elapsed().as_secs_f64() * 1_000.0,
+                                elapsed_ms,
                             );
                         }
                         (code, src_url.clone())
                     }
                     None => {
+                        let timing_name = resource_reference_timing_name(&src_url, base_url);
+                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
+                        let _ = self.eval(&format!(
+                            "__omoikane_record_resource_timing({}, 'script', 0, true, false, {elapsed_ms})",
+                            serde_json::to_string(&timing_name)
+                                .unwrap_or_else(|_| "\"\"".to_string()),
+                        ));
                         errors.push(format!("failed to fetch script: {src_url}"));
                         continue;
                     }
@@ -4353,6 +5136,57 @@ fn resolve_resource_ref(
     }
 }
 
+/// Returns whether a fetched resource ended at a different URL than the one
+/// requested by the document. Relative references are resolved against the
+/// document base before comparing parsed HTTP(S) URLs, so a relative script
+/// does not look redirected merely because the fetch helper returns an
+/// absolute effective URL.
+fn resource_reference_was_redirected(
+    requested: &str,
+    effective: &str,
+    base_url: Option<&crate::http::Url>,
+) -> bool {
+    let requested = match resolve_resource_ref(requested, base_url) {
+        Some(ResolvedResource::Url(url)) => url,
+        _ => requested.to_string(),
+    };
+    match (
+        requested.parse::<crate::http::Url>(),
+        effective.parse::<crate::http::Url>(),
+    ) {
+        (Ok(requested), Ok(effective)) => requested != effective,
+        _ => requested != effective,
+    }
+}
+
+fn resource_reference_timing_name(
+    requested: &str,
+    base_url: Option<&crate::http::Url>,
+) -> String {
+    match resolve_resource_ref(requested, base_url) {
+        Some(ResolvedResource::Url(url)) => url,
+        _ => requested.to_string(),
+    }
+}
+
+fn dispatch_resource_timing_script(
+    event: &str,
+    node_id: usize,
+    url: &str,
+    redirected: bool,
+    elapsed_ms: f64,
+) -> String {
+    let safe_url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
+    let safe_elapsed = if elapsed_ms.is_finite() && elapsed_ms >= 0.0 {
+        elapsed_ms
+    } else {
+        0.0
+    };
+    format!(
+        "__omoikane_dispatch_resource_{event}({node_id}, {safe_url}, {redirected}, {safe_elapsed})"
+    )
+}
+
 fn same_origin_url(a: &crate::http::Url, b: &crate::http::Url) -> bool {
     a.scheme().eq_ignore_ascii_case(b.scheme())
         && a.host().eq_ignore_ascii_case(b.host())
@@ -4465,6 +5299,105 @@ fn post_broadcast_channel(
             .event_loop
             .enqueue_broadcast_channel_message(target_id, data.clone(), sender_origin.clone());
     }
+}
+
+fn next_shared_worker_id() -> u64 {
+    NEXT_SHARED_WORKER_ID.with(|next| {
+        let id = next.get();
+        next.set(id.saturating_add(1));
+        id
+    })
+}
+
+fn next_shared_worker_connection_id() -> u64 {
+    NEXT_SHARED_WORKER_CONNECTION_ID.with(|next| {
+        let id = next.get();
+        next.set(id.saturating_add(1));
+        id
+    })
+}
+
+fn shared_worker_origin(state: &HostState) -> Option<StorageOrigin> {
+    state
+        .base_url
+        .as_ref()
+        .and_then(|url| StorageOrigin::from_url(&url.to_string()))
+}
+
+fn prune_shared_worker_registry(registry: &mut Vec<Rc<RefCell<SharedWorkerRuntime>>>) {
+    for entry in registry.iter() {
+        let mut shared = entry.borrow_mut();
+        shared.connections.retain(|_, connection| {
+            !connection.closed && connection.owner_state.strong_count() > 0
+        });
+    }
+    registry.retain(|entry| {
+        let shared = entry.borrow();
+        !shared.connections.is_empty()
+            && !shared
+                .runtime
+                .borrow()
+                .host_state
+                .borrow()
+                .worker_terminated
+    });
+}
+
+fn shared_worker_entry_for_connection(
+    connection_id: u64,
+) -> Option<Rc<RefCell<SharedWorkerRuntime>>> {
+    SHARED_WORKER_REGISTRY.with(|registry| {
+        registry
+            .borrow()
+            .iter()
+            .find(|entry| entry.borrow().connections.contains_key(&connection_id))
+            .cloned()
+    })
+}
+
+fn shared_worker_entry_for_key(
+    key: &SharedWorkerKey,
+) -> Option<Rc<RefCell<SharedWorkerRuntime>>> {
+    SHARED_WORKER_REGISTRY.with(|registry| {
+        registry
+            .borrow()
+            .iter()
+            .find(|entry| entry.borrow().key == *key)
+            .cloned()
+    })
+}
+
+fn terminate_shared_worker_connections(state: &Rc<RefCell<HostState>>) {
+    let connection_ids: Vec<_> = state
+        .borrow()
+        .shared_worker_ports
+        .keys()
+        .copied()
+        .collect();
+    for connection_id in connection_ids {
+        if let Some(entry) = shared_worker_entry_for_connection(connection_id) {
+            if let Some(connection) = entry.borrow_mut().connections.get_mut(&connection_id) {
+                connection.closed = true;
+                connection.owner_port = None;
+                connection.pending_to_owner.clear();
+            }
+        }
+    }
+    state.borrow_mut().shared_worker_ports.clear();
+}
+
+/// Tears down the isolated WorkletGlobalScope owned by `state`. Taking the
+/// handle before borrowing the child realm breaks the owner/child cycle even
+/// when navigation drops the page while a module task is pending.
+fn terminate_worklet_runtime(state: &Rc<RefCell<HostState>>) {
+    let runtime = state.borrow_mut().worklet_runtime.take();
+    let Some(runtime) = runtime else { return; };
+    let child_state = Rc::clone(&runtime.borrow().host_state);
+    let mut child_state = child_state.borrow_mut();
+    child_state.worklet_terminated = true;
+    child_state.worklet_owner = None;
+    child_state.worklet_modules.clear();
+    child_state.worklet_registrations.clear();
 }
 
 fn resolve_worker_url(
@@ -4640,6 +5573,26 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(performance_now_native),
         ),
         (
+            js_string!("__omoikane_event_loop_now"),
+            0,
+            NativeFunction::from_copy_closure(event_loop_now_native),
+        ),
+        (
+            js_string!("__omoikane_notification_permission"),
+            0,
+            NativeFunction::from_copy_closure(notification_permission_native),
+        ),
+        (
+            js_string!("__omoikane_notification_request_permission"),
+            0,
+            NativeFunction::from_copy_closure(notification_request_permission_native),
+        ),
+        (
+            js_string!("__omoikane_geolocation_permission"),
+            0,
+            NativeFunction::from_copy_closure(geolocation_permission_native),
+        ),
+        (
             js_string!("__omoikane_crypto_random"),
             1,
             NativeFunction::from_copy_closure(crypto_random_native),
@@ -4648,6 +5601,41 @@ fn register_host_bindings(
             js_string!("__omoikane_crypto_digest"),
             2,
             NativeFunction::from_copy_closure(crypto_digest_native),
+        ),
+        (
+            js_string!("__omoikane_crypto_hmac"),
+            3,
+            NativeFunction::from_copy_closure(crypto_hmac_native),
+        ),
+        (
+            js_string!("__omoikane_is_secure_context"),
+            0,
+            NativeFunction::from_copy_closure(is_secure_context_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_read_text"),
+            0,
+            NativeFunction::from_copy_closure(clipboard_read_text_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_write_text"),
+            1,
+            NativeFunction::from_copy_closure(clipboard_write_text_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_permission"),
+            0,
+            NativeFunction::from_copy_closure(clipboard_permission_native),
+        ),
+        (
+            js_string!("__omoikane_geolocation_request"),
+            5,
+            NativeFunction::from_copy_closure(geolocation_request_native),
+        ),
+        (
+            js_string!("__omoikane_geolocation_clear_watch"),
+            1,
+            NativeFunction::from_copy_closure(geolocation_clear_watch_native),
         ),
         (
             js_string!("__omoikane_storage_origin"),
@@ -4683,6 +5671,11 @@ fn register_host_bindings(
             js_string!("__omoikane_storage_clear"),
             2,
             NativeFunction::from_copy_closure(storage_clear_native),
+        ),
+        (
+            js_string!("__omoikane_cache_storage"),
+            3,
+            NativeFunction::from_copy_closure(cache_storage_native),
         ),
         (
             js_string!("__omoikane_query_selector"),
@@ -4895,6 +5888,56 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(worker_close_native),
         ),
         (
+            js_string!("__omoikane_create_worklet"),
+            0,
+            NativeFunction::from_copy_closure(create_worklet_native),
+        ),
+        (
+            js_string!("__omoikane_worklet_add_module"),
+            2,
+            NativeFunction::from_copy_closure(worklet_add_module_native),
+        ),
+        (
+            js_string!("__omoikane_worklet_register"),
+            2,
+            NativeFunction::from_copy_closure(worklet_register_native),
+        ),
+        (
+            js_string!("__omoikane_worklet_registered_names"),
+            1,
+            NativeFunction::from_copy_closure(worklet_registered_names_native),
+        ),
+        (
+            js_string!("__omoikane_worklet_module_count"),
+            1,
+            NativeFunction::from_copy_closure(worklet_module_count_native),
+        ),
+        (
+            js_string!("__omoikane_worklet_teardown"),
+            1,
+            NativeFunction::from_copy_closure(worklet_teardown_native),
+        ),
+        (
+            js_string!("__omoikane_shared_worker_connect"),
+            2,
+            NativeFunction::from_copy_closure(shared_worker_connect_native),
+        ),
+        (
+            js_string!("__omoikane_shared_worker_bind_port"),
+            3,
+            NativeFunction::from_copy_closure(shared_worker_bind_port_native),
+        ),
+        (
+            js_string!("__omoikane_shared_worker_port_post"),
+            2,
+            NativeFunction::from_copy_closure(shared_worker_port_post_native),
+        ),
+        (
+            js_string!("__omoikane_shared_worker_port_close"),
+            1,
+            NativeFunction::from_copy_closure(shared_worker_port_close_native),
+        ),
+        (
             js_string!("__omoikane_canvas_commit"),
             4,
             NativeFunction::from_copy_closure(canvas_commit_native),
@@ -4903,6 +5946,11 @@ fn register_host_bindings(
             js_string!("__omoikane_canvas_data_url"),
             1,
             NativeFunction::from_copy_closure(canvas_data_url_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_png"),
+            3,
+            NativeFunction::from_copy_closure(canvas_png_native),
         ),
         (
             js_string!("__omoikane_canvas_image_source"),
@@ -5060,6 +6108,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(create_document_native),
         ),
         (
+            js_string!("__omoikane_parse_xml"),
+            1,
+            NativeFunction::from_copy_closure(parse_xml_native),
+        ),
+        (
             js_string!("__omoikane_create_document_type"),
             1,
             NativeFunction::from_copy_closure(create_document_type_native),
@@ -5138,6 +6191,11 @@ fn register_host_bindings(
             js_string!("__omoikane_css_rule_count"),
             1,
             NativeFunction::from_copy_closure(css_rule_count_native),
+        ),
+        (
+            js_string!("__omoikane_css_scope_rules_valid"),
+            1,
+            NativeFunction::from_copy_closure(css_scope_rules_valid_native),
         ),
         (
             js_string!("__omoikane_css_supports"),
@@ -5334,6 +6392,325 @@ fn performance_now_native(
     })
 }
 
+fn event_loop_now_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| Ok(JsValue::from(state.borrow().event_loop.now_ms() as f64)))
+}
+
+fn notification_permission_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        Ok(js_string!(state.borrow().notification_permission.as_str()).into())
+    })
+}
+
+fn notification_request_permission_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if state.notification_permission == "default" {
+            state.notification_permission = "denied".to_string();
+        }
+        Ok(js_string!(state.notification_permission.as_str()).into())
+    })
+}
+
+fn geolocation_permission_native(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        Ok(JsValue::from(state.borrow().geolocation_permission_granted))
+    })
+}
+
+fn is_secure_context_url(url: &str) -> bool {
+    let lower_url = url.to_ascii_lowercase();
+    // Fragments are not part of an origin.  Strip them before the IPv6
+    // fast-path and the lightweight URL parser so `http://[::1]#section`
+    // behaves like the corresponding fragment-free loopback URL.
+    let url_without_fragment = lower_url
+        .split_once('#')
+        .map_or(lower_url.as_str(), |(prefix, _)| prefix);
+    if let Some(authority) = url_without_fragment.strip_prefix("http://") {
+        let authority_end = authority.find(['/', '?']).unwrap_or(authority.len());
+        let authority = &authority[..authority_end];
+        if let Some(port) = authority.strip_prefix("[::1]") {
+            let valid_port = match port.strip_prefix(':') {
+                None => true,
+                Some(value) => !value.is_empty() && value.parse::<u16>().is_ok(),
+            };
+            if valid_port {
+                return true;
+            }
+        }
+    }
+    let Ok(url) = url_without_fragment.parse::<crate::http::Url>() else {
+        return false;
+    };
+    if url.scheme().eq_ignore_ascii_case("https") {
+        return true;
+    }
+    if !url.scheme().eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let host = url.host().to_ascii_lowercase();
+    host == "localhost"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.octets()[0] == 127)
+}
+
+fn is_secure_context_parsed_url(url: &crate::http::Url) -> bool {
+    if url.scheme().eq_ignore_ascii_case("https") {
+        return true;
+    }
+    if !url.scheme().eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let host = url.host();
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.octets()[0] == 127)
+}
+
+fn host_is_secure_context(state: &HostState) -> bool {
+    // The base URL is already parsed and is the canonical origin used by the
+    // runtime. Avoid formatting and reparsing it on every secure-context or
+    // clipboard check. The lightweight URL type does not model fragments, so
+    // retain the string path for fragment-bearing URLs (and IPv6 loopback,
+    // which is handled by its dedicated fast path).
+    if let Some(base_url) = state.base_url.as_ref()
+        && !state.location_href.contains('#')
+    {
+        return is_secure_context_parsed_url(base_url);
+    }
+    is_secure_context_url(&state.location_href)
+}
+
+fn is_secure_context_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let state = state.borrow();
+        Ok(JsValue::from(host_is_secure_context(&state)))
+    })
+}
+
+fn clipboard_read_text_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
+            return Ok(JsValue::null());
+        }
+        Ok(JsValue::from(js_string!(state.clipboard.read_text())))
+    })
+}
+
+fn clipboard_permission_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| Ok(JsValue::from(state.borrow().clipboard_permission_granted)))
+}
+
+fn clipboard_write_text_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = string_argument(args.first(), "", context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
+            return Ok(JsValue::from(false));
+        }
+        state.clipboard.write_text(text);
+        Ok(JsValue::from(true))
+    })
+}
+
+fn geolocation_duration_argument(
+    value: Option<&JsValue>,
+    default: Option<u64>,
+    context: &mut Context,
+) -> JsResult<Option<u64>> {
+    let Some(value) = value else { return Ok(default); };
+    let value = value.to_number(context)?;
+    if value.is_nan() || value < 0.0 {
+        return Err(JsNativeError::range()
+            .with_message("geolocation timeout and maximumAge must be non-negative")
+            .into());
+    }
+    if !value.is_finite() {
+        return Ok(None);
+    }
+    Ok(Some(value.floor().min(u64::MAX as f64) as u64))
+}
+
+/// Queues a Geolocation request according to the current permission/provider
+/// snapshot.  A request with a fresh cached position is delivered immediately;
+/// an unavailable provider waits for its finite timeout, while the default
+/// infinite timeout deterministically reports POSITION_UNAVAILABLE.
+fn geolocation_position_age_ms(state: &HostState) -> Option<u64> {
+    let position = state.geolocation_position.as_ref()?;
+    let now = state.performance_time_origin + state.event_loop.now_ms() as f64;
+    if !position.timestamp_ms.is_finite() || now <= position.timestamp_ms {
+        return Some(0);
+    }
+    Some((now - position.timestamp_ms).min(u64::MAX as f64) as u64)
+}
+
+fn wake_geolocation_request(state: &mut HostState, request_id: u64) {
+    let timeout_timer_id = state
+        .geolocation_requests
+        .get(&request_id)
+        .and_then(|request| request.timeout_timer_id);
+    if let Some(timer_id) = timeout_timer_id {
+        state.event_loop.clear_timer(timer_id);
+        if let Some(request) = state.geolocation_requests.get_mut(&request_id) {
+            request.timeout_timer_id = None;
+            request.pending = false;
+        }
+    }
+}
+
+fn schedule_geolocation_request(state: &mut HostState, request_id: u64) {
+    let Some((pending, maximum_age_ms, timeout_ms)) = state
+        .geolocation_requests
+        .get(&request_id)
+        .map(|request| (request.pending, request.maximum_age_ms, request.timeout_ms))
+    else {
+        return;
+    };
+    if pending { return; }
+
+    let fresh_position = geolocation_position_age_ms(state)
+        .is_some_and(|age| maximum_age_ms.is_none_or(|maximum_age| age <= maximum_age));
+    let immediate = !state.geolocation_permission_granted
+        || fresh_position
+        || timeout_ms.is_none()
+        || timeout_ms == Some(0);
+    if let Some(request) = state.geolocation_requests.get_mut(&request_id) {
+        request.pending = true;
+    } else {
+        return;
+    }
+    if immediate {
+        state.event_loop.enqueue_geolocation(request_id);
+        return;
+    }
+    let timeout = timeout_ms.unwrap_or(0);
+    let timer_id = state.event_loop.schedule_timer(
+        TimerPayload::GeolocationTimeout { request_id },
+        timeout,
+        false,
+    );
+    if let Some(request) = state.geolocation_requests.get_mut(&request_id) {
+        request.timeout_timer_id = Some(timer_id);
+    } else {
+        state.event_loop.clear_timer(timer_id);
+    }
+}
+
+fn geolocation_request_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let success = args.first().cloned().unwrap_or_default();
+    if !success.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("Geolocation success callback must be callable")
+            .into());
+    }
+    let error = args.get(1).cloned().filter(|value| value.is_callable());
+    let watch_id = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| JsValue::from(-1))
+        .to_number(context)?;
+    let watch_id = if watch_id.is_finite() && watch_id >= 0.0 {
+        Some(watch_id.min(u32::MAX as f64) as u32)
+    } else {
+        None
+    };
+    // JavaScript normalizes the options, but parse again at the native boundary
+    // so embedders cannot bypass range validation by calling the private hook.
+    let timeout_ms = geolocation_duration_argument(args.get(3), None, context)?;
+    let maximum_age_ms = geolocation_duration_argument(args.get(4), Some(0), context)?;
+
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let request_id = state.next_geolocation_request_id;
+        state.next_geolocation_request_id = state.next_geolocation_request_id.saturating_add(1);
+        state.geolocation_requests.insert(
+            request_id,
+            GeolocationRequest {
+                success,
+                error,
+                watch_id,
+                timeout_ms,
+                maximum_age_ms,
+                pending: false,
+                timeout_timer_id: None,
+            },
+        );
+        schedule_geolocation_request(&mut state, request_id);
+        Ok(JsValue::from(request_id as f64))
+    })
+}
+
+fn geolocation_clear_watch_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let watch_id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)?;
+    if !watch_id.is_finite() || watch_id < 0.0 {
+        return Ok(JsValue::undefined());
+    }
+    let watch_id = watch_id.min(u32::MAX as f64) as u32;
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let request_ids: Vec<_> = state
+            .geolocation_requests
+            .iter()
+            .filter_map(|(request_id, request)| (request.watch_id == Some(watch_id)).then_some(*request_id))
+            .collect();
+        for request_id in request_ids {
+            if let Some(request) = state.geolocation_requests.remove(&request_id)
+                && let Some(timer_id) = request.timeout_timer_id
+            {
+                state.event_loop.clear_timer(timer_id);
+            }
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
 fn crypto_random_native(
     _this: &JsValue,
     args: &[JsValue],
@@ -5383,6 +6760,74 @@ fn crypto_digest_native(
         _ => {
             return Err(JsError::from(
                 JsNativeError::error().with_message("unsupported digest algorithm"),
+            ));
+        }
+    };
+    let json = serde_json::to_string(&digest).map_err(|error| {
+        JsError::from(JsNativeError::error().with_message(error.to_string()))
+    })?;
+    Ok(js_string!(json).into())
+}
+
+/// Computes an HMAC over a caller-owned byte snapshot.
+///
+/// The Web Crypto wrapper keeps CryptoKey objects realm-local and only passes
+/// the immutable key/data snapshots into this host hook.  Dispatching the
+/// digest implementation here avoids exposing a Rust crypto object to Boa
+/// while still making the operation's Promise/task boundary explicit in JS.
+fn crypto_hmac_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use hmac::{Hmac, Mac};
+
+    let algorithm = string_argument(args.first(), "", context)?;
+    let key_json = string_argument(args.get(1), "[]", context)?;
+    let data_json = string_argument(args.get(2), "[]", context)?;
+    let key: Vec<u8> = serde_json::from_str(&key_json).map_err(|error| {
+        JsError::from(
+            JsNativeError::typ().with_message(format!("invalid HMAC key data: {error}")),
+        )
+    })?;
+    let data: Vec<u8> = serde_json::from_str(&data_json).map_err(|error| {
+        JsError::from(
+            JsNativeError::typ().with_message(format!("invalid HMAC input data: {error}")),
+        )
+    })?;
+
+    let digest = match algorithm.as_str() {
+        "SHA-1" => {
+            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&key).map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
+        "SHA-256" => {
+            let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&key).map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
+        "SHA-384" => {
+            let mut mac = Hmac::<sha2::Sha384>::new_from_slice(&key).map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
+        "SHA-512" => {
+            let mut mac = Hmac::<sha2::Sha512>::new_from_slice(&key).map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
+            mac.update(&data);
+            mac.finalize().into_bytes().to_vec()
+        }
+        _ => {
+            return Err(JsError::from(
+                JsNativeError::error().with_message("unsupported HMAC hash algorithm"),
             ));
         }
     };
@@ -5511,6 +6956,117 @@ fn storage_clear_native(
     Ok(JsValue::from(manager.clear(session, &origin, local)))
 }
 
+/// Host-side backing store for the Cache Storage JavaScript wrappers.
+///
+/// Cache operations are deliberately exposed as one JSON boundary: request
+/// and response objects are realm-local, immutable snapshots and must never be
+/// retained as `JsValue`s by the native manager.  The wrapper queues the call
+/// on the networking task source before invoking this binding, so the native
+/// store itself remains synchronous and lock-scoped.
+fn cache_storage_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let operation = string_argument(args.first(), "", context)?;
+    let name = string_argument(args.get(1), "", context)?;
+    let payload = string_argument(args.get(2), "", context)?;
+    with_host_state(|host| {
+        let state = host.borrow();
+        let origin = state
+            .document_origins
+            .get(&state.document.identity())
+            .cloned()
+            .flatten()
+            .ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::error()
+                        .with_message("Cache Storage is unavailable for an opaque origin"),
+                )
+            })?;
+        let manager = state.storage_manager.clone();
+        let output = match operation.as_str() {
+            "open" => {
+                manager.cache_open(&origin, name);
+                serde_json::json!(true)
+            }
+            "has" => serde_json::json!(manager.cache_has(&origin, &name)),
+            "keys" => serde_json::json!(manager.cache_names(&origin)),
+            "delete" => serde_json::json!(manager.cache_delete(&origin, &name)),
+            "entries" => {
+                let entries = manager.cache_entries(&origin, &name).ok_or_else(|| {
+                    JsError::from(
+                        JsNativeError::error().with_message("Cache object no longer exists"),
+                    )
+                })?;
+                serde_json::Value::Array(
+                    entries
+                        .into_iter()
+                        .map(|entry| {
+                            serde_json::json!({
+                                "id": entry.id,
+                                "request": entry.request,
+                                "response": entry.response,
+                            })
+                        })
+                        .collect(),
+                )
+            }
+            "put" => {
+                let value: serde_json::Value = serde_json::from_str(&payload).map_err(|error| {
+                    JsError::from(
+                        JsNativeError::typ()
+                            .with_message(format!("invalid Cache.put snapshot: {error}")),
+                    )
+                })?;
+                let request = value
+                    .get("request")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        JsError::from(
+                            JsNativeError::typ().with_message("Cache.put request snapshot missing"),
+                        )
+                    })?;
+                let response = value
+                    .get("response")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        JsError::from(
+                            JsNativeError::typ()
+                                .with_message("Cache.put response snapshot missing"),
+                        )
+                    })?;
+                if manager
+                    .cache_put(&origin, &name, request.to_string(), response.to_string())
+                    .is_none()
+                {
+                    return Err(JsError::from(
+                        JsNativeError::error().with_message("Cache object no longer exists"),
+                    ));
+                }
+                serde_json::json!(true)
+            }
+            "delete-entry" => {
+                let id = serde_json::from_str::<u64>(&payload).map_err(|error| {
+                    JsError::from(
+                        JsNativeError::typ().with_message(format!("invalid Cache entry id: {error}")),
+                    )
+                })?;
+                serde_json::json!(manager.cache_delete_entry(&origin, &name, id))
+            }
+            _ => {
+                return Err(JsError::from(
+                    JsNativeError::typ().with_message(format!("unknown Cache Storage operation: {operation}")),
+                ));
+            }
+        };
+        let encoded = serde_json::to_string(&output).map_err(|error| {
+            JsError::from(JsNativeError::error().with_message(error.to_string()))
+        })?;
+        Ok(js_string!(encoded).into())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Computed style + layout metrics (issues 016-8, 044-2)
 // ---------------------------------------------------------------------------
@@ -5542,9 +7098,17 @@ fn collect_inline_stylesheets(
         {
             let css = collect_text_recursive(node);
             if !css.trim().is_empty() {
-                let implicit_scope_root = node
-                    .parent_node()
-                    .filter(|parent| parent.node_type() == NodeType::Element);
+                let implicit_scope_root = node.parent_node().and_then(|parent| {
+                    if parent.node_type() == NodeType::Element {
+                        Some(parent)
+                    } else {
+                        // A style element directly in a shadow tree has no
+                        // element parent; CSS Scoping defines its implicit
+                        // scope root as the shadow host.
+                        scope
+                            .and_then(|(root, _)| root.shadow_host())
+                    }
+                });
                 out.push((node.clone(), scope.cloned(), implicit_scope_root, css));
             }
         }
@@ -5955,6 +7519,14 @@ fn transform_rect(rect: Rect, transform: AffineTransform) -> Rect {
         transform.transform_point(rect.x, rect.y + rect.height),
         transform.transform_point(rect.x + rect.width, rect.y + rect.height),
     ];
+    if corners
+        .iter()
+        .any(|point| !point.0.is_finite() || !point.1.is_finite())
+    {
+        // Keep CSSOM geometry anchored in layout space when projection has no
+        // finite corner, avoiding a discontinuous jump to the origin.
+        return rect;
+    }
     let min_x = corners
         .iter()
         .map(|point| point.0)
@@ -6826,6 +8398,46 @@ fn css_rule_count_native(
     Ok(JsValue::from(sheet.rules.len() as f64))
 }
 
+/// Validates every `@scope` prelude in a stylesheet.  The regular stylesheet
+/// parser intentionally keeps malformed at-rules so style resolution can
+/// discard them forgivingly; CSSOM mutation APIs, however, must reject an
+/// invalid scope rule with a SyntaxError before changing the sheet.
+fn css_scope_rules_valid_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let css = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    // CSSOM mutation validation is concerned with @scope preludes.  Keep the
+    // rest of the stylesheet forgiving so an unrelated malformed rule does
+    // not get reported as an invalid scope prelude.
+    let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+    let valid = scope_rules_valid(&sheet.rules);
+    Ok(JsValue::from(valid))
+}
+
+fn scope_rules_valid(rules: &[crate::css::Rule]) -> bool {
+    rules.iter().all(|rule| match rule {
+        crate::css::Rule::At(at_rule) if at_rule.name.eq_ignore_ascii_case("scope") => {
+            parse_scope_prelude(&at_rule.prelude).is_some()
+                && at_rule
+                    .block
+                    .as_deref()
+                    .is_some_and(scope_rules_valid)
+        }
+        crate::css::Rule::At(at_rule) => at_rule
+            .block
+            .as_deref()
+            .is_none_or(scope_rules_valid),
+        _ => true,
+    })
+}
+
 /// Evaluates the two-argument form of `CSS.supports()` against the same parser
 /// and supported-property table used by style resolution.
 fn css_supports_native(
@@ -6851,8 +8463,9 @@ fn css_supports_native(
 }
 
 /// Normalizes values assigned through CSSStyleDeclaration. Transition values
-/// use native grammar validation so invalid assignments are ignored and
-/// specified-value serialization is canonical.
+/// are canonicalized; strictly-validated CSS properties use native grammar
+/// validation so invalid assignments are ignored while valid specified values
+/// are preserved for CSSOM serialization.
 fn normalize_style_value_native(
     _: &JsValue,
     args: &[JsValue],
@@ -6881,6 +8494,24 @@ fn normalize_style_value_native(
             | "transition-delay"
     ) {
         crate::css::normalize_transition_longhand(&property, &value)
+    } else if matches!(
+        property.as_str(),
+        "clip-path"
+            | "-webkit-clip-path"
+            | "mask"
+            | "-webkit-mask"
+            | "mask-image"
+            | "-webkit-mask-image"
+            | "mask-mode"
+            | "-webkit-mask-mode"
+            | "mask-composite"
+            | "-webkit-mask-composite"
+            | "transform-style"
+            | "backface-visibility"
+            | "mix-blend-mode"
+            | "isolation"
+    ) {
+        crate::css::supports_declaration(&property, &value).then_some(value)
     } else {
         Some(value)
     };
@@ -7480,6 +9111,633 @@ fn broadcast_channel_close_native(
     })
 }
 
+fn shared_worker_connect_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let requested_url = string_argument(args.first(), "", context)?;
+    let name = string_argument(args.get(1), "", context)?;
+    with_host_state(|state| {
+        if state.borrow().shared_worker_id.is_some() {
+            return Err(JsNativeError::error()
+                .with_message("SharedWorker construction from a SharedWorker is unsupported")
+                .into());
+        }
+        create_shared_worker_for_owner_state(Rc::clone(state), &requested_url, &name)
+            .map(|id| JsValue::from(js_string!(id.to_string())))
+    })
+}
+
+fn shared_worker_bind_port_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let connection_id = worker_id_argument(args, context)?;
+    let port = args.get(1).cloned().unwrap_or_default();
+    if !port.is_object() {
+        return Err(JsNativeError::typ()
+            .with_message("SharedWorker port must be an object")
+            .into());
+    }
+    let owner_object = args.get(2).cloned().unwrap_or_default();
+    if !owner_object.is_object() {
+        return Err(JsNativeError::typ()
+            .with_message("SharedWorker owner must be an object")
+            .into());
+    }
+    with_host_state(|state| {
+        let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
+            return Ok(JsValue::undefined());
+        };
+        let (owner_state, origin, pending, startup_error) = {
+            let mut shared = entry.borrow_mut();
+            let Some(connection) = shared.connections.get_mut(&connection_id) else {
+                return Ok(JsValue::undefined());
+            };
+            let Some(owner_state) = connection.owner_state.upgrade() else {
+                connection.closed = true;
+                return Ok(JsValue::undefined());
+            };
+            if !Rc::ptr_eq(&owner_state, state) {
+                return Err(JsNativeError::error()
+                    .with_message("SharedWorker port belongs to another global")
+                    .into());
+            }
+            connection.owner_port = Some(port.clone());
+            let origin = connection.owner_origin.clone();
+            let pending = std::mem::take(&mut connection.pending_to_owner);
+            let startup_error = connection.startup_error.take();
+            (owner_state, origin, pending, startup_error)
+        };
+        state
+            .borrow_mut()
+            .shared_worker_ports
+            .insert(connection_id, port.clone());
+        for data in pending {
+            owner_state.borrow_mut().event_loop.enqueue_shared_worker_owner_message(
+                connection_id,
+                port.clone(),
+                data,
+                origin.clone(),
+            );
+        }
+        if let Some(message) = startup_error {
+            // SharedWorker startup failures are reported asynchronously on the
+            // page-facing SharedWorker object, matching Dedicated Worker error
+            // delivery and ensuring construction never silently succeeds.
+            state.borrow_mut().event_loop.enqueue_worker_error(
+                connection_id,
+                Some(owner_object),
+                message,
+            );
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn shared_worker_port_post_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let connection_id = worker_id_argument(args, context)?;
+    let data = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    with_host_state(|state| {
+        let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
+            return Ok(JsValue::undefined());
+        };
+        if state.borrow().shared_worker_id.is_some() {
+            // The call originated in the shared-worker realm.  Route it to
+            // the page endpoint, retaining the wire until the page port has
+            // been bound (the constructor binds immediately after connect).
+            let (owner_state, owner_port, origin) = {
+                let mut shared = entry.borrow_mut();
+                let Some(connection) = shared.connections.get_mut(&connection_id) else {
+                    return Ok(JsValue::undefined());
+                };
+                if connection.closed {
+                    return Ok(JsValue::undefined());
+                }
+                let Some(owner_state) = connection.owner_state.upgrade() else {
+                    connection.closed = true;
+                    return Ok(JsValue::undefined());
+                };
+                let owner_port = connection.owner_port.clone();
+                let origin = connection.owner_origin.clone();
+                if owner_port.is_none() {
+                    connection.pending_to_owner.push_back(data);
+                    return Ok(JsValue::undefined());
+                }
+                (owner_state, owner_port, origin)
+            };
+            if let Some(owner_port) = owner_port {
+                owner_state
+                    .borrow_mut()
+                    .event_loop
+                    .enqueue_shared_worker_owner_message(
+                        connection_id,
+                        owner_port,
+                        data,
+                        origin,
+                    );
+            }
+        } else {
+            // The call originated in a page realm.  Ensure the connection is
+            // owned by that exact global before enqueueing into the shared
+            // worker runtime.
+            let runtime = {
+                let shared = entry.borrow();
+                let Some(connection) = shared.connections.get(&connection_id) else {
+                    return Ok(JsValue::undefined());
+                };
+                if connection.closed
+                    || connection
+                        .owner_state
+                        .upgrade()
+                        .is_none_or(|owner| !Rc::ptr_eq(&owner, state))
+                {
+                    return Ok(JsValue::undefined());
+                }
+                Rc::clone(&shared.runtime)
+            };
+            runtime
+                .borrow_mut()
+                .host_state
+                .borrow_mut()
+                .event_loop
+                .enqueue_shared_worker_message(connection_id, data);
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn shared_worker_port_close_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let connection_id = worker_id_argument(args, context)?;
+    with_host_state(|state| {
+        let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
+            state.borrow_mut().shared_worker_ports.remove(&connection_id);
+            return Ok(JsValue::undefined());
+        };
+        let mut shared = entry.borrow_mut();
+        let Some(connection) = shared.connections.get_mut(&connection_id) else {
+            state.borrow_mut().shared_worker_ports.remove(&connection_id);
+            return Ok(JsValue::undefined());
+        };
+        if state.borrow().shared_worker_id.is_none()
+            && connection
+                .owner_state
+                .upgrade()
+                .is_none_or(|owner| !Rc::ptr_eq(&owner, state))
+        {
+            return Ok(JsValue::undefined());
+        }
+        connection.closed = true;
+        connection.owner_port = None;
+        connection.pending_to_owner.clear();
+        state.borrow_mut().shared_worker_ports.remove(&connection_id);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn worklet_status(ok: bool, name: &str, message: &str, duplicate: bool) -> JsValue {
+    let name = serde_json::to_string(name).unwrap_or_else(|_| "\"Error\"".to_string());
+    let message = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string());
+    js_string!(format!(
+        "{{\"ok\":{ok},\"duplicate\":{duplicate},\"name\":{name},\"message\":{message}}}"
+    ))
+    .into()
+}
+
+fn worklet_error_name(error: &str) -> &'static str {
+    for name in [
+        "InvalidModificationError",
+        "InvalidStateError",
+        "DataCloneError",
+        "SecurityError",
+        "NotAllowedError",
+        "OperationError",
+        "NetworkError",
+        "AbortError",
+        "AggregateError",
+        "EvalError",
+        "RangeError",
+        "ReferenceError",
+        "SyntaxError",
+        "TypeError",
+        "URIError",
+        "Error",
+    ] {
+        if error.starts_with(name) || error.contains(&format!("name: \"{name}\"")) {
+            return name;
+        }
+    }
+    "OperationError"
+}
+
+fn create_worklet_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let id = state.next_worklet_id;
+        state.next_worklet_id = state.next_worklet_id.saturating_add(1);
+        Ok(js_string!(id.to_string()).into())
+    })
+}
+
+/// Loads and evaluates one Worklet module in the owner page's isolated
+/// WorkletGlobalScope. The JavaScript wrapper converts this status record into
+/// the asynchronous `addModule()` Promise lifecycle.
+fn worklet_add_module_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = worker_id_argument(args, context)?;
+    let requested_url = string_argument(args.get(1), "", context)?;
+    with_host_state(|owner_state| {
+        let (owner_url, base_url, storage, session_id, user_agent, secure) = {
+            let state = owner_state.borrow();
+            (
+                state
+                    .base_url
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| state.location_href.clone()),
+                state.base_url.clone(),
+                state.storage_manager.clone(),
+                state.storage_session_id,
+                state.navigator_user_agent.clone(),
+                host_is_secure_context(&state),
+            )
+        };
+        if !secure {
+            return Ok(worklet_status(
+                false,
+                "NotAllowedError",
+                "Worklet modules require a secure context",
+                false,
+            ));
+        }
+        let resolved_url = match resolve_worker_url(&requested_url, &owner_url, base_url.as_ref()) {
+            Ok(url) => url,
+            Err(error) => {
+                return Ok(worklet_status(
+                    false,
+                    "SecurityError",
+                    &error.to_string(),
+                    false,
+                ));
+            }
+        };
+        // A module map hit is resolved entirely from the deterministic cache:
+        // do not refetch a resource that has already executed successfully.
+        // This also ensures a repeated `addModule()` call cannot observe a
+        // changing network response after the first successful registration.
+        if let Some(runtime) = owner_state.borrow().worklet_runtime.clone() {
+            let runtime_ref = runtime.borrow();
+            let worklet_state = runtime_ref.host_state.borrow();
+            if worklet_state.worklet_terminated {
+                return Ok(worklet_status(
+                    false,
+                    "InvalidStateError",
+                    "WorkletGlobalScope has been torn down",
+                    false,
+                ));
+            }
+            if worklet_state.worklet_modules.contains(&resolved_url) {
+                return Ok(worklet_status(true, "", "", true));
+            }
+        }
+        // Fetch before constructing the isolated realm. This keeps failed
+        // addModule() calls side-effect free and makes retries deterministic.
+        let fetched = {
+            let mut state = owner_state.borrow_mut();
+            fetch_script_resource_with_client(
+                &requested_url,
+                base_url.as_ref(),
+                &mut state.http_client,
+            )
+        };
+        let (effective_url, source) = match fetched {
+            Some(value) => value,
+            None => {
+                return Ok(worklet_status(
+                    false,
+                    "TypeError",
+                    &format!("failed to fetch Worklet module: {requested_url}"),
+                    false,
+                ));
+            }
+        };
+        // A redirect must not turn a same-origin module into a cross-origin
+        // script. Data URLs are intentionally retained for deterministic
+        // inline tests, matching the existing Worker implementation.
+        if !effective_url.starts_with("data:") {
+            let owner = match owner_url.parse::<crate::http::Url>() {
+                Ok(url) => url,
+                Err(_) => {
+                    return Ok(worklet_status(
+                        false,
+                        "SecurityError",
+                        "Worklet owner has no origin",
+                        false,
+                    ));
+                }
+            };
+            let effective = match effective_url.parse::<crate::http::Url>() {
+                Ok(url) => url,
+                Err(_) => {
+                    return Ok(worklet_status(
+                        false,
+                        "TypeError",
+                        "Worklet module URL is invalid",
+                        false,
+                    ));
+                }
+            };
+            if !same_origin_url(&owner, &effective) {
+                return Ok(worklet_status(
+                    false,
+                    "SecurityError",
+                    "Worklet module must be same-origin",
+                    false,
+                ));
+            }
+        }
+
+        let runtime_handle = if let Some(runtime) = owner_state.borrow().worklet_runtime.clone() {
+            runtime
+        } else {
+            let mut runtime = match JsRuntime::with_document_url_and_storage(
+                blank_html_document(),
+                &owner_url,
+                storage,
+                session_id,
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    return Ok(worklet_status(
+                        false,
+                        "OperationError",
+                        &error.to_string(),
+                        false,
+                    ));
+                }
+            };
+            runtime.set_user_agent(user_agent);
+            let worklet_state = Rc::clone(&runtime.host_state);
+            {
+                let mut state = worklet_state.borrow_mut();
+                state.worklet_owner = Some(Rc::clone(owner_state));
+                state.worklet_id = Some(id);
+                state.worklet_terminated = false;
+            }
+            if let Err(error) = runtime.eval(&format!(
+                "__omoikane_install_worklet_global({effective_url:?}, {id:?})"
+            )) {
+                return Ok(worklet_status(
+                    false,
+                    "OperationError",
+                    &error.to_string(),
+                    false,
+                ));
+            }
+            let runtime = Rc::new(RefCell::new(runtime));
+            owner_state.borrow_mut().worklet_runtime = Some(Rc::clone(&runtime));
+            runtime
+        };
+
+        {
+            let runtime = runtime_handle.borrow();
+            let state = runtime.host_state.borrow();
+            if state.worklet_terminated {
+                return Ok(worklet_status(
+                    false,
+                    "InvalidStateError",
+                    "WorkletGlobalScope has been torn down",
+                    false,
+                ));
+            }
+            if state.worklet_modules.contains(&resolved_url) {
+                return Ok(worklet_status(true, "", "", true));
+            }
+        }
+
+        let evaluation = {
+            let mut runtime = runtime_handle.borrow_mut();
+            let document = runtime.document();
+            let (result, _, _) = runtime.eval_module_timed(&source, &effective_url, document);
+            result
+        };
+        if let Err(error) = evaluation {
+            return Ok(worklet_status(false, worklet_error_name(&error), &error, false));
+        }
+        runtime_handle
+            .borrow()
+            .host_state
+            .borrow_mut()
+            .worklet_modules
+            .insert(resolved_url);
+        Ok(worklet_status(true, "", "", false))
+    })
+}
+
+fn worklet_register_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = worker_id_argument(args, context)?;
+    let name = string_argument(args.get(1), "", context)?;
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if state.worklet_id != Some(id) || state.worklet_terminated {
+            return Ok(JsValue::from(false));
+        }
+        state.worklet_registrations.insert(name);
+        Ok(JsValue::from(true))
+    })
+}
+
+fn worklet_registered_names_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = worker_id_argument(args, context)?;
+    with_host_state(|owner_state| {
+        let runtime = owner_state.borrow().worklet_runtime.clone();
+        let Some(runtime) = runtime else {
+            return Ok(js_string!("[]").into());
+        };
+        let runtime_ref = runtime.borrow();
+        let state = runtime_ref.host_state.borrow();
+        if state.worklet_id != Some(id) || state.worklet_terminated {
+            return Ok(js_string!("[]").into());
+        }
+        let mut names: Vec<_> = state.worklet_registrations.iter().cloned().collect();
+        names.sort();
+        let json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
+        Ok(js_string!(json).into())
+    })
+}
+
+fn worklet_module_count_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = worker_id_argument(args, context)?;
+    with_host_state(|owner_state| {
+        let runtime = owner_state.borrow().worklet_runtime.clone();
+        let Some(runtime) = runtime else {
+            return Ok(JsValue::from(0));
+        };
+        let runtime_ref = runtime.borrow();
+        let state = runtime_ref.host_state.borrow();
+        if state.worklet_id != Some(id) || state.worklet_terminated {
+            return Ok(JsValue::from(0));
+        }
+        Ok(JsValue::from(state.worklet_modules.len() as u32))
+    })
+}
+
+fn worklet_teardown_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = worker_id_argument(args, context)?;
+    with_host_state(|owner_state| {
+        let runtime = {
+            let mut state = owner_state.borrow_mut();
+            let Some(runtime) = state.worklet_runtime.take() else {
+                return Ok(JsValue::from(false));
+            };
+            if runtime.borrow().host_state.borrow().worklet_id != Some(id) {
+                state.worklet_runtime = Some(runtime);
+                return Ok(JsValue::from(false));
+            }
+            runtime
+        };
+        {
+            let worklet_state = Rc::clone(&runtime.borrow().host_state);
+            let mut state = worklet_state.borrow_mut();
+            state.worklet_terminated = true;
+            state.worklet_owner = None;
+            state.worklet_modules.clear();
+            state.worklet_registrations.clear();
+        }
+        Ok(JsValue::from(true))
+    })
+}
+
+fn create_shared_worker_for_owner_state(
+    owner_state: Rc<RefCell<HostState>>,
+    requested_url: &str,
+    name: &str,
+) -> JsResult<u64> {
+    let (owner_url, base_url, storage, session_id, user_agent, origin, origin_text) = {
+        let state = owner_state.borrow();
+        let origin = shared_worker_origin(&state).ok_or_else(|| {
+            JsNativeError::error().with_message("SharedWorker requires an eligible origin")
+        })?;
+        (
+            state
+                .base_url
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| state.location_href.clone()),
+            state.base_url.clone(),
+            state.storage_manager.clone(),
+            state.storage_session_id,
+            state.navigator_user_agent.clone(),
+            origin,
+            host_state_origin(&state),
+        )
+    };
+    let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
+    let key = SharedWorkerKey {
+        origin,
+        url: worker_url.clone(),
+        name: name.to_string(),
+    };
+    let entry = if let Some(existing) = shared_worker_entry_for_key(&key) {
+        existing
+    } else {
+        let source = {
+            let mut state = owner_state.borrow_mut();
+            fetch_script_resource_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
+                .map(|(_, source)| source)
+        };
+        let shared_id = next_shared_worker_id();
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            blank_html_document(),
+            &worker_url,
+            storage,
+            session_id,
+        )?;
+        runtime.set_user_agent(user_agent);
+        runtime.host_state.borrow_mut().shared_worker_id = Some(shared_id);
+        runtime.eval(&format!(
+            "__omoikane_install_shared_worker_global({worker_url:?}, {shared_id:?})"
+        ))?;
+        let startup_error = match source {
+            Some(source) => runtime.eval(&source).err().map(|error| error.to_string()),
+            None => Some(format!("failed to fetch SharedWorker script: {requested_url}")),
+        };
+        if startup_error.is_some() {
+            runtime.host_state.borrow_mut().worker_terminated = true;
+        }
+        let entry = Rc::new(RefCell::new(SharedWorkerRuntime {
+            key,
+            runtime: Rc::new(RefCell::new(runtime)),
+            startup_error,
+            connections: HashMap::new(),
+        }));
+        SHARED_WORKER_REGISTRY.with(|registry| registry.borrow_mut().push(Rc::clone(&entry)));
+        entry
+    };
+
+    let connection_id = next_shared_worker_connection_id();
+    let startup_error = entry.borrow().startup_error.clone();
+    entry.borrow_mut().connections.insert(
+        connection_id,
+        SharedWorkerConnection {
+            owner_state: Rc::downgrade(&owner_state),
+            owner_port: None,
+            owner_origin: origin_text,
+            pending_to_owner: VecDeque::new(),
+            startup_error,
+            closed: false,
+        },
+    );
+    let runtime = Rc::clone(&entry.borrow().runtime);
+    // The runtime is borrowed independently from the registry entry so
+    // `postMessage` calls made synchronously by an onconnect handler can
+    // safely look the connection up again.
+    if entry.borrow().startup_error.is_none() {
+        let _ = runtime.borrow_mut().eval(&format!(
+            "__omoikane_dispatch_shared_worker_connect({connection_id:?})"
+        ));
+    }
+    Ok(connection_id)
+}
+
 fn create_worker_native(
     _: &JsValue,
     args: &[JsValue],
@@ -7815,6 +10073,39 @@ fn canvas_data_url_native(
     Ok(js_string!(crate::canvas::png_data_url(id).unwrap_or_else(|| "data:,".into())).into())
 }
 
+fn canvas_png_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let width_number = args.first().cloned().unwrap_or_default().to_number(context)?;
+    let height_number = args.get(1).cloned().unwrap_or_default().to_number(context)?;
+    if !width_number.is_finite()
+        || !height_number.is_finite()
+        || width_number.fract() != 0.0
+        || height_number.fract() != 0.0
+        || !(0.0..=32_768.0).contains(&width_number)
+        || !(0.0..=32_768.0).contains(&height_number)
+    {
+        return Ok(JsValue::null());
+    }
+    let width = width_number as u32;
+    let height = height_number as u32;
+    let pixels = body_bytes_argument(args.get(2), context)?.unwrap_or_default();
+    let Some(expected_len) = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return Ok(JsValue::null());
+    };
+    if pixels.len() != expected_len {
+        return Ok(JsValue::null());
+    }
+    Ok(crate::canvas::png_data_url_from_rgba(width, height, pixels)
+        .map(|url| js_string!(url).into())
+        .unwrap_or_else(JsValue::null))
+}
+
 fn canvas_image_source_native(
     _: &JsValue,
     args: &[JsValue],
@@ -8065,6 +10356,18 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
                 .into());
         }
     };
+    let timeout = if let Some(value) = args.get(7) {
+        let milliseconds = value.to_number(context)?;
+        if milliseconds.is_finite() && milliseconds > 0.0 {
+            Some(Duration::from_millis(
+                milliseconds.ceil().min(u64::MAX as f64) as u64,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
@@ -8100,7 +10403,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             cors_preflight_cache,
             ..
         } = &mut *state;
-        let fetched = crate::http::cors::fetch(
+        let fetched = match crate::http::cors::fetch_with_timeout(
             http_client,
             request,
             &origin,
@@ -8108,10 +10411,16 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             credentials,
             redirect_mode,
             cors_preflight_cache,
-        )
-        .map_err(|error| {
-            JsError::from(JsNativeError::error().with_message(error.to_string()))
-        })?;
+            timeout,
+        ) {
+            Ok(fetched) => fetched,
+            Err(crate::http::cors::CorsError::Timeout) if timeout.is_some() => {
+                return Ok(r#"{"__omoikane_timeout":true}"#.to_string());
+            }
+            Err(error) => {
+                return Err(JsError::from(JsNativeError::error().with_message(error.to_string())).into());
+            }
+        };
         if let Some(effective_url) = fetched.response.effective_url()
             && !state
                 .csp_policy_for_document(&document)
@@ -8128,6 +10437,13 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             fetched.response_type,
             ResponseType::Opaque | ResponseType::OpaqueRedirect
         );
+        // Fetch creates a null body for HEAD responses and for status codes
+        // whose semantics forbid a body. A successful response with an empty
+        // payload (for example `200 Content-Length: 0`) still has an empty
+        // ReadableStream, so presence cannot be inferred from byte length.
+        let body_present = !opaque
+            && !matches!(method, Method::Head)
+            && !matches!(response.status_code(), 100..=199 | 204 | 205 | 304);
         // `bodyText` is the lossy UTF-8 decoding the Fetch and XHR text paths are
         // defined in terms of, so it stays the primary representation. It cannot
         // represent a payload that is not valid UTF-8 though (an image, a font),
@@ -8138,7 +10454,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         // `from_utf8_lossy` borrows when the input is already valid UTF-8 and
         // only allocates to substitute replacement characters, so an owned `Cow`
         // is the signal that bytes were lost — no second validation pass needed.
-        let decoded_body = (!opaque).then(|| String::from_utf8_lossy(response.body()));
+        let decoded_body = body_present.then(|| String::from_utf8_lossy(response.body()));
         let body_base64 = matches!(decoded_body, Some(std::borrow::Cow::Owned(_)))
             .then(|| base64::engine::general_purpose::STANDARD.encode(response.body()));
         let body_text = decoded_body.map(std::borrow::Cow::into_owned);
@@ -8166,6 +10482,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             "headers": exposed_headers,
             "bodyText": body_text.as_deref().unwrap_or(""),
             "bodyBase64": body_base64,
+            "bodyPresent": body_present,
         })
         .to_string();
         Ok(payload)
@@ -9144,6 +11461,40 @@ fn create_document_native(
     })
 }
 
+/// Parses an XML-family document using the host XML parser and enrolls the
+/// complete detached tree in this runtime's node/style registries.  A null
+/// result means the input is not well-formed; DOMParser turns that into the
+/// script-visible `parsererror` document instead of exposing parser internals.
+fn parse_xml_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let source = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let Ok(document) = crate::xml::parse(source.as_bytes()) else {
+        return Ok(JsValue::null());
+    };
+    let id = document.identity();
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        state.register_tree(&document);
+        state.document_styles.insert(
+            id,
+            DocumentStyleEntry {
+                resolver: None,
+                dirty: true,
+                needs_full_sample: true,
+            },
+        );
+        Ok(JsValue::from(id as f64))
+    })
+}
+
 /// Materialises the already validated DOMImplementation doctype descriptor so
 /// createDocument can insert it into the native document tree.
 fn create_document_type_native(
@@ -9854,6 +12205,707 @@ mod tests {
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.eval("workerValues[0]").unwrap().as_number(), Some(42.0));
         assert_eq!(runtime.eval("workerDocumentType").unwrap().as_string().unwrap().to_std_string_escaped(), "undefined");
+    }
+
+    #[test]
+    fn worklet_add_module_is_isolated_and_drains_microtasks() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workletProbe = { result: 'pending' };
+                   const source = encodeURIComponent(
+                     "registerWorklet('sync'); queueMicrotask(() => registerPaint('checker', class {}, ['--tone']));"
+                   );
+                   CSS.paintWorklet.addModule('data:text/javascript,' + source).then(
+                     () => workletProbe.result = [CSS.paintWorklet.moduleCount,
+                       CSS.paintWorklet.registeredNames.join(','), typeof document].join('|'),
+                     error => workletProbe.result = 'error:' + error.name
+                   );"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "workletProbe.result"),
+            "1|checker,sync|object"
+        );
+        assert_eq!(eval_str(&mut runtime, "typeof WorkletGlobalScope"), "function");
+        assert_eq!(eval_str(&mut runtime, "typeof CSS.paintWorklet.addModule"), "function");
+        assert_eq!(eval_str(&mut runtime, "typeof __omoikane_create_worklet"), "undefined");
+        assert_eq!(eval_str(&mut runtime, "typeof __omoikane_worklet_add_module"), "undefined");
+    }
+
+    #[test]
+    fn worklet_module_cache_errors_and_teardown_are_deterministic() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workletProbe = [];
+                   const source = encodeURIComponent("registerWorklet('cached')");
+                   const moduleUrl = 'data:text/javascript,' + source;
+                   CSS.paintWorklet.addModule(moduleUrl).then(() => {
+                     workletProbe.push(CSS.paintWorklet.moduleCount);
+                     return CSS.paintWorklet.addModule(moduleUrl);
+                   }).then(() => {
+                     workletProbe.push(CSS.paintWorklet.moduleCount);
+                     return CSS.paintWorklet.addModule('data:text/javascript,%40%40%40');
+                   }).catch(error => {
+                     workletProbe.push(error.name);
+                     return CSS.paintWorklet.teardown();
+                   }).then(() => CSS.paintWorklet.addModule(moduleUrl).catch(error => workletProbe.push(error.name)));"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "workletProbe.join('|')"), "1|1|SyntaxError|InvalidStateError");
+    }
+
+    #[test]
+    fn worklet_rejects_cross_origin_and_insecure_modules() {
+        let mut cross_origin = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://worklet.example.test/page.html",
+        )
+        .unwrap();
+        cross_origin
+            .eval(
+                "globalThis.workletError = ''; CSS.paintWorklet.addModule('https://other.example.test/module.js').catch(error => workletError = error.name);",
+            )
+            .unwrap();
+        cross_origin.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut cross_origin, "workletError"), "SecurityError");
+
+        let mut insecure = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://not-secure.example.test/page.html",
+        )
+        .unwrap();
+        insecure
+            .eval(
+                "globalThis.workletError = ''; CSS.paintWorklet.addModule('data:text/javascript,registerWorklet(\\'x\\')').catch(error => workletError = error.name);",
+            )
+            .unwrap();
+        insecure.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut insecure, "workletError"), "NotAllowedError");
+    }
+
+    #[test]
+    fn worklet_rejects_duplicate_registration_names() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workletError = '';
+                   const first = 'data:text/javascript,' + encodeURIComponent("registerWorklet('same-name')");
+                   const second = 'data:text/javascript,' + encodeURIComponent("/* second */ registerWorklet('same-name')");
+                   CSS.paintWorklet.addModule(first).then(() => CSS.paintWorklet.addModule(second)).catch(error => workletError = error.name);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "workletError"), "InvalidModificationError");
+    }
+
+    #[test]
+    fn worklet_tasks_follow_owner_clock_after_module_microtasks() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workletProbe = [];
+                   const source = encodeURIComponent("queueMicrotask(() => registerWorklet('micro')); setTimeout(() => registerWorklet('timer'), 0)");
+                   CSS.paintWorklet.addModule('data:text/javascript,' + source).then(() => {
+                     workletProbe.push(CSS.paintWorklet.registeredNames.join(','));
+                   });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "workletProbe.join('|')"), "micro");
+        runtime.tick(0).unwrap();
+        assert_eq!(eval_str(&mut runtime, "CSS.paintWorklet.registeredNames.join(',')"), "micro,timer");
+    }
+
+    #[test]
+    fn shared_worker_connects_multiple_ports_and_round_trips_cloned_messages() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.sharedValues = [];
+                   const source = encodeURIComponent('onconnect = event => { const port = event.ports[0]; port.onmessage = message => port.postMessage({ value: message.data.value, proto: Object.getPrototypeOf(message.data) === Object.prototype }); };');
+                   const first = new SharedWorker('data:text/javascript,' + source, { name: 'shared-test' });
+                   const second = new SharedWorker('data:text/javascript,' + source, { name: 'shared-test' });
+                   first.port.onmessage = event => sharedValues.push(['first', event.data]);
+                   second.port.onmessage = event => sharedValues.push(['second', event.data]);
+                   first.port.postMessage({ value: 1 });
+                   second.port.postMessage({ value: 2 });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(sharedValues)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            r#"[["first",{"value":1,"proto":true}],["second",{"value":2,"proto":true}]]"#
+        );
+    }
+
+    #[test]
+    fn shared_worker_is_shared_across_same_origin_runtimes() {
+        let source = "data:text/javascript,onconnect%3De%3D%3E%7Be.ports%5B0%5D.onmessage%3Dm%3D%3Ee.ports%5B0%5D.postMessage(m.data)%7D";
+        let mut first_runtime = JsRuntime::new().unwrap();
+        let mut second_runtime = JsRuntime::new().unwrap();
+        first_runtime
+            .eval(&format!(
+                "globalThis.values = []; globalThis.worker = new SharedWorker('{source}', 'cross-runtime'); worker.port.onmessage = event => values.push(event.data);"
+            ))
+            .unwrap();
+        second_runtime
+            .eval(&format!(
+                "globalThis.values = []; globalThis.worker = new SharedWorker('{source}', 'cross-runtime'); worker.port.onmessage = event => values.push(event.data);"
+            ))
+            .unwrap();
+        first_runtime.eval("worker.port.postMessage('first')").unwrap();
+        second_runtime.eval("worker.port.postMessage('second')").unwrap();
+        first_runtime.run_until_idle().unwrap();
+        second_runtime.run_until_idle().unwrap();
+        assert_eq!(first_runtime.eval("values[0]").unwrap().as_string().unwrap().to_std_string_escaped(), "first");
+        assert_eq!(second_runtime.eval("values[0]").unwrap().as_string().unwrap().to_std_string_escaped(), "second");
+    }
+
+    #[test]
+    fn shared_worker_startup_failure_is_observable_without_stopping_page() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.sharedWorkerErrors = [];
+                   const source = encodeURIComponent('throw new Error("shared boom");');
+                   const worker = new SharedWorker('data:text/javascript,' + source);
+                   worker.onerror = event => sharedWorkerErrors.push(event.message);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("sharedWorkerErrors.length").unwrap().as_number(), Some(1.0));
+        assert!(runtime
+            .eval("sharedWorkerErrors[0].includes('shared boom')")
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false));
+        assert_eq!(runtime.eval("3 * 7").unwrap().as_number(), Some(21.0));
+    }
+
+    #[test]
+    fn shared_worker_requires_an_eligible_origin() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.host_state.borrow_mut().base_url = None;
+        let result = runtime
+            .eval(
+                r#"try {
+                     new SharedWorker('http://localhost/shared.js');
+                     'constructed';
+                   } catch (error) {
+                     error.name;
+                   }"#,
+            )
+            .unwrap();
+        assert_eq!(result.as_string().unwrap().to_std_string_escaped(), "Error");
+    }
+
+    #[test]
+    fn shared_worker_port_is_private_but_remains_a_message_port() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.sharedPortProbe = [];
+                   const source = encodeURIComponent('onconnect = event => {}');
+                   const worker = new SharedWorker('data:text/javascript,' + source);
+                   sharedPortProbe.push(typeof SharedWorkerPort);
+                   sharedPortProbe.push(worker.port instanceof MessagePort);"#,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(sharedPortProbe)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            r#"["undefined",true]"#
+        );
+    }
+
+    #[test]
+    fn shared_worker_port_close_drops_future_messages() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.sharedCloseValues = [];
+                   globalThis.sharedCloseOrigins = [];
+                   const source = encodeURIComponent('onconnect = event => { const port = event.ports[0]; port.onmessage = message => port.postMessage(message.data); };');
+                   globalThis.sharedCloseWorker = new SharedWorker('data:text/javascript,' + source);
+                   sharedCloseWorker.port.onmessage = event => { sharedCloseValues.push(event.data); sharedCloseOrigins.push(event.origin); };
+                   sharedCloseWorker.port.postMessage('before');"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(sharedCloseValues)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            r#"["before"]"#
+        );
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(sharedCloseOrigins)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            r#"[""]"#
+        );
+        runtime
+            .eval(
+                r#"globalThis.sharedCloseError = '';
+                   sharedCloseWorker.port.close();
+                   try { sharedCloseWorker.port.postMessage('after'); }
+                   catch (error) { sharedCloseError = error.name; }"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(sharedCloseValues)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            r#"["before"]"#
+        );
+        assert_eq!(
+            runtime
+                .eval("sharedCloseError")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "InvalidStateError"
+        );
+    }
+
+    #[test]
+    fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://service-worker.example.test/app/index.html",
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.swProbe = { scope: '', state: '', found: false, controller: false, changes: 0, invalid: '', updateFound: 0, updateUndefined: false, replaced: false };
+                   navigator.serviceWorker.oncontrollerchange = () => swProbe.changes++;
+                   navigator.serviceWorker.register('/worker.js', { scope: '/app/' }).then(registration => {
+                     swProbe.scope = registration.scope;
+                     swProbe.state = registration.active.state;
+                     swProbe.controller = navigator.serviceWorker.controller === registration.active;
+                     globalThis.swRegistration = registration;
+                     registration.onupdatefound = () => swProbe.updateFound++;
+                     registration.update().then(value => { swProbe.updateUndefined = value === undefined; });
+                     navigator.serviceWorker.getRegistration('/app/page.html').then(found => { swProbe.found = found === registration; });
+                   });
+                   navigator.serviceWorker.register('https://other.example.test/worker.js').catch(error => { swProbe.invalid = error.name; });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[swProbe.scope, swProbe.state, swProbe.found, swProbe.controller, swProbe.changes, swProbe.invalid].join('|')"),
+            "https://service-worker.example.test/app/|activated|true|true|1|SecurityError",
+        );
+        assert_eq!(eval_str(&mut runtime, "String(swProbe.updateUndefined)"), "true");
+        runtime
+            .eval(
+                "navigator.serviceWorker.register('/worker-v2.js', { scope: '/app/' }).then(registration => { swProbe.replaced = registration === swRegistration; });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "[swProbe.updateFound, swProbe.replaced].join('|')"), "1|true");
+        runtime
+            .eval("navigator.serviceWorker.getRegistration('/app/page.html').then(registration => registration.unregister().then(result => globalThis.swUnregistered = result))")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(swUnregistered) + '|' + (navigator.serviceWorker.controller === null)"), "true|true");
+    }
+
+    #[test]
+    fn service_worker_register_rejects_insecure_and_opaque_origins() {
+        let mut insecure = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://service-worker-insecure.example.test/",
+        )
+        .unwrap();
+        insecure
+            .eval(
+                "globalThis.result = 'pending'; navigator.serviceWorker.register('/worker.js').then(() => result = 'resolved', error => result = error.name);",
+            )
+            .unwrap();
+        insecure.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut insecure, "result"), "SecurityError");
+
+        // A secure URL with an opaque origin is useful for exercising the
+        // origin gate independently of the secure-context gate.  Location's
+        // origin slot is mutable in this model, so mirror the platform's
+        // opaque-origin serialization (`"null"`) directly.
+        let mut opaque = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://service-worker-opaque.example.test/",
+        )
+        .unwrap();
+        opaque
+            .eval(
+                "location.origin = 'null'; globalThis.result = 'pending'; navigator.serviceWorker.register('data:text/javascript,').then(() => result = 'resolved', error => result = error.name);",
+            )
+            .unwrap();
+        opaque.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut opaque, "result"), "SecurityError");
+    }
+
+    #[test]
+    fn webrtc_offer_answer_and_data_channel_are_deterministic() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webrtcProbe = {
+                     surface: typeof RTCPeerConnection === 'function' &&
+                       typeof RTCSessionDescription === 'function' &&
+                       typeof RTCIceCandidate === 'function' &&
+                       typeof RTCDataChannel === 'function',
+                     states: [], data: null, remoteLabel: '', events: [], sendError: ''
+                   };
+                   const pair = RTCPeerConnection.createPair();
+                   const caller = pair[0];
+                   const callee = pair[1];
+                   caller.onconnectionstatechange = () => webrtcProbe.states.push('caller:' + caller.connectionState);
+                   callee.onconnectionstatechange = () => webrtcProbe.states.push('callee:' + callee.connectionState);
+                   callee.ondatachannel = event => {
+                     webrtcProbe.remoteLabel = event.channel.label;
+                     webrtcProbe.remoteChannel = event.channel;
+                     event.channel.onmessage = message => webrtcProbe.data = message.data;
+                   };
+                   const channel = caller.createDataChannel('chat');
+                   channel.onopen = () => { webrtcProbe.events.push('open'); channel.send('hello'); };
+                   channel.onclose = () => webrtcProbe.events.push('close');
+                   caller.createOffer().then(offer => {
+                     webrtcProbe.offerType = offer.type;
+                     webrtcProbe.offerJSON = JSON.stringify(offer.toJSON());
+                     return caller.setLocalDescription(offer).then(() => callee.setRemoteDescription(offer));
+                   }).then(() => callee.createAnswer()).then(answer => {
+                     webrtcProbe.answerType = answer.type;
+                     return callee.setLocalDescription(answer).then(() => caller.setRemoteDescription(answer));
+                   }).then(() => {
+                     webrtcProbe.signaling = caller.signalingState + '|' + callee.signalingState;
+                     webrtcProbe.connected = caller.connectionState + '|' + callee.connectionState;
+                     caller.close();
+                     webrtcProbe.remoteReadyState = webrtcProbe.remoteChannel.readyState;
+                     try { channel.send('closed'); } catch (error) { webrtcProbe.sendError = error.name; }
+                   });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(webrtcProbe.surface)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.offerType + '|' + webrtcProbe.answerType"), "offer|answer");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.remoteLabel + '|' + webrtcProbe.data"), "chat|hello");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.signaling"), "stable|stable");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.connected"), "connected|connected");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.remoteReadyState"), "closed");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.sendError"), "InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "webrtcProbe.events.join('|')"), "open|close");
+        assert_eq!(eval_str(&mut runtime, "JSON.parse(webrtcProbe.offerJSON).type"), "offer");
+    }
+
+    #[test]
+    fn webrtc_invalid_states_rollback_and_candidate_json_are_rejected_or_stable() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webrtcErrors = [];
+                   const peer = new RTCPeerConnection();
+                   peer.createAnswer().catch(error => webrtcErrors.push(error.name));
+                   peer.setRemoteDescription({ type: 'rollback', sdp: '' }).catch(error => webrtcErrors.push(error.name));
+                   const rollbackPeer = new RTCPeerConnection();
+                   rollbackPeer.createOffer().then(offer => rollbackPeer.setLocalDescription(offer))
+                     .then(() => rollbackPeer.setLocalDescription({ type: 'rollback', sdp: '' }))
+                     .then(() => globalThis.rollbackState = rollbackPeer.signalingState + '|' + (rollbackPeer.localDescription === null));
+                   globalThis.candidateJSON = JSON.stringify(new RTCIceCandidate({ candidate: '', sdpMid: null, sdpMLineIndex: null }).toJSON());
+                   globalThis.descriptionJSON = JSON.stringify(new RTCSessionDescription({ type: 'offer', sdp: 'v=0' }).toJSON());"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "webrtcErrors.join('|')"), "InvalidStateError|InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "rollbackState"), "stable|true");
+        assert_eq!(eval_str(&mut runtime, "candidateJSON"), r#"{"candidate":"","sdpMid":null,"sdpMLineIndex":null,"usernameFragment":null}"#);
+        assert_eq!(eval_str(&mut runtime, "descriptionJSON"), r#"{"type":"offer","sdp":"v=0"}"#);
+    }
+
+    #[test]
+    fn webgpu_adapter_device_queue_and_buffer_ordering_are_deterministic() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webgpuProbe = {
+                     surface: typeof GPU === 'function' && typeof navigator.gpu.requestAdapter === 'function' &&
+                       typeof GPUAdapter === 'function' && typeof GPUDevice === 'function' &&
+                       typeof GPUQueue === 'function' && typeof GPUBuffer === 'function',
+                     adapter: false, device: false, info: '', labels: '', bytes: '', lost: ''
+                   };
+                   navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }).then(adapter => {
+                     webgpuProbe.adapter = adapter instanceof GPUAdapter &&
+                       adapter.features instanceof GPUSupportedFeatures &&
+                       adapter.limits.maxBufferSize >= 16 && adapter.info.vendor === 'Omoikane' &&
+                       navigator.gpu.getPreferredCanvasFormat() === 'rgba8unorm';
+                     webgpuProbe.info = adapter.info.architecture + '|' + adapter.info.device + '|' + adapter.isFallbackAdapter;
+                     return adapter.requestDevice({ label: 'device', defaultQueue: { label: 'queue' } });
+                   }).then(device => {
+                     webgpuProbe.device = device instanceof GPUDevice && device.queue instanceof GPUQueue &&
+                       device.label === 'device' && device.queue.label === 'queue';
+                     const source = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+                     const destination = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+                     device.queue.writeBuffer(source, 0, new Uint32Array([1, 2, 3, 4]));
+                     const encoder = device.createCommandEncoder({ label: 'copy' });
+                     encoder.copyBufferToBuffer(source, 0, destination, 0, 16);
+                     device.queue.submit([encoder.finish()]);
+                     webgpuProbe.labels = encoder.label + '|' + destination.mapState;
+                     const mapping = destination.mapAsync(GPUMapMode.READ);
+                     return mapping.then(() => {
+                       webgpuProbe.bytes = Array.from(new Uint32Array(destination.getMappedRange())).join(',');
+                       try { destination.getMappedRange(24); webgpuProbe.invalidRange = false; }
+                       catch (error) { webgpuProbe.invalidRange = error.name === 'OperationError'; }
+                       destination.unmap();
+                       const relative = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC });
+                       return relative.mapAsync(GPUMapMode.WRITE, 8, 8).then(() => {
+                         webgpuProbe.relativeMap = relative.getMappedRange(0, 8).byteLength;
+                         relative.unmap();
+                         const byteOffset = device.createBuffer({ size: 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+                         device.queue.writeBuffer(byteOffset, 0, new Uint32Array([0x11111111, 0x22222222]), 4, 4);
+                         return byteOffset.mapAsync(GPUMapMode.READ).then(() => {
+                           webgpuProbe.byteOffset = new Uint32Array(byteOffset.getMappedRange())[0] === 0x22222222;
+                           byteOffset.unmap();
+                           device.destroy();
+                           const afterDestroy = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST });
+                           webgpuProbe.afterDestroy = afterDestroy.size === 0 && afterDestroy.mapState === 'unmapped';
+                           return device.lost;
+                         });
+                       });
+                     });
+                   }).then(info => { webgpuProbe.lost = info.reason + '|' + info.message; }, error => { webgpuProbe.error = error.name + '|' + error.message; });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.surface)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.adapter)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.device)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webgpuProbe.info"), "deterministic|software|false");
+        assert_eq!(eval_str(&mut runtime, "webgpuProbe.labels"), "copy|unmapped");
+        assert_eq!(eval_str(&mut runtime, "webgpuProbe.bytes"), "1,2,3,4");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.invalidRange)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.relativeMap)"), "8");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.byteOffset)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.afterDestroy)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webgpuProbe.lost"), "destroyed|Device was destroyed.");
+    }
+
+    #[test]
+    fn webgpu_options_and_error_scopes_are_validated_deterministically() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webgpuErrors = { power: '', feature: '', validation: '', uncaptured: 0 };
+                   navigator.gpu.requestAdapter({ powerPreference: 'turbo' }).catch(error => webgpuErrors.power = error.name);
+                   navigator.gpu.requestAdapter().then(adapter =>
+                     adapter.requestDevice({ requiredFeatures: ['texture-compression-bc'] })
+                   ).catch(error => webgpuErrors.feature = error.name);
+                   navigator.gpu.requestAdapter().then(adapter => adapter.requestDevice()).then(device => {
+                     device.onuncapturederror = event => { if (event.error instanceof GPUValidationError) webgpuErrors.uncaptured++; };
+                     device.pushErrorScope('validation');
+                     device.createBuffer({ size: 3, usage: GPUBufferUsage.COPY_DST });
+                     return device.popErrorScope().then(error => {
+                       webgpuErrors.validation = error.constructor.name + '|' + error.message;
+                       device.createBuffer({ size: 3, usage: GPUBufferUsage.COPY_DST });
+                       return Promise.resolve();
+                     });
+                   });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "webgpuErrors.power"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "webgpuErrors.feature"), "NotSupportedError");
+        assert_eq!(eval_str(&mut runtime, "webgpuErrors.validation"), "GPUValidationError|GPUBuffer size must be a positive multiple of four within maxBufferSize.");
+        assert_eq!(eval_str(&mut runtime, "String(webgpuErrors.uncaptured)"), "1");
+    }
+
+    #[test]
+    fn webtransport_pair_datagrams_and_streams_are_deterministic() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webTransportProbe = {
+                     surface: typeof WebTransport === 'function' &&
+                       typeof WebTransportError === 'function' &&
+                       typeof WebTransportCloseInfo === 'function' &&
+                       typeof WebTransportBidirectionalStream === 'function',
+                     ready: '', readyEvents: 0, closeEvents: 0, eventTarget: false,
+                     datagram: '', bidi: '', bidiDone: false,
+                     uni: '', uniDone: false, close: '', peerClose: '', errors: []
+                   };
+                   const pair = WebTransport.createPair(
+                     'https://wt-left.example.test/transport',
+                     'https://wt-right.example.test/transport',
+                   );
+                   const left = pair.left;
+                   const right = pair.right;
+                   webTransportProbe.eventTarget = left instanceof EventTarget && typeof left.addEventListener === 'function';
+                   left.addEventListener('statechange', () => webTransportProbe.readyEvents++);
+                   left.addEventListener('close', () => webTransportProbe.closeEvents++);
+                   Promise.all([left.ready, right.ready]).then(() => {
+                     webTransportProbe.ready = left.url + '|' + right.url;
+                     const datagramReader = right.datagrams.readable.getReader();
+                     const payload = new Uint8Array([1, 2, 3]);
+                     const datagramWrite = left.datagrams.writable.getWriter().write(payload);
+                     payload[0] = 9;
+                     return datagramWrite.then(() => datagramReader.read()).then(result => {
+                       webTransportProbe.datagram = Array.from(result.value).join(',');
+                       const incoming = right.incomingBidirectionalStreams.getReader();
+                       return left.createBidirectionalStream().then(local => incoming.read().then(result => {
+                         const remote = result.value;
+                         webTransportProbe.bidi = String(local instanceof WebTransportBidirectionalStream) + '|' + String(remote instanceof WebTransportBidirectionalStream);
+                         const remoteReader = remote.readable.getReader();
+                         const localWriter = local.writable.getWriter();
+                         return localWriter.write(new Uint8Array([4, 5])).then(() => remoteReader.read()).then(value => {
+                           webTransportProbe.bidi += '|' + Array.from(value.value).join(',');
+                           return localWriter.close().then(() => remoteReader.read());
+                         }).then(value => {
+                           webTransportProbe.bidiDone = value.done;
+                           const incomingUni = right.incomingUnidirectionalStreams.getReader();
+                           return left.createUnidirectionalStream().then(send => incomingUni.read().then(result => {
+                             const receiveReader = result.value.getReader();
+                             const sendWriter = send.getWriter();
+                             return sendWriter.write(new Uint8Array([7, 8])).then(() => receiveReader.read()).then(value => {
+                               webTransportProbe.uni = Array.from(value.value).join(',');
+                               return sendWriter.close().then(() => receiveReader.read());
+                             }).then(value => { webTransportProbe.uniDone = value.done; });
+                           }));
+                         });
+                       }));
+                     });
+                   }).then(() => {
+                     left.close({ closeCode: 42, reason: 'done' });
+                     return Promise.all([left.closed, right.closed]);
+                   }).then(values => {
+                     webTransportProbe.close = values[0].closeCode + '|' + values[0].reason;
+                     webTransportProbe.peerClose = values[1].closeCode + '|' + values[1].reason;
+                   }).catch(error => webTransportProbe.errors.push(error.name + ':' + error.message));"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.surface)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.eventTarget)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.readyEvents)"), "1");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.ready"), "https://wt-left.example.test/transport|https://wt-right.example.test/transport");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.datagram"), "1,2,3");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.bidi"), "true|true|4,5");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.bidiDone)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.uni"), "7,8");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.uniDone)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.close"), "42|done");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.peerClose"), "42|done");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.closeEvents)"), "1");
+        assert_eq!(eval_str(&mut runtime, "webTransportProbe.errors.length"), "0");
+    }
+
+    #[test]
+    fn webtransport_validates_urls_options_and_observes_backpressure_and_close() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.webTransportValidation = { errors: [], first: false, second: false, drained: false, close: '', writeError: '', streamError: '', datagramError: '', datagramErrorName: '', datagramErrorSet: false, streamReason: '' };
+                   for (const make of [
+                     () => new WebTransport('http://insecure.example.test/'),
+                     () => new WebTransport('https://valid.example.test/', { congestionControl: 'invalid' }),
+                     () => new WebTransport('https://valid.example.test/', { requireUnreliable: 'yes' }),
+                     () => new WebTransport('https://valid.example.test/', { serverCertificateHashes: [{}] }),
+                   ]) { try { make(); } catch (error) { webTransportValidation.errors.push(error.name); } }
+                   const pair = WebTransport.createPair();
+                   const left = pair.left;
+                   const right = pair.right;
+                   right.datagrams.incomingHighWaterMark = 1;
+                   const reader = right.datagrams.readable.getReader();
+                   const writer = left.datagrams.writable.getWriter();
+                   const datagramPair = WebTransport.createPair();
+                   const datagramErrorReader = datagramPair.right.datagrams.readable.getReader();
+                   datagramErrorReader.read().catch(error => { webTransportValidation.datagramError = error.message; webTransportValidation.datagramErrorName = error.name; webTransportValidation.datagramErrorSet = true; });
+                   datagramPair.right.datagrams.writable.getWriter().abort('');
+                   writer.write(new Uint8Array([1])).then(() => webTransportValidation.first = true);
+                   writer.write(new Uint8Array([2])).then(() => webTransportValidation.second = true, error => webTransportValidation.writeError = error.name);
+                   const errorPair = WebTransport.createPair();
+                   const errorLeft = errorPair.left;
+                   const errorRight = errorPair.right;
+                   const incoming = errorRight.incomingBidirectionalStreams.getReader();
+                   errorLeft.createBidirectionalStream().then(local => incoming.read().then(result => {
+                     const remoteReader = result.value.readable.getReader();
+                     local.writable.getWriter().abort('abort-me');
+                     return remoteReader.read().then(() => {}, error => {
+                       webTransportValidation.streamError = error.name;
+                       errorLeft.close({ closeCode: 9, reason: 'closed' });
+                       return errorLeft.datagrams.writable.getWriter().write(new Uint8Array([3])).catch(closeError => {
+                         webTransportValidation.writeError = closeError.name;
+                       });
+                     });
+                   }));
+                   errorLeft.closed.then(info => webTransportValidation.close = info.closeCode + '|' + info.reason);
+                   const reasonPair = WebTransport.createPair();
+                   const reasonIncoming = reasonPair.right.incomingUnidirectionalStreams.getReader();
+                   reasonPair.left.createUnidirectionalStream().then(send => reasonIncoming.read().then(result => {
+                     result.value.getReader().read().catch(error => webTransportValidation.streamReason = error.message);
+                     send.getWriter().abort(0);
+                   }));"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.errors.join('|')"), "SecurityError|TypeError|TypeError|TypeError");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.first)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.second)"), "false");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.close"), "9|closed");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.writeError"), "InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.datagramErrorSet)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.datagramErrorName"), "WebTransportError");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.datagramError"), "");
+        runtime.eval("reader.read().then(() => webTransportValidation.drained = true)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.drained)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.second)"), "true");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.streamError"), "WebTransportError");
+        assert_eq!(eval_str(&mut runtime, "webTransportValidation.streamReason"), "0");
+    }
+
+    #[test]
+    fn dedicated_worker_does_not_expose_async_clipboard() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent('postMessage([typeof Clipboard, typeof navigator.clipboard]);');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(workerValues[0])")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[\"undefined\",\"undefined\"]"
+        );
     }
 
     #[test]
@@ -10970,6 +14022,53 @@ mod tests {
     }
 
     #[test]
+    fn owned_document_task_lifecycle_survives_overwritten_navigation_hook() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><body>
+            <script>
+              globalThis.pageLifecycle = [];
+              document.addEventListener('DOMContentLoaded', () => pageLifecycle.push('dcl'));
+              window.addEventListener('load', () => pageLifecycle.push('load'));
+              globalThis.__omoikane_performance_navigation_event = () => {
+                throw new Error('hook failure');
+              };
+            </script>
+            </body></html>"#,
+        )
+        .document();
+        let runtime = JsRuntime::with_document(document).unwrap();
+        let mut task = Box::pin(runtime.into_document_page_task(25, None));
+        let waker: &'static std::task::Waker = std::task::Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let mut completed = loop {
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert_eq!(completed.result, Ok(Vec::new()));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("pageLifecycle.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "dcl,load"
+        );
+        assert_eq!(
+            completed
+                .runtime
+                .eval("document.readyState")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "complete"
+        );
+    }
+
+    #[test]
     fn owned_document_task_quotes_failed_script_src_without_code_injection() {
         let malicious_src = "missing'; globalThis.fetchErrorInjected = true; //\\\nscript.js";
         let document = crate::html::TreeBuilder::parse(&format!(
@@ -11330,6 +14429,75 @@ mod tests {
           let error=''; try { context.getImageData(0,0,0,1); } catch (value) { error=value.name; }
           return [outer[0],outer[3],hole[3],error].join(',');
         })()"#), "255,255,0,IndexSizeError");
+    }
+
+    #[test]
+    fn webgl_canvas_context_state_resources_and_loss_boundary() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = eval_str(&mut runtime, r#"(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 2; canvas.height = 1;
+          const gl = canvas.getContext('webgl');
+          const same = canvas.getContext('experimental-webgl') === gl;
+          const exclusive = canvas.getContext('2d') === null;
+          gl.clearColor(1, 0.25, 0.5, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          const pixels = new Uint8Array(8);
+          gl.readPixels(0, 0, 2, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          const clear = Array.from(pixels.slice(0, 4)).join(',');
+          const dataView = new DataView(new ArrayBuffer(8));
+          gl.readPixels(0, 0, 2, 1, gl.RGBA, gl.UNSIGNED_BYTE, dataView);
+          const dataViewReadback = dataView.getUint8(0) === 255;
+          gl.readPixels(2, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+          const boundsError = gl.getError() === gl.INVALID_VALUE;
+          gl.viewport(1, 2, 3, 4);
+          const viewport = Array.from(gl.getParameter(gl.VIEWPORT)).join(',');
+          const stringParameter = Array.from(gl.getParameter(String(gl.VIEWPORT))).join(',') === viewport;
+          gl.getParameter(0xdead);
+          const invalidEnum = gl.getError() === gl.INVALID_ENUM && gl.getError() === gl.NO_ERROR;
+          const buffer = gl.createBuffer();
+          gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+          gl.bufferData(gl.ARRAY_BUFFER, 12, gl.STATIC_DRAW);
+          const bufferSize = gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE);
+          canvas.width = 3;
+          const resizeKeepsContext = canvas.getContext('webgl') === gl && canvas.getContext('2d') === null && gl.drawingBufferWidth === 3;
+          const viewportSurvivesResize = Array.from(gl.getParameter(gl.VIEWPORT)).join(',') === viewport;
+          canvas.setAttribute('height', '2');
+          const attributeResizeKeepsContext = canvas.getContext('webgl') === gl && canvas.getContext('2d') === null && gl.drawingBufferHeight === 2;
+          const vertex = gl.createShader(gl.VERTEX_SHADER);
+          const fragment = gl.createShader(gl.FRAGMENT_SHADER);
+          gl.shaderSource(vertex, 'attribute vec2 a_position; void main() { gl_Position = vec4(a_position, 0.0, 1.0); }');
+          gl.shaderSource(fragment, 'uniform mediump vec4 u_color; void main() { gl_FragColor = u_color; }');
+          gl.compileShader(vertex); gl.compileShader(fragment);
+          const program = gl.createProgram();
+          gl.attachShader(program, vertex); gl.attachShader(program, fragment); gl.linkProgram(program);
+          const linked = gl.getShaderParameter(vertex, gl.COMPILE_STATUS) && gl.getProgramParameter(program, gl.LINK_STATUS);
+          const uniformLocation = gl.getUniformLocation(program, 'u_color') instanceof WebGLUniformLocation;
+          const other = document.createElement('canvas').getContext('webgl');
+          other.bindBuffer(other.ARRAY_BUFFER, buffer);
+          const ownership = other.getError() === other.INVALID_OPERATION;
+          gl.deleteBuffer(buffer); gl.deleteBuffer(buffer);
+          const repeatedDelete = gl.getError() === gl.NO_ERROR;
+          const events = [];
+          const canvasEvents = [];
+          gl.addEventListener('webglcontextlost', () => events.push('lost'));
+          gl.addEventListener('webglcontextrestored', () => events.push('restored'));
+          canvas.addEventListener('webglcontextlost', () => canvasEvents.push('lost'));
+          canvas.addEventListener('webglcontextrestored', () => canvasEvents.push('restored'));
+          const constantsImmutable = (() => { const value = gl.COLOR_BUFFER_BIT; try { gl.COLOR_BUFFER_BIT = 0; } catch (_) {} return gl.COLOR_BUFFER_BIT === value && WebGLRenderingContext.COLOR_BUFFER_BIT === value; })();
+          __omoikane_webgl_lose_context(gl);
+          const lost = gl.isContextLost() && gl.getError() === gl.CONTEXT_LOST_WEBGL;
+          __omoikane_webgl_restore_context(gl);
+          const restored = !gl.isContextLost() && events.join(',') === 'lost,restored' && canvasEvents.join(',') === 'lost,restored';
+          return [typeof WebGLRenderingContext, gl instanceof WebGLRenderingContext, same, exclusive,
+            clear, dataViewReadback, boundsError, viewport, stringParameter, invalidEnum, bufferSize, resizeKeepsContext, viewportSurvivesResize,
+            attributeResizeKeepsContext, linked, uniformLocation, ownership, repeatedDelete,
+            constantsImmutable, lost, restored].join('|');
+        })()"#);
+        assert_eq!(
+            result,
+            "function|true|true|true|255,64,128,255|true|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true|true"
+        );
     }
 
     #[test]
@@ -11843,6 +15011,205 @@ mod tests {
     }
 
     #[test]
+    fn navigator_clipboard_shares_utf8_text_and_enforces_permissions() {
+        struct ClipboardResetGuard;
+        impl Drop for ClipboardResetGuard {
+            fn drop(&mut self) {
+                host_clipboard().write_text(String::new());
+            }
+        }
+        let _clipboard_reset_guard = ClipboardResetGuard;
+
+        let mut writer = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://clipboard.example.test/page",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut writer, "typeof __omoikane_clipboard_read_text"),
+            "undefined"
+        );
+        assert_eq!(
+            eval_str(&mut writer, "typeof __omoikane_clipboard_write_text"),
+            "undefined"
+        );
+        writer
+            .eval(
+                r#"globalThis.missingWriteArgument = false;
+                   try { navigator.clipboard.writeText(); }
+                   catch (error) { missingWriteArgument = error instanceof TypeError; }"#,
+            )
+            .unwrap();
+        assert_eq!(eval_str(&mut writer, "String(missingWriteArgument)"), "true");
+        writer.eval("navigator.clipboard.writeText('')").unwrap();
+        writer.run_jobs().unwrap();
+        writer
+            .eval(
+                r#"globalThis.emptyResult = 'pending';
+                   navigator.clipboard.readText().then(value => { emptyResult = value; });"#,
+            )
+            .unwrap();
+        writer.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut writer, "emptyResult"), "");
+        writer
+            .eval(
+                r#"globalThis.writeResult = 'pending';
+                   navigator.clipboard.writeText('first\nsecond').then(() => { writeResult = 'done'; });"#,
+            )
+            .unwrap();
+        writer.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut writer, "[isSecureContext, writeResult].join('|')"),
+            "true|done"
+        );
+        writer
+            .eval(
+                r#"globalThis.__omoikane_is_secure_context = () => false;
+                   globalThis.tamperedSecure = isSecureContext;
+                   globalThis.tamperedWrite = 'pending';
+                   navigator.clipboard.writeText('captured')
+                     .then(() => { tamperedWrite = 'done'; });"#,
+            )
+            .unwrap();
+        writer.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut writer, "[tamperedSecure, tamperedWrite].join('|')"),
+            "true|done"
+        );
+
+        // A separate runtime sees the same host clipboard, and a dropped
+        // writer does not clear the host-owned snapshot.
+        drop(writer);
+        let mut reader = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://clipboard.example.test/reader",
+        )
+        .unwrap();
+        reader
+            .eval(
+                r#"globalThis.readResult = 'pending';
+                   navigator.clipboard.readText().then(value => { readResult = value; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "readResult"), "captured");
+
+        reader
+            .eval(
+                r#"globalThis.order = [];
+                   Promise.all([
+                     navigator.clipboard.writeText('A').then(() => order.push('A')),
+                     navigator.clipboard.writeText('B').then(() => order.push('B'))
+                   ]).then(() => navigator.clipboard.readText())
+                     .then(value => order.push(value));"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "order.join('|')"), "A|B|B");
+
+        // A read queued beside a write observes the clipboard snapshot at its
+        // own turn, while a subsequent read sees the completed write.  This
+        // exercises the same Promise/mutex ordering as real read/write
+        // contention rather than only write/write ordering.
+        reader
+            .eval(
+                r#"globalThis.concurrent = 'pending';
+                   globalThis.concurrentFinal = 'pending';
+                   Promise.all([
+                     navigator.clipboard.readText().then(value => { concurrent = value; }),
+                     navigator.clipboard.writeText('during-contention')
+                   ]).then(() => navigator.clipboard.readText())
+                     .then(value => { concurrentFinal = `${concurrent}|${value}`; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut reader, "concurrent + '|' + concurrentFinal"),
+            "B|B|during-contention"
+        );
+
+        reader.host_state.borrow_mut().clipboard_permission_granted = false;
+        reader
+            .eval(
+                r#"globalThis.denied = '';
+                   navigator.clipboard.readText().catch(error => { denied = error.name; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "denied"), "NotAllowedError");
+        reader
+            .eval(
+                r#"globalThis.writeDenied = '';
+                   navigator.clipboard.writeText('blocked')
+                     .catch(error => { writeDenied = error.name; });"#,
+            )
+            .unwrap();
+        reader.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut reader, "writeDenied"), "NotAllowedError");
+
+        let mut insecure = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://clipboard.example.test/insecure",
+        )
+        .unwrap();
+        insecure
+            .eval(
+                r#"globalThis.denied = '';
+                   navigator.clipboard.writeText('blocked').catch(error => { denied = error.name; });"#,
+            )
+            .unwrap();
+        insecure.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut insecure, "[isSecureContext, denied].join('|')"),
+            "false|NotAllowedError"
+        );
+        let mut loopback = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://127.0.0.2/loopback",
+        )
+        .unwrap();
+        assert!(eval_str(&mut loopback, "String(isSecureContext)") == "true");
+        let mut ipv6_loopback = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://[::1]/loopback",
+        )
+        .unwrap();
+        assert_eq!(eval_str(&mut ipv6_loopback, "String(isSecureContext)"), "true");
+        let mut ipv6_loopback_fragment = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://[::1]#fragment",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut ipv6_loopback_fragment, "String(isSecureContext)"),
+            "true"
+        );
+        let mut ipv6_invalid_port = JsRuntime::with_document_and_url(
+            default_document(),
+            "http://[::1]:evil/loopback",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut ipv6_invalid_port, "String(isSecureContext)"),
+            "false"
+        );
+        let mut https_fragment = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://clipboard.example.test/page#fragment",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(&mut https_fragment, "String(isSecureContext)"),
+            "true"
+        );
+
+        // Keep the host clipboard empty for subsequent tests.
+        reader.host_state.borrow_mut().clipboard_permission_granted = true;
+        reader.eval("navigator.clipboard.writeText('')").unwrap();
+        reader.run_jobs().unwrap();
+    }
+
+    #[test]
     fn navigator_exposes_empty_plugin_and_mime_type_collections() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(
@@ -12082,6 +15449,107 @@ mod tests {
                 .unwrap()
                 .as_boolean()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn web_crypto_hmac_key_lifecycle_and_operations() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.hmacResult = { done: false, errors: [] };
+                (async () => {
+                  const source = new Uint8Array(20); source.fill(0x0b);
+                  const key = await crypto.subtle.importKey(
+                    'raw', source, { name: 'HMAC', hash: 'SHA-256' }, true, ['sign', 'verify']);
+                  hmacResult.shape = [
+                    key instanceof CryptoKey, key.type, key.extractable,
+                    key.algorithm.name, key.algorithm.hash.name, key.algorithm.length,
+                    Object.isFrozen(key.algorithm), Object.isFrozen(key.usages),
+                    key.usages.join(',')
+                  ];
+                  const data = new TextEncoder().encode('Hi There');
+                  const signature = await crypto.subtle.sign('HMAC', key, data);
+                  hmacResult.signature = Array.from(new Uint8Array(signature))
+                    .map(value => value.toString(16).padStart(2, '0')).join('');
+                  hmacResult.verify = await crypto.subtle.verify('HMAC', key, signature, data);
+                  const altered = new Uint8Array(signature.slice(0)); altered[0] ^= 1;
+                  hmacResult.verifyAltered = await crypto.subtle.verify('HMAC', key, altered, data);
+                  const raw = await crypto.subtle.exportKey('raw', key);
+                  hmacResult.raw = Array.from(new Uint8Array(raw)).join(',');
+                  const jwk = await crypto.subtle.exportKey('jwk', key);
+                  hmacResult.jwk = [jwk.kty, jwk.alg, jwk.key_ops.join(','), jwk.ext, jwk.k];
+                  const generated = await crypto.subtle.generateKey(
+                    { name: 'HMAC', hash: { name: 'SHA-256' }, length: 128 }, true, ['sign']);
+                  hmacResult.generated = [generated instanceof CryptoKey, generated.algorithm.length, generated.usages.join(',')];
+                  const importedJwk = await crypto.subtle.importKey(
+                    'jwk', jwk, { name: 'HMAC', hash: 'SHA-256' }, true, ['verify']);
+                  hmacResult.jwkRoundTrip = await crypto.subtle.verify('HMAC', importedJwk, signature, data);
+                  hmacResult.done = true;
+                })().catch(error => hmacResult.errors.push(error.name));"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(
+                r#"hmacResult.done && hmacResult.errors.length === 0 &&
+                JSON.stringify(hmacResult.shape) === '[true,"secret",true,"HMAC","SHA-256",160,true,true,"sign,verify"]' &&
+                hmacResult.signature === 'b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7' &&
+                hmacResult.verify === true && hmacResult.verifyAltered === false &&
+                hmacResult.raw === '11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11' &&
+                hmacResult.jwk[0] === 'oct' && hmacResult.jwk[1] === 'HS256' &&
+                hmacResult.jwk[2] === 'sign,verify' && hmacResult.jwk[3] === true &&
+                hmacResult.jwk[4] === 'CwsLCwsLCwsLCwsLCwsLCwsLCws' &&
+                JSON.stringify(hmacResult.generated) === '[true,128,"sign"]' &&
+                hmacResult.jwkRoundTrip === true"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false));
+
+        let mut teardown_runtime = JsRuntime::new().unwrap();
+        teardown_runtime
+            .eval(
+                r#"globalThis.teardownResult = 'pending';
+                   const pending = crypto.subtle.importKey(
+                     'raw', new Uint8Array([1, 2, 3]), { name: 'HMAC', hash: 'SHA-256' }, true, ['sign']);
+                   __omoikane_crypto_teardown();
+                   pending.then(() => teardownResult = 'resolved', error => teardownResult = error.name);"#,
+            )
+            .unwrap();
+        teardown_runtime.run_jobs().unwrap();
+        assert_eq!(
+            teardown_runtime
+                .eval("teardownResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "InvalidStateError"
+        );
+    }
+
+    #[test]
+    fn web_crypto_hmac_rejects_invalid_usages_and_non_extractable_exports() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.cryptoErrors = [];
+                const remember = promise => promise.then(() => cryptoErrors.push('resolved'), error => cryptoErrors.push(error.name));
+                remember(crypto.subtle.importKey('raw', new Uint8Array([1]), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']).then(key => crypto.subtle.exportKey('raw', key)));
+                remember(crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, true, ['encrypt']));
+                remember(crypto.subtle.importKey('jwk', { kty: 'oct', k: '!!!' }, { name: 'HMAC', hash: 'SHA-256' }, true, ['sign']));"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval("cryptoErrors.slice().sort().join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "DataError,InvalidAccessError,SyntaxError"
         );
     }
 
@@ -12786,6 +16254,90 @@ mod tests {
     }
 
     #[test]
+    fn data_transfer_assigns_synthetic_files_and_preserves_file_boundaries() {
+        let mut runtime = runtime_from_html(
+            "<html><body><form id='target'><input id='upload' type='file' name='upload'></form></body></html>",
+        );
+        let value = runtime
+            .eval(
+                r#"(() => {
+                const input = document.getElementById('upload');
+                const transfer = new DataTransfer();
+                const file = new File([new Uint8Array([0, 255, 65])], '/tmp/private/asset.bin', {
+                  type: 'Application/Octet-Stream', lastModified: 7
+                });
+                const events = [];
+                input.addEventListener('input', () => events.push('input'));
+                input.addEventListener('change', () => events.push('change'));
+                const item = transfer.items.add(file);
+                transfer.items.add('payload', 'text/plain');
+                const files = transfer.files;
+                input.files = files;
+                const formFile = new FormData(document.getElementById('target')).get('upload');
+                const firstList = transfer.files;
+                const transferData = transfer.getData('text/plain');
+                const transferTypes = transfer.types.join(',');
+                const initialFile = files.item(0) === file;
+                const initialLength = files.length;
+                transfer.items.remove(1);
+                const afterRemove = transfer.files;
+                const removeLength = afterRemove.length;
+                transfer.items.clear();
+                return [
+                  transfer instanceof DataTransfer,
+                  item instanceof DataTransferItem,
+                  item.kind, item.type, item.getAsFile() === file,
+                  transferData, transferTypes,
+                  files === firstList, initialFile, initialLength,
+                  input.files !== files, input.files.item(0) === file,
+                  input.value, input.value.includes('/tmp/private'),
+                  events.join(','),
+                  formFile instanceof File, formFile.name, formFile.type, formFile.size,
+                  removeLength, transfer.files.length,
+                  Object.prototype.toString.call(input.files),
+                  transfer.items.item(0) === item
+                ].join('|');
+              })()"#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            value,
+            "true|true|file|application/octet-stream|true|payload|text/plain,Files|true|true|1|true|true|C:\\fakepath\\asset.bin|false|input,change|true|/tmp/private/asset.bin|application/octet-stream|3|1|0|[object FileList]|false"
+        );
+    }
+
+    #[test]
+    fn drag_event_exposes_data_transfer_and_html_drag_handlers() {
+        let mut runtime = runtime_from_html("<html><body><div id='source'>source</div><div id='target'></div></body></html>");
+        let value = runtime
+            .eval(
+                r#"(() => {
+                const source = document.getElementById('source');
+                const target = document.getElementById('target');
+                const image = document.createElement('img');
+                const link = document.createElement('a');
+                link.setAttribute('href', 'https://example.test/target');
+                source.draggable = true;
+                const transfer = new DataTransfer();
+                transfer.setData('text/plain', 'payload');
+                let seen = null;
+                target.ondrop = event => { seen = [event instanceof DragEvent, event.dataTransfer === transfer, event.clientX, event.bubbles, event.cancelable]; };
+                const event = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: 12 });
+                target.dispatchEvent(event);
+                return [source.draggable, image.draggable, link.draggable, seen.join(':'), event.dataTransfer.getData('text/plain')].join('|');
+              })()"#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(value, "true|true|true|true:true:12:true:true|payload");
+    }
+
+    #[test]
     fn response_and_request_round_trip_blob_bodies() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
@@ -12819,10 +16371,13 @@ mod tests {
                     await new Response(new Blob([new Uint8Array([1, 2, 3])])).arrayBuffer(),
                   ));
                   const request = new Request("https://x.test/", { method: "POST", body: blob });
+                  const requestTextCopy = request.clone();
                   const requestBlob = await request.blob();
-                  bodyResult.request = [requestBlob.type, await requestBlob.text(), await request.text()];
-                  const clone = new Response(blob, { headers: { "content-type": "text/html" } }).clone();
-                  bodyResult.clone = [(await clone.blob()).type, await clone.text()];
+                  bodyResult.request = [requestBlob.type, await requestBlob.text(), await requestTextCopy.text()];
+                  const cloneSource = new Response(blob, { headers: { "content-type": "text/html" } });
+                  const cloneBlob = cloneSource.clone();
+                  const cloneText = cloneSource.clone();
+                  bodyResult.clone = [(await cloneBlob.blob()).type, await cloneText.text()];
                   bodyResult.done = true;
                 })();"#,
             )
@@ -12874,14 +16429,15 @@ mod tests {
             .eval(
                 r#"globalThis.binaryResult = {};
                 fetch("/image.png").then(async response => {
-                  const copy = response.clone();
+                  const arrayCopy = response.clone();
+                  const textCopy = response.clone();
                   const blob = await response.blob();
                   binaryResult.blob = [blob.type, blob.size];
                   binaryResult.bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
-                  binaryResult.buffer = Array.from(new Uint8Array(await copy.arrayBuffer()));
+                  binaryResult.buffer = Array.from(new Uint8Array(await arrayCopy.arrayBuffer()));
                   // The text path still sees the lossy UTF-8 decoding it is defined
                   // to return, with one replacement character per invalid byte.
-                  binaryResult.text = Array.from(await copy.text(), c => c.codePointAt(0));
+                  binaryResult.text = Array.from(await textCopy.text(), c => c.codePointAt(0));
                   binaryResult.done = true;
                 });"#,
             )
@@ -13109,7 +16665,7 @@ b</textarea></form>"#);
     #[test]
     fn multipart_form_data_is_used_by_request_and_xhr() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime.eval(r#"(() => { const data = new FormData(); data.append("a", "one"); data.append("a", "two"); const encoded = data.__multipart("fixed-boundary"); const request = new Request("/upload", { method: "POST", body: data }); const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload"); xhr.send(data); return encoded.body === "--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\none\r\n--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ntwo\r\n--fixed-boundary--\r\n" && request.headers.get("content-type").startsWith("multipart/form-data; boundary=") && request.body.includes("name=\"a\"") && xhr._headers["content-type"].startsWith("multipart/form-data; boundary="); })()"#).unwrap().as_boolean().unwrap());
+        assert!(runtime.eval(r#"(() => { const data = new FormData(); data.append("a", "one"); data.append("a", "two"); const encoded = data.__multipart("fixed-boundary"); const request = new Request("/upload", { method: "POST", body: data }); const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload"); xhr.send(data); return encoded.body === "--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\none\r\n--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ntwo\r\n--fixed-boundary--\r\n" && request.headers.get("content-type").startsWith("multipart/form-data; boundary=") && request.body instanceof ReadableStream && request.__body.text.includes('name="a"') && xhr._headers["content-type"].startsWith("multipart/form-data; boundary="); })()"#).unwrap().as_boolean().unwrap());
     }
 
     #[test]
@@ -13243,6 +16799,160 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn fetch_bodies_expose_streams_one_shot_consumption_and_form_data() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"
+                globalThis.fetchBodyChecks = (async () => {
+                  const blob = new Blob([new Uint8Array([97, 98, 99])], { type: "text/plain" });
+                  const blobReader = blob.stream().getReader();
+                  const blobChunk = await blobReader.read();
+                  const blobDone = await blobReader.read();
+
+                  const response = new Response("hello");
+                  const responseStream = response.body;
+                  const responseSameStream = response.body === responseStream;
+                  const reader = responseStream.getReader();
+                  const first = await reader.read();
+                  const done = await reader.read();
+                  let cloneRejected = false;
+                  try { response.clone(); } catch (_) { cloneRejected = true; }
+                  try { response.bodyUsed = false; } catch (_) {}
+                  const cloneSource = new Response("clone");
+                  const cloneCopy = cloneSource.clone();
+                  const cloneValues = await Promise.all([cloneSource.text(), cloneCopy.text()]);
+                  const streamCloneSource = new Response("parallel");
+                  const streamCloneCopy = streamCloneSource.clone();
+                  const parallelValues = await Promise.all([
+                    streamCloneSource.body.getReader().read(),
+                    streamCloneCopy.body.getReader().read(),
+                  ]);
+
+                  const streamInput = new ReadableStream({ start(controller) {
+                    controller.enqueue(new Uint8Array([115, 116, 114, 101, 97, 109]));
+                    controller.close();
+                  } });
+                  const streamRequest = new Request("https://example.test/stream", {
+                    method: "POST", body: streamInput,
+                  });
+                  const streamInputText = await streamRequest.text();
+                  const openStream = new ReadableStream({ start(controller) {
+                    controller.enqueue(new Uint8Array([120]));
+                  } });
+                  let openStreamRejected = false;
+                  try { new Request("https://example.test/open", { method: "POST", body: openStream }); }
+                  catch (error) { openStreamRejected = error instanceof TypeError; }
+                  const emptyBody = new Response().body === null;
+                  const failingStream = new ReadableStream({ start(controller) {
+                    controller.error(new Error("stream failed"));
+                  } });
+                  const failingReader = failingStream.getReader();
+                  let streamErrorRejected = false;
+                  let streamClosedRejected = false;
+                  try { await failingReader.read(); } catch (_) { streamErrorRejected = true; }
+                  try { await failingReader.closed; } catch (_) { streamClosedRejected = true; }
+                  let cancelReason = "";
+                  const cancellable = new ReadableStream({ cancel(reason) { cancelReason = String(reason); } });
+                  await cancellable.cancel("abort");
+                  let releaseController;
+                  const releasable = new ReadableStream({ start(controller) { releaseController = controller; } });
+                  const releasedReader = releasable.getReader();
+                  releasedReader.releaseLock();
+                  let releasedClosedRejected = false;
+                  try { await releasedReader.closed; } catch (_) { releasedClosedRejected = true; }
+                  const replacementReader = releasable.getReader();
+                  releaseController.close();
+                  await replacementReader.closed;
+
+                  const formResponse = new Response("name=Miku&message=hello+world", {
+                    headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+                  });
+                  const form = await formResponse.formData();
+                  const unsupportedForm = new Response("x", { headers: { "Content-Type": "text/plain" } });
+                  let unsupportedFormRejected = false;
+                  try { await unsupportedForm.formData(); } catch (error) { unsupportedFormRejected = error instanceof TypeError; }
+
+                  const outgoing = new FormData();
+                  outgoing.append("title", "song");
+                  outgoing.append("payload", new Blob([new Uint8Array([0, 255, 65])], { type: "application/octet-stream" }), "data.bin");
+                  const request = new Request("https://example.test/upload", { method: "POST", body: outgoing });
+                  const parsed = await request.formData();
+                  const file = parsed.get("payload");
+                  return {
+                    blobType: blobChunk.value instanceof Uint8Array,
+                    blobText: new TextDecoder().decode(blobChunk.value),
+                    blobDone: blobDone.done,
+                    responseType: responseStream instanceof ReadableStream,
+                    responseSameStream,
+                    responseChunk: new TextDecoder().decode(first.value),
+                    responseDone: done.done,
+                    bodyUsed: response.bodyUsed,
+                    cloneRejected,
+                    cloneValues: cloneValues.join("|"),
+                    parallelValues: parallelValues.map(value => new TextDecoder().decode(value.value)).join("|"),
+                    streamInputText,
+                    openStreamRejected,
+                    emptyBody,
+                    unsupportedFormRejected,
+                    streamErrorRejected,
+                    streamClosedRejected,
+                    cancelReason,
+                    releasedClosedRejected,
+                    formValues: [form.get("name"), form.get("message")].join("|"),
+                    parsedTitle: parsed.get("title"),
+                    fileName: file.name,
+                    fileType: file.type,
+                    fileBytes: Array.from(new Uint8Array(await file.arrayBuffer())).join(","),
+                  };
+                })();
+                "#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(
+                r#"fetchBodyChecks instanceof Promise"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval(
+                r#"fetchBodyChecks.then(value => globalThis.fetchBodyCheckResult = value)"#,
+            )
+            .is_ok());
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "fetchBodyCheckResult.blobText"),
+            "abc"
+        );
+        assert!(runtime
+            .eval(
+                r#"fetchBodyCheckResult.blobType && fetchBodyCheckResult.blobDone &&
+                   fetchBodyCheckResult.responseType && fetchBodyCheckResult.responseSameStream &&
+                   fetchBodyCheckResult.responseChunk === "hello" && fetchBodyCheckResult.responseDone &&
+                   fetchBodyCheckResult.bodyUsed && fetchBodyCheckResult.cloneRejected &&
+                   fetchBodyCheckResult.cloneValues === "clone|clone" &&
+                   fetchBodyCheckResult.parallelValues === "parallel|parallel" &&
+                   fetchBodyCheckResult.streamInputText === "stream" && fetchBodyCheckResult.openStreamRejected &&
+                   fetchBodyCheckResult.emptyBody &&
+                   fetchBodyCheckResult.unsupportedFormRejected &&
+                   fetchBodyCheckResult.streamErrorRejected && fetchBodyCheckResult.streamClosedRejected &&
+                   fetchBodyCheckResult.cancelReason === "abort" &&
+                   fetchBodyCheckResult.releasedClosedRejected &&
+                   fetchBodyCheckResult.formValues === "Miku|hello world" &&
+                   fetchBodyCheckResult.parsedTitle === "song" && fetchBodyCheckResult.fileName === "data.bin" &&
+                   fetchBodyCheckResult.fileType === "application/octet-stream" &&
+                   fetchBodyCheckResult.fileBytes === "0,255,65""#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn implements_fetch_api() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -13273,6 +16983,59 @@ b</textarea></form>"#);
         handle.join().unwrap();
 
         assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn fetch_body_presence_distinguishes_empty_streams_from_null_bodies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+                let response = if request.starts_with("GET /empty ") {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                } else if request.starts_with("GET /none ") {
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .as_slice()
+                } else {
+                    assert!(request.starts_with("HEAD /head "));
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody"
+                        .as_slice()
+                };
+                stream.write_all(response).unwrap();
+            }
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.bodyPresenceResult = null;
+                (async () => {{
+                    const empty = await fetch("http://127.0.0.1:{}/empty");
+                    const none = await fetch("http://127.0.0.1:{}/none");
+                    const head = await fetch("http://127.0.0.1:{}/head", {{ method: "HEAD" }});
+                    const emptyRead = await empty.body.getReader().read();
+                    return [empty.body !== null, emptyRead.done, none.body === null, head.body === null];
+                }})().then(value => globalThis.bodyPresenceResult = value);"#,
+                address.port(),
+                address.port(),
+                address.port(),
+            ))
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(bodyPresenceResult)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[true,true,true,true]",
+        );
     }
 
     #[test]
@@ -13445,7 +17208,7 @@ b</textarea></form>"#);
                     try {{ failedXhr.setRequestHeader("X-Late", "no"); }} catch (_) {{ xhrRequestLocked = true; }}"#
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
 
         assert!(runtime
             .eval(r#"!fetchThrew && fetchRejected && !xhrThrew && xhrRequestLocked && failedXhr.status === 0 && failedXhr.readyState === XMLHttpRequest.DONE && failureEvents.join(",") === "error,loadend""#)
@@ -13499,7 +17262,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
         assert_eq!(runtime.eval("cookieXhr.status").unwrap().as_number(), Some(200.0));
@@ -13535,7 +17298,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
         assert!(runtime
@@ -13603,7 +17366,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
         assert!(runtime
@@ -13692,7 +17455,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
         assert!(runtime
             .eval("omitFetch === 200 && sameOriginFetch === 200 && credentialFetch === 200 && credentialXhr.status === 200")
@@ -13826,7 +17589,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
         assert!(runtime
             .eval(r#"xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200 && xhr.responseText === "hello" && xhrEvents.join(",") === "load,loadend""#)
@@ -13849,7 +17612,7 @@ b</textarea></form>"#);
                 abort_address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         abort_handle.join().unwrap();
         assert!(runtime
             .eval(r#"xhr.readyState === XMLHttpRequest.UNSENT && xhr.status === 0 && xhr.responseText === "" && xhrEvents.join(",") === "loadend""#)
@@ -13892,7 +17655,7 @@ b</textarea></form>"#);
                 address.port()
             ))
             .unwrap();
-        runtime.run_jobs().unwrap();
+        runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
         assert!(runtime
@@ -13915,10 +17678,270 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn xml_http_request_reports_download_and_upload_progress_events() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.ends_with("\r\n\r\nrequest"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                .unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.downloadEvents = [];
+                globalThis.uploadEvents = [];
+                globalThis.uploadObjectCalls = 0;
+                const recordProgress = (target, label, type) => event =>
+                  target.push([label, type, event.loaded, event.total,
+                    event.lengthComputable, event instanceof ProgressEvent].join(":"));
+                const xhr = new XMLHttpRequest();
+                const uploadObject = {{ handleEvent(event) {{
+                  if (event.type === "progress") uploadObjectCalls++;
+                }}}};
+                for (const type of ["loadstart", "progress", "load", "loadend"])
+                  xhr.addEventListener(type, recordProgress(downloadEvents, "download", type));
+                for (const type of ["loadstart", "progress", "load", "loadend"])
+                  xhr.upload.addEventListener(type, recordProgress(uploadEvents, "upload", type));
+                xhr.upload.addEventListener("progress", uploadObject);
+                xhr.upload.addEventListener("progress", uploadObject);
+                xhr.upload.addEventListener("progress", null);
+                xhr.open("POST", "http://127.0.0.1:{}/upload");
+                xhr.send("request");
+                globalThis.progressXhr = xhr;"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(
+                r#"downloadEvents.join("|") ===
+                  "download:loadstart:0:0:false:true|download:progress:5:5:true:true|download:load:5:5:true:true|download:loadend:5:5:true:true" &&
+                uploadEvents.join("|") ===
+                  "upload:loadstart:0:7:true:true|upload:progress:7:7:true:true|upload:load:7:7:true:true|upload:loadend:7:7:true:true" &&
+                progressXhr.upload instanceof XMLHttpRequestUpload &&
+                progressXhr.upload instanceof EventTarget &&
+                uploadObjectCalls === 1 &&
+                progressXhr.status === 200 && progressXhr.responseText === "hello""#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn xml_http_request_timeout_is_exclusive_and_finishes_with_loadend() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlate");
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.timeoutEvents = [];
+                const xhr = new XMLHttpRequest();
+                for (const type of ["loadstart", "progress", "load", "error", "timeout", "loadend"])
+                  xhr.addEventListener(type, event => timeoutEvents.push([
+                    type, event.loaded, event.total, event instanceof ProgressEvent].join(":")));
+                xhr.timeout = 10;
+                xhr.open("GET", "http://127.0.0.1:{}/slow");
+                xhr.send();
+                globalThis.timeoutXhr = xhr;"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        handle.join().unwrap();
+
+        let state = runtime
+            .eval(r#"JSON.stringify([timeoutEvents, timeoutXhr.readyState, timeoutXhr.status, timeoutXhr.responseText])"#)
+            .unwrap();
+        assert!(runtime
+            .eval(
+                r#"timeoutEvents.join("|") ===
+                  "loadstart:0:0:true|timeout:0:0:true|loadend:0:0:true" &&
+                timeoutXhr.readyState === XMLHttpRequest.DONE &&
+                timeoutXhr.status === 0 && timeoutXhr.responseText === """#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false), "state={}", state.display());
+    }
+
+    #[test]
+    fn xml_http_request_timeout_uses_unsigned_long_conversion() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.timeout = Infinity;
+                    const infinity = xhr.timeout === 0;
+                    xhr.timeout = -1;
+                    const negative = xhr.timeout === 4294967295;
+                    xhr.timeout = 2 ** 32;
+                    const wrapped = xhr.timeout === 0;
+                    xhr.timeout = 1.9;
+                    return infinity && negative && wrapped && xhr.timeout === 1;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn xml_http_request_open_resets_request_and_response_state() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
             .eval(r#"(() => { const xhr = new XMLHttpRequest(); xhr.open("POST", "https://example.com/log"); xhr.status = 204; xhr.statusText = "No Content"; xhr.responseText = "stale"; xhr.responseURL = "https://example.com/old"; xhr.setRequestHeader("x-old", "yes"); xhr.open("PUT", "https://example.com/next"); return xhr.readyState === XMLHttpRequest.OPENED && xhr.status === 0 && xhr.statusText === "" && xhr.responseText === "" && xhr.responseURL === "" && Object.keys(xhr._headers).length === 0; })()"#)
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn xml_http_request_response_type_preserves_binary_bytes() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.xhrBinary = {};
+                const binaryUrl = URL.createObjectURL(new Blob([
+                  new Uint8Array([0, 255, 1, 128])
+                ], { type: "application/octet-stream" }));
+                const jsonUrl = URL.createObjectURL(new Blob(["{\"answer\":42}"], {
+                  type: "application/json"
+                }));
+                const request = (url, type) => new Promise(resolve => {
+                  const xhr = new XMLHttpRequest();
+                  xhr.open("GET", url);
+                  xhr.responseType = type;
+                  xhr.onloadend = () => resolve(xhr);
+                  xhr.send();
+                });
+                Promise.all([
+                  request(binaryUrl, "arraybuffer"),
+                  request(binaryUrl, "blob"),
+                  request(jsonUrl, "json"),
+                ]).then(([array, blob, json]) => {
+                  Object.defineProperty(xhrBinary, "arrayXhr", { value: array });
+                  xhrBinary.array = [array.status, Array.from(new Uint8Array(array.response))];
+                  xhrBinary.blob = [blob.response.type, blob.response.size];
+                  xhrBinary.blobBytes = blob.response.arrayBuffer().then(buffer =>
+                    Array.from(new Uint8Array(buffer)));
+                  xhrBinary.json = json.response.answer;
+                  xhrBinary.done = true;
+                });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let probe = runtime
+            .eval(
+                r#"(() => {
+                  const probe = new XMLHttpRequest();
+                  probe.responseType = "arraybuffer";
+                  let responseTextError = null;
+                  try { void probe.responseText; } catch (error) { responseTextError = error.name; }
+                  let syntaxError = null;
+                  try { probe.responseType = "wat"; } catch (error) { syntaxError = error.name; }
+                  const pending = new XMLHttpRequest();
+                  pending.open("GET", "blob:null/pending");
+                  pending.send();
+                  let sendStateError = null;
+                  try { pending.responseType = "text"; }
+                  catch (error) { sendStateError = error.name; }
+                  pending.abort();
+                  let doneStateError = null;
+                  try { xhrBinary.arrayXhr.responseType = "text"; }
+                  catch (error) { doneStateError = error.name; }
+                  return xhrBinary.done &&
+                    JSON.stringify(xhrBinary.array) === '[200,[0,255,1,128]]' &&
+                    JSON.stringify(xhrBinary.blob) === '["application/octet-stream",4]' &&
+                    xhrBinary.json === 42 &&
+                    responseTextError === "InvalidStateError" &&
+                    syntaxError === "SyntaxError" &&
+                    sendStateError === "InvalidStateError" &&
+                    doneStateError === "InvalidStateError";
+                })()"#,
+            )
+            .unwrap();
+        let state = runtime.eval("JSON.stringify(xhrBinary)").unwrap();
+        assert!(
+            probe.as_boolean().unwrap_or(false),
+            "probe={probe:?}, state={}",
+            state.display()
+        );
+        assert!(runtime
+            .eval(r#"xhrBinary.blobBytes.then(bytes => xhrBinary.blobBytesResult = JSON.stringify(bytes))"#)
+            .is_ok());
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("xhrBinary.blobBytesResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[0,255,1,128]"
+        );
+    }
+
+    #[test]
+    fn xml_http_request_http_binary_response_type_preserves_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            let body = [0u8, 255, 1, 128];
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"globalThis.httpBinary = null;
+                const xhr = new XMLHttpRequest();
+                xhr.open("GET", "http://127.0.0.1:{}/binary");
+                xhr.responseType = "arraybuffer";
+                xhr.onloadend = () => {{
+                  httpBinary = [xhr.status, xhr.response.byteLength,
+                    Array.from(new Uint8Array(xhr.response)), xhr.responseURL];
+                }};
+                xhr.send();"#,
+                address.port()
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        handle.join().unwrap();
+
+        assert!(runtime
+            .eval(&format!(
+                r#"JSON.stringify(httpBinary) ===
+                  '[200,4,[0,255,1,128],"http://127.0.0.1:{}/binary"]'"#,
+                address.port()
+            ))
             .unwrap()
             .as_boolean()
             .unwrap());
@@ -13955,17 +17978,34 @@ b</textarea></form>"#);
     fn sandbox_config_has_default_timeout() {
         let config = SandboxConfig::default();
         assert_eq!(config.timeout, std::time::Duration::from_secs(5));
+        assert_eq!(config.max_loop_iterations, 1_000_000);
     }
 
     #[test]
     fn runtime_with_custom_sandbox() {
         let sandbox = SandboxConfig {
             timeout: std::time::Duration::from_secs(1),
+            max_loop_iterations: 10_000,
         };
         let doc = crate::dom::NodeHandle::document();
         let mut runtime = JsRuntime::with_document_and_sandbox(doc, sandbox).unwrap();
         let result = runtime.eval_safe("1 + 1");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sandbox_loop_limit_interrupts_non_terminating_script() {
+        let sandbox = SandboxConfig {
+            timeout: std::time::Duration::from_secs(1),
+            max_loop_iterations: 128,
+        };
+        let doc = crate::dom::NodeHandle::document();
+        let mut runtime = JsRuntime::with_document_and_sandbox(doc, sandbox).unwrap();
+        let result = runtime.eval_safe("let counter = 0; while (true) counter++;");
+        assert!(
+            result.is_err(),
+            "the deterministic VM loop limit must interrupt an infinite loop"
+        );
     }
 
     #[test]
@@ -14233,6 +18273,89 @@ b</textarea></form>"#);
             ),
             "5px"
         );
+    }
+
+    #[test]
+    fn style_mutation_accepts_clip_shapes_and_mask_layers_but_rejects_invalid_values() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"
+                const el = document.querySelector("div");
+                el.style.setProperty("clip-path", "circle(50% at 50% 50%)");
+                el.style.setProperty(
+                  "mask-image",
+                  "linear-gradient(to right, black, transparent), url(mask.svg)"
+                );
+                el.style.setProperty("mask-mode", "luminance, alpha");
+                el.style.setProperty("clip-path", "not-a-basic-shape()");
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).clipPath"
+            ),
+            "circle(50% at 50% 50%)",
+            "an invalid later declaration must not replace a valid clip-path"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).maskImage"
+            ),
+            "linear-gradient(to right, black, transparent), url(mask.svg)"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).maskMode"
+            ),
+            "luminance, alpha"
+        );
+    }
+
+    #[test]
+    fn compositing_style_properties_validate_and_compute() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div);
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const el = document.querySelector('div');
+                const initial = getComputedStyle(el);
+                el.style.transformStyle = 'preserve-3d';
+                el.style.backfaceVisibility = 'hidden';
+                el.style.mixBlendMode = 'multiply';
+                el.style.isolation = 'isolate';
+                el.style.setProperty('transform-style', 'invalid-value');
+                return [
+                    CSS.supports('transform-style', 'preserve-3d'),
+                    CSS.supports('transform-style', 'invalid-value') === false,
+                    CSS.supports('backface-visibility', 'hidden'),
+                    CSS.supports('mix-blend-mode', 'multiply'),
+                    CSS.supports('isolation', 'isolate'),
+                    initial.transformStyle,
+                    initial.backfaceVisibility,
+                    initial.mixBlendMode,
+                    initial.isolation,
+                    getComputedStyle(el).transformStyle,
+                    getComputedStyle(el).backfaceVisibility,
+                    getComputedStyle(el).mixBlendMode,
+                    getComputedStyle(el).isolation
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(actual, "true|true|true|true|true|flat|visible|normal|auto|preserve-3d|hidden|multiply|isolate");
     }
 
     #[test]
@@ -15605,6 +19728,34 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn toggle_attribute_reflects_force_and_mutation_semantics() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const element = document.createElement('div');
+                const added = element.toggleAttribute('hidden');
+                const removed = element.toggleAttribute('hidden');
+                const forcedAbsent = element.toggleAttribute('hidden', false);
+                const forcedPresent = element.toggleAttribute('hidden', true);
+                const explicitUndefined = element.toggleAttribute('hidden', undefined);
+                const readded = element.toggleAttribute('hidden', true);
+                return [
+                    added,
+                    removed,
+                    forcedAbsent,
+                    forcedPresent,
+                    explicitUndefined,
+                    readded,
+                    element.getAttribute('hidden') === '',
+                    element.hasAttribute('hidden')
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(actual, "true|false|false|true|false|true|true|true");
+    }
+
+    #[test]
     fn dom_mixins_and_html_members_have_spec_scoped_prototypes() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let actual = eval_str(
@@ -15763,6 +19914,38 @@ b</textarea></form>"#);
         assert_eq!(
             actual,
             "1|abcd|true|3|true|4|true|4|true|true|InvalidCharacterError|TypeError|TypeError|4|true|4|true|true|parsed"
+        );
+    }
+
+    #[test]
+    fn dom_parser_builds_xml_and_svg_trees_and_reports_parsererror() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const xml = new DOMParser().parseFromString(
+                  "<?xml version='1.0'?><svg xmlns='http://www.w3.org/2000/svg'><g id='group'>hello<rect width='4' height='5'/><!--comment--><![CDATA[raw]]><?note data?></g></svg>",
+                  "image/svg+xml"
+                );
+                const root = xml.documentElement;
+                const group = root.firstElementChild;
+                const rect = group.firstElementChild;
+                const kinds = Array.from(group.childNodes).map(node => node.nodeType).join(",");
+                const malformed = new DOMParser().parseFromString("<root><child></root>", "text/xml");
+                return [
+                  xml !== document,
+                  root.localName, root.namespaceURI,
+                  group.id, group.firstChild.data,
+                  rect.localName, rect.getAttribute("width"), rect.namespaceURI,
+                  kinds, group.lastChild.nodeType, group.lastChild.target,
+                  malformed.documentElement.localName,
+                  malformed.documentElement.textContent.includes("XML parse error")
+                ].join("|");
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "true|svg|http://www.w3.org/2000/svg|group|hello|rect|4|http://www.w3.org/2000/svg|3,1,8,3,7|7|note|parsererror|true"
         );
     }
 
@@ -16493,6 +20676,116 @@ b</textarea></form>"#);
                         commented instanceof CSSScopeRule &&
                         commented.start === ".commented" &&
                         limitOnly.start === null && limitOnly.end === ".limit";
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn css_scope_grouping_rule_mutations_recompute_cascade() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>@scope (.card) { p { color: red; } }</style></head><body><section class='card'><p id='target'></p></section></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const scope = document.styleSheets[0].cssRules[0];
+                    scope.insertRule('#target { width: 33px; }', scope.cssRules.length);
+                    return getComputedStyle(document.getElementById('target')).width === '33px' &&
+                        scope.cssRules.length === 2;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[0].cssRules[1].selectorText",
+            ),
+            "#target"
+        );
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const scope = document.styleSheets[0].cssRules[0];
+                    scope.cssRules[1].selectorText = '#target';
+                    scope.deleteRule(0);
+                    return scope.cssRules.length === 1 &&
+                        getComputedStyle(document.getElementById('target')).width === '33px';
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    try {
+                        document.styleSheets[0].insertRule('@scope (.broken) trailing { p {} }', 0);
+                        return false;
+                    } catch (error) {
+                        return error instanceof DOMException && error.name === 'SyntaxError';
+                    }
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn css_scope_recomputes_after_detach_reattach_and_respects_shadow_boundary() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>p { color: black; }</style></head><body></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const card = document.createElement('section');
+                    const scopedStyle = document.createElement('style');
+                    scopedStyle.textContent = '@scope { p { color: red; } }';
+                    const paragraph = document.createElement('p');
+                    card.appendChild(scopedStyle);
+                    card.appendChild(paragraph);
+                    document.body.appendChild(card);
+                    globalThis.__scopeParagraph = paragraph;
+                    globalThis.__scopeCard = card;
+                    return getComputedStyle(paragraph).color === 'rgb(255, 0, 0)';
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    __scopeCard.remove();
+                    const detached = getComputedStyle(__scopeParagraph).color;
+                    document.body.appendChild(__scopeCard);
+                    return detached !== 'rgb(255, 0, 0)' &&
+                        getComputedStyle(__scopeParagraph).color === 'rgb(255, 0, 0)';
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    const host = document.createElement('x-scoped');
+                    document.body.appendChild(host);
+                    const shadow = host.attachShadow({ mode: 'open' });
+                    shadow.innerHTML = '<style>@scope { p { color: blue; } }</style><p id="shadow-target"></p>';
+                    const target = shadow.querySelector('#shadow-target');
+                    return getComputedStyle(target).color === 'rgb(0, 0, 255)' &&
+                        getComputedStyle(__scopeParagraph).color === 'rgb(255, 0, 0)';
                 })()"#,
             )
             .unwrap()
@@ -19188,6 +23481,98 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn indexeddb_open_upgrade_transaction_and_clone_isolation() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://indexeddb.example.test/",
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.idbProbe = { events: [], value: null, count: -1, error: '' };
+                   const open = indexedDB.open('books', 1);
+                   open.onupgradeneeded = event => {
+                     idbProbe.events.push('upgrade:' + event.oldVersion + '>' + event.newVersion);
+                     event.target.result.createObjectStore('books', { keyPath: 'id', autoIncrement: true });
+                   };
+                   open.onerror = event => { idbProbe.error = event.target.error.name; };
+                   open.onsuccess = event => {
+                     idbProbe.events.push('open');
+                     const db = event.target.result;
+                     const tx = db.transaction('books', 'readwrite');
+                     tx.oncomplete = () => idbProbe.events.push('complete');
+                     const store = tx.objectStore('books');
+                     const original = { title: 'first', nested: { value: 3 } };
+                     store.add(original).onsuccess = event => {
+                       original.title = 'mutated';
+                       idbProbe.events.push('add:' + event.target.result);
+                     };
+                     store.get(1).onsuccess = event => {
+                       idbProbe.value = event.target.result.title + ':' + event.target.result.nested.value;
+                     };
+                     store.count().onsuccess = event => { idbProbe.count = event.target.result; };
+                   };"#,
+            )
+            .unwrap();
+        assert_eq!(runtime.eval("idbProbe.events.length").unwrap().as_number(), Some(0.0));
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "idbProbe.events.join('|')"),
+            "upgrade:0>1|open|add:1|complete",
+        );
+        assert_eq!(eval_str(&mut runtime, "idbProbe.value"), "first:3");
+        assert_eq!(eval_str(&mut runtime, "String(idbProbe.count)"), "1");
+        assert_eq!(eval_str(&mut runtime, "idbProbe.error"), "");
+        runtime
+            .eval(
+                r#"globalThis.idbSecond = { value: '', names: '', rejected: '' };
+                   const reopen = indexedDB.open('books');
+                   reopen.onsuccess = event => {
+                     const db = event.target.result;
+                     idbSecond.names = Array.from(db.objectStoreNames).join(',');
+                     const request = db.transaction('books').objectStore('books').get(1);
+                     request.onsuccess = event => { idbSecond.value = event.target.result.title; };
+                   };
+                   indexedDB.open('books', 0).onerror = event => { idbSecond.rejected = event.target.error.name; };"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "idbSecond.value + '|' + idbSecond.names + '|' + idbSecond.rejected"), "first|books|TypeError");
+    }
+
+    #[test]
+    fn indexeddb_rejects_array_key_paths_and_normalizes_boxed_store_names() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://indexeddb-keypath.example.test/",
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.idbEdge = { objectStore: '', index: '', boxed: '' };
+                   const request = indexedDB.open('edge', 1);
+                   request.onupgradeneeded = event => {
+                     const db = event.target.result;
+                     try { db.createObjectStore('bad', { keyPath: ['a', 'b'] }); }
+                     catch (error) { idbEdge.objectStore = error.name; }
+                     const store = db.createObjectStore('books');
+                     try { store.createIndex('bad', ['a', 'b']); }
+                     catch (error) { idbEdge.index = error.name; }
+                   };
+                   request.onsuccess = event => {
+                     try { event.target.result.transaction(new String('books')); idbEdge.boxed = 'ok'; }
+                     catch (error) { idbEdge.boxed = error.name; }
+                   };"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "idbEdge.objectStore + '|' + idbEdge.index + '|' + idbEdge.boxed"),
+            "NotSupportedError|NotSupportedError|ok",
+        );
+    }
+
+    #[test]
     fn storage_is_scoped_by_origin_and_top_level_session() {
         let storage = StorageManager::new();
         let first_session = storage.create_session();
@@ -19285,6 +23670,400 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn performance_navigation_and_resource_timing_entries_have_lifecycle_semantics() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://example.test/index.html",
+        )
+        .unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const navigation = performance.getEntriesByType("navigation");
+                  if (navigation.length !== 1) return false;
+                  const entry = navigation[0];
+                  if (!(entry instanceof PerformanceNavigationTiming) ||
+                      entry.name !== "https://example.test/index.html" ||
+                      entry.entryType !== "navigation" || entry.startTime !== 0 ||
+                      entry.duration < 0 || entry.type !== "navigate" ||
+                      entry.redirectCount !== 0 || entry.toJSON().entryType !== "navigation" ||
+                      entry.toJSON().type !== "navigate" ||
+                      "navigationStart" in entry || "navigationStart" in entry.toJSON()) return false;
+                  performance.clearResourceTimings();
+                  performance.setResourceTimingBufferSize(2);
+                  performance.mark("survivor");
+                  const first = new Image();
+                  first.src = "data:image/png;base64,AA==";
+                  const second = new Image();
+                  second.src = "data:image/png;base64,AA==";
+                  const third = new Image();
+                  third.src = "data:image/png;base64,AA==";
+                  const resources = performance.getEntriesByType("resource");
+                  const resourceStart = Object.getOwnPropertyDescriptor(first, "__resourceTimingStart");
+                  const resourceRecorded = Object.getOwnPropertyDescriptor(first, "__resourceTimingRecorded");
+                  return resources.length === 2 &&
+                    resourceStart && resourceRecorded &&
+                    resourceStart.enumerable === false && resourceRecorded.enumerable === false &&
+                    resources.every(resource => resource instanceof PerformanceResourceTiming &&
+                      resource.initiatorType === "img" && resource.responseEnd >= resource.startTime &&
+                      resource.toJSON().initiatorType === "img") &&
+                    performance.getEntriesByName("data:image/png;base64,AA==").length === 2;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  return performance.getEntriesByType("resource").length === 0 &&
+                    performance.getEntriesByType("navigation").length === 1 &&
+                    performance.getEntriesByName("survivor", "mark").length === 1;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.fire_dom_content_loaded().unwrap();
+        runtime.fire_load().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const entry = performance.getEntriesByType("navigation")[0];
+                  return entry.domInteractive >= 0 &&
+                    entry.domContentLoadedEventStart <= entry.domContentLoadedEventEnd &&
+                    entry.domContentLoadedEventEnd <= entry.domComplete &&
+                    entry.loadEventStart <= entry.loadEventEnd;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_navigation_lifecycle_survives_hook_overwrite() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.lifecycleEvents = [];
+                   document.addEventListener("DOMContentLoaded", () => lifecycleEvents.push("dcl"));
+                   window.addEventListener("load", () => lifecycleEvents.push("load"));
+                   globalThis.__omoikane_performance_navigation_event = () => { throw new Error("hook failure"); };"#,
+            )
+            .unwrap();
+        runtime.fire_dom_content_loaded().unwrap();
+        runtime.fire_load().unwrap();
+        assert_eq!(eval_str(&mut runtime, "lifecycleEvents.join(',')"), "dcl,load");
+    }
+
+    #[test]
+    fn performance_navigation_duration_and_domcontentloaded_bubble() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"globalThis.windowDclCount = 0;
+                   window.addEventListener("DOMContentLoaded", () => windowDclCount++);"#,
+            )
+            .unwrap();
+        runtime.fire_dom_content_loaded().unwrap();
+        runtime.fire_load().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const entry = performance.getEntriesByType("navigation")[0];
+                  const domInteractiveDescriptor = Object.getOwnPropertyDescriptor(entry, "domInteractive");
+                  const durationDescriptor = Object.getOwnPropertyDescriptor(entry, "duration");
+                  const previousDomInteractive = entry.domInteractive;
+                  const deleted = delete entry.domInteractive;
+                  __omoikane_performance_navigation_event("domInteractive");
+                  return windowDclCount === 1 && !deleted &&
+                    domInteractiveDescriptor.configurable === false &&
+                    durationDescriptor.configurable === false &&
+                    typeof domInteractiveDescriptor.get === "function" &&
+                    typeof durationDescriptor.get === "function" &&
+                    entry.domInteractive >= previousDomInteractive &&
+                    entry.loadEventEnd >= entry.loadEventStart &&
+                    entry.duration === entry.loadEventEnd - entry.startTime &&
+                    entry.toJSON().duration === entry.duration;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_records_fetch_and_xhr_success_and_abort() {
+        let port = spawn_static_http_server("text/plain", "tïmed");
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(&format!(
+                r#"globalThis.fetchResult = null;
+                   fetch("http://127.0.0.1:{port}/fetch").then(response => response.text()).then(text => fetchResult = text);
+                   globalThis.xhr = new XMLHttpRequest();
+                   xhr.open("GET", "http://127.0.0.1:{port}/xhr");
+                   xhr.send();"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const fetchEntries = performance.getEntriesByName("http://127.0.0.1:{port}/fetch");
+                  const xhrEntries = performance.getEntriesByName("http://127.0.0.1:{port}/xhr");
+                  const resources = performance.getEntriesByType("resource");
+                  const expectedBytes = new TextEncoder().encode("tïmed").length;
+                  return fetchResult === "tïmed" && xhr.status === 200 &&
+                    fetchEntries.length === 1 && xhrEntries.length === 1 &&
+                    fetchEntries[0].initiatorType === "fetch" &&
+                    fetchEntries[0].transferSize === expectedBytes &&
+                    fetchEntries[0].encodedBodySize === expectedBytes &&
+                    fetchEntries[0].decodedBodySize === expectedBytes &&
+                    xhrEntries[0].initiatorType === "xmlhttprequest" &&
+                    xhrEntries[0].transferSize === expectedBytes &&
+                    xhrEntries[0].encodedBodySize === expectedBytes &&
+                    xhrEntries[0].decodedBodySize === expectedBytes &&
+                    resources.every(entry => entry.responseEnd >= entry.startTime && entry.fetchStart <= entry.requestStart && entry.requestStart <= entry.responseStart);
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime
+            .eval(&format!(
+                r#"xhr.open("GET", "http://127.0.0.1:{port}/abort"); xhr.send(); xhr.abort();"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const aborted = performance.getEntriesByName("http://127.0.0.1:{port}/abort");
+                  return aborted.length === 1 && aborted[0].initiatorType === "xmlhttprequest" &&
+                    aborted[0].responseStatus === 0 && aborted[0].responseEnd >= aborted[0].startTime;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_fetch_completion_is_idempotent() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  const originalFetch = globalThis.__omoikane_fetch;
+                  globalThis.__omoikane_fetch = () => Promise.resolve(JSON.stringify({
+                    status: 200,
+                    statusText: "OK",
+                    url: "https://example.test/broken-response",
+                    redirected: false,
+                    type: "basic",
+                    headers: [null],
+                    bodyText: "",
+                    bodyBase64: null,
+                  }));
+                  const restoreFetch = () => {
+                    globalThis.__omoikane_fetch = originalFetch;
+                  };
+                  fetch("https://example.test/broken-response").then(restoreFetch, restoreFetch);
+                })()"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const entries = performance.getEntriesByName("https://example.test/broken-response");
+                  return entries.length === 1 && entries[0].responseStatus === 200;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_buffer_count_resets_after_clear() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  performance.setResourceTimingBufferSize(1);
+                  performance.mark("before");
+                  new Image().src = "data:image/png;base64,AA==";
+                  new Image().src = "data:image/png;base64,AA==";
+                  const full = performance.getEntriesByType("resource").length === 1;
+                  performance.clearResourceTimings();
+                  performance.mark("after");
+                  new Image().src = "data:image/png;base64,AA==";
+                  return full && performance.getEntriesByType("resource").length === 1 &&
+                    performance.getEntriesByType("mark").length === 2;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_link_finishes_when_rel_follows_href() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  performance.clearResourceTimings();
+                  const stylesheetHref = "data:text/css,body%7Bcolor%3Ared%7D";
+                  const stylesheet = document.createElement("link");
+                  stylesheet.href = stylesheetHref;
+                  stylesheet.rel = "stylesheet";
+                  const preloadHref = "data:text/css,body%7Bbackground%3Ablue%7D";
+                  const preload = document.createElement("link");
+                  preload.setAttribute("href", preloadHref);
+                  preload.setAttribute("rel", "preload");
+                  const entries = performance.getEntriesByType("resource");
+                  return entries.length === 2 &&
+                    entries.every(entry => entry.initiatorType === "link" &&
+                      entry.responseStatus === 200 && entry.responseEnd >= entry.startTime) &&
+                    performance.getEntriesByName(stylesheetHref).length === 1 &&
+                    performance.getEntriesByName(preloadHref).length === 1;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_script_redirect_records_redirect_window() {
+        let port = spawn_redirect_script_server();
+        let requested = format!("http://127.0.0.1:{port}/redirect.js");
+        let effective = format!("http://127.0.0.1:{port}/final.js");
+        let mut runtime = runtime_from_html(&format!(
+            r#"<html><head><script src="{requested}"></script></head><body></body></html>"#
+        ));
+        let base: crate::http::Url = format!("http://127.0.0.1:{port}/index.html")
+            .parse()
+            .unwrap();
+        let errors = runtime.execute_document_scripts(Some(&base));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entry = performance.getEntriesByType("resource")
+                    .find(item => item.initiatorType === "script");
+                  return globalThis.redirectScriptRan === true && entry &&
+                    entry.name === "{effective}" && entry.responseStatus === 200 &&
+                    entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart &&
+                    entry.redirectEnd <= entry.fetchStart && entry.fetchStart <= entry.requestStart &&
+                    entry.requestStart <= entry.responseStart && entry.responseStart <= entry.responseEnd &&
+                    entry.responseEnd >= entry.redirectEnd && entry.responseEnd > entry.startTime;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_fetch_redirect_uses_effective_url() {
+        let port = spawn_redirect_script_server();
+        let requested = format!("http://127.0.0.1:{port}/redirect.js");
+        let effective = format!("http://127.0.0.1:{port}/final.js");
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(&format!(
+                r#"fetch("{requested}").then(response => response.text());"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entries = performance.getEntriesByType("resource")
+                    .filter(item => item.initiatorType === "fetch");
+                  const entry = entries[0];
+                  return entries.length === 1 && entry.name === "{effective}" &&
+                    entry.responseStatus === 200 && entry.redirectStart > 0 &&
+                    entry.redirectEnd >= entry.redirectStart &&
+                    entry.redirectEnd <= entry.fetchStart && entry.fetchStart <= entry.requestStart &&
+                    entry.requestStart <= entry.responseStart && entry.responseStart <= entry.responseEnd &&
+                    entry.responseEnd > entry.startTime;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_failed_script_resolves_reference_name() {
+        let port = spawn_redirect_script_server();
+        let effective = format!("http://127.0.0.1:{port}/missing.js");
+        let mut runtime = runtime_from_html(
+            r#"<html><head><script src="missing.js"></script></head><body></body></html>"#,
+        );
+        let base: crate::http::Url = format!("http://127.0.0.1:{port}/index.html")
+            .parse()
+            .unwrap();
+        let errors = runtime.execute_document_scripts(Some(&base));
+        assert_eq!(errors.len(), 1, "expected one missing-script error: {errors:?}");
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entry = performance.getEntriesByName("{effective}")[0];
+                  return entry && entry.entryType === "resource" &&
+                    entry.initiatorType === "script" && entry.responseStatus === 0;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn performance_resource_timing_buffer_full_event_targets_performance() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        runtime
+            .eval(
+                r#"(() => {
+                  globalThis.bufferFullState = null;
+                  performance.clearResourceTimings();
+                  performance.setResourceTimingBufferSize(1);
+                  performance.onresourcetimingbufferfull = event => {
+                    event.initEvent("mutated", false, false);
+                    bufferFullState = [event.target === performance, event.currentTarget === performance,
+                      event.eventPhase === 2, event.type === "resourcetimingbufferfull",
+                      event.composedPath().length === 1 && event.composedPath()[0] === performance];
+                  };
+                  new Image().src = "data:image/png;base64,AA==";
+                  new Image().src = "data:image/png;base64,AA==";
+                })()"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert!(runtime
+            .eval("bufferFullState && bufferFullState[0] && bufferFullState[1] && bufferFullState[2] && bufferFullState[3] && bufferFullState[4]")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn user_timing_records_orders_and_clears_entries() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         assert!(runtime
@@ -19306,7 +24085,8 @@ b</textarea></form>"#);
                   const late = performance.mark("same", { startTime: 20, detail: { id: 1 } });
                   const early = performance.mark("same", { startTime: 10 });
                   const measure = performance.measure("span", { start: 10, end: 25, detail: "d" });
-                  const entries = performance.getEntries();
+                  const entries = performance.getEntries().filter(entry =>
+                    entry.entryType === "mark" || entry.entryType === "measure");
                   const valid = late instanceof PerformanceMark && late instanceof PerformanceEntry &&
                     measure instanceof PerformanceMeasure && measure.duration === 15 && measure.detail === "d" &&
                     late.detail.id === 1 && entries.length === 3 &&
@@ -19315,7 +24095,9 @@ b</textarea></form>"#);
                     performance.getEntriesByType("measure")[0] === measure;
                   performance.clearMarks("same");
                   performance.clearMeasures("span");
-                  return valid && performance.getEntries().length === 0;
+                  return valid && performance.getEntries().filter(entry =>
+                    entry.entryType === "mark" || entry.entryType === "measure").length === 0 &&
+                    performance.getEntriesByType("navigation").length === 1;
                 })()"#
             )
             .unwrap()
@@ -19490,7 +24272,7 @@ b</textarea></form>"#);
                     throwsTypeError(() => observer.observe({ type: "mark", entryTypes: ["mark"] })) &&
                     throwsTypeError(() => observer.observe({ entryTypes: [] })) && modeError &&
                     Object.isFrozen(PerformanceObserver.supportedEntryTypes) &&
-                    PerformanceObserver.supportedEntryTypes.join(",") === "mark,measure";
+                    PerformanceObserver.supportedEntryTypes.join(",") === "navigation,resource,mark,measure";
                 })()"#,
             )
             .unwrap()
@@ -19517,6 +24299,601 @@ b</textarea></form>"#);
                 .as_number()
                 .unwrap(),
             2.0
+        );
+    }
+
+    #[test]
+    fn html_media_element_models_playback_state_and_errors() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.mediaEvents = [];
+                   const video = document.createElement('video');
+                   document.body.appendChild(video);
+                   for (const type of ['loadstart', 'durationchange', 'loadedmetadata',
+                                       'loadeddata', 'canplay', 'load', 'play', 'playing',
+                                       'timeupdate', 'ended']) {
+                     video.addEventListener(type, () => mediaEvents.push(type));
+                   }
+                   video.src = 'data:video/mp4,fixture';
+                   globalThis.playResult = 'pending';
+                   video.play().then(() => { playResult = 'resolved'; },
+                                     error => { playResult = 'rejected:' + error.name; });
+                   globalThis.audio = new Audio('data:audio/mpeg,fixture');"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "mediaEvents.join(',')"),
+            "loadstart,durationchange,loadedmetadata,loadeddata,canplay,load,play,playing"
+        );
+        assert_eq!(eval_str(&mut runtime, "playResult"), "resolved");
+        assert_eq!(eval_str(&mut runtime, "String(video instanceof HTMLVideoElement)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(audio instanceof HTMLAudioElement)"), "true");
+        assert_eq!(eval_str(&mut runtime, "String(audio instanceof HTMLMediaElement)"), "true");
+        assert_eq!(eval_num(&mut runtime, "video.readyState"), 4.0);
+        assert_eq!(eval_num(&mut runtime, "video.networkState"), 1.0);
+        assert_eq!(eval_num(&mut runtime, "video.duration"), 1.0);
+        assert_eq!(eval_str(&mut runtime, "video.canPlayType('audio/mpeg')"), "probably");
+        runtime.eval("video.width = 3.5; video.height = -2.5;").unwrap();
+        assert_eq!(eval_str(&mut runtime, "[video.width, video.height].join('|')"), "3|0");
+        assert_eq!(
+            eval_str(&mut runtime, "(() => { try { new MediaError(4); return 'constructible'; } catch (error) { return error.name; } })()"),
+            "TypeError"
+        );
+
+        runtime.run_timers(1_000, 100, 32);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "mediaEvents.slice(-2).join(',')"),
+            "timeupdate,ended"
+        );
+        assert_eq!(eval_str(&mut runtime, "String(video.paused) + '|' + String(video.ended)"), "true|true");
+        assert_eq!(eval_num(&mut runtime, "video.currentTime"), 1.0);
+        runtime
+            .eval(
+                "video.currentTime = 0.25; video.volume = 0.5; video.muted = true; video.controls = true;",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_num(&mut runtime, "video.currentTime"), 0.25);
+        assert_eq!(eval_str(&mut runtime, "[video.volume, video.muted, video.controls].join('|')"), "0.5|true|true");
+
+        runtime
+            .eval(
+                r#"globalThis.pauseEvents = [];
+                   const pauseProbe = document.createElement('audio');
+                   pauseProbe.src = 'data:audio/mpeg,fixture';
+                   pauseProbe.addEventListener('play', () => pauseEvents.push('play'));
+                   pauseProbe.addEventListener('pause', () => pauseEvents.push('pause'));
+                   pauseProbe.play();
+                   globalThis.pauseProbe = pauseProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval("pauseProbe.pause()").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pauseEvents.join(',')"), "play,pause");
+        assert_eq!(eval_str(&mut runtime, "String(pauseProbe.paused)"), "true");
+
+        runtime
+            .eval(
+                r#"const seekProbe = document.createElement('audio');
+                   seekProbe.src = 'data:audio/mpeg,seek-end';
+                   seekProbe.play();
+                   globalThis.seekProbe = seekProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval("seekProbe.currentTime = seekProbe.duration").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"),
+            "true|true|1"
+        );
+        runtime.eval("seekProbe.play()").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"),
+            "false|false|0"
+        );
+
+        runtime
+            .eval(
+                r#"globalThis.cancelResult = 'pending';
+                   const cancelProbe = document.createElement('audio');
+                   cancelProbe.src = 'data:audio/mpeg,cancel';
+                   cancelProbe.play().catch(error => { cancelResult = error.name; });
+                   cancelProbe.pause();
+                   globalThis.cancelProbe = cancelProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "cancelResult"), "AbortError");
+
+        runtime
+            .eval(
+                r#"globalThis.emptyEvents = [];
+                   const empty = document.createElement('audio');
+                   empty.addEventListener('error', () => emptyEvents.push('error'));
+                   empty.load();
+                   globalThis.empty = empty;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "emptyEvents.join(',')"), "");
+        assert_eq!(eval_str(&mut runtime, "String(empty.error)"), "null");
+        runtime
+            .eval(
+                "globalThis.emptyPlayResult = 'pending'; empty.play().catch(error => { emptyPlayResult = error.name; });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "emptyPlayResult"), "NotSupportedError");
+        assert_eq!(eval_num(&mut runtime, "empty.error.code"), 4.0);
+
+        runtime
+            .eval(
+                r#"const attributeProbe = document.createElement('audio');
+                   attributeProbe.setAttribute('muted', '');
+                   attributeProbe.setAttribute('src', 'data:audio/mpeg,attribute');
+                   globalThis.attributeProbe = attributeProbe;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(attributeProbe.muted)"), "true");
+        assert_eq!(eval_num(&mut runtime, "attributeProbe.readyState"), 4.0);
+        runtime
+            .eval("video.setAttribute('width', '-5'); video.setAttribute('height', '-2');")
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "[video.width, video.height].join('|')"), "0|0");
+
+        runtime
+            .eval(
+                r#"globalThis.badResult = 'pending';
+                   const bad = document.createElement('audio');
+                   bad.setAttribute('type', 'application/x-unsupported');
+                   bad.src = 'data:application/x-unsupported,fixture';
+                   bad.play().then(() => { badResult = 'resolved'; },
+                                   error => { badResult = error.name; });
+                   globalThis.bad = bad;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "badResult"), "NotSupportedError");
+        assert_eq!(eval_num(&mut runtime, "bad.error.code"), 4.0);
+        assert_eq!(eval_num(&mut runtime, "bad.networkState"), 3.0);
+
+        runtime
+            .eval(
+                r#"globalThis.networkResult = 'pending';
+                   const missing = document.createElement('audio');
+                   missing.src = 'blob:null/missing';
+                   missing.play().catch(error => { networkResult = error.name; });
+                   globalThis.missing = missing;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "networkResult"), "NetworkError");
+        assert_eq!(eval_num(&mut runtime, "missing.error.code"), 2.0);
+
+        runtime
+            .eval(
+                r#"globalThis.unknownResult = 'pending';
+                   const unknown = document.createElement('audio');
+                   unknown.src = 'data:,fixture';
+                   unknown.play().catch(error => { unknownResult = error.name; });
+                   globalThis.unknown = unknown;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "unknownResult"), "NotSupportedError");
+        assert_eq!(eval_num(&mut runtime, "unknown.error.code"), 4.0);
+    }
+
+    #[test]
+    fn web_audio_models_context_state_param_automation_and_node_lifecycle() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.audioEvents = [];
+                   globalThis.stateEvents = [];
+                   globalThis.context = new AudioContext({ sampleRate: 48000 });
+                   context.addEventListener('statechange', () => globalThis.stateEvents.push(context.state));
+                   globalThis.gain = context.createGain();
+                   globalThis.oscillator = context.createOscillator();
+                   oscillator.onended = () => audioEvents.push('ended');
+                   oscillator.connect(gain).connect(context.destination);
+                   gain.gain.setValueAtTime(0.25, 0);
+                   gain.gain.linearRampToValueAtTime(0.75, 1);
+                   gain.gain.exponentialRampToValueAtTime(1.5, 2);"#,
+            )
+            .unwrap();
+        assert_eq!(eval_num(&mut runtime, "context.sampleRate"), 48000.0);
+        assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
+        assert_eq!(eval_str(&mut runtime, "typeof __omoikane_event_loop_now"), "undefined");
+        assert_eq!(eval_str(&mut runtime, "String(gain instanceof GainNode) + '|' + String(oscillator instanceof OscillatorNode)"), "true|true");
+        assert_eq!(eval_str(&mut runtime, "String(gain.connect(gain.gain))"), "undefined");
+        assert!((eval_num(&mut runtime, "gain.gain.__valueAt(0.5)") - 0.5).abs() < 1e-9);
+        runtime.eval("globalThis.targetGain = context.createGain(); targetGain.gain.setValueAtTime(1, 0); targetGain.gain.setTargetAtTime(0, 0, 1);").unwrap();
+        assert!((eval_num(&mut runtime, "targetGain.gain.__valueAt(0.5)") - (-0.5f64).exp()).abs() < 1e-9);
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.gain.setValueAtTime(0.5, -1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.gain.setTargetAtTime(0.5, -1, 0.1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.gain.exponentialRampToValueAtTime(0, 1); return 'allowed'; } catch (error) { return String(error instanceof RangeError) + '|' + error.name; } })()"), "true|RangeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const param = context.createGain().gain; param.setValueAtTime(-1, 1); try { param.exponentialRampToValueAtTime(1, 2); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        runtime.eval("context.resume(); oscillator.start(); oscillator.stop(0.02);").unwrap();
+        assert_eq!(eval_str(&mut runtime, "(() => { try { oscillator.stop(0.03); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidStateError");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "context.state"), "running");
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\"]");
+        runtime.run_timers(100, 10, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "audioEvents.includes('ended')"), "true");
+        assert!(eval_num(&mut runtime, "context.currentTime") > 0.0);
+        assert!(eval_num(&mut runtime, "gain.gain.value") >= 0.25);
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, NaN); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const other = new AudioContext(); const node = context.createGain(); node.context = other; try { node.connect(other.destination); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const source = context.createGain(); const destination = context.createGain(); source.connect(destination, 0, 0); source.connect(destination, 0, 0); source.disconnect(destination, 0, 0); try { source.disconnect(destination, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const source = context.createGain(); const destination = context.createGain(); source.connect(destination); source.disconnect(0); try { source.disconnect(destination); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
+        runtime.eval("context.suspend();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\"]");
+        runtime
+            .eval(
+                "globalThis.pausedEvents = []; globalThis.pausedOscillator = context.createOscillator(); pausedOscillator.onended = () => pausedEvents.push('ended'); pausedOscillator.start(); pausedOscillator.stop(0.05);",
+            )
+            .unwrap();
+        runtime.run_timers(100, 10, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "false");
+        runtime.eval("context.resume();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\",\"running\"]");
+        runtime.run_timers(100, 10, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "true");
+        assert_eq!(eval_str(&mut runtime, "(() => { const candidate = context.createOscillator(); try { candidate.start(-1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const candidate = context.createOscillator(); candidate.start(); try { candidate.stop(NaN); } catch (error) { if (error.name !== 'TypeError') return error.name; } try { candidate.stop(0.02); return 'allowed'; } catch (error) { return error.name; } })()"), "allowed");
+        assert_eq!(eval_str(&mut runtime, "(() => { const candidate = context.createOscillator(); candidate.start(); try { candidate.stop(-1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        runtime.eval("context.close();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "context.state"), "closed");
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\",\"running\",\"closed\"]");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { context.createGain(); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioContext({ sampleRate: 0 }); return 'allowed'; } catch (error) { return error.name; } })()"), "NotSupportedError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioNode(); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioDestinationNode(context); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new GainNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new OscillatorNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
+        assert_eq!(eval_str(&mut runtime, "[Object.getOwnPropertyDescriptor(gain, 'gain').writable, Object.getOwnPropertyDescriptor(oscillator, 'frequency').writable, Object.getOwnPropertyDescriptor(oscillator, 'detune').writable, Object.getOwnPropertyDescriptor(gain, 'numberOfInputs').writable, Object.getOwnPropertyDescriptor(gain.gain, 'defaultValue').writable, Object.getOwnPropertyDescriptor(context, 'sampleRate').writable, Object.getOwnPropertyDescriptor(context, 'baseLatency').writable, Object.getOwnPropertyDescriptor(context, 'outputLatency').writable].join('|')"), "false|false|false|false|false|false|false|false");
+        runtime
+            .eval(
+                "globalThis.throwingContext = new AudioContext(); globalThis.throwingResult = 'pending'; throwingContext.onstatechange = () => { throw new Error('statechange'); }; throwingContext.resume().then(() => throwingResult = 'resolved', error => throwingResult = 'rejected:' + error.name);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "throwingResult"), "resolved");
+    }
+
+    #[test]
+    fn notifications_model_permission_and_task_queued_lifecycle() {
+        let mut runtime = runtime_from_html("<html><body></body></html>");
+        assert_eq!(eval_str(&mut runtime, "Notification.permission"), "default");
+        runtime
+            .eval(
+                "globalThis.permissionResult = 'pending'; Notification.requestPermission(value => permissionResult = value);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "permissionResult"), "denied");
+        assert_eq!(eval_str(&mut runtime, "Notification.permission"), "denied");
+
+        runtime.set_notification_permission("granted").unwrap();
+        let invalid_permission = runtime.set_notification_permission("unknown").unwrap_err();
+        assert!(invalid_permission.contains("unknown"));
+        assert!(invalid_permission.contains("default, granted, denied"));
+        runtime
+            .eval(
+                r#"globalThis.notificationEvents = [];
+                   globalThis.notification = new Notification('Hello', {
+                     body: 'World', tag: 'tag', silent: null, data: { value: 7 }, actions: [{ action: 'open', title: 'Open' }]
+                   });
+                   notification.onshow = () => notificationEvents.push('show');
+                   notification.onclick = () => notificationEvents.push('click');
+                   notification.addEventListener('close', () => notificationEvents.push('close')) ;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show");
+        assert_eq!(eval_str(&mut runtime, "[notification.title, notification.body, notification.tag, notification.silent, notification.data.value, notification.actions[0].action, String('__notificationClosed' in notification), String(Object.keys(notification).some(name => name === 'onshow'))].join('|')"), "Hello|World|tag|false|7|open|false|false");
+        runtime.eval("__omoikane_dispatch_notification_click(notification)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click");
+        runtime.eval("notification.close(); notification.close();").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click,close");
+        runtime.set_notification_permission("denied").unwrap();
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
+
+        let mut insecure = JsRuntime::with_document_and_url(default_document(), "http://example.com/").unwrap();
+        insecure.set_notification_permission("granted").unwrap();
+        assert_eq!(eval_str(&mut insecure, "String(isSecureContext)"), "false");
+        assert_eq!(eval_str(&mut insecure, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
+        insecure
+            .eval("globalThis.insecurePermission = 'pending'; Notification.requestPermission().then(value => insecurePermission = value, error => insecurePermission = error.name);")
+            .unwrap();
+        insecure.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut insecure, "insecurePermission"), "NotAllowedError");
+    }
+
+    #[test]
+    fn permissions_query_maps_existing_states_and_notifies_lifecycle_changes() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[typeof Permissions, typeof PermissionStatus, navigator.permissions instanceof Permissions, typeof navigator.permissions.query].join('|')",
+            ),
+            "function|function|true|function"
+        );
+        runtime
+            .eval(
+                r#"globalThis.permissionOrder = [];
+                   globalThis.permissionChanges = [];
+                   navigator.permissions.query({ name: 'notifications' }).then(status => {
+                     globalThis.notificationStatus = status;
+                     permissionOrder.push(['notifications', status.state].join(':'));
+                     status.onchange = () => permissionChanges.push(['notifications', status.state].join(':'));
+                     status.addEventListener('change', () => permissionChanges.push('listener'));
+                   });
+                   navigator.permissions.query({ name: 'geolocation' }).then(status => {
+                     globalThis.geolocationStatus = status;
+                     permissionOrder.push(['geolocation', status.state].join(':'));
+                   });
+                   navigator.permissions.query({ name: 'clipboard-read' }).then(status => {
+                     globalThis.clipboardStatus = status;
+                     permissionOrder.push(['clipboard-read', status.state].join(':'));
+                   });
+                   navigator.permissions.query({ name: 'clipboard-write' }).then(status => {
+                     globalThis.clipboardWriteStatus = status;
+                     permissionOrder.push(['clipboard-write', status.state].join(':'));
+                   });
+                   permissionOrder.push('after-query');"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "permissionOrder.join('|')"),
+            "after-query|notifications:prompt|geolocation:granted|clipboard-read:granted|clipboard-write:granted"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[notificationStatus instanceof PermissionStatus, notificationStatus.state, notificationStatus.onchange !== null].join('|')",
+            ),
+            "true|prompt|true"
+        );
+
+        runtime.set_notification_permission("granted").unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "permissionChanges.join('|')"), "notifications:granted|listener");
+        runtime.set_notification_permission("granted").unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "permissionChanges.length"), "2");
+
+        runtime.set_geolocation_permission(false);
+        runtime.set_clipboard_permission(false);
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "[geolocationStatus.state, clipboardStatus.state, clipboardWriteStatus.state].join('|')"), "denied|denied|denied");
+
+        runtime.set_notification_permission("default").unwrap();
+        runtime.run_jobs().unwrap();
+        runtime
+            .eval("globalThis.requestResult = 'pending'; Notification.requestPermission().then(value => requestResult = value);")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "requestResult + '|' + notificationStatus.state"), "denied|denied");
+        assert_eq!(eval_str(&mut runtime, "permissionChanges.length"), "6");
+
+        // A page cannot forge a granted transition by invoking the bridge
+        // directly: the host-backed state remains authoritative.
+        runtime
+            .eval("__omoikane_permission_changed('clipboard-read', 'granted');")
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "clipboardStatus.state + '|' + permissionChanges.length"), "denied|6");
+
+        runtime
+            .eval(
+                r#"globalThis.invalidPermission = 'pending';
+                   navigator.permissions.query({ name: 'camera' }).catch(error => invalidPermission = error.name);
+                   globalThis.invalidDescriptor = 'pending';
+                   navigator.permissions.query(null).catch(error => invalidDescriptor = error.name);"#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "invalidPermission + '|' + invalidDescriptor"), "NotSupportedError|TypeError");
+
+        // A document teardown invalidates all retained statuses and drops
+        // their listeners before a later host transition can enqueue a change.
+        runtime.eval("__omoikane_permission_teardown();").unwrap();
+        runtime.set_notification_permission("granted").unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(eval_str(&mut runtime, "permissionChanges.length"), "6");
+    }
+
+    #[test]
+    fn dedicated_worker_does_not_expose_media_or_notification_constructors() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent(
+                     'const values = [typeof MediaError, typeof HTMLMediaElement, typeof Audio, typeof AudioContext, typeof AudioNode, typeof AudioParam, typeof Notification, typeof OffscreenCanvas, typeof ImageBitmap];' +
+                     'const sourceCanvas = new OffscreenCanvas(1, 1);' +
+                     'const sourceContext = sourceCanvas.getContext("2d");' +
+                     'sourceContext.fillStyle = "red"; sourceContext.fillRect(0, 0, 1, 1);' +
+                     'createImageBitmap(sourceCanvas).then(bitmap => {' +
+                     '  const targetCanvas = new OffscreenCanvas(1, 1);' +
+                     '  const targetContext = targetCanvas.getContext("2d");' +
+                     '  targetContext.drawImage(bitmap, 0, 0);' +
+                     '  postMessage(values.concat([bitmap.width, targetContext.getImageData(0, 0, 1, 1).data[0]]));' +
+                     '});');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
+            "[\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"undefined\",\"function\",\"function\",1,255]"
+        );
+    }
+
+    #[test]
+    fn offscreen_canvas_models_pixels_bitmaps_blobs_and_detachment() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.offscreen = new OffscreenCanvas(2, 1);
+                   globalThis.offscreenContext = offscreen.getContext('2d');
+                   offscreenContext.fillStyle = 'red';
+                   offscreenContext.fillRect(0, 0, 1, 1);
+                   globalThis.bitmap = offscreen.transferToImageBitmap();
+                   globalThis.target = document.createElement('canvas');
+                   target.width = 2; target.height = 1;
+                   target.getContext('2d').drawImage(bitmap, 0, 0);
+                   globalThis.pixel = Array.from(target.getContext('2d').getImageData(0, 0, 1, 1).data).join(',');
+                   globalThis.blobResult = 'pending';
+                   offscreen.convertToBlob().then(blob => { blobResult = [blob.type, blob.size].join('|'); });
+                   globalThis.emptyBlobResult = 'pending';
+                   new OffscreenCanvas(0, 0).convertToBlob().then(blob => { emptyBlobResult = [blob.type, blob.size].join('|'); });
+                   globalThis.cropResult = 'pending';
+                   globalThis.cropZeroError = 'pending';
+                   globalThis.cropBoundsError = 'pending';
+                   createImageBitmap(offscreen, 0, 0, 1, 1).then(value => { cropResult = [value.width, value.height].join('|'); });
+                   createImageBitmap(offscreen, 0, 0, 0, 1).catch(error => { cropZeroError = error.name; });
+                   createImageBitmap(offscreen, 0, 0, 3, 1).catch(error => { cropBoundsError = error.name; });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "pixel"), "255,0,0,255");
+        assert_eq!(eval_str(&mut runtime, "[offscreen.width, offscreen.height, bitmap.width, bitmap.height, offscreenContext instanceof OffscreenCanvasRenderingContext2D].join('|')"), "2|1|2|1|true");
+        assert!(eval_str(&mut runtime, "blobResult").starts_with("image/png|"));
+        assert_eq!(eval_str(&mut runtime, "emptyBlobResult"), "image/png|0");
+        assert_eq!(eval_str(&mut runtime, "cropResult"), "1|1");
+        assert_eq!(eval_str(&mut runtime, "cropZeroError + '|' + cropBoundsError"), "IndexSizeError|IndexSizeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { bitmap.close(); return [bitmap.width, bitmap.height, (() => { try { target.getContext('2d').drawImage(bitmap, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()]; })().join('|')"), "0|0|InvalidStateError");
+        assert_eq!(eval_str(&mut runtime, "(() => { try { new OffscreenCanvas(-1, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
+        assert_eq!(eval_str(&mut runtime, "(() => { const canvas = new OffscreenCanvas(1, 1); canvas.getContext('2d'); return String(canvas.getContext('webgl')); })()"), "null");
+    }
+
+    #[test]
+    fn geolocation_models_position_watch_permission_and_cleanup() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_geolocation_position(GeolocationPositionData::new(35.0, 139.0, 4.0));
+        runtime
+            .eval(
+                r#"globalThis.geoEvents = [];
+                   navigator.geolocation.getCurrentPosition(
+                     position => geoEvents.push(['current', position.coords.latitude,
+                       position.coords.longitude, position.coords.accuracy,
+                       position.coords.altitude, position.timestamp > 0]),
+                     error => geoEvents.push(['current-error', error.code])
+                   );
+                   const first = navigator.geolocation.watchPosition(
+                     position => geoEvents.push(['first', position.coords.latitude]),
+                     error => geoEvents.push(['first-error', error.code])
+                   );
+                   const second = navigator.geolocation.watchPosition(
+                     position => geoEvents.push(['second', position.coords.latitude]),
+                     error => geoEvents.push(['second-error', error.code])
+                   );
+                   navigator.geolocation.clearWatch(second);
+                   globalThis.firstWatch = first;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(geoEvents)"),
+            r#"[["current",35,139,4,null,true],["first",35]]"#
+        );
+
+        runtime.set_geolocation_position(GeolocationPositionData::new(36.0, 140.0, 5.0));
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(geoEvents.slice(-1))"),
+            r#"[["first",36]]"#
+        );
+        runtime.eval("navigator.geolocation.clearWatch(first)").unwrap();
+        runtime.set_geolocation_position(GeolocationPositionData::new(37.0, 141.0, 6.0));
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "geoEvents.length"), "3");
+    }
+
+    #[test]
+    fn geolocation_models_permission_timeout_and_maximum_age() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_geolocation_permission(false);
+        runtime
+            .eval(
+                "globalThis.geoError = null; navigator.geolocation.getCurrentPosition(() => {}, error => geoError = [error.code, error.message]);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "JSON.stringify(geoError)"), r#"[1,"User denied Geolocation."]"#);
+
+        runtime.set_geolocation_permission(true);
+        runtime.clear_geolocation_position();
+        runtime
+            .eval(
+                "globalThis.timeoutError = null; navigator.geolocation.getCurrentPosition(() => {}, error => timeoutError = error.code, { timeout: 25 });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(timeoutError)"), "null");
+        runtime.run_timers(24, 1, 100);
+        assert_eq!(eval_str(&mut runtime, "String(timeoutError)"), "null");
+        runtime.run_timers(1, 1, 100);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(timeoutError)"), "3");
+
+        runtime.set_geolocation_position(GeolocationPositionData::new(35.0, 139.0, 4.0));
+        runtime
+            .eval(
+                "globalThis.ageResult = 'pending'; navigator.geolocation.getCurrentPosition(position => ageResult = position.coords.latitude, error => ageResult = 'error', { maximumAge: 0 });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(ageResult)"), "35");
+        runtime.tick(10).unwrap();
+        runtime
+            .eval(
+                "globalThis.staleResult = 'pending'; navigator.geolocation.getCurrentPosition(position => staleResult = position.coords.latitude, error => staleResult = error.code, { maximumAge: 5, timeout: 0 });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "String(staleResult)"), "3");
+    }
+
+    #[test]
+    fn dedicated_worker_does_not_expose_geolocation() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent(
+                     'postMessage([typeof Geolocation, typeof GeolocationPosition, typeof navigator.geolocation]);');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
+            "[\"undefined\",\"undefined\",\"undefined\"]"
         );
     }
 
@@ -20401,6 +25778,44 @@ b</textarea></form>"#);
                 .as_boolean()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn connected_dynamic_script_redirect_records_effective_resource_timing() {
+        let port = spawn_redirect_script_server();
+        let requested = format!("http://127.0.0.1:{port}/redirect.js");
+        let effective = format!("http://127.0.0.1:{port}/final.js");
+        use crate::html::TreeBuilder;
+        let document = TreeBuilder::parse("<html><head></head><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            document,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(&format!(
+                r#"const script = document.createElement("script");
+                   script.src = "{requested}";
+                   script.addEventListener("load", () => globalThis.dynamicRedirectLoaded = true);
+                   document.head.appendChild(script);"#,
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(&format!(
+                r#"(() => {{
+                  const entry = performance.getEntriesByType("resource")
+                    .find(item => item.initiatorType === "script");
+                  return globalThis.dynamicRedirectLoaded === true && entry &&
+                    entry.name === "{effective}" && entry.responseStatus === 200 &&
+                    entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart &&
+                    entry.redirectEnd <= entry.fetchStart && entry.fetchStart <= entry.requestStart &&
+                    entry.requestStart <= entry.responseStart && entry.responseStart <= entry.responseEnd;
+                }})()"#,
+            ))
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]
@@ -21879,9 +27294,21 @@ b</textarea></form>"#);
                 if (f.elements[0] !== i) return 3;
                 if (f.elements.first !== i) return 4;
                 if (f.elements.second !== null) return 5;
+                if (f.elements.item(0) !== i) return 6;
+                if (f.elements.namedItem('first') !== i) return 7;
+                if (!(0 in f.elements) || !('first' in f.elements)) return 8;
+                if (f.elements[Symbol('missing')] !== undefined) return 9;
                 i.name = 'second';
-                if (f.elements.second !== i) return 6;
-                if (f.elements.first !== null) return 7;
+                if (f.elements.second !== i) return 10;
+                if (f.elements.first !== null) return 11;
+                var select = document.createElement('select');
+                select.name = 'choice';
+                f.appendChild(select);
+                var retained = f.elements;
+                if (retained.length !== 2 || retained.namedItem('choice') !== select) return 12;
+                if (Array.from(retained).length !== 2) return 13;
+                f.removeChild(i);
+                if (retained.length !== 1 || retained[0] !== select) return 14;
                 return 0;
             })()
         "#,
@@ -22867,6 +28294,46 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn offset_parent_tracks_positioned_ancestor_and_box_visibility() {
+        let html = r#"<html><head><style>
+            * { margin: 0; }
+            #positioned { position: relative; width: 100px; height: 100px; }
+            #child { width: 20px; height: 20px; }
+            #fixed { position: fixed; width: 10px; height: 10px; }
+            #hidden { display: none; }
+        </style></head><body><div id="positioned"><div id="child"></div></div>
+          <div id="fixed"></div><div id="hidden"><div id="hidden-child"></div></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const positioned = document.getElementById('positioned');
+                const child = document.getElementById('child');
+                const fixed = document.getElementById('fixed');
+                const hiddenChild = document.getElementById('hidden-child');
+                const detached = document.createElement('div');
+                const shadowHost = document.createElement('div');
+                shadowHost.style.position = 'relative';
+                document.body.appendChild(shadowHost);
+                const shadowRoot = shadowHost.attachShadow({ mode: 'open' });
+                const slot = document.createElement('slot');
+                shadowRoot.appendChild(slot);
+                const slotted = document.createElement('div');
+                shadowHost.appendChild(slotted);
+                return [
+                    child.offsetParent === positioned,
+                    fixed.offsetParent === null,
+                    hiddenChild.offsetParent === null,
+                    detached.offsetParent === null,
+                    slotted.offsetParent === shadowHost,
+                    child.offsetTop === 0 && child.offsetLeft === 0
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(actual, "true|true|true|true|true|true");
+    }
+
+    #[test]
     fn bounding_client_rect_includes_transforms_but_offset_size_does_not() {
         let html = r#"<html><head><style>
             * { margin: 0; padding: 0; }
@@ -22900,6 +28367,36 @@ b</textarea></form>"#);
         // scale(2) around the child's center expands -5..15, then the parent
         // translation moves that bounding box to 25..45.
         assert_eq!(eval_str(&mut runtime, expression), "25|-5|20|20");
+    }
+
+    #[test]
+    fn bounding_client_rect_handles_3d_perspective_without_changing_offset_size() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #box { width: 100px; height: 50px; transform-origin: 50% 50%;
+                   transform: perspective(500px) rotateY(30deg) translateZ(20px); }
+        </style></head><body><div id="box"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let expression = r#"(() => {
+            const box = document.getElementById('box');
+            const rect = box.getBoundingClientRect();
+            const computed = getComputedStyle(box).transform;
+            return [rect.width, rect.height, box.offsetWidth, box.offsetHeight,
+                    Number.isFinite(rect.left), computed.includes('perspective')].join('|');
+        })()"#;
+
+        let values = eval_str(&mut runtime, expression)
+            .split('|')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let width = values[0].parse::<f32>().unwrap();
+        let height = values[1].parse::<f32>().unwrap();
+        assert!(width > 70.0 && width < 110.0);
+        assert!(height > 45.0 && height < 60.0);
+        assert_eq!(values[2], "100");
+        assert_eq!(values[3], "50");
+        assert_eq!(values[4], "true");
+        assert_eq!(values[5], "true");
     }
 
     #[test]
@@ -23905,6 +29402,35 @@ b</textarea></form>"#);
         port
     }
 
+    fn spawn_redirect_script_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0u8; 4096];
+                let size = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..size]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (status, headers, body) = match path {
+                    "/redirect.js" => ("302 Found", "Location: /final.js\r\n", ""),
+                    "/final.js" => (
+                        "200 OK",
+                        "Content-Type: text/javascript\r\n",
+                        "globalThis.redirectScriptRan = true;",
+                    ),
+                    _ => ("404 Not Found", "", ""),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
     fn eval_string_value(runtime: &mut JsRuntime, source: &str) -> Option<String> {
         runtime
             .eval(source)
@@ -23952,6 +29478,147 @@ b</textarea></form>"#);
                 .as_boolean(),
             Some(false),
             "an HTML rect element must not receive an SVG interface"
+        );
+    }
+
+    #[test]
+    fn svg_geometry_interfaces_expose_bbox_ctm_points_and_idl_shapes() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const ns = 'http://www.w3.org/2000/svg';
+                const svg = document.createElementNS(ns, 'svg');
+                svg.setAttribute('viewBox', '10 20 100 50');
+                svg.setAttribute('width', '200');
+                svg.setAttribute('height', '100');
+                const rect = document.createElementNS(ns, 'rect');
+                rect.setAttribute('x', '5');
+                rect.setAttribute('y', '6');
+                rect.setAttribute('width', '20');
+                rect.setAttribute('height', '10');
+                rect.setAttribute('transform', 'translate(3 4)');
+                const circle = document.createElementNS(ns, 'circle');
+                circle.setAttribute('cx', '40');
+                circle.setAttribute('cy', '30');
+                circle.setAttribute('r', '5');
+                const path = document.createElementNS(ns, 'path');
+                path.setAttribute('d', 'M 1 2 L 11 12');
+                svg.appendChild(rect);
+                svg.appendChild(circle);
+                svg.appendChild(path);
+                document.body.appendChild(svg);
+                const box = rect.getBBox();
+                const circleBox = circle.getBBox();
+                const pathBox = path.getBBox();
+                const ctm = rect.getCTM();
+                const defaultStrokeBox = rect.getBBox({ stroke: true });
+                rect.setAttribute('stroke', 'red');
+                rect.setAttribute('stroke-width', '4');
+                const strokeBox = rect.getBBox({ stroke: true });
+                const matrix = new DOMMatrix([1, 2, 3, 4, 5, 6]);
+                const point = svg.createSVGPoint();
+                point.x = 1;
+                point.y = 2;
+                const transformed = point.matrixTransform(ctm);
+                const widthDescriptor = Object.getOwnPropertyDescriptor(SVGRectElement.prototype, 'width');
+                return [
+                    rect instanceof SVGElement,
+                    rect instanceof SVGGraphicsElement,
+                    rect instanceof SVGGeometryElement,
+                    rect instanceof SVGRectElement,
+                    circle instanceof SVGCircleElement,
+                    path instanceof SVGPathElement,
+                    Object.prototype.toString.call(rect),
+                    Object.prototype.toString.call(box),
+                    Object.prototype.toString.call(point),
+                    box.x, box.y, box.width, box.height,
+                    circleBox.x, circleBox.y, circleBox.width, circleBox.height,
+                    pathBox.x, pathBox.y, pathBox.width, pathBox.height,
+                    ctm.a, ctm.d, ctm.e, ctm.f,
+                    transformed.x, transformed.y,
+                    matrix.m12, matrix.m21,
+                    defaultStrokeBox.width, strokeBox.width,
+                    svg.createSVGRect().width,
+                    widthDescriptor.get !== undefined && widthDescriptor.set === undefined,
+                    typeof SVGGraphicsElement.prototype.getBBox,
+                    typeof SVGSVGElement.prototype.createSVGPoint
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "true|true|true|true|true|true|[object SVGRectElement]|[object SVGRect]|[object SVGPoint]|5|6|20|10|35|25|10|10|1|2|10|10|2|2|-14|-32|-12|-28|2|3|20|24|0|true|function|function"
+        );
+    }
+
+    #[test]
+    fn svg_text_geometry_uses_utf16_ranges_and_nested_transforms() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const ns = 'http://www.w3.org/2000/svg';
+                const svg = document.createElementNS(ns, 'svg');
+                const text = document.createElementNS(ns, 'text');
+                text.setAttribute('x', '10');
+                text.setAttribute('y', '20');
+                text.setAttribute('font-size', '10');
+                text.appendChild(document.createTextNode('AB'));
+                const span = document.createElementNS(ns, 'tspan');
+                span.setAttribute('dx', '2');
+                span.setAttribute('transform', 'translate(5 3)');
+                span.appendChild(document.createTextNode('C'));
+                text.appendChild(span);
+                svg.appendChild(text);
+                document.body.appendChild(svg);
+                const start = text.getStartPositionOfChar(2);
+                const end = text.getEndPositionOfChar(2);
+                const extent = text.getExtentOfChar(2);
+                const box = text.getBBox();
+                const spanStart = span.getStartPositionOfChar(0);
+                const spanBox = span.getBBox();
+                const group = document.createElementNS(ns, 'g');
+                group.setAttribute('transform', 'translate(7 4)');
+                const deep = document.createElementNS(ns, 'tspan');
+                deep.setAttribute('transform', 'scale(2)');
+                deep.appendChild(document.createTextNode('D'));
+                group.appendChild(deep);
+                text.appendChild(group);
+                const deepStart = deep.getStartPositionOfChar(0);
+                const deepBox = deep.getBBox();
+                const singular = document.createElementNS(ns, 'tspan');
+                singular.setAttribute('transform', 'scale(0)');
+                singular.appendChild(document.createTextNode('E'));
+                text.appendChild(singular);
+                let singularSafe = true;
+                try { singular.getBBox(); } catch (_) { singularSafe = false; }
+                const round = value => Math.round(value * 100) / 100;
+                return [
+                    text.getNumberOfChars(),
+                    round(text.getComputedTextLength()),
+                    round(text.getSubStringLength(1, 2)),
+                    round(start.x), round(start.y), round(end.x), round(end.y),
+                    round(extent.x), round(extent.y), round(extent.width), round(extent.height),
+                    round(box.x), round(box.y), round(box.width), round(box.height),
+                    start instanceof SVGPoint,
+                    extent instanceof SVGRect,
+                    Object.getPrototypeOf(start) === SVGPoint.prototype,
+                    Object.getPrototypeOf(extent) === SVGRect.prototype,
+                    Object.getOwnPropertyDescriptor(SVGRectElement.prototype, 'width').set === undefined,
+                    span instanceof SVGTextContentElement,
+                    span instanceof SVGTSpanElement,
+                    round(spanStart.x), round(spanStart.y),
+                    round(spanBox.x), round(spanBox.y),
+                    round(deepStart.x), round(deepStart.y),
+                    round(deepBox.x), round(deepBox.y),
+                    singularSafe,
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "5|30|12|29|23|35|23|29|15|6|10|10|12|25|13|true|true|true|true|true|true|true|24|20|24|12|30|20|30|12|true"
         );
     }
 
@@ -25509,6 +31176,45 @@ b</textarea></form>"#);
             runtime.eval("f.contentWindow.marker").unwrap().as_number(),
             Some(42.0),
             "contentWindow identity and state must survive a src change"
+        );
+    }
+
+    /// Detaching an iframe destroys its active nested browsing context while
+    /// keeping the WindowProxy identity stable. Reconnecting starts a fresh
+    /// document, and the proxy becomes live again.
+    #[test]
+    fn detached_iframe_closes_nested_context_until_reconnected() {
+        use crate::html::TreeBuilder;
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            runtime
+                .eval(
+                    "var f = document.getElementById('f'); \
+                     var first = f.contentDocument; \
+                     var win = f.contentWindow; \
+                     document.body.removeChild(f); \
+                     [f.contentDocument === null, win.document === null, win.closed].join('|')",
+                )
+                .unwrap()
+                .as_string()
+                .map(|value| value.to_std_string_escaped())
+                .as_deref(),
+            Some("true|true|true")
+        );
+
+        runtime.eval("document.body.appendChild(f)").unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime
+                .eval("[f.contentWindow === win, f.contentDocument !== first, win.document === f.contentDocument, win.closed].join('|')")
+                .unwrap()
+                .as_string()
+                .map(|value| value.to_std_string_escaped())
+                .as_deref(),
+            Some("true|true|true|false")
         );
     }
 
@@ -28929,5 +34635,134 @@ b</textarea></form>"#);
         );
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "messages + ':' + errors"), "0:1");
+    }
+
+    #[test]
+    fn cache_storage_snapshots_match_options_and_delivers_on_networking_tasks() {
+        let storage = StorageManager::new();
+        let first_session = storage.create_session();
+        let second_session = storage.create_session();
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "https://cache.example.test/page",
+            storage.clone(),
+            first_session,
+        )
+        .unwrap();
+
+        eval_str(
+            &mut runtime,
+            r#"(() => {
+              globalThis.cacheProbe = { events: [], body: '', ignoredSearch: '', varied: true, ignoredVary: '' };
+              caches.open('v1').then(cache => {
+                cacheProbe.events.push('opened');
+                const request = new Request('/asset?a=1', { headers: { Accept: 'text/plain' } });
+                const response = new Response('snapshot', { headers: { Vary: 'Accept', 'X-Cache': 'yes' } });
+                return cache.put(request, response).then(() => {
+                  cacheProbe.events.push('put');
+                  return Promise.all([
+                    cache.match(new Request('/asset?a=1', { headers: { Accept: 'text/plain' } })).then(value => value.text()),
+                    cache.match(new Request('/asset?a=2', { headers: { Accept: 'text/plain' } }), { ignoreSearch: true }).then(value => value.text()),
+                    cache.match(new Request('/asset?a=1', { headers: { Accept: 'application/json' } })),
+                    cache.match('/asset?a=1', { ignoreVary: true }).then(value => value.text()),
+                    cache.match(new Request('/asset?a=1', { headers: { Accept: 'text/plain' } })).then(value => value.text()),
+                  ]);
+                });
+              }).then(values => {
+                cacheProbe.events.push('matched');
+                cacheProbe.body = values[0];
+                cacheProbe.ignoredSearch = values[1];
+                cacheProbe.varied = values[2] === undefined;
+                cacheProbe.ignoredVary = values[3];
+                cacheProbe.secondRead = values[4];
+              });
+              globalThis.cacheRejected = { method: false, opaque: false, vary: false };
+              caches.open('v1').then(cache => {
+                cache.put(new Request('/post', { method: 'POST' }), new Response('bad'))
+                  .then(() => {}, error => { cacheRejected.method = error instanceof TypeError; });
+                const opaque = new Response('opaque');
+                opaque.type = 'opaque';
+                cache.put('/opaque', opaque)
+                  .then(() => {}, error => { cacheRejected.opaque = error instanceof TypeError; });
+                cache.put('/vary-star', new Response('bad', { headers: { Vary: '*' } }))
+                  .then(() => {}, error => { cacheRejected.vary = error instanceof TypeError; });
+              });
+            })()"#,
+        );
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.events.length"), "0");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "cacheProbe.events.join(',')"),
+            "opened,put,matched"
+        );
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.body"), "snapshot");
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.ignoredSearch"), "snapshot");
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.varied + ':' + cacheProbe.ignoredVary"), "true:snapshot");
+        assert_eq!(eval_str(&mut runtime, "cacheProbe.secondRead"), "snapshot");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "cacheRejected.method + ':' + cacheRejected.opaque + ':' + cacheRejected.vary"
+            ),
+            "true:true:true"
+        );
+        eval_str(&mut runtime, "(() => { globalThis.cacheHas = undefined; caches.has('v1').then(value => { cacheHas = value; }); })()");
+        assert_eq!(eval_str(&mut runtime, "cacheHas === undefined"), "true");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "cacheHas"), "true");
+        eval_str(
+            &mut runtime,
+            "(() => { globalThis.cacheNames = []; caches.keys().then(names => { cacheNames = names; }); })()",
+        );
+        assert_eq!(eval_str(&mut runtime, "cacheNames.length"), "0");
+        runtime.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut runtime, "cacheNames.join(',')"), "v1");
+
+        // StorageManager is shared by independently created realms: the
+        // origin namespace is visible in the second runtime, while another
+        // origin receives an empty CacheStorage namespace.
+        let mut same_origin = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "https://cache.example.test/other",
+            storage.clone(),
+            second_session,
+        )
+        .unwrap();
+        eval_str(
+            &mut same_origin,
+            "(() => { globalThis.cacheNames = []; caches.keys().then(names => { cacheNames = names; }); })()",
+        );
+        assert_eq!(eval_str(&mut same_origin, "cacheNames.length"), "0");
+        same_origin.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut same_origin, "cacheNames.join(',')"), "v1");
+
+        let mut other_origin = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "https://other-cache.example.test/",
+            storage,
+            second_session,
+        )
+        .unwrap();
+        eval_str(
+            &mut other_origin,
+            "(() => { globalThis.cacheNames = []; caches.keys().then(names => { cacheNames = names; }); })()",
+        );
+        other_origin.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut other_origin, "cacheNames.length"), "0");
+
+        let mut opaque_origin = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "data:text/html,<p>opaque</p>",
+            StorageManager::new(),
+            1,
+        )
+        .unwrap();
+        eval_str(
+            &mut opaque_origin,
+            "(() => { globalThis.cacheError = ''; caches.open('opaque').then(() => { cacheError = 'resolved'; }, error => { cacheError = error.name; }); })()",
+        );
+        assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "");
+        opaque_origin.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "SecurityError");
     }
 }

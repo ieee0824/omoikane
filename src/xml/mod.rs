@@ -146,7 +146,18 @@ impl<'a> Parser<'a> {
         if target.eq_ignore_ascii_case("xml") {
             return self.err("the processing-instruction target 'xml' is reserved");
         }
-        self.take_until("?>")?;
+        let data = if self.starts("?>") {
+            self.pos += 2;
+            String::new()
+        } else {
+            if !self.peek().is_some_and(char::is_whitespace) {
+                return self.err("processing-instruction data must follow whitespace");
+            }
+            self.ws();
+            self.take_until("?>")?.to_string()
+        };
+        self.parent()
+            .append_child(NodeHandle::processing_instruction(target, data));
         Ok(())
     }
     fn parse_cdata(&mut self) -> Result<(), XmlParseError> {
@@ -232,6 +243,11 @@ mod tests {
         let child = root.child_nodes().into_iter().find(|n| n.node_type() == NodeType::Element).unwrap(); assert_eq!(child.tag_name().as_deref(), Some("p:Child")); assert_eq!(child.namespace_uri().as_deref(), Some("urn:p")); assert_eq!(child.local_name().as_deref(), Some("Child"));
     }
     #[test] fn accepts_doctype_comment_pi_and_defined_entities() { assert!(parse(br#"<?x ok?><!DOCTYPE R SYSTEM 'urn:x'><!--c--><R>&gt;&quot;&apos;</R>"#).is_ok()); }
+    #[test] fn rejects_processing_instruction_data_without_whitespace() {
+        assert!(parse(br#"<r><?x,data?></r>"#).is_err());
+        assert!(parse(br#"<r><?x ok?></r>"#).is_ok());
+        assert!(parse(br#"<r><?x?></r>"#).is_ok());
+    }
     #[test] fn rejects_mismatched_tags_unquoted_attributes_and_unknown_entities() { for xml in ["<a></b>", "<a x=y/>", "<a>&bogus;</a>"] { assert!(parse(xml.as_bytes()).is_err(), "expected error for {xml}"); } }
     #[test] fn rejects_invalid_utf8_and_non_utf8_declaration() { assert!(parse(b"<r>\xff</r>").is_err()); assert!(parse(br#"<?xml version='1.0' encoding='ISO-8859-1'?><r/>"#).is_err()); }
     #[test] fn rejects_xhtml_crossed_tags_as_whole_document_error() { assert!(parse(br#"<html><p><strong/>x</strong></p></html>"#).is_err()); }

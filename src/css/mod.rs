@@ -81,8 +81,8 @@ pub(crate) fn split_top_level_commas(value: &str) -> Vec<&str> {
 }
 pub use transform::AffineTransform;
 pub(crate) use transform::{
-    TransformReferenceBox, interpolate_transform_lists, parse_transform_list,
-    parse_transform_with_origin,
+    TransformReferenceBox, interpolate_transform_lists, parse_perspective_origin,
+    parse_perspective_with_origin, parse_transform_list, parse_transform_with_origin,
 };
 pub use tokenizer::tokenize;
 

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::time::Duration;
 
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 
@@ -312,6 +313,17 @@ pub(super) struct Http1Session {
 }
 
 impl Http1Session {
+    pub(super) fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), HttpParseError> {
+        self.stream
+            .sock
+            .set_read_timeout(timeout)
+            .map_err(HttpParseError::Io)?;
+        self.stream
+            .sock
+            .set_write_timeout(timeout)
+            .map_err(HttpParseError::Io)
+    }
+
     pub(super) fn send_request(
         &mut self,
         request: &HttpRequest,
@@ -340,6 +352,19 @@ pub(super) struct Http2Session {
 }
 
 impl Http2Session {
+    pub(super) fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), HttpParseError> {
+        self.connection
+            .io
+            .sock
+            .set_read_timeout(timeout)
+            .map_err(HttpParseError::Io)?;
+        self.connection
+            .io
+            .sock
+            .set_write_timeout(timeout)
+            .map_err(HttpParseError::Io)
+    }
+
     pub(super) fn send_request(
         &mut self,
         request: &HttpRequest,

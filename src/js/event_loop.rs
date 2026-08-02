@@ -27,11 +27,15 @@ pub(crate) enum TaskSource {
     /// The file reading task source, used by `FileReader` to deliver its
     /// `loadstart`/`progress`/`load`/`loadend` events.
     FileReading,
+    /// The geolocation task source, used to deliver position/error callbacks.
+    Geolocation,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum Task {
     Timer(TimerPayload),
+    /// A geolocation request delivered after the current script task.
+    Geolocation { request_id: u64 },
     Navigation(NavigationRequest),
     PostedMessage { port: JsValue, data: JsValue },
     /// A message delivered to a page-owned `BroadcastChannel` endpoint.
@@ -51,6 +55,17 @@ pub(crate) enum Task {
         worker_id: u64,
         owner: JsValue,
         data: String,
+    },
+    /// A message sent from a page-owned `SharedWorkerPort` to the shared
+    /// worker runtime.  The endpoint is identified by a process-local id;
+    /// the structured-clone wire is decoded in the target realm.
+    SharedWorkerMessage { connection_id: u64, data: String },
+    /// A message sent from a shared worker runtime to a page-owned port.
+    SharedWorkerOwnerMessage {
+        connection_id: u64,
+        port: JsValue,
+        data: String,
+        origin: String,
     },
     /// A worker startup/runtime failure reported to its owner page.
     WorkerError {
@@ -122,10 +137,13 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
             unsafe { data.trace(tracer) };
         }
         Task::WorkerOwnerMessage { owner, .. } => unsafe { owner.trace(tracer) },
+        Task::SharedWorkerOwnerMessage { port, .. } => unsafe { port.trace(tracer) },
         Task::WorkerError { owner: Some(owner), .. } => unsafe { owner.trace(tracer) },
-        Task::Navigation(_)
+        Task::Geolocation { .. }
+        | Task::Navigation(_)
         | Task::BroadcastChannelMessage { .. }
         | Task::WorkerMessage { .. }
+        | Task::SharedWorkerMessage { .. }
         | Task::WorkerError { owner: None, .. } => {}
     }
 }
@@ -157,6 +175,7 @@ impl EventLoop {
     pub(crate) fn enqueue_timer(&mut self, payload: TimerPayload) {
         let source = match payload {
             TimerPayload::ResourceLoad { .. } => TaskSource::Networking,
+            TimerPayload::GeolocationTimeout { .. } => TaskSource::Geolocation,
             _ => TaskSource::Timer,
         };
         self.enqueue(source, Task::Timer(payload));
@@ -183,6 +202,11 @@ impl EventLoop {
     /// Queues a callback on the DOM manipulation task source.
     pub(crate) fn enqueue_dom_manipulation(&mut self, payload: TimerPayload) {
         self.enqueue(TaskSource::DomManipulation, Task::Timer(payload));
+    }
+
+    /// Queues a geolocation delivery on its own task source.
+    pub(crate) fn enqueue_geolocation(&mut self, request_id: u64) {
+        self.enqueue(TaskSource::Geolocation, Task::Geolocation { request_id });
     }
 
     /// Queues a port and cloned data on the posted message task source.
@@ -226,6 +250,31 @@ impl EventLoop {
                 worker_id,
                 owner,
                 data,
+            },
+        );
+    }
+
+    pub(crate) fn enqueue_shared_worker_message(&mut self, connection_id: u64, data: String) {
+        self.enqueue(
+            TaskSource::PostedMessage,
+            Task::SharedWorkerMessage { connection_id, data },
+        );
+    }
+
+    pub(crate) fn enqueue_shared_worker_owner_message(
+        &mut self,
+        connection_id: u64,
+        port: JsValue,
+        data: String,
+        origin: String,
+    ) {
+        self.enqueue(
+            TaskSource::PostedMessage,
+            Task::SharedWorkerOwnerMessage {
+                connection_id,
+                port,
+                data,
+                origin,
             },
         );
     }
@@ -295,12 +344,22 @@ impl EventLoop {
         }
     }
 
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.now_ms
+    }
+
     pub(crate) fn has_pending_timers(&self) -> bool {
         !self.timers.is_empty()
             || self
                 .queues
                 .values()
                 .any(|queue| queue.iter().any(|(_, task)| matches!(task, Task::Timer(_))))
+    }
+
+    pub(crate) fn has_pending_geolocation_tasks(&self) -> bool {
+        self.queues
+            .get(&TaskSource::Geolocation)
+            .is_some_and(|queue| queue.iter().any(|(_, task)| matches!(task, Task::Geolocation { .. })))
     }
 
     pub(crate) fn schedule_animation_frame(&mut self, callback: JsValue) -> u64 {
@@ -333,6 +392,7 @@ impl EventLoop {
     pub(crate) fn rendering_time_ms(&self) -> f64 {
         self.now_ms as f64
     }
+
 }
 
 #[cfg(test)]
@@ -401,6 +461,16 @@ mod tests {
             .map(|(_, task)| match task { Task::Timer(TimerPayload::Source(value)) => value, _ => panic!("unexpected task") })
             .collect();
         assert_eq!(labels, ["open", "timer", "message"]);
+    }
+
+    #[test]
+    fn geolocation_tasks_use_their_own_source() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_geolocation(7);
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((TaskSource::Geolocation, Task::Geolocation { request_id: 7 }))
+        ));
     }
 
     #[test]

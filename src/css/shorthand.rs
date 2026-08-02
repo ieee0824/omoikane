@@ -967,6 +967,44 @@ fn is_color_function(name: &str) -> bool {
 }
 
 fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    if let Value::CommaList(layers) = value {
+        // Each comma-separated mask layer has its own longhand slots.  A
+        // component omitted from one layer still consumes that layer's slot
+        // and takes the property's initial value; dropping it would shift a
+        // later value onto the wrong image layer (for example, `url(a),
+        // url(b) no-repeat`).
+        let expanded_layers = layers
+            .into_iter()
+            .map(|layer| expand_mask_shorthand(layer, important))
+            .collect::<Vec<_>>();
+        let names = [
+            "mask-image",
+            "mask-position-x",
+            "mask-position-y",
+            "mask-size",
+            "mask-repeat",
+        ];
+        return names
+            .into_iter()
+            .map(|name| {
+                let values = expanded_layers
+                    .iter()
+                    .map(|declarations| {
+                        declarations
+                            .iter()
+                            .find(|declaration| declaration.name == name)
+                            .map(|declaration| declaration.value.clone())
+                            .unwrap_or_else(|| mask_initial_value(name))
+                    })
+                    .collect::<Vec<_>>();
+                Declaration {
+                    name: name.to_string(),
+                    value: Value::CommaList(values),
+                    important,
+                }
+            })
+            .collect();
+    }
     let values = match value {
         Value::List(values) => values,
         single => vec![single],
@@ -999,6 +1037,11 @@ fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
             {
                 repeat = Some(item.clone());
             }
+            Value::Function { name, .. } if is_mask_image_function(name) => {
+                if image.is_none() {
+                    image = Some(Value::Keyword(render_mask_value(item)));
+                }
+            }
             Value::Function { .. } => unsupported_image = true,
             item if is_mask_position_value(item) => position.push(item.clone()),
             _ => {}
@@ -1018,7 +1061,7 @@ fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     }
 
     let mut declarations = Vec::new();
-    // This implementation supports only URL masks. Gradients and other image
+    // This implementation supports URL and gradient masks. Other image
     // functions deliberately compute to `none`, i.e. no mask is applied.
     if unsupported_image && image.is_none() {
         image = Some(Value::Keyword("none".to_string()));
@@ -1048,7 +1091,92 @@ fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     declarations
 }
 
+fn mask_initial_value(name: &str) -> Value {
+    match name {
+        "mask-image" => Value::Keyword("none".to_string()),
+        "mask-position-x" | "mask-position-y" => Value::Percentage(0.0),
+        "mask-size" => Value::Keyword("auto".to_string()),
+        "mask-repeat" => Value::Keyword("repeat".to_string()),
+        _ => Value::Keyword("initial".to_string()),
+    }
+}
+
+fn is_mask_image_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "linear-gradient"
+            | "repeating-linear-gradient"
+            | "radial-gradient"
+            | "repeating-radial-gradient"
+            | "conic-gradient"
+            | "repeating-conic-gradient"
+    )
+}
+
+fn render_mask_value(value: &Value) -> String {
+    match value {
+        Value::Keyword(value) => value.clone(),
+        Value::Length(number, unit) => format!("{number}{unit}"),
+        Value::Color(value) | Value::String(value) => value.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Percentage(number) => format!("{number}%"),
+        Value::Function { name, arguments } => format!(
+            "{name}({})",
+            arguments
+                .iter()
+                .map(render_mask_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::List(values) => values
+            .iter()
+            .map(render_mask_value)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(render_mask_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 fn expand_mask_position_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    if let Value::CommaList(layers) = value {
+        let mut x_values = Vec::with_capacity(layers.len());
+        let mut y_values = Vec::with_capacity(layers.len());
+        for layer in layers {
+            let values = match layer {
+                Value::List(values) => values,
+                single => vec![single],
+            };
+            let declarations = expand_mask_position_values(&values, important);
+            let x = declarations
+                .iter()
+                .find(|declaration| declaration.name == "mask-position-x")
+                .map(|declaration| declaration.value.clone());
+            let y = declarations
+                .iter()
+                .find(|declaration| declaration.name == "mask-position-y")
+                .map(|declaration| declaration.value.clone());
+            if let (Some(x), Some(y)) = (x, y) {
+                x_values.push(x);
+                y_values.push(y);
+            }
+        }
+        return vec![
+            Declaration {
+                name: "mask-position-x".to_string(),
+                value: Value::CommaList(x_values),
+                important,
+            },
+            Declaration {
+                name: "mask-position-y".to_string(),
+                value: Value::CommaList(y_values),
+                important,
+            },
+        ];
+    }
     let values = match value {
         Value::List(values) => values,
         single => vec![single],

@@ -1,9 +1,14 @@
-//! CSS Transforms Level 1 parsing and two-dimensional matrix primitives.
+//! CSS Transforms parsing and matrix primitives.
 
 use std::f32::consts::PI;
 
-/// A two-dimensional affine transform using the CSS `matrix(a,b,c,d,e,f)`
-/// convention.
+/// A two-dimensional transform using the CSS `matrix(a,b,c,d,e,f)` convention.
+///
+/// The final row (`g`, `h`, `i`) is normally `0, 0, 1`.  Keeping it here lets
+/// the paint and DOM-geometry paths represent the projective transform of a
+/// CSS 3D plane (for example `rotateY()` followed by `perspective()`) without
+/// changing the long-standing 2D call sites.  Existing affine transforms keep
+/// exactly the same values and behaviour.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffineTransform {
     pub a: f32,
@@ -12,6 +17,9 @@ pub struct AffineTransform {
     pub d: f32,
     pub e: f32,
     pub f: f32,
+    pub g: f32,
+    pub h: f32,
+    pub i: f32,
 }
 
 impl Default for AffineTransform {
@@ -29,6 +37,9 @@ impl AffineTransform {
             d: 1.0,
             e: 0.0,
             f: 0.0,
+            g: 0.0,
+            h: 0.0,
+            i: 1.0,
         }
     }
 
@@ -39,18 +50,24 @@ impl AffineTransform {
             && approximately(self.d, 1.0)
             && approximately(self.e, 0.0)
             && approximately(self.f, 0.0)
+            && approximately(self.g, 0.0)
+            && approximately(self.h, 0.0)
+            && approximately(self.i, 1.0)
     }
 
     /// Matrix multiplication. `self.multiply(other)` produces `self * other`,
     /// matching the order used by CSS transform lists.
     pub fn multiply(self, other: Self) -> Self {
         Self {
-            a: self.a * other.a + self.c * other.b,
-            b: self.b * other.a + self.d * other.b,
-            c: self.a * other.c + self.c * other.d,
-            d: self.b * other.c + self.d * other.d,
-            e: self.a * other.e + self.c * other.f + self.e,
-            f: self.b * other.e + self.d * other.f + self.f,
+            a: self.a * other.a + self.c * other.b + self.e * other.g,
+            b: self.b * other.a + self.d * other.b + self.f * other.g,
+            c: self.a * other.c + self.c * other.d + self.e * other.h,
+            d: self.b * other.c + self.d * other.d + self.f * other.h,
+            e: self.a * other.e + self.c * other.f + self.e * other.i,
+            f: self.b * other.e + self.d * other.f + self.f * other.i,
+            g: self.g * other.a + self.h * other.b + self.i * other.g,
+            h: self.g * other.c + self.h * other.d + self.i * other.h,
+            i: self.g * other.e + self.h * other.f + self.i * other.i,
         }
     }
 
@@ -79,6 +96,7 @@ impl AffineTransform {
             d: cos,
             e: 0.0,
             f: 0.0,
+            ..Self::identity()
         }
     }
 
@@ -90,29 +108,42 @@ impl AffineTransform {
             d: 1.0,
             e: 0.0,
             f: 0.0,
+            ..Self::identity()
         }
     }
 
     pub fn transform_point(self, x: f32, y: f32) -> (f32, f32) {
-        (
-            self.a * x + self.c * y + self.e,
-            self.b * x + self.d * y + self.f,
-        )
+        let denominator = self.g * x + self.h * y + self.i;
+        let numerator_x = self.a * x + self.c * y + self.e;
+        let numerator_y = self.b * x + self.d * y + self.f;
+        if denominator.abs() <= 1e-7 {
+            // A plane crossing the projective horizon has no finite screen
+            // coordinate.  NaN is an explicit sentinel for geometry callers;
+            // they can discard the affected bounds before converting to
+            // integer loop limits instead of accidentally iterating forever.
+            return (f32::NAN, f32::NAN);
+        }
+        (numerator_x / denominator, numerator_y / denominator)
     }
 
     pub fn inverse(self) -> Option<Self> {
-        let determinant = self.a * self.d - self.b * self.c;
+        let determinant = self.a * (self.d * self.i - self.f * self.h)
+            - self.c * (self.b * self.i - self.f * self.g)
+            + self.e * (self.b * self.h - self.d * self.g);
         if !determinant.is_finite() || determinant.abs() < 1e-8 {
             return None;
         }
         let inverse = 1.0 / determinant;
         Some(Self {
-            a: self.d * inverse,
-            b: -self.b * inverse,
-            c: -self.c * inverse,
-            d: self.a * inverse,
+            a: (self.d * self.i - self.f * self.h) * inverse,
+            b: (self.f * self.g - self.b * self.i) * inverse,
+            c: (self.e * self.h - self.c * self.i) * inverse,
+            d: (self.a * self.i - self.e * self.g) * inverse,
             e: (self.c * self.f - self.d * self.e) * inverse,
             f: (self.b * self.e - self.a * self.f) * inverse,
+            g: (self.b * self.h - self.d * self.g) * inverse,
+            h: (self.c * self.g - self.a * self.h) * inverse,
+            i: (self.a * self.d - self.c * self.b) * inverse,
         })
     }
 
@@ -138,35 +169,352 @@ pub(crate) struct TransformReferenceBox {
     pub root_font_size: f32,
 }
 
-/// Parses a CSS 2D transform list and returns the absolute-coordinate matrix,
-/// including `transform-origin`.
+/// A CSS 4×4 transform matrix in row-major storage.  CSS serializes the
+/// matrix column-major (`matrix3d(m11, m12, …)`), so the parser below performs
+/// the one explicit conversion at the boundary.  Keeping this representation
+/// private avoids leaking a second matrix convention to layout callers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Matrix4 {
+    values: [f32; 16],
+}
+
+impl Matrix4 {
+    const fn identity() -> Self {
+        Self {
+            values: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        }
+    }
+
+    fn multiply(self, other: Self) -> Self {
+        let mut values = [0.0; 16];
+        for row in 0..4 {
+            for column in 0..4 {
+                values[row * 4 + column] = (0..4)
+                    .map(|index| self.values[row * 4 + index] * other.values[index * 4 + column])
+                    .sum();
+            }
+        }
+        Self { values }
+    }
+
+    fn translate(x: f32, y: f32, z: f32) -> Self {
+        let mut matrix = Self::identity();
+        matrix.values[3] = x;
+        matrix.values[7] = y;
+        matrix.values[11] = z;
+        matrix
+    }
+
+    fn scale(x: f32, y: f32, z: f32) -> Self {
+        let mut matrix = Self::identity();
+        matrix.values[0] = x;
+        matrix.values[5] = y;
+        matrix.values[10] = z;
+        matrix
+    }
+
+    fn rotate_x(radians: f32) -> Self {
+        let (sin, cos) = radians.sin_cos();
+        Self {
+            values: [
+                1.0, 0.0, 0.0, 0.0, 0.0, cos, -sin, 0.0, 0.0, sin, cos, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        }
+    }
+
+    fn rotate_y(radians: f32) -> Self {
+        let (sin, cos) = radians.sin_cos();
+        Self {
+            values: [
+                cos, 0.0, sin, 0.0, 0.0, 1.0, 0.0, 0.0, -sin, 0.0, cos, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        }
+    }
+
+    fn rotate_z(radians: f32) -> Self {
+        let (sin, cos) = radians.sin_cos();
+        Self {
+            values: [
+                cos, -sin, 0.0, 0.0, sin, cos, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        }
+    }
+
+    fn rotate_axis(x: f32, y: f32, z: f32, radians: f32) -> Option<Self> {
+        let length = (x * x + y * y + z * z).sqrt();
+        if !length.is_finite() || length <= f32::EPSILON {
+            return None;
+        }
+        let (x, y, z) = (x / length, y / length, z / length);
+        let (sin, cos) = radians.sin_cos();
+        let one_minus_cos = 1.0 - cos;
+        Some(Self {
+            values: [
+                x * x * one_minus_cos + cos,
+                x * y * one_minus_cos - z * sin,
+                x * z * one_minus_cos + y * sin,
+                0.0,
+                y * x * one_minus_cos + z * sin,
+                y * y * one_minus_cos + cos,
+                y * z * one_minus_cos - x * sin,
+                0.0,
+                z * x * one_minus_cos - y * sin,
+                z * y * one_minus_cos + x * sin,
+                z * z * one_minus_cos + cos,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ],
+        })
+    }
+
+    fn skew(x_radians: f32, y_radians: f32) -> Self {
+        let mut matrix = Self::identity();
+        matrix.values[1] = x_radians.tan();
+        matrix.values[4] = y_radians.tan();
+        matrix
+    }
+
+    fn perspective(distance: f32) -> Option<Self> {
+        if !distance.is_finite() || distance <= 0.0 {
+            return None;
+        }
+        let mut matrix = Self::identity();
+        // CSS perspective contributes -1 / distance to homogeneous w.  In
+        // this row-major, column-vector representation that is the fourth
+        // row, third column (`values[14]`).
+        matrix.values[14] = -1.0 / distance;
+        Some(matrix)
+    }
+
+    fn around(self, x: f32, y: f32, z: f32) -> Self {
+        Self::translate(x, y, z)
+            .multiply(self)
+            .multiply(Self::translate(-x, -y, -z))
+    }
+
+    fn is_identity(self) -> bool {
+        self == Self::identity()
+    }
+
+    /// Restrict the transformed z=0 plane to a 3×3 projective transform.
+    fn to_projective(self) -> AffineTransform {
+        AffineTransform {
+            a: self.values[0],
+            b: self.values[4],
+            c: self.values[1],
+            d: self.values[5],
+            e: self.values[3],
+            f: self.values[7],
+            g: self.values[12],
+            h: self.values[13],
+            i: self.values[15],
+        }
+    }
+}
+
+/// Parses a CSS transform list and returns its z=0 plane as an
+/// absolute-coordinate projective matrix.  Pure 2D lists remain affine;
+/// 3D/perspective lists retain the projective denominator needed by paint and
+/// DOM geometry.
 pub(crate) fn parse_transform_with_origin(
     transform: &str,
     origin: &str,
     reference: TransformReferenceBox,
 ) -> Option<AffineTransform> {
-    let matrix = parse_transform_list(transform, reference)?;
+    let matrix = parse_transform_matrix(transform, reference)?;
     if matrix.is_identity() {
-        return Some(matrix);
+        return Some(matrix.to_projective());
     }
-    let (origin_x, origin_y) = parse_transform_origin(origin, reference)?;
-    Some(matrix.around(origin_x, origin_y))
+    let (origin_x, origin_y, origin_z) = parse_transform_origin_3d(origin, reference)?;
+    Some(matrix.around(origin_x, origin_y, origin_z).to_projective())
 }
 
 pub(crate) fn parse_transform_list(
     value: &str,
     reference: TransformReferenceBox,
 ) -> Option<AffineTransform> {
-    let functions = parse_transform_functions(value)?;
-    if functions.is_empty() {
+    Some(parse_transform_matrix(value, reference)?.to_projective())
+}
+
+/// Parses the `perspective` property and returns the projective matrix that
+/// should be applied to a child plane.  `none` and CSS-wide keywords
+/// intentionally produce identity; callers can use the same helper for value
+/// validation and layout composition.
+pub(crate) fn parse_perspective_with_origin(
+    perspective: &str,
+    origin: &str,
+    reference: TransformReferenceBox,
+) -> Option<AffineTransform> {
+    let value = perspective.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("none") || is_css_wide_keyword(value) {
         return Some(AffineTransform::identity());
     }
+    let distance = parse_length(value, reference)?;
+    let (origin_x, origin_y) = parse_perspective_origin(origin, reference)?;
+    Some(
+        Matrix4::perspective(distance)?
+            .around(origin_x, origin_y, 0.0)
+            .to_projective(),
+    )
+}
 
-    let mut result = AffineTransform::identity();
+pub(crate) fn parse_perspective_origin(
+    value: &str,
+    reference: TransformReferenceBox,
+) -> Option<(f32, f32)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let value = if is_css_wide_keyword(value) {
+        "50% 50%"
+    } else {
+        value
+    };
+    let values = value.split_whitespace().collect::<Vec<_>>();
+    if values.is_empty() || values.len() > 2 {
+        return None;
+    }
+    let (x, y) = match values.as_slice() {
+        [single] if is_vertical_keyword(single) => ("center", *single),
+        [single] => (*single, "center"),
+        [first, second] if is_vertical_keyword(first) && is_horizontal_keyword(second) => {
+            (*second, *first)
+        }
+        [first, second] => (*first, *second),
+        _ => return None,
+    };
+    Some((
+        reference.x + parse_origin_axis(x, reference.width, true, reference)?,
+        reference.y + parse_origin_axis(y, reference.height, false, reference)?,
+    ))
+}
+
+fn parse_transform_matrix(value: &str, reference: TransformReferenceBox) -> Option<Matrix4> {
+    let functions = parse_transform_functions(value)?;
+    if functions.is_empty() {
+        return Some(Matrix4::identity());
+    }
+
+    let mut result = Matrix4::identity();
     for (name, args) in functions {
-        result = result.multiply(parse_transform_function(name, args, reference)?);
+        result = result.multiply(parse_transform_matrix_function(name, args, reference)?);
     }
     Some(result)
+}
+
+fn parse_transform_matrix_function(
+    name: &str,
+    args: &str,
+    reference: TransformReferenceBox,
+) -> Option<Matrix4> {
+    let args = split_args(args)?;
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "matrix" if args.len() == 6 => {
+            let values = args
+                .iter()
+                .map(|value| parse_number(value))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Matrix4 {
+                values: [
+                    values[0], values[2], 0.0, values[4], values[1], values[3], 0.0, values[5],
+                    0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                ],
+            })
+        }
+        "matrix3d" if args.len() == 16 => {
+            let values = args
+                .iter()
+                .map(|value| parse_number(value))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Matrix4 {
+                values: [
+                    values[0], values[4], values[8], values[12], values[1], values[5], values[9],
+                    values[13], values[2], values[6], values[10], values[14], values[3], values[7],
+                    values[11], values[15],
+                ],
+            })
+        }
+        "translate" if (1..=2).contains(&args.len()) => Some(Matrix4::translate(
+            parse_length_percentage(args[0], reference.width, reference)?,
+            if args.len() == 2 {
+                parse_length_percentage(args[1], reference.height, reference)?
+            } else {
+                0.0
+            },
+            0.0,
+        )),
+        "translatex" if args.len() == 1 => Some(Matrix4::translate(
+            parse_length_percentage(args[0], reference.width, reference)?,
+            0.0,
+            0.0,
+        )),
+        "translatey" if args.len() == 1 => Some(Matrix4::translate(
+            0.0,
+            parse_length_percentage(args[0], reference.height, reference)?,
+            0.0,
+        )),
+        "translatez" if args.len() == 1 => Some(Matrix4::translate(
+            0.0,
+            0.0,
+            parse_length(args[0], reference)?,
+        )),
+        "translate3d" if args.len() == 3 => Some(Matrix4::translate(
+            parse_length_percentage(args[0], reference.width, reference)?,
+            parse_length_percentage(args[1], reference.height, reference)?,
+            parse_length(args[2], reference)?,
+        )),
+        "scale" if (1..=2).contains(&args.len()) => {
+            let x = parse_scale(args[0])?;
+            Some(Matrix4::scale(
+                x,
+                if args.len() == 2 {
+                    parse_scale(args[1])?
+                } else {
+                    x
+                },
+                1.0,
+            ))
+        }
+        "scalex" if args.len() == 1 => Some(Matrix4::scale(parse_scale(args[0])?, 1.0, 1.0)),
+        "scaley" if args.len() == 1 => Some(Matrix4::scale(1.0, parse_scale(args[0])?, 1.0)),
+        "scalez" if args.len() == 1 => Some(Matrix4::scale(1.0, 1.0, parse_scale(args[0])?)),
+        "scale3d" if args.len() == 3 => Some(Matrix4::scale(
+            parse_scale(args[0])?,
+            parse_scale(args[1])?,
+            parse_scale(args[2])?,
+        )),
+        "rotate" | "rotatez" if args.len() == 1 => Some(Matrix4::rotate_z(parse_angle(args[0])?)),
+        "rotatex" if args.len() == 1 => Some(Matrix4::rotate_x(parse_angle(args[0])?)),
+        "rotatey" if args.len() == 1 => Some(Matrix4::rotate_y(parse_angle(args[0])?)),
+        "rotate3d" if args.len() == 4 => Matrix4::rotate_axis(
+            parse_number(args[0])?,
+            parse_number(args[1])?,
+            parse_number(args[2])?,
+            parse_angle(args[3])?,
+        ),
+        "skew" if (1..=2).contains(&args.len()) => Some(Matrix4::skew(
+            parse_angle(args[0])?,
+            if args.len() == 2 {
+                parse_angle(args[1])?
+            } else {
+                0.0
+            },
+        )),
+        "skewx" if args.len() == 1 => Some(Matrix4::skew(parse_angle(args[0])?, 0.0)),
+        "skewy" if args.len() == 1 => Some(Matrix4::skew(0.0, parse_angle(args[0])?)),
+        "perspective" if args.len() == 1 => Matrix4::perspective(parse_length(args[0], reference)?),
+        _ => None,
+    }
 }
 
 fn parse_transform_functions(value: &str) -> Option<Vec<(&str, &str)>> {
@@ -245,11 +593,7 @@ enum TransformOperation {
 /// Interpolates compatible CSS 2D transform lists without resolving relative
 /// lengths. Percentages and font-relative lengths therefore remain available
 /// for resolution against the element's real reference box during layout.
-pub(crate) fn interpolate_transform_lists(
-    start: &str,
-    end: &str,
-    progress: f32,
-) -> Option<String> {
+pub(crate) fn interpolate_transform_lists(start: &str, end: &str, progress: f32) -> Option<String> {
     let start_text = start;
     let end_text = end;
     let mut start = parse_interpolable_transform_list(start_text)?;
@@ -260,7 +604,10 @@ pub(crate) fn interpolate_transform_lists(
     if start.is_empty() {
         start = end.iter().map(TransformOperation::identity_like).collect();
     } else if end.is_empty() {
-        end = start.iter().map(TransformOperation::identity_like).collect();
+        end = start
+            .iter()
+            .map(TransformOperation::identity_like)
+            .collect();
     }
     if start.len() < end.len() {
         start.extend(
@@ -453,6 +800,9 @@ impl TransformOperation {
                 d: values[3],
                 e: values[4],
                 f: values[5],
+                g: 0.0,
+                h: 0.0,
+                i: 1.0,
             }),
             Self::Translate(x, y) => Some(AffineTransform::translate(
                 x.absolute_px()?,
@@ -599,70 +949,6 @@ fn format_component(value: f32) -> String {
         .to_string()
 }
 
-fn parse_transform_function(
-    name: &str,
-    args: &str,
-    reference: TransformReferenceBox,
-) -> Option<AffineTransform> {
-    let args = split_args(args)?;
-    let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "matrix" if args.len() == 6 => Some(AffineTransform {
-            a: parse_number(args[0])?,
-            b: parse_number(args[1])?,
-            c: parse_number(args[2])?,
-            d: parse_number(args[3])?,
-            e: parse_number(args[4])?,
-            f: parse_number(args[5])?,
-        }),
-        "translate" if (1..=2).contains(&args.len()) => Some(AffineTransform::translate(
-            parse_length_percentage(args[0], reference.width, reference)?,
-            if args.len() == 2 {
-                parse_length_percentage(args[1], reference.height, reference)?
-            } else {
-                0.0
-            },
-        )),
-        "translatex" if args.len() == 1 => Some(AffineTransform::translate(
-            parse_length_percentage(args[0], reference.width, reference)?,
-            0.0,
-        )),
-        "translatey" if args.len() == 1 => Some(AffineTransform::translate(
-            0.0,
-            parse_length_percentage(args[0], reference.height, reference)?,
-        )),
-        "translate3d" if args.len() == 3 && parse_zero_length(args[2]) => {
-            Some(AffineTransform::translate(
-                parse_length_percentage(args[0], reference.width, reference)?,
-                parse_length_percentage(args[1], reference.height, reference)?,
-            ))
-        }
-        "scale" if (1..=2).contains(&args.len()) => {
-            let x = parse_scale(args[0])?;
-            let y = if args.len() == 2 {
-                parse_scale(args[1])?
-            } else {
-                x
-            };
-            Some(AffineTransform::scale(x, y))
-        }
-        "scalex" if args.len() == 1 => Some(AffineTransform::scale(parse_scale(args[0])?, 1.0)),
-        "scaley" if args.len() == 1 => Some(AffineTransform::scale(1.0, parse_scale(args[0])?)),
-        "rotate" if args.len() == 1 => Some(AffineTransform::rotate(parse_angle(args[0])?)),
-        "skew" if (1..=2).contains(&args.len()) => Some(AffineTransform::skew(
-            parse_angle(args[0])?,
-            if args.len() == 2 {
-                parse_angle(args[1])?
-            } else {
-                0.0
-            },
-        )),
-        "skewx" if args.len() == 1 => Some(AffineTransform::skew(parse_angle(args[0])?, 0.0)),
-        "skewy" if args.len() == 1 => Some(AffineTransform::skew(0.0, parse_angle(args[0])?)),
-        _ => None,
-    }
-}
-
 fn split_args(value: &str) -> Option<Vec<&str>> {
     if value.trim().is_empty() {
         return Some(Vec::new());
@@ -716,6 +1002,22 @@ fn parse_length_percentage(
     (zero == 0.0).then_some(0.0)
 }
 
+fn parse_length(value: &str, reference: TransformReferenceBox) -> Option<f32> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let value = normalized.as_str();
+    if let Some(px) = value.strip_suffix("px") {
+        return parse_number(px);
+    }
+    if let Some(rem) = value.strip_suffix("rem") {
+        return Some(parse_number(rem)? * reference.root_font_size);
+    }
+    if let Some(em) = value.strip_suffix("em") {
+        return Some(parse_number(em)? * reference.font_size);
+    }
+    let zero = parse_number(value)?;
+    (zero == 0.0).then_some(0.0)
+}
+
 fn parse_zero_length(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase();
     let value = normalized.as_str();
@@ -741,7 +1043,10 @@ fn parse_angle(value: &str) -> Option<f32> {
     (zero == 0.0).then_some(0.0)
 }
 
-fn parse_transform_origin(value: &str, reference: TransformReferenceBox) -> Option<(f32, f32)> {
+fn parse_transform_origin_3d(
+    value: &str,
+    reference: TransformReferenceBox,
+) -> Option<(f32, f32, f32)> {
     let value = value.trim();
     let value = if value.is_empty() || is_css_wide_keyword(value) {
         "50% 50%"
@@ -756,7 +1061,7 @@ fn parse_transform_origin(value: &str, reference: TransformReferenceBox) -> Opti
         if values[2].ends_with('%') {
             return None;
         }
-        parse_length_percentage(values[2], 0.0, reference)?;
+        parse_length(values[2], reference)?;
     }
 
     let (x, y) = match values.as_slice() {
@@ -771,6 +1076,11 @@ fn parse_transform_origin(value: &str, reference: TransformReferenceBox) -> Opti
     Some((
         reference.x + parse_origin_axis(x, reference.width, true, reference)?,
         reference.y + parse_origin_axis(y, reference.height, false, reference)?,
+        if values.len() == 3 {
+            parse_length(values[2], reference)?
+        } else {
+            0.0
+        },
     ))
 }
 
@@ -858,6 +1168,61 @@ mod tests {
     }
 
     #[test]
+    fn parses_matrix3d_and_non_zero_translate_z() {
+        let matrix = parse_transform_list(
+            "matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 12, 8, 4, 1)",
+            reference(),
+        )
+        .unwrap();
+        assert_eq!(matrix.transform_point(0.0, 0.0), (12.0, 8.0));
+
+        let translated = parse_transform_list("translate3d(12px, 8px, 4px)", reference()).unwrap();
+        assert_eq!(translated.transform_point(0.0, 0.0), (12.0, 8.0));
+        assert!(parse_transform_list("translate3d(1px, 2px, 3%)", reference()).is_none());
+    }
+
+    #[test]
+    fn perspective_projects_rotated_plane_and_preserves_2d_identity() {
+        let identity = parse_transform_list("perspective(500px)", reference()).unwrap();
+        assert!(identity.is_identity());
+        let matrix =
+            parse_transform_list("perspective(500px) rotateY(45deg)", reference()).unwrap();
+        let left = matrix.transform_point(0.0, 0.0);
+        let right = matrix.transform_point(100.0, 0.0);
+        assert!(right.0 > left.0);
+        assert!(right.0 - left.0 < 100.0);
+    }
+
+    #[test]
+    fn projective_horizon_returns_non_finite_sentinel() {
+        let matrix = AffineTransform {
+            g: 1.0,
+            ..AffineTransform::identity()
+        };
+        let point = matrix.transform_point(-1.0, 10.0);
+        assert!(point.0.is_nan());
+        assert!(point.1.is_nan());
+    }
+
+    #[test]
+    fn rejects_empty_perspective_values_but_accepts_css_wide_keywords() {
+        assert!(parse_perspective_with_origin("", "50% 50%", reference()).is_none());
+        assert!(parse_perspective_with_origin("500px", "", reference()).is_none());
+        assert!(parse_perspective_origin("", reference()).is_none());
+        assert!(parse_perspective_with_origin("none", "50% 50%", reference()).is_some());
+        assert!(parse_perspective_with_origin("initial", "50% 50%", reference()).is_some());
+        assert!(parse_perspective_origin("initial", reference()).is_some());
+    }
+
+    #[test]
+    fn transform_origin_accepts_z_length() {
+        let matrix =
+            parse_transform_with_origin("rotateX(90deg)", "50% 50% 10px", reference()).unwrap();
+        assert!(matrix.transform_point(110.0, 70.0).0.is_finite());
+        assert!(matrix.transform_point(110.0, 70.0).1.is_finite());
+    }
+
+    #[test]
     fn interpolates_compatible_transform_lists_without_losing_relative_units() {
         assert_eq!(
             interpolate_transform_lists(
@@ -882,12 +1247,8 @@ mod tests {
 
     #[test]
     fn interpolated_transform_matches_firefox_midpoint_matrix() {
-        let value = interpolate_transform_lists(
-            "none",
-            "translate(50%, 2rem) rotate(180deg)",
-            0.5,
-        )
-        .unwrap();
+        let value = interpolate_transform_lists("none", "translate(50%, 2rem) rotate(180deg)", 0.5)
+            .unwrap();
         let matrix = parse_transform_list(
             &value,
             TransformReferenceBox {
@@ -912,9 +1273,7 @@ mod tests {
     fn rejects_incompatible_transform_operations_and_length_units() {
         let decomposed = interpolate_transform_lists("scale(2)", "rotate(1rad)", 0.5).unwrap();
         assert!(parse_transform_list(&decomposed, reference()).is_some());
-        assert!(
-            interpolate_transform_lists("translateX(1em)", "translateX(1rem)", 0.5).is_none()
-        );
+        assert!(interpolate_transform_lists("translateX(1em)", "translateX(1rem)", 0.5).is_none());
     }
 
     #[test]

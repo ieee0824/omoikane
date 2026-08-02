@@ -25,6 +25,8 @@ const TIMER_PUMP_MAX_TASKS: usize = 100_000;
 const ANIMATION_FRAME_PUMP_MAX_FRAMES: usize = 8;
 /// Nominal headless refresh interval used for animation-frame timestamps.
 const ANIMATION_FRAME_INTERVAL_MS: u64 = 16;
+/// Maximum pixels allocated for a reusable background or mask tile surface.
+const MAX_TILE_PIXELS: u64 = 16_777_216;
 
 thread_local! {
     static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
@@ -326,9 +328,8 @@ fn box_filter_sample(
     let mut blue_sum = 0.0f64;
 
     for source_y in y0..y1 {
-        let y_weight = (source_bottom.min(source_y as f32 + 1.0)
-            - source_top.max(source_y as f32))
-        .max(0.0) as f64;
+        let y_weight = (source_bottom.min(source_y as f32 + 1.0) - source_top.max(source_y as f32))
+            .max(0.0) as f64;
         for source_x in x0..x1 {
             let x_weight = (source_right.min(source_x as f32 + 1.0)
                 - source_left.max(source_x as f32))
@@ -452,6 +453,15 @@ impl Canvas {
         self.pixels[offset + 1] = color.g;
         self.pixels[offset + 2] = color.b;
         self.pixels[offset + 3] = color.a;
+    }
+
+    /// Alpha-blends one pixel over the existing canvas contents.
+    pub(crate) fn blend_pixel(&mut self, x: u32, y: u32, color: Color) {
+        if x >= self.width || y >= self.height || color.a == 0 {
+            return;
+        }
+        let offset = (y as usize * self.width as usize + x as usize) * 4;
+        blend_pixel(&mut self.pixels[offset..offset + 4], color);
     }
 
     /// Returns the pixel color at `(x, y)`, if in bounds.
@@ -925,13 +935,7 @@ impl Canvas {
                     } else {
                         source_y as f32 + 1.0
                     };
-                    box_filter_sample(
-                        image,
-                        source_left,
-                        source_top,
-                        source_right,
-                        source_bottom,
-                    )
+                    box_filter_sample(image, source_left, source_top, source_right, source_bottom)
                 } else {
                     let source_index =
                         ((source_y as u32 * image.width + source_x as u32) * 4) as usize;
@@ -1158,10 +1162,8 @@ fn render_document_with_url_internal(
             // queues. Drive it explicitly after deferred page initialization and
             // before rebuilding styles/layout for the screenshot.
             let animation_frames_start = Instant::now();
-            let frame_callbacks_run = runtime.run_animation_frames(
-                ANIMATION_FRAME_PUMP_MAX_FRAMES,
-                ANIMATION_FRAME_INTERVAL_MS,
-            );
+            let frame_callbacks_run = runtime
+                .run_animation_frames(ANIMATION_FRAME_PUMP_MAX_FRAMES, ANIMATION_FRAME_INTERVAL_MS);
             image_animation_time_ms = runtime.rendering_time_ms();
             timings.animation_frames = animation_frames_start.elapsed();
             if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
@@ -1463,11 +1465,7 @@ fn paint_transformed_box(
             let tile_width = (tile_x1 - tile_x).max(1) as u32;
             let tile_height = (tile_y1 - tile_y).max(1) as u32;
             let mut translated_layout = layout.clone();
-            translate_layout_for_paint(
-                &mut translated_layout,
-                -(tile_x as f32),
-                -(tile_y as f32),
-            );
+            translate_layout_for_paint(&mut translated_layout, -(tile_x as f32), -(tile_y as f32));
             let translated_viewport = Rect {
                 x: viewport.x - tile_x as f32,
                 y: viewport.y - tile_y as f32,
@@ -1554,7 +1552,14 @@ pub(crate) fn apply_scroll_offsets(
         return;
     }
     let window_offset = (-window_scroll.0, -window_scroll.1);
-    translate_layout_for_scroll(layout, resolver, window_offset, window_offset, viewport, None);
+    translate_layout_for_scroll(
+        layout,
+        resolver,
+        window_offset,
+        window_offset,
+        viewport,
+        None,
+    );
 }
 
 /// Returns the topmost event target at viewport coordinates using the cached
@@ -1595,9 +1600,13 @@ fn hit_test_box(
     let transform = ancestor_transform.multiply(layout.transform);
     let inverse = transform.inverse()?;
     let local_point = inverse.transform_point(x, y);
+    if !local_point.0.is_finite() || !local_point.1.is_finite() {
+        return None;
+    }
     let style = resolver.computed_style(&layout.node);
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
+    let clip_shape = clip_path_shape(&style, border_box);
     let mut clip = inherited_clip;
     if let Some(inset) = clip_path_inset_rect(&style, border_box) {
         let inset = inset?;
@@ -1606,14 +1615,39 @@ fn hit_test_box(
             return None;
         }
     }
+    if let Some(shape) = clip_shape {
+        if !shape.contains(local_point) {
+            return None;
+        }
+        clip = intersect_optional_clip(clip, transformed_rect_bounds(shape.bounds(), transform));
+        if clip.is_none() || clip.is_some_and(|area| !rect_contains_point(area, x, y)) {
+            return None;
+        }
+    }
     if layout.overflow.clips_overflow() {
         let transformed_padding = transformed_rect_bounds(padding_box, transform);
         let base = clip.unwrap_or(viewport);
         let overflow_clip = Rect {
-            x: if layout.overflow.clips_x() { transformed_padding.x } else { base.x },
-            y: if layout.overflow.clips_y() { transformed_padding.y } else { base.y },
-            width: if layout.overflow.clips_x() { transformed_padding.width } else { base.width },
-            height: if layout.overflow.clips_y() { transformed_padding.height } else { base.height },
+            x: if layout.overflow.clips_x() {
+                transformed_padding.x
+            } else {
+                base.x
+            },
+            y: if layout.overflow.clips_y() {
+                transformed_padding.y
+            } else {
+                base.y
+            },
+            width: if layout.overflow.clips_x() {
+                transformed_padding.width
+            } else {
+                base.width
+            },
+            height: if layout.overflow.clips_y() {
+                transformed_padding.height
+            } else {
+                base.height
+            },
         };
         clip = intersect_optional_clip(clip, overflow_clip);
         if clip.is_none() {
@@ -1653,12 +1687,88 @@ fn hit_test_box(
             }
         }
     }
+    // Inline SVG is represented by one replaced layout box for painting, but
+    // pointer events still target its child geometry.  Resolve the child hit
+    // before line fragments return the SVG viewport element itself.
+    if layout.node.tag_name().as_deref() == Some("svg") {
+        // SVG is painted by the inline-image path into the fragment's content
+        // box.  Use that exact destination when available so padding and
+        // borders remain click-through instead of being mapped into the SVG
+        // viewBox.  The layout content box is a safe fallback for boxes that
+        // do not carry an inline image fragment (e.g. an empty SVG).
+        let svg_box = layout
+            .lines
+            .iter()
+            .flat_map(|line| line.fragments.iter())
+            .find_map(|fragment| match &fragment.content {
+                InlineFragmentContent::Image(_, fragment_style)
+                    if fragment.node.identity() == layout.node.identity() =>
+                {
+                    let border = EdgeSizesForPaint::from_style(fragment_style);
+                    Some(inline_fragment_content_rect(fragment.rect, fragment_style, border))
+                }
+                _ => None,
+            })
+            .unwrap_or(layout.dimensions.content);
+        if rect_contains_point(svg_box, local_point.0, local_point.1) {
+            let local_x = local_point.0 - svg_box.x;
+            let local_y = local_point.1 - svg_box.y;
+            let mut computed_pointer_events = |node: &NodeHandle| {
+                match resolver.computed_property(node, "pointer-events") {
+                    Some(ComputedValue::Keyword(value)) => Some(value),
+                    _ => None,
+                }
+            };
+            if let Some(target) = crate::svg::hit_test_svg(
+                &layout.node,
+                local_x,
+                local_y,
+                svg_box.width,
+                svg_box.height,
+                &mut computed_pointer_events,
+            ) {
+                return Some(target);
+            }
+        }
+    }
     for line in layout.lines.iter().rev() {
         for fragment in line.fragments.iter().rev() {
             if rect_contains_point(fragment.rect, local_point.0, local_point.1) {
+                if fragment.node.identity() != layout.node.identity()
+                    && fragment.node.tag_name().as_deref() == Some("svg")
+                {
+                    let svg_box = match &fragment.content {
+                        InlineFragmentContent::Image(_, fragment_style) => {
+                            let border = EdgeSizesForPaint::from_style(fragment_style);
+                            inline_fragment_content_rect(fragment.rect, fragment_style, border)
+                        }
+                        _ => fragment.rect,
+                    };
+                    if rect_contains_point(svg_box, local_point.0, local_point.1) {
+                        let local_x = local_point.0 - svg_box.x;
+                        let local_y = local_point.1 - svg_box.y;
+                        let mut computed_pointer_events = |node: &NodeHandle| {
+                            match resolver.computed_property(node, "pointer-events") {
+                                Some(ComputedValue::Keyword(value)) => Some(value),
+                                _ => None,
+                            }
+                        };
+                        if let Some(target) = crate::svg::hit_test_svg(
+                            &fragment.node,
+                            local_x,
+                            local_y,
+                            svg_box.width,
+                            svg_box.height,
+                            &mut computed_pointer_events,
+                        ) {
+                            return Some(target);
+                        }
+                    }
+                }
                 let target = event_target_element(&fragment.node)?;
-                let target_style = resolver.computed_style(&target);
-                if accepts_pointer_events(&target_style) {
+                if accepts_pointer_events_value(
+                    resolver.computed_property(&target, "pointer-events"),
+                ) {
                     return Some(target);
                 }
             }
@@ -1680,10 +1790,14 @@ fn hit_test_box(
 }
 
 fn accepts_pointer_events(style: &ComputedStyle) -> bool {
-    !matches!(
-        style.get("pointer-events"),
-        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
-    )
+    accepts_pointer_events_value(style.get("pointer-events").cloned())
+}
+
+fn accepts_pointer_events_value(value: Option<ComputedValue>) -> bool {
+    match value {
+        Some(ComputedValue::Keyword(value)) => !value.eq_ignore_ascii_case("none"),
+        _ => true,
+    }
 }
 
 fn event_target_element(node: &NodeHandle) -> Option<NodeHandle> {
@@ -1814,7 +1928,9 @@ fn sticky_inset(style: &ComputedStyle, side: &str, reference: f32) -> Option<f32
     match style.get(side) {
         Some(ComputedValue::Px(value)) => Some(*value),
         Some(ComputedValue::Percentage(value)) => Some(reference * *value / 100.0),
-        Some(ComputedValue::CalcPxPercent(px, percentage)) => Some(*px + reference * *percentage / 100.0),
+        Some(ComputedValue::CalcPxPercent(px, percentage)) => {
+            Some(*px + reference * *percentage / 100.0)
+        }
         Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
         _ => None,
     }
@@ -1836,12 +1952,24 @@ fn sticky_translation(
     let bottom = sticky_inset(style, "bottom", containing_block.height);
     (
         sticky_axis_translation(
-            margin_box.x, margin_box.width, scrollport.x, scrollport.width,
-            containing_block.x, containing_block.width, left, right,
+            margin_box.x,
+            margin_box.width,
+            scrollport.x,
+            scrollport.width,
+            containing_block.x,
+            containing_block.width,
+            left,
+            right,
         ),
         sticky_axis_translation(
-            margin_box.y, margin_box.height, scrollport.y, scrollport.height,
-            containing_block.y, containing_block.height, top, bottom,
+            margin_box.y,
+            margin_box.height,
+            scrollport.y,
+            scrollport.height,
+            containing_block.y,
+            containing_block.height,
+            top,
+            bottom,
         ),
     )
 }
@@ -1928,6 +2056,7 @@ fn paint_box_internal_untransformed(
     let style = resolver.computed_style(&layout.node);
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
+    let clip_shape = clip_path_shape(&style, border_box);
     let inherited_clip = if let Some(inset_clip) = clip_path_inset_rect(&style, border_box) {
         let Some(inset_clip) = inset_clip else {
             return;
@@ -1949,13 +2078,15 @@ fn paint_box_internal_untransformed(
         apply_backdrop_filters(canvas, &backdrop_filters, border_box, inherited_clip);
     }
 
-    // opacity、filter、または解決可能な mask-image がある場合、要素サブツリーを
+    // opacity、filter、mask、または非矩形 clip-path がある場合、要素サブツリーを
     // オフスクリーンバッファに描画してからまとめて合成する。
     let opacity = element_opacity(&style);
     let filters = element_filters(&style);
-    let mask = mask_image(&style);
-    let needs_offscreen =
-        opacity.is_some_and(|v| v < 1.0) || !filters.is_empty() || mask.is_some();
+    let masks = mask_layers(&style);
+    let needs_offscreen = opacity.is_some_and(|v| v < 1.0)
+        || !filters.is_empty()
+        || !masks.is_empty()
+        || clip_shape.is_some();
 
     if needs_offscreen {
         let opacity_value = opacity.unwrap_or(1.0);
@@ -1970,11 +2101,11 @@ fn paint_box_internal_untransformed(
             height: canvas.height() as f32,
         };
         let mut effect_bounds = subtree_paint_bounds(layout, resolver);
-        if mask.is_some() {
-            let Some(masked_bounds) = intersect(effect_bounds, border_box) else {
+        if let Some(shape) = &clip_shape {
+            let Some(shaped_bounds) = intersect(effect_bounds, shape.bounds()) else {
                 return;
             };
-            effect_bounds = masked_bounds;
+            effect_bounds = shaped_bounds;
         }
         if let Some(clip) = inherited_clip {
             let Some(clipped_bounds) = intersect(effect_bounds, clip) else {
@@ -2035,8 +2166,11 @@ fn paint_box_internal_untransformed(
         );
         apply_filters(&mut offscreen, &filters);
         offscreen.multiply_alpha(opacity_value);
-        if let Some(mask) = &mask {
-            apply_mask_alpha(&mut offscreen, mask, &style, offset_border_box);
+        if !masks.is_empty() {
+            apply_mask_alpha(&mut offscreen, &masks, &style, offset_border_box);
+        }
+        if let Some(shape) = clip_path_shape(&style, offset_border_box) {
+            apply_clip_path_shape(&mut offscreen, &shape);
         }
         // メインキャンバスに合成
         let dst_w = canvas.width() as i32;
@@ -2133,6 +2267,12 @@ fn composite_affine(
         transform.transform_point(source_min_x as f32, source_max_y as f32),
         transform.transform_point(source_max_x as f32, source_max_y as f32),
     ];
+    if corners
+        .iter()
+        .any(|point| !point.0.is_finite() || !point.1.is_finite())
+    {
+        return;
+    }
     let min_x = corners
         .iter()
         .map(|point| point.0)
@@ -2169,6 +2309,9 @@ fn composite_affine(
                 continue;
             }
             let (source_x, source_y) = inverse.transform_point(x as f32 + 0.5, y as f32 + 0.5);
+            if !source_x.is_finite() || !source_y.is_finite() {
+                continue;
+            }
             let source_x = source_x.floor() as i32;
             let source_y = source_y.floor() as i32;
             if source_x < source_min_x
@@ -2189,8 +2332,7 @@ fn composite_affine(
                 b: source.pixels[source_index + 2],
                 a: alpha,
             };
-            let destination_index =
-                ((y as u32 * destination.width() + x as u32) * 4) as usize;
+            let destination_index = ((y as u32 * destination.width() + x as u32) * 4) as usize;
             blend_pixel(
                 &mut destination.pixels[destination_index..destination_index + 4],
                 color,
@@ -2275,6 +2417,15 @@ fn transformed_rect_bounds(rect: Rect, transform: AffineTransform) -> Rect {
         transform.transform_point(rect.x, rect.y + rect.height),
         transform.transform_point(rect.x + rect.width, rect.y + rect.height),
     ];
+    if corners
+        .iter()
+        .any(|point| !point.0.is_finite() || !point.1.is_finite())
+    {
+        // If a corner crosses the projective horizon, preserve the original
+        // bounds rather than jumping to the origin while keeping the paint
+        // geometry finite and bounded.
+        return rect;
+    }
     let min_x = corners
         .iter()
         .map(|point| point.0)
@@ -2312,22 +2463,112 @@ fn union_rect(left: Rect, right: Rect) -> Rect {
     }
 }
 
-fn apply_mask_alpha(canvas: &mut Canvas, mask: &Image, style: &ComputedStyle, area: Rect) {
-    let (tile_width, tile_height) = mask_size(
-        style,
-        area,
-        mask.width().max(1) as f32,
-        mask.height().max(1) as f32,
-    );
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaskMode {
+    Alpha,
+    Luminance,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaskComposite {
+    Add,
+    Subtract,
+    Intersect,
+    Exclude,
+}
+
+fn mask_mode_for_layer(style: &ComputedStyle, index: usize) -> MaskMode {
+    match computed_style_layer_text(style.get("mask-mode"), index).as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("luminance") => MaskMode::Luminance,
+        _ => MaskMode::Alpha,
+    }
+}
+
+fn mask_composite_for_layer(style: &ComputedStyle, index: usize) -> MaskComposite {
+    match computed_style_layer_text(style.get("mask-composite"), index).as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("subtract") => MaskComposite::Subtract,
+        Some(value) if value.eq_ignore_ascii_case("intersect") => MaskComposite::Intersect,
+        Some(value) if value.eq_ignore_ascii_case("exclude") => MaskComposite::Exclude,
+        _ => MaskComposite::Add,
+    }
+}
+
+fn prepare_mask_tile(
+    source: &PreparedMask,
+    layer_style: &ComputedStyle,
+    area: Rect,
+) -> Option<(Arc<Image>, f32, f32)> {
+    let (intrinsic_width, intrinsic_height) = match source {
+        PreparedMask::Image(image) => (image.width().max(1) as f32, image.height().max(1) as f32),
+        PreparedMask::Gradient(_) => (area.width.max(1.0), area.height.max(1.0)),
+    };
+    let (tile_width, tile_height) = mask_size(layer_style, area, intrinsic_width, intrinsic_height);
     if tile_width <= 0.0 || tile_height <= 0.0 {
-        canvas.multiply_alpha(0.0);
+        return None;
+    }
+    let width = tile_width.ceil().max(1.0) as u32;
+    let height = tile_height.ceil().max(1.0) as u32;
+    // Keep malformed/hostile CSS from allocating an unbounded mask surface.
+    if u64::from(width) * u64::from(height) > MAX_TILE_PIXELS {
+        return None;
+    }
+    let tile = match source {
+        PreparedMask::Image(image) => Arc::clone(image),
+        PreparedMask::Gradient(gradient) => {
+            let mut canvas = Canvas::new(width, height);
+            color::paint_gradient(
+                &mut canvas,
+                gradient,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: tile_width,
+                    height: tile_height,
+                },
+                None,
+            );
+            Arc::new(Image::new(width, height, canvas.pixels).ok()?)
+        }
+    };
+    Some((tile, tile_width, tile_height))
+}
+
+fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedStyle, area: Rect) {
+    let prepared = layers
+        .iter()
+        .filter_map(|layer| {
+            let layer_style = mask_style_for_layer(style, layer.index);
+            let (tile, tile_width, tile_height) =
+                prepare_mask_tile(&layer.source, &layer_style, area)?;
+            let (repeat_x, repeat_y) = mask_repeat(&layer_style);
+            let (position_x, position_y) = mask_position(
+                &layer_style,
+                area.width,
+                area.height,
+                tile_width,
+                tile_height,
+            );
+            let mode = mask_mode_for_layer(style, layer.index);
+            let composite = mask_composite_for_layer(style, layer.index);
+            Some((
+                tile,
+                tile_width,
+                tile_height,
+                repeat_x,
+                repeat_y,
+                position_x,
+                position_y,
+                mode,
+                composite,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if prepared.is_empty() {
+        // A mask that could not be prepared (for example because its size is
+        // zero or exceeds the allocation cap) falls back to painting without
+        // a mask rather than making the entire element transparent.
         return;
     }
-    let (position_x, position_y) =
-        mask_position(style, area.width, area.height, tile_width, tile_height);
-    let anchor_x = area.x + position_x;
-    let anchor_y = area.y + position_y;
-    let repeat = mask_repeat(style);
     let width = canvas.width as i32;
     let height = canvas.height as i32;
     let area_x0 = area.x.floor().max(0.0) as i32;
@@ -2337,23 +2578,70 @@ fn apply_mask_alpha(canvas: &mut Canvas, mask: &Image, style: &ComputedStyle, ar
 
     for y in 0..height {
         for x in 0..width {
-            let pixel_x = x as f32;
-            let pixel_y = y as f32;
             let inside_area = x >= area_x0 && x < area_x1 && y >= area_y0 && y < area_y1;
-            let mask_alpha = if inside_area {
-                sample_mask_alpha(
-                    mask,
-                    pixel_x,
-                    pixel_y,
-                    anchor_x,
-                    anchor_y,
+            let mut combined: Option<u8> = None;
+            if inside_area {
+                for (
+                    tile,
                     tile_width,
                     tile_height,
-                    repeat,
-                )
-            } else {
-                0
-            };
+                    repeat_x,
+                    repeat_y,
+                    position_x,
+                    position_y,
+                    mode,
+                    composite,
+                ) in &prepared
+                {
+                    let anchor_x = area.x + *position_x;
+                    let anchor_y = area.y + *position_y;
+                    let color = sample_mask_color(
+                        tile.as_ref(),
+                        x as f32,
+                        y as f32,
+                        anchor_x,
+                        anchor_y,
+                        *tile_width,
+                        *tile_height,
+                        *repeat_x,
+                        *repeat_y,
+                    );
+                    let alpha = if *mode == MaskMode::Luminance {
+                        let luminance = (0.2126 * color.r as f32
+                            + 0.7152 * color.g as f32
+                            + 0.0722 * color.b as f32)
+                            .round()
+                            .clamp(0.0, 255.0) as u16;
+                        ((luminance * color.a as u16 + 127) / 255) as u8
+                    } else {
+                        color.a
+                    };
+                    combined = Some(match combined {
+                        None => alpha,
+                        Some(previous) => {
+                            match composite {
+                                MaskComposite::Subtract => {
+                                    ((previous as u16 * (255 - alpha as u16) + 127) / 255) as u8
+                                }
+                                MaskComposite::Intersect => {
+                                    ((previous as u16 * alpha as u16 + 127) / 255) as u8
+                                }
+                                MaskComposite::Exclude => {
+                                    // Keep the intermediate sum in a wide type. Clamping
+                                    // `previous + alpha` before subtracting the product
+                                    // changes the exclude result for mid/high alphas.
+                                    let product =
+                                        (u32::from(previous) * u32::from(alpha) + 127) / 255;
+                                    (u32::from(previous) + u32::from(alpha) - 2 * product)
+                                        .clamp(0, 255) as u8
+                                }
+                                MaskComposite::Add => previous.saturating_add(alpha),
+                            }
+                        }
+                    });
+                }
+            }
+            let mask_alpha = combined.unwrap_or(0);
             let index = ((y * width + x) * 4) as usize;
             canvas.pixels[index + 3] =
                 ((canvas.pixels[index + 3] as u16 * mask_alpha as u16 + 127) / 255) as u8;
@@ -2362,7 +2650,7 @@ fn apply_mask_alpha(canvas: &mut Canvas, mask: &Image, style: &ComputedStyle, ar
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sample_mask_alpha(
+fn sample_mask_color(
     mask: &Image,
     x: f32,
     y: f32,
@@ -2370,14 +2658,15 @@ fn sample_mask_alpha(
     anchor_y: f32,
     tile_width: f32,
     tile_height: f32,
-    repeat: bool,
-) -> u8 {
-    let tile_x = if repeat {
+    repeat_x: bool,
+    repeat_y: bool,
+) -> Color {
+    let tile_x = if repeat_x {
         anchor_x + ((x - anchor_x) / tile_width).floor() * tile_width
     } else {
         anchor_x
     };
-    let tile_y = if repeat {
+    let tile_y = if repeat_y {
         anchor_y + ((y - anchor_y) / tile_height).floor() * tile_height
     } else {
         anchor_y
@@ -2385,12 +2674,51 @@ fn sample_mask_alpha(
     let u = (x - tile_x) / tile_width;
     let v = (y - tile_y) / tile_height;
     if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
-        return 0;
+        return Color::rgba(0, 0, 0, 0);
     }
-    let source_x = (u * mask.width as f32).floor() as u32;
-    let source_y = (v * mask.height as f32).floor() as u32;
+    let source_x = ((u * mask.width as f32).floor() as u32).min(mask.width.saturating_sub(1));
+    let source_y = ((v * mask.height as f32).floor() as u32).min(mask.height.saturating_sub(1));
     let index = ((source_y * mask.width + source_x) * 4) as usize;
-    mask.pixels[index + 3]
+    Color {
+        r: mask.pixels[index],
+        g: mask.pixels[index + 1],
+        b: mask.pixels[index + 2],
+        a: mask.pixels[index + 3],
+    }
+}
+
+fn apply_clip_path_shape(canvas: &mut Canvas, shape: &ClipPathShape) {
+    let bounds = shape.bounds();
+    let x0 = bounds.x.floor().max(0.0) as i32;
+    let y0 = bounds.y.floor().max(0.0) as i32;
+    let x1 = (bounds.x + bounds.width).ceil().min(canvas.width as f32) as i32;
+    let y1 = (bounds.y + bounds.height).ceil().min(canvas.height as f32) as i32;
+    if x0 >= x1 || y0 >= y1 {
+        canvas.pixels.fill(0);
+        return;
+    }
+
+    let canvas_width = canvas.width as usize;
+    let row_bytes = canvas_width * 4;
+    for y in 0..canvas.height as i32 {
+        let row_start = y as usize * row_bytes;
+        let row_end = row_start + row_bytes;
+        if y < y0 || y >= y1 {
+            canvas.pixels[row_start..row_end].fill(0);
+            continue;
+        }
+
+        let left_end = row_start + x0 as usize * 4;
+        canvas.pixels[row_start..left_end].fill(0);
+        let right_start = row_start + x1 as usize * 4;
+        canvas.pixels[right_start..row_end].fill(0);
+        for x in x0..x1 {
+            if !shape.contains((x as f32 + 0.5, y as f32 + 0.5)) {
+                let index = row_start + x as usize * 4;
+                canvas.pixels[index..index + 4].fill(0);
+            }
+        }
+    }
 }
 
 fn paint_replaced_image_box(
@@ -2422,12 +2750,8 @@ fn paint_replaced_image_box(
     };
 
     let content_box = layout.dimensions.content;
-    let destination = image::object_fit_destination(
-        content_box,
-        image.width as f32,
-        image.height as f32,
-        style,
-    );
+    let destination =
+        image::object_fit_destination(content_box, image.width as f32, image.height as f32, style);
     // The content box bounds the painted result, so `cover` (and an oversized
     // `none`) crop instead of spilling out of the element.
     let clip = match clip {
@@ -2491,7 +2815,9 @@ fn paint_box_internal_to(
 
     // `background_list` always supplies at least its default, but keep the
     // arithmetic robust if its parsing contract changes.
-    let image_count = background_list(style, "background-image", "none").len().max(1);
+    let image_count = background_list(style, "background-image", "none")
+        .len()
+        .max(1);
     let clip_values = background_list(style, "background-clip", "border-box");
     let color_clip = &clip_values[(image_count - 1) % clip_values.len()];
     let (background_clip_rect, background_radii) =
@@ -2514,11 +2840,7 @@ fn paint_box_internal_to(
                     Some(background_clip),
                 );
             } else {
-                canvas.fill_rect_clipped(
-                    background_clip_rect,
-                    background,
-                    Some(background_clip),
-                );
+                canvas.fill_rect_clipped(background_clip_rect, background, Some(background_clip));
             }
         }
     }
@@ -2952,9 +3274,7 @@ fn paint_background_image_rounded(
     }
     #[cfg(test)]
     BACKGROUND_IMAGE_SURFACE_PIXELS.with(|pixels| {
-        pixels.set(
-            pixels.get() + u64::from(surface_width) * u64::from(surface_height),
-        );
+        pixels.set(pixels.get() + u64::from(surface_width) * u64::from(surface_height));
     });
     let offset_x = x0 as f32;
     let offset_y = y0 as f32;
@@ -3017,7 +3337,9 @@ enum PreparedBackgroundImage {
 
 fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundImage> {
     let value = match style.get("background-image") {
-        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value,
+        Some(ComputedValue::Keyword(value))
+        | Some(ComputedValue::String(value))
+        | Some(ComputedValue::Color(value)) => value,
         _ => return None,
     };
     if let Some(gradient) = color::parse_gradient(value.trim_start()) {
@@ -3034,17 +3356,91 @@ fn background_image(style: &ComputedStyle) -> Option<Image> {
     }
 }
 
-fn mask_image(style: &ComputedStyle) -> Option<Image> {
-    let value = match style.get("mask-image") {
-        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
-        _ => return None,
+#[derive(Clone)]
+enum PreparedMask {
+    Image(Arc<Image>),
+    Gradient(Gradient),
+}
+
+#[derive(Clone)]
+struct MaskLayer {
+    source: PreparedMask,
+    index: usize,
+}
+
+/// Maximum number of effective mask layers prepared for one element.
+///
+/// Each layer is sampled for every pixel, so bounding the layer count keeps
+/// hostile styles from turning mask painting into an unbounded hot loop.
+pub(crate) const MAX_MASK_LAYERS: usize = 64;
+
+fn computed_style_layer_text(value: Option<&ComputedValue>, index: usize) -> Option<String> {
+    let value = match value {
+        Some(ComputedValue::Keyword(value))
+        | Some(ComputedValue::String(value))
+        | Some(ComputedValue::Color(value)) => value,
+        Some(ComputedValue::Px(value)) => return Some(format!("{value}px")),
+        Some(ComputedValue::Percentage(value)) => return Some(format!("{value}%")),
+        Some(ComputedValue::Number(value)) => return Some(value.to_string()),
+        Some(ComputedValue::CalcPxPercent(px, percentage)) => {
+            return Some(format!("calc({px}px + {percentage}%)"));
+        }
+        None => return None,
     };
-    // The scoped implementation accepts URL images only. Unsupported image
-    // functions (such as gradients) and load failures mean no mask.
-    if !value.to_ascii_lowercase().starts_with("url(") {
-        return None;
+    let values = crate::css::split_top_level_commas(value)
+        .into_iter()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values
+        .get(index.min(values.len().saturating_sub(1)))
+        .map(|value| value.to_string())
+}
+
+fn mask_style_for_layer(style: &ComputedStyle, index: usize) -> ComputedStyle {
+    let mut layer_style = ComputedStyle::default();
+    for property in [
+        "mask-position-x",
+        "mask-position-y",
+        "mask-size",
+        "mask-repeat",
+    ] {
+        if let Some(value) = computed_style_layer_text(style.get(property), index) {
+            layer_style.set_paint_value(property, value);
+        }
     }
-    image::parse_background_image_value(value)
+    layer_style
+}
+
+fn mask_layers(style: &ComputedStyle) -> Vec<MaskLayer> {
+    let values = match style.get("mask-image") {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
+            crate::css::split_top_level_commas(value)
+        }
+        _ => return Vec::new(),
+    };
+    values
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let value = value.trim();
+            if value.eq_ignore_ascii_case("none") || value.is_empty() {
+                return None;
+            }
+            if let Some(gradient) = color::parse_gradient(value) {
+                return Some(MaskLayer {
+                    source: PreparedMask::Gradient(gradient),
+                    index,
+                });
+            }
+            let image = image::parse_background_image_value(value)?;
+            Some(MaskLayer {
+                source: PreparedMask::Image(Arc::new(image)),
+                index,
+            })
+        })
+        .take(MAX_MASK_LAYERS)
+        .collect()
 }
 
 fn background_repeat(style: &ComputedStyle) -> (bool, bool) {
@@ -3064,15 +3460,24 @@ fn background_repeat(style: &ComputedStyle) -> (bool, bool) {
     }
 }
 
-fn mask_repeat(style: &ComputedStyle) -> bool {
-    image_repeat(style, "mask-repeat")
-}
-
-fn image_repeat(style: &ComputedStyle, property: &str) -> bool {
-    !matches!(
-        style.get(property),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("no-repeat")
-    )
+fn mask_repeat(style: &ComputedStyle) -> (bool, bool) {
+    let value = match style.get("mask-repeat") {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
+            value.to_ascii_lowercase()
+        }
+        _ => return (true, true),
+    };
+    match value.as_str() {
+        "no-repeat" => (false, false),
+        "repeat-x" => (true, false),
+        "repeat-y" => (false, true),
+        _ => {
+            let parts = value.split_whitespace().collect::<Vec<_>>();
+            let x = parts.first().copied().unwrap_or("repeat");
+            let y = parts.get(1).copied().unwrap_or(x);
+            (x != "no-repeat", y != "no-repeat")
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3230,6 +3635,489 @@ impl ClipPathInsetLength {
     }
 }
 
+const MAX_CLIP_PATH_POLYGON_POINTS: usize = 256;
+
+/// A paint-time representation of the basic-shape forms accepted by
+/// `clip-path`.  The layout engine keeps the shape in the element's local
+/// border-box coordinate space; callers apply the same shape to descendants,
+/// hit testing, and transformed off-screen surfaces.
+#[derive(Clone, Debug)]
+enum ClipPathShape {
+    RoundedRect {
+        rect: Rect,
+        radii: (f32, f32, f32, f32),
+    },
+    Circle {
+        center: (f32, f32),
+        radius: f32,
+        bounds: Rect,
+    },
+    Ellipse {
+        center: (f32, f32),
+        radii: (f32, f32),
+        bounds: Rect,
+    },
+    Polygon {
+        points: Vec<(f32, f32)>,
+        bounds: Rect,
+    },
+}
+
+impl ClipPathShape {
+    fn bounds(&self) -> Rect {
+        match self {
+            Self::RoundedRect { rect, .. } => *rect,
+            Self::Circle { bounds, .. }
+            | Self::Ellipse { bounds, .. }
+            | Self::Polygon { bounds, .. } => *bounds,
+        }
+    }
+
+    fn contains(&self, point: (f32, f32)) -> bool {
+        match self {
+            Self::RoundedRect { rect, radii } => {
+                if rect.width <= 0.0 || rect.height <= 0.0 {
+                    return false;
+                }
+                point_in_rounded_rect(
+                    point.0,
+                    point.1,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    radii.0,
+                    radii.1,
+                    radii.2,
+                    radii.3,
+                )
+            }
+            Self::Circle { center, radius, .. } => {
+                let dx = point.0 - center.0;
+                let dy = point.1 - center.1;
+                dx * dx + dy * dy <= radius * radius + 1e-4
+            }
+            Self::Ellipse {
+                center,
+                radii: (rx, ry),
+                ..
+            } => {
+                if *rx <= 0.0 || *ry <= 0.0 {
+                    return false;
+                }
+                let dx = (point.0 - center.0) / *rx;
+                let dy = (point.1 - center.1) / *ry;
+                dx * dx + dy * dy <= 1.0 + 1e-4
+            }
+            Self::Polygon { points, .. } => point_in_polygon(point, points),
+        }
+    }
+}
+
+fn shape_length(value: &str, basis: f32) -> Option<f32> {
+    parse_clip_path_inset_length(value).map(|length| length.resolve(basis))
+}
+
+fn shape_position_component(value: &str, basis: f32, horizontal: bool) -> Option<f32> {
+    let value = value.trim();
+    match value.to_ascii_lowercase().as_str() {
+        "left" if horizontal => Some(0.0),
+        "right" if horizontal => Some(basis),
+        "top" if !horizontal => Some(0.0),
+        "bottom" if !horizontal => Some(basis),
+        "center" => Some(basis * 0.5),
+        _ => shape_length(value, basis),
+    }
+}
+
+fn shape_position(value: &str, border_box: Rect) -> Option<(f32, f32)> {
+    let parts = split_top_level_whitespace(value);
+    if parts.is_empty() || parts.len() > 2 {
+        return None;
+    }
+    let (x, y) = if parts.len() == 1 {
+        let is_vertical = matches!(parts[0].to_ascii_lowercase().as_str(), "top" | "bottom");
+        if is_vertical {
+            ("center", parts[0])
+        } else {
+            (parts[0], "center")
+        }
+    } else {
+        let first_vertical = matches!(parts[0].to_ascii_lowercase().as_str(), "top" | "bottom");
+        let second_horizontal = matches!(parts[1].to_ascii_lowercase().as_str(), "left" | "right");
+        if first_vertical || second_horizontal {
+            (parts[1], parts[0])
+        } else {
+            (parts[0], parts[1])
+        }
+    };
+    Some((
+        border_box.x + shape_position_component(x, border_box.width, true)?,
+        border_box.y + shape_position_component(y, border_box.height, false)?,
+    ))
+}
+
+fn parse_shape_radii(value: &str, rect: Rect) -> Option<(f32, f32, f32, f32)> {
+    let parts = split_top_level_whitespace(value);
+    let values = parts
+        .iter()
+        .map(|part| shape_length(part, rect.width.min(rect.height)))
+        .collect::<Option<Vec<_>>>()?;
+    let radii = match values.as_slice() {
+        [all] => [*all; 4],
+        [vertical, horizontal] => [*vertical, *horizontal, *vertical, *horizontal],
+        [top, horizontal, bottom] => [*top, *horizontal, *bottom, *horizontal],
+        [top, right, bottom, left] => [*top, *right, *bottom, *left],
+        _ => return None,
+    };
+    Some((
+        radii[0]
+            .min(rect.width / 2.0)
+            .min(rect.height / 2.0)
+            .max(0.0),
+        radii[1]
+            .min(rect.width / 2.0)
+            .min(rect.height / 2.0)
+            .max(0.0),
+        radii[2]
+            .min(rect.width / 2.0)
+            .min(rect.height / 2.0)
+            .max(0.0),
+        radii[3]
+            .min(rect.width / 2.0)
+            .min(rect.height / 2.0)
+            .max(0.0),
+    ))
+}
+
+/// Parses non-rectangular `clip-path` forms (and `inset(... round ...)`).
+/// Unsupported or malformed values return `None`, preserving the CSS fallback
+/// behavior of painting without a clip.
+fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathShape> {
+    let value = match style.get("clip-path") {
+        Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
+        _ => return None,
+    };
+    let open = value.find('(')?;
+    if !value.ends_with(')') {
+        return None;
+    }
+    let name = value[..open].trim().to_ascii_lowercase();
+    let body = &value[open + 1..value.len() - 1];
+    match name.as_str() {
+        "inset" => {
+            let parts = split_top_level_whitespace(body);
+            let round_at = parts
+                .iter()
+                .position(|part| part.eq_ignore_ascii_case("round"));
+            let round_at = round_at?;
+            let before = parts[..round_at].join(" ");
+            let after = parts[round_at + 1..].join(" ");
+            let rect = parse_clip_path_inset_rect_geometry(&format!("inset({before})"), border_box)?;
+            let radii = parse_shape_radii(&after, rect)?;
+            Some(ClipPathShape::RoundedRect { rect, radii })
+        }
+        "circle" => {
+            let (radius_text, position_text) =
+                if let Some(at) = body.to_ascii_lowercase().find(" at ") {
+                    (&body[..at], &body[at + 4..])
+                } else {
+                    (body, "center")
+                };
+            let center = shape_position(position_text.trim(), border_box)?;
+            let radius_text = radius_text.trim();
+            let radius = match radius_text.to_ascii_lowercase().as_str() {
+                keyword @ ("closest-side"
+                | "farthest-side"
+                | "closest-corner"
+                | "farthest-corner") => {
+                    let left = (center.0 - border_box.x).abs();
+                    let right = (border_box.x + border_box.width - center.0).abs();
+                    let top = (center.1 - border_box.y).abs();
+                    let bottom = (border_box.y + border_box.height - center.1).abs();
+                    let side_distances = [left, right, top, bottom];
+                    let corner_distances = [
+                        (left * left + top * top).sqrt(),
+                        (right * right + top * top).sqrt(),
+                        (right * right + bottom * bottom).sqrt(),
+                        (left * left + bottom * bottom).sqrt(),
+                    ];
+                    let distances = if keyword.ends_with("side") {
+                        &side_distances
+                    } else {
+                        &corner_distances
+                    };
+                    if keyword.starts_with("closest") {
+                        distances.iter().copied().fold(f32::INFINITY, f32::min)
+                    } else {
+                        distances
+                            .iter()
+                            .copied()
+                            .fold(f32::NEG_INFINITY, f32::max)
+                    }
+                }
+                _ => shape_length(radius_text, border_box.width.min(border_box.height))?,
+            };
+            let radius = radius.max(0.0);
+            Some(ClipPathShape::Circle {
+                center,
+                radius,
+                bounds: Rect {
+                    x: center.0 - radius,
+                    y: center.1 - radius,
+                    width: radius * 2.0,
+                    height: radius * 2.0,
+                },
+            })
+        }
+        "ellipse" => {
+            let lower = body.to_ascii_lowercase();
+            let at_index = lower.find(" at ");
+            let (radii_text, position_text) = at_index
+                .map(|index| (&body[..index], &body[index + 4..]))
+                .unwrap_or((body, "center"));
+            let radii = split_top_level_whitespace(radii_text.trim());
+            if radii.is_empty() || radii.len() > 2 {
+                return None;
+            }
+            let rx = shape_length(radii[0], border_box.width)?;
+            let ry = shape_length(radii.get(1).copied().unwrap_or(radii[0]), border_box.height)?;
+            let center = shape_position(position_text.trim(), border_box)?;
+            let rx = rx.max(0.0);
+            let ry = ry.max(0.0);
+            Some(ClipPathShape::Ellipse {
+                center,
+                radii: (rx, ry),
+                bounds: Rect {
+                    x: center.0 - rx,
+                    y: center.1 - ry,
+                    width: rx * 2.0,
+                    height: ry * 2.0,
+                },
+            })
+        }
+        "polygon" => {
+            let mut points = Vec::new();
+            for component in crate::css::split_top_level_commas(body.trim()) {
+                let components = split_top_level_whitespace(component.trim());
+                if components.len() != 2 {
+                    return None;
+                }
+                let x = shape_length(components[0], border_box.width)?;
+                let y = shape_length(components[1], border_box.height)?;
+                points.push((border_box.x + x, border_box.y + y));
+            }
+            if points.len() < 3 || points.len() > MAX_CLIP_PATH_POLYGON_POINTS {
+                return None;
+            }
+            let min_x = points.iter().map(|point| point.0).fold(f32::INFINITY, f32::min);
+            let min_y = points.iter().map(|point| point.1).fold(f32::INFINITY, f32::min);
+            let max_x = points
+                .iter()
+                .map(|point| point.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let max_y = points
+                .iter()
+                .map(|point| point.1)
+                .fold(f32::NEG_INFINITY, f32::max);
+            Some(ClipPathShape::Polygon {
+                points,
+                bounds: Rect {
+                    x: min_x,
+                    y: min_y,
+                    width: max_x - min_x,
+                    height: max_y - min_y,
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Validates the subset of CSS basic shapes supported by the paint pipeline.
+/// This is intentionally syntax-only: dimensions are resolved later against
+/// the element's border box, so a valid shape must not depend on its size.
+pub(crate) fn is_valid_clip_path_value(value: &str) -> bool {
+    let value = value.trim();
+    let Some(open) = value.find('(') else {
+        return false;
+    };
+    if !value.ends_with(')') || value[..open].trim().is_empty() {
+        return false;
+    }
+    let name = value[..open].trim();
+    let body = &value[open + 1..value.len() - 1];
+    match name.to_ascii_lowercase().as_str() {
+        "inset" => valid_clip_path_inset_body(body),
+        "circle" => valid_clip_path_circle_body(body),
+        "ellipse" => valid_clip_path_ellipse_body(body),
+        "polygon" => valid_clip_path_polygon_body(body),
+        _ => false,
+    }
+}
+
+fn valid_clip_path_length(value: &str) -> bool {
+    parse_clip_path_inset_length(value).is_some()
+}
+
+fn valid_clip_path_position(value: &str) -> bool {
+    let parts = split_top_level_whitespace(value.trim());
+    if parts.is_empty() || parts.len() > 2 {
+        return false;
+    }
+    let valid_component = |part: &str, horizontal: bool| {
+        valid_clip_path_length(part)
+            || match part.to_ascii_lowercase().as_str() {
+                "center" => true,
+                "left" | "right" if horizontal => true,
+                "top" | "bottom" if !horizontal => true,
+                _ => false,
+            }
+    };
+    match parts.as_slice() {
+        [part] => valid_component(part, true) || valid_component(part, false),
+        [first, second] => {
+            let first_edge = matches!(
+                first.to_ascii_lowercase().as_str(),
+                "top" | "right" | "bottom" | "left"
+            );
+            let second_edge = matches!(
+                second.to_ascii_lowercase().as_str(),
+                "top" | "right" | "bottom" | "left"
+            );
+            // Edge-offset positions (e.g. `right 10px`) require the full
+            // CSS <position> grammar, which the painter does not implement.
+            // Reject them instead of treating the length as the other axis.
+            if (first_edge && valid_clip_path_length(second))
+                || (second_edge && valid_clip_path_length(first))
+            {
+                return false;
+            }
+            let first_vertical = matches!(
+                first.to_ascii_lowercase().as_str(),
+                "top" | "bottom"
+            );
+            let second_horizontal = matches!(
+                second.to_ascii_lowercase().as_str(),
+                "left" | "right"
+            );
+            let (x, y) = if first_vertical || second_horizontal {
+                (*second, *first)
+            } else {
+                (*first, *second)
+            };
+            valid_component(x, true) && valid_component(y, false)
+        }
+        _ => false,
+    }
+}
+
+fn valid_clip_path_inset_body(body: &str) -> bool {
+    let parts = split_top_level_whitespace(body.trim());
+    if parts.is_empty() {
+        return false;
+    }
+    let round_indices = parts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, part)| part.eq_ignore_ascii_case("round").then_some(index))
+        .collect::<Vec<_>>();
+    if round_indices.len() > 1 {
+        return false;
+    }
+    let (inset_parts, radius_parts) = if let Some(&round_index) = round_indices.first() {
+        (&parts[..round_index], &parts[round_index + 1..])
+    } else {
+        (&parts[..], &[][..])
+    };
+    let radius_valid = if round_indices.is_empty() {
+        radius_parts.is_empty()
+    } else {
+        (1..=4).contains(&radius_parts.len())
+            && radius_parts.iter().all(|part| valid_clip_path_length(part))
+    };
+    (1..=4).contains(&inset_parts.len())
+        && inset_parts.iter().all(|part| valid_clip_path_length(part))
+        && radius_valid
+}
+
+fn split_shape_at(body: &str) -> Option<(&str, &str)> {
+    let lower = body.to_ascii_lowercase();
+    let mut indices = lower.match_indices(" at ");
+    let Some((index, _)) = indices.next() else {
+        return Some((body, "center"));
+    };
+    if indices.next().is_some() {
+        return None;
+    }
+    Some((&body[..index], &body[index + 4..]))
+}
+
+fn valid_clip_path_circle_body(body: &str) -> bool {
+    let Some((radius_text, position_text)) = split_shape_at(body) else {
+        return false;
+    };
+    let radius = radius_text.trim();
+    let radius_parts = split_top_level_whitespace(radius);
+    if radius_parts.len() != 1 {
+        return false;
+    }
+    let radius = radius_parts[0];
+    (matches!(
+        radius.to_ascii_lowercase().as_str(),
+        "closest-side" | "farthest-side" | "closest-corner" | "farthest-corner"
+    ) || valid_clip_path_length(radius))
+        && valid_clip_path_position(position_text)
+}
+
+fn valid_clip_path_ellipse_body(body: &str) -> bool {
+    let Some((radii_text, position_text)) = split_shape_at(body) else {
+        return false;
+    };
+    let radii = split_top_level_whitespace(radii_text.trim());
+    (1..=2).contains(&radii.len())
+        && radii.iter().all(|part| valid_clip_path_length(part))
+        && valid_clip_path_position(position_text)
+}
+
+fn valid_clip_path_polygon_body(body: &str) -> bool {
+    let components = crate::css::split_top_level_commas(body.trim());
+    (3..=MAX_CLIP_PATH_POLYGON_POINTS).contains(&components.len())
+        && components.iter().all(|component| {
+            let point = split_top_level_whitespace(component.trim());
+            point.len() == 2
+                && point.iter().all(|part| valid_clip_path_length(part))
+        })
+}
+
+fn point_in_polygon(point: (f32, f32), points: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let mut previous = *points.last().unwrap_or(&(0.0, 0.0));
+    for &current in points {
+        let on_edge = ((current.1 - previous.1) * (point.0 - previous.0)
+            - (current.0 - previous.0) * (point.1 - previous.1))
+            .abs()
+            <= 1e-4
+            && point.0 >= current.0.min(previous.0) - 1e-4
+            && point.0 <= current.0.max(previous.0) + 1e-4
+            && point.1 >= current.1.min(previous.1) - 1e-4
+            && point.1 <= current.1.max(previous.1) + 1e-4;
+        if on_edge {
+            return true;
+        }
+        if (current.1 > point.1) != (previous.1 > point.1) {
+            let intersection_x = (previous.0 - current.0) * (point.1 - current.1)
+                / (previous.1 - current.1)
+                + current.0;
+            if point.0 < intersection_x {
+                inside = !inside;
+            }
+        }
+        previous = current;
+    }
+    inside
+}
+
 /// Returns `None` for unsupported clip shapes, `Some(None)` for an empty inset,
 /// and `Some(Some(rect))` for a non-empty inset clip.
 fn clip_path_inset_rect(style: &ComputedStyle, border_box: Rect) -> Option<Option<Rect>> {
@@ -3237,6 +4125,17 @@ fn clip_path_inset_rect(style: &ComputedStyle, border_box: Rect) -> Option<Optio
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
         _ => return None,
     };
+    parse_clip_path_inset_rect_value(value, border_box)
+}
+
+fn parse_clip_path_inset_rect_value(value: &str, border_box: Rect) -> Option<Option<Rect>> {
+    parse_clip_path_inset_rect_geometry(value, border_box).map(normalize_rect)
+}
+
+/// Parses inset geometry without normalizing an empty result away. Rounded
+/// inset clips need to retain a non-positive rectangle so their shape can
+/// explicitly reject every point instead of falling back to no clip.
+fn parse_clip_path_inset_rect_geometry(value: &str, border_box: Rect) -> Option<Rect> {
     let open = value.find('(')?;
     if !value[..open].trim().eq_ignore_ascii_case("inset") || !value.ends_with(')') {
         return None;
@@ -3267,7 +4166,7 @@ fn clip_path_inset_rect(style: &ComputedStyle, border_box: Rect) -> Option<Optio
         width: border_box.width - left - right,
         height: border_box.height - top - bottom,
     };
-    Some(normalize_rect(rect))
+    Some(rect)
 }
 
 fn split_top_level_whitespace(value: &str) -> Vec<&str> {
@@ -3532,16 +4431,27 @@ fn apply_filters_full(canvas: &mut Canvas, filters: &[crate::css::FilterFunction
             FilterFunction::Contrast(amount) => {
                 apply_color_filter(canvas, |value| (value - 0.5) * amount + 0.5, 1.0)
             }
-            FilterFunction::DropShadow { offset_x, offset_y, blur, color } => {
-                apply_drop_shadow(canvas, *offset_x, *offset_y, *blur, *color)
+            FilterFunction::DropShadow {
+                offset_x,
+                offset_y,
+                blur,
+                color,
+            } => apply_drop_shadow(canvas, *offset_x, *offset_y, *blur, *color),
+            FilterFunction::Grayscale(amount) => {
+                apply_color_matrix(canvas, grayscale_matrix(*amount))
             }
-            FilterFunction::Grayscale(amount) => apply_color_matrix(canvas, grayscale_matrix(*amount)),
-            FilterFunction::HueRotate(degrees) => apply_color_matrix(canvas, hue_rotate_matrix(*degrees)),
-            FilterFunction::Invert(amount) => {
-                apply_color_filter(canvas, |value| value * (1.0 - amount) + (1.0 - value) * amount, 1.0)
+            FilterFunction::HueRotate(degrees) => {
+                apply_color_matrix(canvas, hue_rotate_matrix(*degrees))
             }
+            FilterFunction::Invert(amount) => apply_color_filter(
+                canvas,
+                |value| value * (1.0 - amount) + (1.0 - value) * amount,
+                1.0,
+            ),
             FilterFunction::Opacity(amount) => apply_color_filter(canvas, |value| value, *amount),
-            FilterFunction::Saturate(amount) => apply_color_matrix(canvas, saturate_matrix(*amount)),
+            FilterFunction::Saturate(amount) => {
+                apply_color_matrix(canvas, saturate_matrix(*amount))
+            }
             FilterFunction::Sepia(amount) => apply_color_matrix(canvas, sepia_matrix(*amount)),
         }
     }
@@ -3554,7 +4464,9 @@ fn alpha_bounds(canvas: &Canvas) -> Option<(usize, usize, usize, usize)> {
     let mut x1 = 0usize;
     let mut y1 = 0usize;
     for (index, pixel) in canvas.pixels.chunks_exact(4).enumerate() {
-        if pixel[3] == 0 { continue; }
+        if pixel[3] == 0 {
+            continue;
+        }
         let x = index % width;
         let y = index / width;
         x0 = x0.min(x);
@@ -3611,7 +4523,12 @@ fn filter_padding(filters: &[crate::css::FilterFunction]) -> (usize, usize, usiz
                 right = right.saturating_add(radius);
                 bottom = bottom.saturating_add(radius);
             }
-            FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => {
+            FilterFunction::DropShadow {
+                offset_x,
+                offset_y,
+                blur,
+                ..
+            } => {
                 let (blur, shift) = drop_shadow_reach(*offset_x, *offset_y, *blur);
                 // 右下へずれる影は出力を右下へ広げる。
                 left = left.saturating_add(blur.saturating_add(shift.left));
@@ -3654,7 +4571,12 @@ fn filter_source_padding(filters: &[crate::css::FilterFunction]) -> (usize, usiz
                 right = right.saturating_add(radius);
                 bottom = bottom.saturating_add(radius);
             }
-            FilterFunction::DropShadow { offset_x, offset_y, blur, .. } => {
+            FilterFunction::DropShadow {
+                offset_x,
+                offset_y,
+                blur,
+                ..
+            } => {
                 let (blur, shift) = drop_shadow_reach(*offset_x, *offset_y, *blur);
                 // 出力側と逆の辺へ加算する。右下へずれる影は左上の入力を読む。
                 left = left.saturating_add(blur.saturating_add(shift.right));
@@ -3673,8 +4595,7 @@ fn apply_drop_shadow(canvas: &mut Canvas, offset_x: f32, offset_y: f32, blur: f3
     let mut shadow = Canvas::new(canvas.width, canvas.height);
     let mut result = Canvas::new(canvas.width, canvas.height);
     for (index, pixel) in source.pixels.chunks_exact(4).enumerate() {
-        shadow.pixels[index * 4 + 3] =
-            ((pixel[3] as u16 * color.a as u16) / 255) as u8;
+        shadow.pixels[index * 4 + 3] = ((pixel[3] as u16 * color.a as u16) / 255) as u8;
     }
     box_blur(&mut shadow, blur.round() as usize);
     let dx = offset_x.round() as i32;
@@ -3688,13 +4609,30 @@ fn apply_drop_shadow(canvas: &mut Canvas, offset_x: f32, offset_y: f32, blur: f3
             }
             let source_index = (sy as usize * canvas.width as usize + sx as usize) * 4;
             let alpha = shadow.pixels[source_index + 3];
-            if alpha == 0 { continue; }
+            if alpha == 0 {
+                continue;
+            }
             let target_index = (y as usize * canvas.width as usize + x as usize) * 4;
-            blend_pixel(&mut result.pixels[target_index..target_index + 4], Color { a: alpha, ..color });
+            blend_pixel(
+                &mut result.pixels[target_index..target_index + 4],
+                Color { a: alpha, ..color },
+            );
         }
     }
-    for (target, source) in result.pixels.chunks_exact_mut(4).zip(source.pixels.chunks_exact(4)) {
-        blend_pixel(target, Color { r: source[0], g: source[1], b: source[2], a: source[3] });
+    for (target, source) in result
+        .pixels
+        .chunks_exact_mut(4)
+        .zip(source.pixels.chunks_exact(4))
+    {
+        blend_pixel(
+            target,
+            Color {
+                r: source[0],
+                g: source[1],
+                b: source[2],
+                a: source[3],
+            },
+        );
     }
     *canvas = result;
 }
@@ -3710,7 +4648,11 @@ fn apply_color_filter(canvas: &mut Canvas, map: impl Fn(f32) -> f32, alpha: f32)
 
 fn apply_color_matrix(canvas: &mut Canvas, matrix: [[f32; 3]; 3]) {
     for pixel in canvas.pixels.chunks_exact_mut(4) {
-        let rgb = [pixel[0] as f32 / 255.0, pixel[1] as f32 / 255.0, pixel[2] as f32 / 255.0];
+        let rgb = [
+            pixel[0] as f32 / 255.0,
+            pixel[1] as f32 / 255.0,
+            pixel[2] as f32 / 255.0,
+        ];
         for row in 0..3 {
             let value = matrix[row][0] * rgb[0] + matrix[row][1] * rgb[1] + matrix[row][2] * rgb[2];
             pixel[row] = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -3721,25 +4663,53 @@ fn apply_color_matrix(canvas: &mut Canvas, matrix: [[f32; 3]; 3]) {
 fn grayscale_matrix(amount: f32) -> [[f32; 3]; 3] {
     let a = amount.clamp(0.0, 1.0);
     let keep = 1.0 - a;
-    [[keep + 0.2126*a, 0.7152*a, 0.0722*a], [0.2126*a, keep + 0.7152*a, 0.0722*a], [0.2126*a, 0.7152*a, keep + 0.0722*a]]
+    [
+        [keep + 0.2126 * a, 0.7152 * a, 0.0722 * a],
+        [0.2126 * a, keep + 0.7152 * a, 0.0722 * a],
+        [0.2126 * a, 0.7152 * a, keep + 0.0722 * a],
+    ]
 }
 
 fn saturate_matrix(amount: f32) -> [[f32; 3]; 3] {
     let a = amount.max(0.0);
-    [[0.213 + 0.787*a, 0.715 - 0.715*a, 0.072 - 0.072*a], [0.213 - 0.213*a, 0.715 + 0.285*a, 0.072 - 0.072*a], [0.213 - 0.213*a, 0.715 - 0.715*a, 0.072 + 0.928*a]]
+    [
+        [0.213 + 0.787 * a, 0.715 - 0.715 * a, 0.072 - 0.072 * a],
+        [0.213 - 0.213 * a, 0.715 + 0.285 * a, 0.072 - 0.072 * a],
+        [0.213 - 0.213 * a, 0.715 - 0.715 * a, 0.072 + 0.928 * a],
+    ]
 }
 
 fn sepia_matrix(amount: f32) -> [[f32; 3]; 3] {
     let a = amount.clamp(0.0, 1.0);
     let keep = 1.0 - a;
-    [[keep + 0.393*a, 0.769*a, 0.189*a], [0.349*a, keep + 0.686*a, 0.168*a], [0.272*a, 0.534*a, keep + 0.131*a]]
+    [
+        [keep + 0.393 * a, 0.769 * a, 0.189 * a],
+        [0.349 * a, keep + 0.686 * a, 0.168 * a],
+        [0.272 * a, 0.534 * a, keep + 0.131 * a],
+    ]
 }
 
 fn hue_rotate_matrix(degrees: f32) -> [[f32; 3]; 3] {
     let radians = degrees.to_radians();
     let c = radians.cos();
     let s = radians.sin();
-    [[0.213 + c*0.787 - s*0.213, 0.715 - c*0.715 - s*0.715, 0.072 - c*0.072 + s*0.928], [0.213 - c*0.213 + s*0.143, 0.715 + c*0.285 + s*0.140, 0.072 - c*0.072 - s*0.283], [0.213 - c*0.213 - s*0.787, 0.715 - c*0.715 + s*0.715, 0.072 + c*0.928 + s*0.072]]
+    [
+        [
+            0.213 + c * 0.787 - s * 0.213,
+            0.715 - c * 0.715 - s * 0.715,
+            0.072 - c * 0.072 + s * 0.928,
+        ],
+        [
+            0.213 - c * 0.213 + s * 0.143,
+            0.715 + c * 0.285 + s * 0.140,
+            0.072 - c * 0.072 - s * 0.283,
+        ],
+        [
+            0.213 - c * 0.213 - s * 0.787,
+            0.715 - c * 0.715 + s * 0.715,
+            0.072 + c * 0.928 + s * 0.072,
+        ],
+    ]
 }
 
 fn box_blur(canvas: &mut Canvas, radius: usize) {
@@ -3783,7 +4753,8 @@ fn box_blur(canvas: &mut Canvas, radius: usize) {
             let index = (y * width + x) * 4;
             let sum = |channel: usize| {
                 bottom_right[channel] + top_left[channel]
-                    - bottom_left[channel] - top_right[channel]
+                    - bottom_left[channel]
+                    - top_right[channel]
             };
             let alpha_sum = sum(3);
             for channel in 0..3 {
@@ -3821,6 +4792,9 @@ fn point_in_rounded_rect(
     br: f32,
     bl: f32,
 ) -> bool {
+    if rw <= 0.0 || rh <= 0.0 {
+        return false;
+    }
     // 矩形の外側は除外
     if px < rx || px > rx + rw || py < ry || py > ry + rh {
         return false;
@@ -4366,8 +5340,16 @@ fn paint_prepared_background_image(
             };
             let (position_x, position_y) =
                 background_position(style, pos_cw, pos_ch, tile_w, tile_h);
-            let anchor_x = if fixed { viewport.x + position_x } else { area.x + position_x };
-            let anchor_y = if fixed { viewport.y + position_y } else { area.y + position_y };
+            let anchor_x = if fixed {
+                viewport.x + position_x
+            } else {
+                area.x + position_x
+            };
+            let anchor_y = if fixed {
+                viewport.y + position_y
+            } else {
+                area.y + position_y
+            };
             let clip_area = clip.unwrap_or(area);
             let x_start = if repeat_x {
                 anchor_x + ((clip_area.x - anchor_x) / tile_w).floor() * tile_w
@@ -4390,7 +5372,6 @@ fn paint_prepared_background_image(
                 area.y + area.height
             };
 
-            const MAX_TILE_PIXELS: u64 = 16_777_216;
             let tile_image = if repeat_x || repeat_y {
                 let tw = tile_w.ceil().max(1.0) as u32;
                 let th = tile_h.ceil().max(1.0) as u32;
@@ -4399,7 +5380,12 @@ fn paint_prepared_background_image(
                     color::paint_gradient(
                         &mut tile_canvas,
                         gradient,
-                        Rect { x: 0.0, y: 0.0, width: tile_w, height: tile_h },
+                        Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: tile_w,
+                            height: tile_h,
+                        },
                         None,
                     );
                     Image::new(tw, th, tile_canvas.pixels).ok()
@@ -4414,7 +5400,12 @@ fn paint_prepared_background_image(
             while ty < y_end {
                 let mut tx = x_start;
                 while tx < x_end {
-                    let tile_rect = Rect { x: tx, y: ty, width: tile_w, height: tile_h };
+                    let tile_rect = Rect {
+                        x: tx,
+                        y: ty,
+                        width: tile_w,
+                        height: tile_h,
+                    };
                     if let Some(ref image) = tile_image {
                         canvas.draw_image_scaled_clipped(image, tile_rect, clip.or(Some(area)));
                     } else {
@@ -4439,13 +5430,17 @@ fn paint_prepared_background_image(
             let tile_height = area.height.max(1.0);
             let tw = tile_width.ceil() as u32;
             let th = tile_height.ceil() as u32;
-            const MAX_TILE_PIXELS: u64 = 16_777_216;
             let tile_image = if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
                 let mut tile_canvas = Canvas::new(tw, th);
                 color::paint_gradient(
                     &mut tile_canvas,
                     gradient,
-                    Rect { x: 0.0, y: 0.0, width: tile_width, height: tile_height },
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: tile_width,
+                        height: tile_height,
+                    },
                     None,
                 );
                 Image::new(tw, th, tile_canvas.pixels).ok()
@@ -4463,13 +5458,26 @@ fn paint_prepared_background_image(
             } else {
                 area.y
             };
-            let x_end = if repeat_x { clip_area.x + clip_area.width } else { area.x + area.width };
-            let y_end = if repeat_y { clip_area.y + clip_area.height } else { area.y + area.height };
+            let x_end = if repeat_x {
+                clip_area.x + clip_area.width
+            } else {
+                area.x + area.width
+            };
+            let y_end = if repeat_y {
+                clip_area.y + clip_area.height
+            } else {
+                area.y + area.height
+            };
             let mut y = y_start;
             while y < y_end {
                 let mut x = x_start;
                 while x < x_end {
-                    let tile_rect = Rect { x, y, width: tile_width, height: tile_height };
+                    let tile_rect = Rect {
+                        x,
+                        y,
+                        width: tile_width,
+                        height: tile_height,
+                    };
                     if let Some(ref tile_image) = tile_image {
                         canvas.draw_image_scaled_clipped(
                             tile_image,

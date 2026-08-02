@@ -4,11 +4,50 @@
   // cannot use it to inspect closed shadow trees.
   const internalAssignedSlot = globalThis.__omoikane_internal_assigned_slot;
   delete globalThis.__omoikane_internal_assigned_slot;
+  // Keep the host clipboard bindings private to this bootstrap closure. Page
+  // code must go through the Promise-based Clipboard API, where secure-context
+  // and permission checks are applied consistently.
+  const nativeClipboardReadText = globalThis.__omoikane_clipboard_read_text;
+  const nativeClipboardWriteText = globalThis.__omoikane_clipboard_write_text;
+  const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
+  const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
+  const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
+  // Worklet lifecycle bindings are private implementation hooks. Keep them in
+  // this closure so page code can only reach the standard Worklet methods.
+  const nativeCreateWorklet = globalThis.__omoikane_create_worklet;
+  const nativeWorkletAddModule = globalThis.__omoikane_worklet_add_module;
+  const nativeWorkletRegister = globalThis.__omoikane_worklet_register;
+  const nativeWorkletRegisteredNames = globalThis.__omoikane_worklet_registered_names;
+  const nativeWorkletModuleCount = globalThis.__omoikane_worklet_module_count;
+  const nativeWorkletTeardown = globalThis.__omoikane_worklet_teardown;
+  const nativeCryptoRandom = globalThis.__omoikane_crypto_random;
+  const nativeCryptoDigest = globalThis.__omoikane_crypto_digest;
+  const nativeCryptoHmac = globalThis.__omoikane_crypto_hmac;
+  delete globalThis.__omoikane_clipboard_read_text;
+  delete globalThis.__omoikane_clipboard_write_text;
+  delete globalThis.__omoikane_clipboard_permission;
+  delete globalThis.__omoikane_geolocation_permission;
+  delete globalThis.__omoikane_is_secure_context;
+  delete globalThis.__omoikane_create_worklet;
+  delete globalThis.__omoikane_worklet_add_module;
+  delete globalThis.__omoikane_worklet_register;
+  delete globalThis.__omoikane_worklet_registered_names;
+  delete globalThis.__omoikane_worklet_module_count;
+  delete globalThis.__omoikane_worklet_teardown;
+  delete globalThis.__omoikane_crypto_random;
+  delete globalThis.__omoikane_crypto_digest;
+  delete globalThis.__omoikane_crypto_hmac;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
   const cache = new Map();
+  const validatesSpecialStyleProperties = new Set([
+    "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
+    "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
+    "mask-composite", "-webkit-mask-composite",
+    "transform-style", "backface-visibility", "mix-blend-mode", "isolation",
+  ]);
   const customElementConstructionStack = [];
   const customElementDefinitionByConstructor = new Map();
   const customElementRegistryByDocument = new WeakMap();
@@ -511,6 +550,15 @@
       this.metaKey = init.metaKey ?? false;
       this.relatedTarget = init.relatedTarget ?? null;
     }
+  }
+
+  class DragEvent extends MouseEvent {
+    constructor(type, init = {}) {
+      init = init ?? {};
+      super(type, init);
+      this.dataTransfer = init.dataTransfer ?? null;
+    }
+    get [Symbol.toStringTag]() { return "DragEvent"; }
   }
 
   class WheelEvent extends MouseEvent {
@@ -1398,7 +1446,7 @@
       // getValue/getPriority.
       const setValue = (kebab, value, priority) => {
         value = String(value);
-        if (kebab === "transition" || kebab.startsWith("transition-")) {
+        if (kebab === "transition" || kebab.startsWith("transition-") || validatesSpecialStyleProperties.has(kebab)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
           value = normalized;
@@ -1752,6 +1800,25 @@
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
     }
 
+    toggleAttribute(name, force) {
+      const attr = String(name);
+      const present = this.hasAttribute(attr);
+      if (arguments.length < 2) {
+        if (present) {
+          this.removeAttribute(attr);
+          return false;
+        }
+        this.setAttribute(attr, "");
+        return true;
+      }
+      if (Boolean(force)) {
+        if (!present) this.setAttribute(attr, "");
+        return true;
+      }
+      if (present) this.removeAttribute(attr);
+      return false;
+    }
+
     setAttributeNS(namespace, qualifiedName, value) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       const name = String(qualifiedName);
@@ -2085,7 +2152,28 @@
         this.__applyScroll(current.x + Number(xOrOptions), current.y + Number(y));
       }
     }
-    get offsetParent() { return null; }
+    get offsetParent() {
+      if (!this.isConnected || this.tagName === "BODY") return null;
+      const ownStyle = globalThis.getComputedStyle(this);
+      if (ownStyle.display === "none" || ownStyle.position === "fixed") return null;
+
+      let fallbackBody = null;
+      const composedParent = node => {
+        if (node && node.assignedSlot) return node.assignedSlot;
+        if (node && node.parentNode) return node.parentNode;
+        return node instanceof ShadowRoot ? node.host : null;
+      };
+      for (let ancestor = composedParent(this); ancestor; ancestor = composedParent(ancestor)) {
+        if (ancestor.nodeType !== 1) continue;
+        const style = globalThis.getComputedStyle(ancestor);
+        if (style.display === "none") return null;
+        const tagName = ancestor.tagName;
+        if (tagName === "BODY") fallbackBody = ancestor;
+        if (style.position !== "static" && style.position !== "") return ancestor;
+        if (tagName === "TD" || tagName === "TH" || tagName === "TABLE") return ancestor;
+      }
+      return fallbackBody;
+    }
 
     // Designates this element as its document's focused area and dispatches
     // `blur`/`focusout` on the previously focused element followed by
@@ -2325,6 +2413,18 @@
   class Element extends Node {
     remove() { removeChildNode.call(this); }
 
+    setPointerCapture(pointerId) {
+      setPointerCaptureTarget(this, normalizePointerId(pointerId));
+    }
+
+    releasePointerCapture(pointerId) {
+      releasePointerCaptureTarget(this, normalizePointerId(pointerId));
+    }
+
+    hasPointerCapture(pointerId) {
+      return pointerCaptureTarget(this.ownerDocument, normalizePointerId(pointerId)) === this;
+    }
+
     get slot() { return this.getAttribute("slot") || ""; }
     set slot(value) { this.setAttribute("slot", String(value)); }
 
@@ -2379,7 +2479,7 @@
   distributePrototypeMembers(Node.prototype, [Element.prototype], [
     "namespaceURI", "prefix", "localName", "tagName",
     "id", "className", "classList",
-    "getAttribute", "setAttribute", "hasAttribute", "removeAttribute",
+    "getAttribute", "setAttribute", "hasAttribute", "removeAttribute", "toggleAttribute",
     "setAttributeNS", "getAttributeNS", "removeAttributeNS", "attributes",
     "matches", "closest",
     "__layoutMetrics", "getBoundingClientRect", "getClientRects",
@@ -2421,6 +2521,19 @@
 
       super(id);
       throw new TypeError("Illegal constructor");
+    }
+
+    get draggable() {
+      const value = this.getAttribute("draggable");
+      const normalized = value === null ? "auto" : value.trim().toLowerCase();
+      if (normalized === "true") return true;
+      if (normalized === "false") return false;
+      const name = String(this.localName || "").toLowerCase();
+      return name === "img" || (name === "a" && this.hasAttribute("href"));
+    }
+
+    set draggable(value) {
+      this.setAttribute("draggable", value ? "true" : "false");
     }
   }
   class HTMLHtmlElement extends HTMLElement {}
@@ -3401,16 +3514,18 @@
   // `item(index)`, `namedItem(name)`, iteration, and named property access by
   // `id` (any element) or `name` (elements in COLLECTION_NAME_TAGS). Out-of-range
   // index access resolves to `null`.
-  function makeHTMLCollection(collect) {
+  function makeHTMLCollection(
+    collect,
+    allowsNamedName = el => COLLECTION_NAME_TAGS.has(el.tagName),
+    missingNamedValue = undefined,
+  ) {
     // Per spec an id match wins over a name match; both scan in tree order.
     const byName = (list, key) => {
       let named = null;
       for (const el of list) {
         if (!el.getAttribute) continue;
         if (el.getAttribute("id") === key) return el;
-        if (named === null &&
-            COLLECTION_NAME_TAGS.has(el.tagName) &&
-            el.getAttribute("name") === key) {
+        if (named === null && allowsNamedName(el) && el.getAttribute("name") === key) {
           named = el;
         }
       }
@@ -3432,6 +3547,9 @@
         // Array prototype members (Symbol.iterator, forEach, ...) and anything
         // else resolve against the live snapshot; bind methods to it.
         const value = list[prop];
+        if (typeof prop === "string" && value === undefined && missingNamedValue !== undefined) {
+          return missingNamedValue;
+        }
         return typeof value === "function" ? value.bind(list) : value;
       },
       has(_target, prop) {
@@ -4060,6 +4178,11 @@
     return rules;
   }
 
+  function scopeRulesValid(source) {
+    try { return __omoikane_css_scope_rules_valid(String(source)); }
+    catch (_) { return false; }
+  }
+
   function declarationView(block) {
     const declarations = [];
     for (const part of block.split(";")) {
@@ -4144,7 +4267,30 @@
     get style() { return this.__style; }
   }
 
-  class CSSGroupingRule {}
+  class CSSGroupingRule {
+    // Grouping-rule CSSOM mutations operate on a live child stylesheet.  Keep
+    // that child linked to its owning rule so edits are reflected in the
+    // containing stylesheet (and therefore in native style resolution) rather
+    // than being stranded in a detached CSSRuleList snapshot.
+    insertRule(rule, index) {
+      if (!this.__innerSheet) {
+        throw new DOMException("The rule has no child rule list.", "InvalidStateError");
+      }
+      return this.__innerSheet.insertRule(rule, index);
+    }
+    deleteRule(index) {
+      if (!this.__innerSheet) {
+        throw new DOMException("The rule has no child rule list.", "InvalidStateError");
+      }
+      return this.__innerSheet.deleteRule(index);
+    }
+    __syncFromInner() {
+      if (!this.__sheet || this.__index < 0 || !this.__innerSheet ||
+          typeof this.__serializeCssText !== "function") return;
+      this.__text = this.__serializeCssText();
+      this.__sheet.__replaceRule(this.__index, this.__text);
+    }
+  }
   class CSSConditionRule extends CSSGroupingRule {}
 
   class CSSSupportsRule extends CSSConditionRule {
@@ -4161,12 +4307,18 @@
         : "";
       this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
       this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
+      this.__innerSheet.__parentRule = this;
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get conditionText() { return this.__conditionText; }
     get matches() { return CSS.supports(this.conditionText); }
     get cssRules() { return this.__innerSheet.cssRules; }
-    get cssText() { return this.__text.trim(); }
+    __serializeCssText() {
+      const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
+      return "@supports" + (this.conditionText ? " " + this.conditionText : "") +
+        " {\n" + (nested ? nested + "\n" : "") + "}";
+    }
+    get cssText() { return this.__serializeCssText(); }
   }
 
   class CSSContainerRule extends CSSConditionRule {
@@ -4188,6 +4340,7 @@
         (this.__containerName ? prelude.slice(conditionStart) : prelude);
       this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
       this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
+      this.__innerSheet.__parentRule = this;
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get containerName() { return this.__containerName; }
@@ -4198,12 +4351,13 @@
         : this.containerQuery;
     }
     get cssRules() { return this.__innerSheet.cssRules; }
-    get cssText() {
+    __serializeCssText() {
       const name = this.containerName ? " " + this.containerName : "";
       const query = this.containerQuery ? " " + this.containerQuery : "";
       const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
       return "@container" + name + query + " {\n" + (nested ? nested + "\n" : "") + "}";
     }
+    get cssText() { return this.__serializeCssText(); }
   }
 
   function scopeBoundaryTexts(prelude) {
@@ -4269,18 +4423,20 @@
       this.__end = boundaries.end;
       this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
       this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
+      this.__innerSheet.__parentRule = this;
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get start() { return this.__start; }
     get end() { return this.__end; }
     get cssRules() { return this.__innerSheet.cssRules; }
-    get cssText() {
+    __serializeCssText() {
       let prelude = "@scope";
       if (this.start !== null) prelude += " (" + this.start + ")";
       if (this.end !== null) prelude += " to (" + this.end + ")";
       const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
       return prelude + " {\n" + (nested ? nested + "\n" : "") + "}";
     }
+    get cssText() { return this.__serializeCssText(); }
   }
 
   function createCssRule(text, sheet = null, index = -1) {
@@ -4527,6 +4683,7 @@
       this.__ownerText = this.ownerNode ? this.ownerNode.textContent : ownerText;
       this.__ruleViews = new Set();
       this.__cssRules = ruleListProxy(this);
+      this.__parentRule = null;
     }
     __syncFromOwner() {
       if (!this.ownerNode) return;
@@ -4559,6 +4716,7 @@
     __markDirty() {
       if (this.__constructed) this.__syncAdoptedRoots();
       else dirtyStyleSheets.add(this);
+      if (this.__parentRule) this.__parentRule.__syncFromInner();
     }
     __registerRuleView(rule) { this.__ruleViews.add(rule); }
     __shiftRuleViewsForInsert(index) {
@@ -4601,6 +4759,9 @@
       try { count = __omoikane_css_rule_count(text); }
       catch (error) { throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError"); }
       if (count !== 1) throw new DOMException("Exactly one rule is required.", "SyntaxError");
+      if (!scopeRulesValid(text)) {
+        throw new DOMException("Invalid @scope prelude.", "SyntaxError");
+      }
       const rules = this.__ruleTexts();
       const position = index === undefined ? 0 : Number(index);
       if (!Number.isInteger(position) || position < 0 || position > rules.length)
@@ -4626,6 +4787,9 @@
       if (!this.__constructed || this.__replacing) {
         throw new DOMException("Only constructed stylesheets can be replaced.", "NotAllowedError");
       }
+      if (!scopeRulesValid(text)) {
+        throw new DOMException("Invalid @scope prelude.", "SyntaxError");
+      }
       this.__rules = splitCssRules(String(text));
       for (const rule of this.__ruleViews) {
         rule.__sheet = null;
@@ -4639,6 +4803,9 @@
         return Promise.reject(new DOMException(
           "Only constructed stylesheets can be replaced.", "NotAllowedError"
         ));
+      }
+      if (!scopeRulesValid(text)) {
+        return Promise.reject(new DOMException("Invalid @scope prelude.", "SyntaxError"));
       }
       this.__replacing = true;
       return Promise.resolve().then(() => {
@@ -4724,6 +4891,10 @@
   // src reloads it.
   class HTMLIFrameElement extends HTMLElement {
     get contentDocument() {
+      // Removing an iframe destroys its active nested browsing context. Keep
+      // the stable WindowProxy object around, but expose no live Document until
+      // the element is connected again and a fresh navigation is committed.
+      if (!this.isConnected) return null;
       return wrapNode(__omoikane_iframe_content_document(this.__id));
     }
 
@@ -4747,6 +4918,9 @@
           __listeners: new Map(),
           get document() {
             return iframe.contentDocument;
+          },
+          get closed() {
+            return iframe.contentDocument === null;
           },
           get customElements() {
             return registryForDocument(iframe.contentDocument);
@@ -4808,6 +4982,466 @@
     set data(value) {
       __omoikane_set_attribute(this.__id, "data", String(value));
     }
+  }
+
+  // ── HTML media element playback state ──────────────────────────────────────
+  // The embedding deliberately has no audio/video decoder.  These classes
+  // nevertheless model the observable HTMLMediaElement state machine: source
+  // selection and fetch failures, metadata readiness, Promise-based play(),
+  // pause/seek transitions, and task-queued media events.  A successful source
+  // uses a short synthetic duration so playback can advance deterministically
+  // under the virtual timer used by the runtime.
+  const MEDIA_HAVE_NOTHING = 0;
+  const MEDIA_HAVE_METADATA = 1;
+  const MEDIA_HAVE_CURRENT_DATA = 2;
+  const MEDIA_HAVE_FUTURE_DATA = 3;
+  const MEDIA_HAVE_ENOUGH_DATA = 4;
+  const MEDIA_NETWORK_EMPTY = 0;
+  const MEDIA_NETWORK_IDLE = 1;
+  const MEDIA_NETWORK_LOADING = 2;
+  const MEDIA_NETWORK_NO_SOURCE = 3;
+  const MEDIA_TYPE_BY_EXTENSION = new Map([
+    ["mp3", "audio/mpeg"], ["m4a", "audio/mp4"], ["aac", "audio/aac"],
+    ["wav", "audio/wav"], ["oga", "audio/ogg"], ["ogg", "audio/ogg"],
+    ["mp4", "video/mp4"], ["m4v", "video/mp4"], ["webm", "video/webm"],
+    ["ogv", "video/ogg"],
+  ]);
+  const MEDIA_AUDIO_TYPES = new Set([
+    "audio/aac", "audio/flac", "audio/m4a", "audio/mp4", "audio/mpeg",
+    "audio/ogg", "audio/wav", "audio/wave", "audio/x-wav",
+  ]);
+  const MEDIA_VIDEO_TYPES = new Set([
+    "video/mp4", "video/ogg", "video/webm", "video/mpeg",
+  ]);
+
+  const mediaErrorConstructionToken = {};
+  class MediaError {
+    constructor(token, code, message = "") {
+      if (token !== mediaErrorConstructionToken) throw new TypeError("Illegal constructor");
+      this.code = Number(code);
+      this.message = String(message);
+    }
+    get [Symbol.toStringTag]() { return "MediaError"; }
+  }
+  MediaError.MEDIA_ERR_ABORTED = 1;
+  MediaError.MEDIA_ERR_NETWORK = 2;
+  MediaError.MEDIA_ERR_DECODE = 3;
+  MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
+  for (const name of [
+    "MEDIA_ERR_ABORTED", "MEDIA_ERR_NETWORK", "MEDIA_ERR_DECODE", "MEDIA_ERR_SRC_NOT_SUPPORTED",
+  ]) MediaError.prototype[name] = MediaError[name];
+
+  function mediaTypeToken(value) {
+    return String(value || "").split(";", 1)[0].trim().toLowerCase();
+  }
+
+  function mediaTypeFromSource(source) {
+    const value = String(source || "");
+    const data = value.match(/^data:([^;,]+)/i);
+    if (data) return mediaTypeToken(data[1]);
+    const path = value.split(/[?#]/, 1)[0].toLowerCase();
+    const extension = path.slice(path.lastIndexOf(".") + 1);
+    return MEDIA_TYPE_BY_EXTENSION.get(extension) || "";
+  }
+
+  function mediaTypeSupported(element, type) {
+    const token = mediaTypeToken(type);
+    if (!token) return false;
+    const isAudio = token.startsWith("audio/");
+    const isVideo = token.startsWith("video/");
+    if ((!isAudio && !isVideo) || (element.localName === "audio" && !isAudio)) return false;
+    return isAudio ? MEDIA_AUDIO_TYPES.has(token) : MEDIA_VIDEO_TYPES.has(token);
+  }
+
+  function mediaDurationFromSource(source) {
+    const match = String(source || "").match(/[?#&]duration=([0-9]+(?:\.[0-9]+)?)/i);
+    const duration = match ? Number(match[1]) : 1;
+    return Number.isFinite(duration) && duration >= 0 ? duration : 1;
+  }
+
+  function queueMediaTask(callback) {
+    if (typeof __omoikane_queue_media_task === "function") {
+      __omoikane_queue_media_task(callback);
+    } else if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(callback);
+    } else {
+      setTimeout(callback, 0);
+    }
+  }
+
+  class HTMLMediaElement extends HTMLElement {
+    constructor(id) {
+      super(id);
+      this.__mediaLoadId = 0;
+      this.__mediaPlaybackId = 0;
+      this.__mediaPlaybackTimer = null;
+      this.__mediaPlayWaiters = [];
+      this.__mediaScheduledPlayWaiters = [];
+      this.__mediaCurrentSrc = "";
+      this.__mediaCurrentTime = 0;
+      this.__mediaDuration = NaN;
+      this.__mediaPaused = true;
+      this.__mediaEnded = false;
+      this.__mediaReadyState = MEDIA_HAVE_NOTHING;
+      this.__mediaNetworkState = MEDIA_NETWORK_EMPTY;
+      this.__mediaVolume = 1;
+      this.__mediaError = null;
+    }
+
+    get src() {
+      const raw = this.getAttribute("src");
+      return raw === null ? "" : __omoikane_resolve_url(raw);
+    }
+    set src(value) {
+      super.setAttribute("src", String(value));
+      this.load();
+    }
+    setAttribute(name, value) {
+      const attr = String(name).toLowerCase();
+      super.setAttribute(name, value);
+      if (attr === "src") this.load();
+    }
+    get currentSrc() { return this.__mediaCurrentSrc; }
+    get currentTime() { return this.__mediaCurrentTime; }
+    set currentTime(value) {
+      const next = Number(value);
+      if (!Number.isFinite(next)) {
+        throw new TypeError("currentTime must be finite");
+      }
+      const bounded = Number.isFinite(this.__mediaDuration)
+        ? Math.min(Math.max(next, 0), this.__mediaDuration) : Math.max(next, 0);
+      const changed = bounded !== this.__mediaCurrentTime;
+      const wasPlaying = !this.__mediaPaused;
+      const reachedEnd = Number.isFinite(this.__mediaDuration) &&
+        bounded >= this.__mediaDuration;
+      this.__mediaCurrentTime = bounded;
+      this.__mediaEnded = reachedEnd;
+      if (reachedEnd && wasPlaying) {
+        this.__mediaPaused = true;
+        this.__mediaCancelPlayback();
+      }
+      if (changed) {
+        this.__mediaQueueEvent("seeking");
+        this.__mediaQueueEvent("timeupdate");
+        this.__mediaQueueEvent("seeked");
+        if (reachedEnd && wasPlaying) this.__mediaQueueEvent("ended");
+        if (!this.__mediaPaused && !this.__mediaEnded) this.__mediaScheduleEnd();
+      }
+    }
+    get duration() { return this.__mediaDuration; }
+    get paused() { return this.__mediaPaused; }
+    get ended() { return this.__mediaEnded; }
+    get readyState() { return this.__mediaReadyState; }
+    get networkState() { return this.__mediaNetworkState; }
+    get volume() { return this.__mediaVolume; }
+    set volume(value) {
+      const next = Number(value);
+      if (!Number.isFinite(next) || next < 0 || next > 1) {
+        throw new DOMException("The volume must be between 0 and 1.", "IndexSizeError");
+      }
+      if (next === this.__mediaVolume) return;
+      this.__mediaVolume = next;
+      this.__mediaQueueEvent("volumechange");
+    }
+    get muted() { return this.hasAttribute("muted"); }
+    set muted(value) {
+      const next = Boolean(value);
+      if (next === this.hasAttribute("muted")) return;
+      if (next) this.setAttribute("muted", "");
+      else this.removeAttribute("muted");
+      this.__mediaQueueEvent("volumechange");
+    }
+    get defaultMuted() { return this.hasAttribute("muted"); }
+    set defaultMuted(value) {
+      const next = Boolean(value);
+      if (next === this.hasAttribute("muted")) return;
+      if (next) this.setAttribute("muted", "");
+      else this.removeAttribute("muted");
+      this.__mediaQueueEvent("volumechange");
+    }
+    get controls() { return this.hasAttribute("controls"); }
+    set controls(value) {
+      if (value) this.setAttribute("controls", "");
+      else this.removeAttribute("controls");
+    }
+    get error() { return this.__mediaError; }
+    get autoplay() { return this.hasAttribute("autoplay"); }
+    set autoplay(value) {
+      if (value) this.setAttribute("autoplay", "");
+      else this.removeAttribute("autoplay");
+    }
+    get loop() { return this.hasAttribute("loop"); }
+    set loop(value) {
+      if (value) this.setAttribute("loop", "");
+      else this.removeAttribute("loop");
+    }
+    get playbackRate() { return this.__mediaPlaybackRate || 1; }
+    set playbackRate(value) {
+      const next = Number(value);
+      if (!Number.isFinite(next) || next <= 0) throw new TypeError("Invalid playbackRate");
+      this.__mediaPlaybackRate = next;
+      this.__mediaQueueEvent("ratechange");
+      if (!this.__mediaPaused) this.__mediaScheduleEnd();
+    }
+    get defaultPlaybackRate() { return this.__mediaDefaultPlaybackRate || 1; }
+    set defaultPlaybackRate(value) {
+      const next = Number(value);
+      if (!Number.isFinite(next) || next <= 0) throw new TypeError("Invalid defaultPlaybackRate");
+      this.__mediaDefaultPlaybackRate = next;
+    }
+    canPlayType(type) {
+      const token = mediaTypeToken(type);
+      if (!mediaTypeSupported(this, token)) return "";
+      return token === "audio/mpeg" || token === "video/mp4" || token === "video/webm"
+        ? "probably" : "maybe";
+    }
+
+    __mediaQueueEvent(type, loadId = this.__mediaLoadId) {
+      queueMediaTask(() => {
+        if (loadId !== this.__mediaLoadId) return;
+        // HTML media events do not bubble; the default Event flags are
+        // intentional here (including play/playing/timeupdate/ended below).
+        fireRealtimeEvent(this, new Event(type));
+      });
+    }
+
+    __mediaQueueReadyEvent(type, readyState, loadId = this.__mediaLoadId, finalState = readyState) {
+      queueMediaTask(() => {
+        if (loadId !== this.__mediaLoadId) return;
+        this.__mediaReadyState = readyState;
+        fireRealtimeEvent(this, new Event(type));
+        this.__mediaReadyState = finalState;
+      });
+    }
+
+    __mediaCancelPlayback() {
+      this.__mediaPlaybackId += 1;
+      if (this.__mediaPlaybackTimer !== null) {
+        clearTimeout(this.__mediaPlaybackTimer);
+        this.__mediaPlaybackTimer = null;
+      }
+      const waiters = this.__mediaScheduledPlayWaiters.splice(0);
+      const error = new DOMException("The play() request was interrupted.", "AbortError");
+      for (const waiter of waiters) waiter.reject(error);
+    }
+
+    __mediaRejectWaiters(error) {
+      const waiters = this.__mediaPlayWaiters.splice(0);
+      for (const waiter of waiters) waiter.reject(error);
+    }
+
+    __mediaFailure(loadId, code, name, message) {
+      if (loadId !== this.__mediaLoadId) return;
+      this.__mediaReadyState = MEDIA_HAVE_NOTHING;
+      this.__mediaNetworkState = MEDIA_NETWORK_NO_SOURCE;
+      this.__mediaError = new MediaError(mediaErrorConstructionToken, code, message);
+      const error = new DOMException(message, name);
+      const waiters = this.__mediaPlayWaiters.splice(0);
+      this.__mediaQueueEvent("error", loadId);
+      queueMediaTask(() => {
+        // The request belongs to this failed load even if a newer load has
+        // already started by the time the rejection task runs.
+        for (const waiter of waiters) waiter.reject(error);
+      });
+    }
+
+    __mediaReady(loadId, responseType = "") {
+      if (loadId !== this.__mediaLoadId) return;
+      const type = mediaTypeToken(responseType) || mediaTypeFromSource(this.__mediaCurrentSrc);
+      if (!type || !mediaTypeSupported(this, type)) {
+        this.__mediaFailure(
+          loadId,
+          MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED,
+          "NotSupportedError",
+          "The media resource is not supported.",
+        );
+        return;
+      }
+      this.__mediaError = null;
+      this.__mediaNetworkState = MEDIA_NETWORK_IDLE;
+      this.__mediaReadyState = MEDIA_HAVE_METADATA;
+      this.__mediaDuration = mediaDurationFromSource(this.__mediaCurrentSrc);
+      this.__mediaCurrentTime = 0;
+      this.__mediaEnded = false;
+      const waiters = this.__mediaPlayWaiters.splice(0);
+      this.__mediaQueueReadyEvent("durationchange", MEDIA_HAVE_METADATA, loadId);
+      this.__mediaQueueReadyEvent("loadedmetadata", MEDIA_HAVE_METADATA, loadId);
+      this.__mediaQueueReadyEvent("loadeddata", MEDIA_HAVE_CURRENT_DATA, loadId);
+      this.__mediaQueueReadyEvent("canplay", MEDIA_HAVE_FUTURE_DATA, loadId, MEDIA_HAVE_ENOUGH_DATA);
+      this.__mediaQueueEvent("load", loadId);
+      if (waiters.length) this.__mediaStartPlayback(waiters);
+    }
+
+    __mediaBeginLoad(loadId, source) {
+      if (loadId !== this.__mediaLoadId) return;
+      if (!source) {
+        return;
+      }
+      const sourceType = mediaTypeFromSource(source);
+      if (/^data:/i.test(source)) {
+        queueMediaTask(() => this.__mediaReady(loadId, sourceType));
+        return;
+      }
+      try {
+        Promise.resolve(fetch(source)).then(response => {
+          if (loadId !== this.__mediaLoadId) return;
+          if (!response || !response.ok) {
+            this.__mediaFailure(
+              loadId,
+              MediaError.MEDIA_ERR_NETWORK,
+              "NetworkError",
+              "The media resource could not be fetched.",
+            );
+            return;
+          }
+          const responseType = response.headers && response.headers.get("content-type");
+          queueMediaTask(() => this.__mediaReady(loadId, responseType || sourceType));
+        }, () => {
+          this.__mediaFailure(
+            loadId,
+            MediaError.MEDIA_ERR_NETWORK,
+            "NetworkError",
+            "The media resource could not be fetched.",
+          );
+        });
+      } catch (_) {
+        this.__mediaFailure(
+          loadId,
+          MediaError.MEDIA_ERR_NETWORK,
+          "NetworkError",
+          "The media resource could not be fetched.",
+        );
+      }
+    }
+
+    __mediaLoad() {
+      const loadId = ++this.__mediaLoadId;
+      this.__mediaCancelPlayback();
+      this.__mediaRejectWaiters(new DOMException("The play() request was interrupted.", "AbortError"));
+      this.__mediaCurrentSrc = this.src;
+      this.__mediaCurrentTime = 0;
+      this.__mediaDuration = NaN;
+      this.__mediaPaused = true;
+      this.__mediaEnded = false;
+      this.__mediaReadyState = MEDIA_HAVE_NOTHING;
+      this.__mediaNetworkState = this.__mediaCurrentSrc ? MEDIA_NETWORK_LOADING : MEDIA_NETWORK_NO_SOURCE;
+      this.__mediaError = null;
+      this.__mediaQueueEvent("loadstart", loadId);
+      queueMediaTask(() => this.__mediaBeginLoad(loadId, this.__mediaCurrentSrc));
+      return loadId;
+    }
+
+    load() {
+      this.__mediaLoad();
+    }
+
+    play() {
+      const source = this.src;
+      return new Promise((resolve, reject) => {
+        if (!source) {
+          const loadId = this.__mediaLoad();
+          this.__mediaPlayWaiters.push({ resolve, reject });
+          queueMediaTask(() => {
+            if (loadId !== this.__mediaLoadId || this.__mediaCurrentSrc) return;
+            this.__mediaFailure(
+              loadId,
+              MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED,
+              "NotSupportedError",
+              "The element has no supported source.",
+            );
+          });
+          return;
+        }
+        if (this.__mediaPaused === false) {
+          resolve();
+          return;
+        }
+        if (this.__mediaNetworkState === MEDIA_NETWORK_EMPTY ||
+            this.__mediaCurrentSrc !== source || this.__mediaNetworkState === MEDIA_NETWORK_NO_SOURCE) {
+          this.load();
+        }
+        this.__mediaPlayWaiters.push({ resolve, reject });
+        if (this.__mediaReadyState >= MEDIA_HAVE_FUTURE_DATA &&
+            this.__mediaNetworkState === MEDIA_NETWORK_IDLE) {
+          const waiters = this.__mediaPlayWaiters.splice(0);
+          this.__mediaStartPlayback(waiters);
+        }
+      });
+    }
+
+    pause() {
+      const wasPlaying = !this.__mediaPaused;
+      this.__mediaPaused = true;
+      this.__mediaCancelPlayback();
+      this.__mediaRejectWaiters(new DOMException("The play() request was interrupted.", "AbortError"));
+      if (wasPlaying) this.__mediaQueueEvent("pause");
+    }
+
+    __mediaStartPlayback(waiters) {
+      if (!this.__mediaPaused) {
+        for (const waiter of waiters) waiter.resolve();
+        return;
+      }
+      if (this.__mediaEnded && Number.isFinite(this.__mediaDuration)) {
+        this.__mediaCurrentTime = 0;
+      }
+      this.__mediaPaused = false;
+      this.__mediaEnded = false;
+      const playbackId = ++this.__mediaPlaybackId;
+      this.__mediaScheduledPlayWaiters = waiters;
+      queueMediaTask(() => {
+        if (playbackId !== this.__mediaPlaybackId || this.__mediaPaused) return;
+        this.__mediaScheduledPlayWaiters = [];
+        fireRealtimeEvent(this, new Event("play"));
+        fireRealtimeEvent(this, new Event("playing"));
+        for (const waiter of waiters) waiter.resolve();
+        this.__mediaScheduleEnd(playbackId);
+      });
+    }
+
+    __mediaScheduleEnd(playbackId = this.__mediaPlaybackId) {
+      if (this.__mediaPlaybackTimer !== null) clearTimeout(this.__mediaPlaybackTimer);
+      const remaining = Math.max(0, (Number.isFinite(this.__mediaDuration)
+        ? this.__mediaDuration : 1) - this.__mediaCurrentTime);
+      const delay = Math.max(1, remaining * 1000 / this.playbackRate);
+      this.__mediaPlaybackTimer = setTimeout(() => {
+        this.__mediaPlaybackTimer = null;
+        if (playbackId !== this.__mediaPlaybackId || this.__mediaPaused) return;
+        this.__mediaCurrentTime = Number.isFinite(this.__mediaDuration) ? this.__mediaDuration : 1;
+        this.__mediaEnded = true;
+        this.__mediaPaused = true;
+        queueMediaTask(() => {
+          if (playbackId !== this.__mediaPlaybackId) return;
+          fireRealtimeEvent(this, new Event("timeupdate"));
+          fireRealtimeEvent(this, new Event("ended"));
+        });
+      }, delay);
+    }
+
+    removeAttribute(name) {
+      const attr = String(name).toLowerCase();
+      super.removeAttribute(name);
+      if (attr === "src") this.load();
+    }
+  }
+
+  class HTMLAudioElement extends HTMLMediaElement {}
+  class HTMLVideoElement extends HTMLMediaElement {
+    get width() { return Math.max(0, Math.trunc(Number(this.getAttribute("width")) || 0)); }
+    set width(value) { this.setAttribute("width", String(Math.max(0, Math.trunc(Number(value) || 0)))); }
+    get height() { return Math.max(0, Math.trunc(Number(this.getAttribute("height")) || 0)); }
+    set height(value) { this.setAttribute("height", String(Math.max(0, Math.trunc(Number(value) || 0)))); }
+  }
+
+  for (const [name, value] of [
+    ["HAVE_NOTHING", MEDIA_HAVE_NOTHING], ["HAVE_METADATA", MEDIA_HAVE_METADATA],
+    ["HAVE_CURRENT_DATA", MEDIA_HAVE_CURRENT_DATA], ["HAVE_FUTURE_DATA", MEDIA_HAVE_FUTURE_DATA],
+    ["HAVE_ENOUGH_DATA", MEDIA_HAVE_ENOUGH_DATA], ["NETWORK_EMPTY", MEDIA_NETWORK_EMPTY],
+    ["NETWORK_IDLE", MEDIA_NETWORK_IDLE], ["NETWORK_LOADING", MEDIA_NETWORK_LOADING],
+    ["NETWORK_NO_SOURCE", MEDIA_NETWORK_NO_SOURCE],
+  ]) {
+    HTMLMediaElement[name] = value;
+    HTMLMediaElement.prototype[name] = value;
   }
 
   // ── HTML element specializations ────────────────────────────────────────────
@@ -5184,23 +5818,10 @@
       walk(this);
       return controls;
     }
-    // Live HTMLFormControlsCollection: index access, `.length`, and named access
-    // by control `name`/`id`. Missing named entries resolve to null.
+    // Live HTMLFormControlsCollection: index access, `.length`, `item()`,
+    // `namedItem()`, iteration, and named access by control `name`/`id`.
     get elements() {
-      const controls = this.__controls();
-      return new Proxy(controls, {
-        get(target, prop) {
-          if (prop === "length") return target.length;
-          if (typeof prop !== "string") return target[prop];
-          if (/^\d+$/.test(prop)) return target[Number(prop)] ?? null;
-          const named = target.find(
-            c => (c.name && c.name === prop) || (c.id && c.id === prop)
-          );
-          if (named) return named;
-          if (prop in target) return target[prop];
-          return null;
-        },
-      });
+      return makeHTMLCollection(() => this.__controls(), () => true, null);
     }
     get length() {
       return this.__controls().length;
@@ -5450,25 +6071,59 @@
       return t || "text";
     }
     set type(v) {
+      const before = this.type;
       this.setAttribute("type", String(v));
+      if (before === "file" && this.type !== "file") this.__files = undefined;
+      if (before !== "file" && this.type === "file") this.__files = new FileList();
     }
-    // Only a file control has a selected files list. Omoikane cannot open a file
-    // picker, so the list stays empty; it is cached per element so repeated reads
-    // return the same object, as in browsers.
+    // Only a file control has a selected files list. The host has no native
+    // picker, but scripts can provide a deterministic synthetic selection via
+    // `input.files = new DataTransfer().files`.
     get files() {
       if (this.type !== "file") return null;
       if (this.__files === undefined) this.__files = new FileList();
       return this.__files;
+    }
+    set files(value) {
+      if (this.type !== "file") {
+        throw new DOMException("The input is not a file control.", "InvalidStateError");
+      }
+      if (value !== null && !(value instanceof FileList)) {
+        throw new TypeError("HTMLInputElement.files must be a FileList or null");
+      }
+      const next = value ? Array.from(value) : [];
+      if (next.some(file => !(file instanceof File))) {
+        throw new TypeError("HTMLInputElement.files contains a non-File value");
+      }
+      const previous = this.files;
+      const unchanged = previous.__files.length === next.length &&
+        previous.__files.every((file, index) => file === next[index]);
+      if (unchanged) return;
+      this.__files = new FileList(next);
+      // A synthetic selection is an observable user-input boundary. Keep the
+      // event order deterministic and expose no host path: `value` below only
+      // ever reports the browser-style fakepath plus the selected filename.
+      this.dispatchEvent(new Event("input", { bubbles: true }));
+      this.dispatchEvent(new Event("change", { bubbles: true }));
     }
     // The `value` IDL attribute is the control's "dirty value": it is held in
     // JS and is NOT reflected to the `value` content attribute. Storing it in
     // JS also preserves lone UTF-16 surrogates that would otherwise be mangled
     // crossing the native boundary.
     get value() {
+      if (this.type === "file") {
+        const files = this.files;
+        return files.length ? "C:\\fakepath\\" + files[0].name.split(/[\\/]/).pop() : "";
+      }
       if (this.__value !== undefined) return this.__value;
       return this.getAttribute("value") || "";
     }
     set value(v) {
+      if (this.type === "file") {
+        if (String(v) !== "") throw new DOMException("The value of a file input may only be cleared.", "InvalidStateError");
+        this.files = null;
+        return;
+      }
       this.__value = v == null ? "" : String(v);
       setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
@@ -5641,6 +6296,10 @@
   }
 
   class HTMLScriptElement extends HTMLElement {
+    setAttribute(name, value) {
+      if (String(name).toLowerCase() === "src") noteElementResourceStart(this);
+      super.setAttribute(name, value);
+    }
     get src() {
       return this.getAttribute("src") || "";
     }
@@ -5673,6 +6332,14 @@
   }
 
   class HTMLImageElement extends HTMLElement {
+    setAttribute(name, value) {
+      const isSource = String(name).toLowerCase() === "src";
+      if (isSource) noteElementResourceStart(this);
+      super.setAttribute(name, value);
+      if (isSource && /^(?:data:|blob:)/i.test(String(value))) {
+        finishElementResourceTiming(this, 200, false);
+      }
+    }
     get src() {
       return this.getAttribute("src") || "";
     }
@@ -5713,8 +6380,10 @@
   const canvasStates = new WeakMap();
   function canvasDimensions(canvas) {
     const integer = (name, fallback) => {
-      const value = canvas.getAttribute(name);
-      return value === null ? fallback : Math.max(0, Math.min(32768, Math.trunc(Number(value)) || 0));
+      const value = typeof canvas.getAttribute === "function"
+        ? canvas.getAttribute(name) : canvas["__" + name];
+      return value === null || value === undefined
+        ? fallback : Math.max(0, Math.min(32768, Math.trunc(Number(value)) || 0));
     };
     return [integer("width", 300), integer("height", 150)];
   }
@@ -5731,12 +6400,21 @@
   }
   function initialCanvasState(canvas) {
     const [width,height]=canvasDimensions(canvas);
-    return { width,height,pixels:new Uint8ClampedArray(width*height*4), context:null,
+    return { width,height,pixels:new Uint8ClampedArray(width*height*4), context:null, webgl:null, contextMode:null,
       style:{fillStyle:"#000000",strokeStyle:"#000000",globalAlpha:1,lineWidth:1,lineCap:"butt",lineJoin:"miter",miterLimit:10,font:"10px sans-serif",transform:[1,0,0,1,0,0],clip:null}, stack:[], paths:[], current:null };
   }
   function canvasState(canvas) {
     let state=canvasStates.get(canvas); const [width,height]=canvasDimensions(canvas);
-    if (!state || state.width!==width || state.height!==height) { state=initialCanvasState(canvas); canvasStates.set(canvas,state); __omoikane_canvas_commit(canvas.__id,width,height,new Uint8Array(state.pixels.buffer)); }
+    if (!state || state.width!==width || state.height!==height) {
+      const previous = state;
+      state=initialCanvasState(canvas);
+      if (previous) {
+        state.contextMode = previous.contextMode;
+        state.context = previous.context;
+        state.webgl = previous.webgl;
+      }
+      canvasStates.set(canvas,state); commitCanvas(canvas,state);
+    }
     return state;
   }
   function blendCanvasPixel(state,x,y,color,clear=false) {
@@ -5750,7 +6428,9 @@
   }
   function transformCanvasPoint(m,x,y){return [m[0]*x+m[2]*y+m[4],m[1]*x+m[3]*y+m[5]];}
   function pointInCanvasPaths(x,y,paths,rule){let winding=0,crossings=0;for(const path of paths){for(let i=0;i<path.length;i++){const a=path[i],b=path[(i+1)%path.length];if((a[1]>y)!==(b[1]>y)){const ix=a[0]+(y-a[1])*(b[0]-a[0])/(b[1]-a[1]);if(ix>x){crossings++;winding+=b[1]>a[1]?1:-1;}}}}return rule==="evenodd"?crossings%2===1:winding!==0;}
-  function commitCanvas(canvas,state){__omoikane_canvas_commit(canvas.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));}
+  function commitCanvas(canvas,state){
+    if (canvas.__id != null) __omoikane_canvas_commit(canvas.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));
+  }
 
   class CanvasRenderingContext2D {
     constructor(canvas){this.canvas=canvas;}
@@ -5780,26 +6460,896 @@
     createImageData(a,b){return a instanceof ImageData?new ImageData(a.width,a.height):new ImageData(a,b);}
     getImageData(sx,sy,sw,sh){sw=Number(sw);sh=Number(sh);if(sw<=0||sh<=0)throw new DOMException("ImageData dimensions must be positive","IndexSizeError");const s=this.__s,out=new ImageData(sw,sh);for(let y=0;y<out.height;y++)for(let x=0;x<out.width;x++){const si=((sy+y)*s.width+(sx+x))*4,di=(y*out.width+x)*4;if(sx+x>=0&&sy+y>=0&&sx+x<s.width&&sy+y<s.height)out.data.set(s.pixels.slice(si,si+4),di);}return out;}
     putImageData(image,dx,dy){const s=this.__s;for(let y=0;y<image.height;y++)for(let x=0;x<image.width;x++){const tx=dx+x,ty=dy+y;if(tx>=0&&ty>=0&&tx<s.width&&ty<s.height)s.pixels.set(image.data.slice((y*image.width+x)*4,(y*image.width+x+1)*4),(ty*s.width+tx)*4);}commitCanvas(this.canvas,s);}
-    drawImage(source,...args){let src;if(source instanceof HTMLCanvasElement)src=canvasState(source);else{const raw=source&&source.__id!=null?__omoikane_canvas_image_source(source.__id):null;if(raw===null)throw new DOMException("Image source is unavailable","InvalidStateError");const decoded=JSON.parse(raw);src={width:decoded.width,height:decoded.height,pixels:bytesFromBase64(decoded.pixels)};}const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
+    drawImage(source,...args){let src;
+      const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
+      if (isHtmlCanvas || source instanceof OffscreenCanvas) src=canvasState(source);
+      else if (source instanceof ImageBitmap) {
+        if (source.__detached) throw new DOMException("The ImageBitmap is detached","InvalidStateError");
+        src={width:source.width,height:source.height,pixels:source.__pixels};
+      } else {
+        const raw=source&&source.__id!=null?__omoikane_canvas_image_source(source.__id):null;
+        if(raw===null)throw new DOMException("Image source is unavailable","InvalidStateError");
+        const decoded=JSON.parse(raw);src={width:decoded.width,height:decoded.height,pixels:bytesFromBase64(decoded.pixels)};
+      }
+      const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;
+      if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}
+      for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
     measureText(text){const size=parseFloat(this.__s.style.font)||10;return {width:String(text).length*size*.6,actualBoundingBoxAscent:size*.8,actualBoundingBoxDescent:size*.2};}
     fillText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.fillRect(x,y-size*.8,w,size);}
     strokeText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.strokeRect(x,y-size*.8,w,size);}
   }
   for(const name of ["fillStyle","strokeStyle","globalAlpha","lineWidth","lineCap","lineJoin","miterLimit","font"]){Object.defineProperty(CanvasRenderingContext2D.prototype,name,{get(){return this.__s.style[name];},set(value){this.__s.style[name]=name==="globalAlpha"?Math.max(0,Math.min(1,Number(value))):name==="lineWidth"?Math.max(0,Number(value)):String(value);}});}
 
+  // EventTarget is declared later in this bootstrap (Navigator is constructed
+  // before the shared event infrastructure is installed).  The bridge keeps
+  // WebGL context construction safe during that initial pass and adopts the
+  // real EventTarget prototype once it becomes available below.
+  class WebGLEventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(...args) { return globalThis.EventTarget.prototype.addEventListener.call(this, ...args); }
+    removeEventListener(...args) { return globalThis.EventTarget.prototype.removeEventListener.call(this, ...args); }
+    dispatchEvent(...args) { return globalThis.EventTarget.prototype.dispatchEvent.call(this, ...args); }
+  }
+
+  const webglContextConstructionToken = {};
+  const webglResourceConstructionToken = {};
+  class WebGLResource {
+    constructor(context, kind, token) {
+      if (token !== webglResourceConstructionToken) throw new TypeError("Illegal constructor");
+      this.__context = context;
+      this.__kind = kind;
+      this.__deleted = false;
+    }
+    get [Symbol.toStringTag]() { return this.__kind; }
+  }
+  class WebGLBuffer extends WebGLResource {
+    constructor(context, token) { super(context, "WebGLBuffer", token); this.__size = 0; this.__usage = 0; }
+  }
+  class WebGLShader extends WebGLResource {
+    constructor(context, type, token) {
+      super(context, "WebGLShader", token);
+      this.__type = type;
+      this.__source = "";
+      this.__compiled = false;
+      this.__infoLog = "";
+    }
+  }
+  class WebGLProgram extends WebGLResource {
+    constructor(context, token) {
+      super(context, "WebGLProgram", token);
+      this.__shaders = [];
+      this.__linked = false;
+      this.__infoLog = "";
+      this.__attributes = new Map();
+      this.__uniforms = new Map();
+    }
+  }
+  class WebGLUniformLocation {
+    constructor(program, name, token) {
+      if (token !== webglResourceConstructionToken) throw new TypeError("Illegal constructor");
+      this.__program = program;
+      this.__name = name;
+    }
+    get [Symbol.toStringTag]() { return "WebGLUniformLocation"; }
+  }
+
+  const WEBGL_CONSTANTS = {
+    DEPTH_BUFFER_BIT: 0x00000100, STENCIL_BUFFER_BIT: 0x00000400, COLOR_BUFFER_BIT: 0x00004000,
+    POINTS: 0x0000, LINES: 0x0001, LINE_LOOP: 0x0002, LINE_STRIP: 0x0003,
+    TRIANGLES: 0x0004, TRIANGLE_STRIP: 0x0005, TRIANGLE_FAN: 0x0006,
+    ZERO: 0, ONE: 1, SRC_COLOR: 0x0300, ONE_MINUS_SRC_COLOR: 0x0301,
+    SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303, DST_ALPHA: 0x0304,
+    ONE_MINUS_DST_ALPHA: 0x0305, DST_COLOR: 0x0306, ONE_MINUS_DST_COLOR: 0x0307,
+    SRC_ALPHA_SATURATE: 0x0308, FUNC_ADD: 0x8006, BLEND_EQUATION: 0x8009,
+    BLEND_EQUATION_RGB: 0x8009, BLEND_EQUATION_ALPHA: 0x883D,
+    FUNC_SUBTRACT: 0x800A, FUNC_REVERSE_SUBTRACT: 0x800B,
+    BLEND_DST_RGB: 0x80C8, BLEND_SRC_RGB: 0x80C9, BLEND_DST_ALPHA: 0x80CA,
+    BLEND_SRC_ALPHA: 0x80CB, BLEND_COLOR: 0x8005,
+    CONSTANT_COLOR: 0x8001, ONE_MINUS_CONSTANT_COLOR: 0x8002,
+    CONSTANT_ALPHA: 0x8003, ONE_MINUS_CONSTANT_ALPHA: 0x8004,
+    ARRAY_BUFFER: 0x8892, ELEMENT_ARRAY_BUFFER: 0x8893,
+    ARRAY_BUFFER_BINDING: 0x8894, ELEMENT_ARRAY_BUFFER_BINDING: 0x8895,
+    STREAM_DRAW: 0x88E0, STATIC_DRAW: 0x88E4, DYNAMIC_DRAW: 0x88E8,
+    BUFFER_SIZE: 0x8764, BUFFER_USAGE: 0x8765,
+    CURRENT_VERTEX_ATTRIB: 0x8626, FRONT: 0x0404, BACK: 0x0405, FRONT_AND_BACK: 0x0408,
+    CULL_FACE: 0x0B44, BLEND: 0x0BE2, DITHER: 0x0BD0, STENCIL_TEST: 0x0B90,
+    DEPTH_TEST: 0x0B71, SCISSOR_TEST: 0x0C11, POLYGON_OFFSET_FILL: 0x8037,
+    SAMPLE_ALPHA_TO_COVERAGE: 0x809E, SAMPLE_COVERAGE: 0x80A0,
+    NO_ERROR: 0, INVALID_ENUM: 0x0500, INVALID_VALUE: 0x0501,
+    INVALID_OPERATION: 0x0502, OUT_OF_MEMORY: 0x0505,
+    INVALID_FRAMEBUFFER_OPERATION: 0x0506, CONTEXT_LOST_WEBGL: 0x9242,
+    EXP: 0x0800, EXP2: 0x0801,
+    NEVER: 0x0200, LESS: 0x0201, EQUAL: 0x0202, LEQUAL: 0x0203,
+    GREATER: 0x0204, NOTEQUAL: 0x0205, GEQUAL: 0x0206, ALWAYS: 0x0207,
+    KEEP: 0x1E00, REPLACE: 0x1E01, INCR: 0x1E02, DECR: 0x1E03,
+    INVERT: 0x150A, INCR_WRAP: 0x8507, DECR_WRAP: 0x8508,
+    VERTEX_ATTRIB_ARRAY_ENABLED: 0x8622, VERTEX_ATTRIB_ARRAY_SIZE: 0x8623,
+    VERTEX_ATTRIB_ARRAY_STRIDE: 0x8624, VERTEX_ATTRIB_ARRAY_TYPE: 0x8625,
+    VERTEX_ATTRIB_ARRAY_NORMALIZED: 0x886A, VERTEX_ATTRIB_ARRAY_POINTER: 0x8645,
+    VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: 0x889F,
+    FLOAT: 0x1406, UNSIGNED_BYTE: 0x1401,
+    UNSIGNED_SHORT: 0x1403, UNSIGNED_INT: 0x1405,
+    VERTEX_SHADER: 0x8B31, FRAGMENT_SHADER: 0x8B30,
+    COMPILE_STATUS: 0x8B81, DELETE_STATUS: 0x8B80, SHADER_TYPE: 0x8B4F,
+    LINK_STATUS: 0x8B82, VALIDATE_STATUS: 0x8B83, ATTACHED_SHADERS: 0x8B85,
+    CURRENT_PROGRAM: 0x8B8D, ACTIVE_ATTRIBUTES: 0x8B89, ACTIVE_UNIFORMS: 0x8B86,
+    ACTIVE_TEXTURE: 0x84E0, TEXTURE0: 0x84C0, TEXTURE_BINDING_2D: 0x8069,
+    TEXTURE_2D: 0x0DE1, TEXTURE_CUBE_MAP: 0x8513, RGB: 0x1907, RGBA: 0x1908,
+    VIEWPORT: 0x0BA2, SCISSOR_BOX: 0x0C10,
+    COLOR_CLEAR_VALUE: 0x0C22, COLOR_WRITEMASK: 0x0C23,
+    DEPTH_CLEAR_VALUE: 0x0B73, DEPTH_WRITEMASK: 0x0B72,
+    STENCIL_CLEAR_VALUE: 0x0B91, STENCIL_WRITEMASK: 0x0B98,
+    STENCIL_BACK_WRITEMASK: 0x8CA5, DEPTH_BITS: 0x0D56, STENCIL_BITS: 0x0D57,
+    RED_BITS: 0x0D52, GREEN_BITS: 0x0D53, BLUE_BITS: 0x0D54, ALPHA_BITS: 0x0D55,
+    MAX_TEXTURE_SIZE: 0x0D33, MAX_CUBE_MAP_TEXTURE_SIZE: 0x851C,
+    MAX_VIEWPORT_DIMS: 0x0D3A, MAX_VERTEX_ATTRIBS: 0x8869,
+    MAX_VERTEX_UNIFORM_VECTORS: 0x8DFB, MAX_VARYING_VECTORS: 0x8DFC,
+    MAX_COMBINED_TEXTURE_IMAGE_UNITS: 0x8B4D, MAX_VERTEX_TEXTURE_IMAGE_UNITS: 0x8B4C,
+    MAX_TEXTURE_IMAGE_UNITS: 0x8872, MAX_FRAGMENT_UNIFORM_VECTORS: 0x8DFD,
+    SAMPLE_BUFFERS: 0x80A8, SAMPLES: 0x80A9, SUBPIXEL_BITS: 0x0D50,
+    RENDERER: 0x1F01, VENDOR: 0x1F00, VERSION: 0x1F02,
+    SHADING_LANGUAGE_VERSION: 0x8B8C,
+  };
+
+  const WEBGL_CAPABILITIES = Object.freeze([
+    WEBGL_CONSTANTS.BLEND, WEBGL_CONSTANTS.CULL_FACE, WEBGL_CONSTANTS.DEPTH_TEST,
+    WEBGL_CONSTANTS.DITHER, WEBGL_CONSTANTS.POLYGON_OFFSET_FILL,
+    WEBGL_CONSTANTS.SAMPLE_ALPHA_TO_COVERAGE, WEBGL_CONSTANTS.SAMPLE_COVERAGE,
+    WEBGL_CONSTANTS.SCISSOR_TEST, WEBGL_CONSTANTS.STENCIL_TEST,
+  ]);
+  const WEBGL_CLEAR_BITS = WEBGL_CONSTANTS.COLOR_BUFFER_BIT |
+    WEBGL_CONSTANTS.DEPTH_BUFFER_BIT | WEBGL_CONSTANTS.STENCIL_BUFFER_BIT;
+  const WEBGL_BUFFER_TARGETS = Object.freeze([
+    WEBGL_CONSTANTS.ARRAY_BUFFER, WEBGL_CONSTANTS.ELEMENT_ARRAY_BUFFER,
+  ]);
+  const WEBGL_DRAW_MODES = Object.freeze([
+    WEBGL_CONSTANTS.POINTS, WEBGL_CONSTANTS.LINES, WEBGL_CONSTANTS.LINE_LOOP,
+    WEBGL_CONSTANTS.LINE_STRIP, WEBGL_CONSTANTS.TRIANGLES,
+    WEBGL_CONSTANTS.TRIANGLE_STRIP, WEBGL_CONSTANTS.TRIANGLE_FAN,
+  ]);
+
+  function webglClamp(value) {
+    const number = Number(value);
+    if (Number.isNaN(number)) return 0;
+    return Math.max(0, Math.min(1, number));
+  }
+  function webglError(context, code) {
+    if (!context.__state.errors.length) context.__state.errors.push(code);
+  }
+  function webglActive(context) {
+    if (context.__state.lost) return false;
+    return true;
+  }
+  function webglOwned(context, value, constructor, nullable = false, allowDeleted = false) {
+    if (value === null && nullable) return null;
+    if (!(value instanceof constructor) || value.__context !== context || (!allowDeleted && value.__deleted)) {
+      webglError(context, WEBGL_CONSTANTS.INVALID_OPERATION);
+      return undefined;
+    }
+    return value;
+  }
+  function webglDeletable(context, value, constructor) {
+    if (!(value instanceof constructor) || value.__context !== context) {
+      webglError(context, WEBGL_CONSTANTS.INVALID_OPERATION);
+      return undefined;
+    }
+    return value;
+  }
+  function webglSourceNames(source, keyword) {
+    const names = [];
+    const seen = new Set();
+    const expression = new RegExp(
+      "\\b" + keyword + "\\s+(?:(?:lowp|mediump|highp)\\s+)?\\w+\\s+(\\w+)(?:\\s*\\[[^\\]]*\\])?\\s*;",
+      "g",
+    );
+    let match;
+    while ((match = expression.exec(source))) {
+      if (!seen.has(match[1])) { seen.add(match[1]); names.push(match[1]); }
+    }
+    return names;
+  }
+
+  class WebGLRenderingContext extends WebGLEventTarget {
+    constructor(canvas, token) {
+      if (token !== webglContextConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this.canvas = canvas;
+      this.__state = {
+        context: this, lost: false, errors: [], clearColor: [0, 0, 0, 0],
+        colorMask: [true, true, true, true], depthMask: true,
+        stencilMask: 0xffffffff, clearDepth: 1, clearStencil: 0,
+        viewport: [0, 0, canvasDimensions(canvas)[0], canvasDimensions(canvas)[1]],
+        scissor: [0, 0, canvasDimensions(canvas)[0], canvasDimensions(canvas)[1]],
+        enabled: new Set(), buffers: new Set(), shaders: new Set(), programs: new Set(),
+        arrayBuffer: null, elementArrayBuffer: null, currentProgram: null,
+        activeTexture: WEBGL_CONSTANTS.TEXTURE0,
+      };
+      this.__oncontextlost = null;
+      this.__oncontextrestored = null;
+    }
+    get drawingBufferWidth() { return canvasDimensions(this.canvas)[0]; }
+    get drawingBufferHeight() { return canvasDimensions(this.canvas)[1]; }
+    get __s() { return this.__state; }
+    __commit() { commitCanvas(this.canvas, canvasState(this.canvas)); }
+    __lose() {
+      if (this.__state.lost) return false;
+      this.__state.lost = true;
+      this.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      if (this.canvas && typeof this.canvas.dispatchEvent === "function") {
+        this.canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      }
+      return true;
+    }
+    __restore() {
+      if (!this.__state.lost) return false;
+      this.__state.lost = false;
+      this.__state.errors.length = 0;
+      this.__state.clearColor = [0, 0, 0, 0];
+      this.__state.clearDepth = 1;
+      this.__state.clearStencil = 0;
+      this.__state.activeTexture = WEBGL_CONSTANTS.TEXTURE0;
+      this.__state.colorMask = [true, true, true, true];
+      this.__state.depthMask = true;
+      this.__state.stencilMask = 0xffffffff;
+      this.__state.viewport = [0, 0, this.drawingBufferWidth, this.drawingBufferHeight];
+      this.__state.scissor = [0, 0, this.drawingBufferWidth, this.drawingBufferHeight];
+      this.__state.enabled.clear();
+      for (const resource of [...this.__state.buffers, ...this.__state.shaders, ...this.__state.programs]) resource.__deleted = true;
+      this.__state.buffers.clear();
+      this.__state.shaders.clear();
+      this.__state.programs.clear();
+      this.__state.arrayBuffer = null;
+      this.__state.elementArrayBuffer = null;
+      this.__state.currentProgram = null;
+      this.dispatchEvent(new Event("webglcontextrestored"));
+      if (this.canvas && typeof this.canvas.dispatchEvent === "function") {
+        this.canvas.dispatchEvent(new Event("webglcontextrestored"));
+      }
+      return true;
+    }
+    get oncontextlost() { return this.__oncontextlost || null; }
+    set oncontextlost(callback) {
+      if (this.__oncontextlost) this.removeEventListener("webglcontextlost", this.__oncontextlost);
+      this.__oncontextlost = typeof callback === "function" ? callback : null;
+      if (this.__oncontextlost) this.addEventListener("webglcontextlost", this.__oncontextlost);
+    }
+    get oncontextrestored() { return this.__oncontextrestored || null; }
+    set oncontextrestored(callback) {
+      if (this.__oncontextrestored) this.removeEventListener("webglcontextrestored", this.__oncontextrestored);
+      this.__oncontextrestored = typeof callback === "function" ? callback : null;
+      if (this.__oncontextrestored) this.addEventListener("webglcontextrestored", this.__oncontextrestored);
+    }
+    clearColor(red, green, blue, alpha) {
+      if (!webglActive(this)) return;
+      this.__state.clearColor = [webglClamp(red), webglClamp(green), webglClamp(blue), webglClamp(alpha)];
+    }
+    clearDepth(value) {
+      if (!webglActive(this)) return;
+      this.__state.clearDepth = webglClamp(value);
+    }
+    clearStencil(value) {
+      if (!webglActive(this)) return;
+      const number = Number(value);
+      if (!Number.isFinite(number)) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+      this.__state.clearStencil = number | 0;
+    }
+    colorMask(red, green, blue, alpha) {
+      if (!webglActive(this)) return;
+      this.__state.colorMask = [!!red, !!green, !!blue, !!alpha];
+    }
+    depthMask(value) { if (webglActive(this)) this.__state.depthMask = !!value; }
+    stencilMask(value) {
+      if (!webglActive(this)) return;
+      const number = Number(value);
+      if (!Number.isFinite(number)) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+      this.__state.stencilMask = number >>> 0;
+    }
+    viewport(x, y, width, height) {
+      if (!webglActive(this)) return;
+      const values = [x, y, width, height].map(Number);
+      if (values.some(value => !Number.isFinite(value) || Math.trunc(value) !== value) || values[2] < 0 || values[3] < 0) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE);
+        return;
+      }
+      this.__state.viewport = values;
+    }
+    scissor(x, y, width, height) {
+      if (!webglActive(this)) return;
+      const values = [x, y, width, height].map(Number);
+      if (values.some(value => !Number.isFinite(value) || Math.trunc(value) !== value) || values[2] < 0 || values[3] < 0) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE);
+        return;
+      }
+      this.__state.scissor = values;
+    }
+    clear(mask) {
+      if (!webglActive(this)) return;
+      const bits = Number(mask);
+      if (!Number.isFinite(bits) || (bits & WEBGL_CLEAR_BITS) !== bits) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE);
+        return;
+      }
+      if (bits & WEBGL_CONSTANTS.COLOR_BUFFER_BIT) {
+        const state = canvasState(this.canvas);
+        const color = this.__state.clearColor.map(value => Math.round(value * 255));
+        for (let index = 0; index < state.pixels.length; index += 4) {
+          for (let channel = 0; channel < 4; channel++) {
+            if (this.__state.colorMask[channel]) state.pixels[index + channel] = color[channel];
+          }
+        }
+        this.__commit();
+      }
+    }
+    enable(capability) {
+      if (!webglActive(this)) return;
+      if (!WEBGL_CAPABILITIES.includes(capability)) webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
+      else this.__state.enabled.add(capability);
+    }
+    disable(capability) {
+      if (!webglActive(this)) return;
+      if (!WEBGL_CAPABILITIES.includes(capability)) webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
+      else this.__state.enabled.delete(capability);
+    }
+    isEnabled(capability) {
+      if (!webglActive(this)) return false;
+      if (!WEBGL_CAPABILITIES.includes(capability)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return false; }
+      return this.__state.enabled.has(capability);
+    }
+    isContextLost() { return this.__state.lost; }
+    getError() {
+      if (this.__state.lost) return WEBGL_CONSTANTS.CONTEXT_LOST_WEBGL;
+      return this.__state.errors.shift() || WEBGL_CONSTANTS.NO_ERROR;
+    }
+    getParameter(parameter) {
+      if (!webglActive(this)) return null;
+      parameter = Number(parameter);
+      switch (parameter) {
+        case WEBGL_CONSTANTS.VIEWPORT: return new Int32Array(this.__state.viewport);
+        case WEBGL_CONSTANTS.SCISSOR_BOX: return new Int32Array(this.__state.scissor);
+        case WEBGL_CONSTANTS.COLOR_CLEAR_VALUE: return new Float32Array(this.__state.clearColor);
+        case WEBGL_CONSTANTS.COLOR_WRITEMASK: return this.__state.colorMask.slice();
+        case WEBGL_CONSTANTS.DEPTH_CLEAR_VALUE: return this.__state.clearDepth;
+        case WEBGL_CONSTANTS.DEPTH_WRITEMASK: return this.__state.depthMask;
+        case WEBGL_CONSTANTS.STENCIL_CLEAR_VALUE: return this.__state.clearStencil;
+        case WEBGL_CONSTANTS.STENCIL_WRITEMASK: return this.__state.stencilMask;
+        case WEBGL_CONSTANTS.STENCIL_BACK_WRITEMASK: return this.__state.stencilMask;
+        case WEBGL_CONSTANTS.ARRAY_BUFFER_BINDING: return this.__state.arrayBuffer && !this.__state.arrayBuffer.__deleted ? this.__state.arrayBuffer : null;
+        case WEBGL_CONSTANTS.ELEMENT_ARRAY_BUFFER_BINDING: return this.__state.elementArrayBuffer && !this.__state.elementArrayBuffer.__deleted ? this.__state.elementArrayBuffer : null;
+        case WEBGL_CONSTANTS.CURRENT_PROGRAM: return this.__state.currentProgram && !this.__state.currentProgram.__deleted ? this.__state.currentProgram : null;
+        case WEBGL_CONSTANTS.ACTIVE_TEXTURE: return this.__state.activeTexture;
+        case WEBGL_CONSTANTS.MAX_TEXTURE_SIZE:
+        case WEBGL_CONSTANTS.MAX_CUBE_MAP_TEXTURE_SIZE: return 4096;
+        case WEBGL_CONSTANTS.MAX_VIEWPORT_DIMS: return new Int32Array([32768, 32768]);
+        case WEBGL_CONSTANTS.MAX_VERTEX_ATTRIBS: return 8;
+        case WEBGL_CONSTANTS.MAX_VERTEX_UNIFORM_VECTORS: return 128;
+        case WEBGL_CONSTANTS.MAX_VARYING_VECTORS: return 8;
+        case WEBGL_CONSTANTS.MAX_COMBINED_TEXTURE_IMAGE_UNITS: return 8;
+        case WEBGL_CONSTANTS.MAX_VERTEX_TEXTURE_IMAGE_UNITS: return 0;
+        case WEBGL_CONSTANTS.MAX_TEXTURE_IMAGE_UNITS: return 8;
+        case WEBGL_CONSTANTS.MAX_FRAGMENT_UNIFORM_VECTORS: return 16;
+        case WEBGL_CONSTANTS.RED_BITS:
+        case WEBGL_CONSTANTS.GREEN_BITS:
+        case WEBGL_CONSTANTS.BLUE_BITS:
+        case WEBGL_CONSTANTS.ALPHA_BITS: return 8;
+        case WEBGL_CONSTANTS.DEPTH_BITS: return 24;
+        case WEBGL_CONSTANTS.STENCIL_BITS: return 8;
+        case WEBGL_CONSTANTS.SAMPLE_BUFFERS:
+        case WEBGL_CONSTANTS.SAMPLES: return 0;
+        case WEBGL_CONSTANTS.SUBPIXEL_BITS: return 4;
+        case WEBGL_CONSTANTS.RENDERER: return "Omoikane Software WebGL";
+        case WEBGL_CONSTANTS.VENDOR: return "Omoikane";
+        case WEBGL_CONSTANTS.VERSION: return "WebGL 1.0 Omoikane";
+        case WEBGL_CONSTANTS.SHADING_LANGUAGE_VERSION: return "WebGL GLSL ES 1.0 Omoikane";
+        case WEBGL_CONSTANTS.BLEND:
+        case WEBGL_CONSTANTS.CULL_FACE:
+        case WEBGL_CONSTANTS.DEPTH_TEST:
+        case WEBGL_CONSTANTS.DITHER:
+        case WEBGL_CONSTANTS.POLYGON_OFFSET_FILL:
+        case WEBGL_CONSTANTS.SAMPLE_ALPHA_TO_COVERAGE:
+        case WEBGL_CONSTANTS.SAMPLE_COVERAGE:
+        case WEBGL_CONSTANTS.SCISSOR_TEST:
+        case WEBGL_CONSTANTS.STENCIL_TEST: return this.__state.enabled.has(parameter);
+        default:
+          webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
+          return null;
+      }
+    }
+    createBuffer() {
+      if (!webglActive(this)) return null;
+      const buffer = new WebGLBuffer(this, webglResourceConstructionToken);
+      this.__state.buffers.add(buffer);
+      return buffer;
+    }
+    deleteBuffer(buffer) {
+      if (buffer === null) return;
+      const value = webglDeletable(this, buffer, WebGLBuffer);
+      if (!value) return;
+      if (value.__deleted) return;
+      value.__deleted = true;
+      this.__state.buffers.delete(value);
+      if (this.__state.arrayBuffer === value) this.__state.arrayBuffer = null;
+      if (this.__state.elementArrayBuffer === value) this.__state.elementArrayBuffer = null;
+    }
+    bindBuffer(target, buffer) {
+      if (!webglActive(this)) return;
+      if (!WEBGL_BUFFER_TARGETS.includes(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (buffer !== null && webglOwned(this, buffer, WebGLBuffer) === undefined) return;
+      if (target === WEBGL_CONSTANTS.ARRAY_BUFFER) this.__state.arrayBuffer = buffer;
+      else this.__state.elementArrayBuffer = buffer;
+    }
+    bufferData(target, dataOrSize, usage) {
+      if (!webglActive(this)) return;
+      if (!WEBGL_BUFFER_TARGETS.includes(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (![WEBGL_CONSTANTS.STREAM_DRAW, WEBGL_CONSTANTS.STATIC_DRAW, WEBGL_CONSTANTS.DYNAMIC_DRAW].includes(usage)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      const buffer = target === WEBGL_CONSTANTS.ARRAY_BUFFER ? this.__state.arrayBuffer : this.__state.elementArrayBuffer;
+      if (!buffer) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      let size;
+      if (typeof dataOrSize === "number") size = Number(dataOrSize);
+      else if (dataOrSize instanceof ArrayBuffer || ArrayBuffer.isView(dataOrSize)) size = dataOrSize.byteLength;
+      else { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+      if (!Number.isFinite(size) || Math.trunc(size) !== size || size < 0) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+      buffer.__size = size;
+      buffer.__usage = usage;
+    }
+    bufferSubData(target, offset, data) {
+      if (!webglActive(this)) return;
+      if (!WEBGL_BUFFER_TARGETS.includes(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      const buffer = target === WEBGL_CONSTANTS.ARRAY_BUFFER ? this.__state.arrayBuffer : this.__state.elementArrayBuffer;
+      if (!buffer) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      const start = Number(offset);
+      const size = data instanceof ArrayBuffer || ArrayBuffer.isView(data) ? data.byteLength : NaN;
+      if (!Number.isFinite(start) || Math.trunc(start) !== start || start < 0 || !Number.isFinite(size) || start + size > buffer.__size) webglError(this, WEBGL_CONSTANTS.INVALID_VALUE);
+    }
+    getBufferParameter(target, parameter) {
+      if (!webglActive(this)) return null;
+      if (!WEBGL_BUFFER_TARGETS.includes(target)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
+      const buffer = target === WEBGL_CONSTANTS.ARRAY_BUFFER ? this.__state.arrayBuffer : this.__state.elementArrayBuffer;
+      if (!buffer) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return null; }
+      if (parameter === WEBGL_CONSTANTS.BUFFER_SIZE) return buffer.__size;
+      if (parameter === WEBGL_CONSTANTS.BUFFER_USAGE) return buffer.__usage;
+      webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
+      return null;
+    }
+    createShader(type) {
+      if (!webglActive(this)) return null;
+      if (type !== WEBGL_CONSTANTS.VERTEX_SHADER && type !== WEBGL_CONSTANTS.FRAGMENT_SHADER) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
+      const shader = new WebGLShader(this, type, webglResourceConstructionToken);
+      this.__state.shaders.add(shader);
+      return shader;
+    }
+    shaderSource(shader, source) {
+      if (!webglActive(this)) return;
+      const value = webglOwned(this, shader, WebGLShader);
+      if (!value) return;
+      value.__source = String(source);
+      value.__compiled = false;
+      value.__infoLog = "";
+    }
+    compileShader(shader) {
+      if (!webglActive(this)) return;
+      const value = webglOwned(this, shader, WebGLShader);
+      if (!value) return;
+      const source = value.__source;
+      value.__compiled = /\bvoid\s+main\s*\(/.test(source) && !/\b(?:compile_fail|syntax_error|error)\b/i.test(source);
+      value.__infoLog = value.__compiled ? "" : "deterministic shader validation failed";
+    }
+    getShaderParameter(shader, parameter) {
+      if (!webglActive(this)) return null;
+      const value = webglOwned(this, shader, WebGLShader, false, true);
+      if (!value) return null;
+      if (parameter === WEBGL_CONSTANTS.COMPILE_STATUS) return value.__compiled;
+      if (parameter === WEBGL_CONSTANTS.DELETE_STATUS) return value.__deleted;
+      if (parameter === WEBGL_CONSTANTS.SHADER_TYPE) return value.__type;
+      webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
+      return null;
+    }
+    getShaderInfoLog(shader) {
+      if (!webglActive(this)) return null;
+      const value = webglOwned(this, shader, WebGLShader, false, true);
+      return value ? value.__infoLog : null;
+    }
+    getShaderSource(shader) {
+      if (!webglActive(this)) return null;
+      const value = webglOwned(this, shader, WebGLShader, false, true);
+      return value ? value.__source : null;
+    }
+    deleteShader(shader) {
+      if (shader === null) return;
+      const value = webglDeletable(this, shader, WebGLShader);
+      if (!value) return;
+      if (value.__deleted) return;
+      value.__deleted = true;
+      this.__state.shaders.delete(value);
+    }
+    createProgram() {
+      if (!webglActive(this)) return null;
+      const program = new WebGLProgram(this, webglResourceConstructionToken);
+      this.__state.programs.add(program);
+      return program;
+    }
+    attachShader(program, shader) {
+      if (!webglActive(this)) return;
+      const target = webglOwned(this, program, WebGLProgram);
+      const source = webglOwned(this, shader, WebGLShader);
+      if (!target || !source || target.__shaders.includes(source)) return;
+      target.__shaders.push(source);
+      target.__linked = false;
+    }
+    detachShader(program, shader) {
+      if (!webglActive(this)) return;
+      const target = webglOwned(this, program, WebGLProgram);
+      const source = webglOwned(this, shader, WebGLShader);
+      if (!target || !source) return;
+      target.__shaders = target.__shaders.filter(value => value !== source);
+      target.__linked = false;
+    }
+    linkProgram(program) {
+      if (!webglActive(this)) return;
+      const value = webglOwned(this, program, WebGLProgram);
+      if (!value) return;
+      const vertex = value.__shaders.find(shader => shader.__type === WEBGL_CONSTANTS.VERTEX_SHADER);
+      const fragment = value.__shaders.find(shader => shader.__type === WEBGL_CONSTANTS.FRAGMENT_SHADER);
+      value.__linked = !!vertex && !!fragment && vertex.__compiled && fragment.__compiled;
+      value.__infoLog = value.__linked ? "" : "deterministic program validation failed";
+      value.__attributes = new Map();
+      value.__uniforms = new Map();
+      if (value.__linked) {
+        const names = [];
+        const attributes = new Set();
+        const uniforms = new Set();
+        for (const shader of value.__shaders) {
+          for (const name of webglSourceNames(shader.__source, "attribute")) {
+            if (!attributes.has(name)) { attributes.add(name); names.push(name); }
+          }
+          for (const name of webglSourceNames(shader.__source, "uniform")) {
+            if (!uniforms.has(name)) { uniforms.add(name); names.push(name); }
+          }
+        }
+        let attributeIndex = 0;
+        for (const name of names) {
+          if (attributes.has(name)) value.__attributes.set(name, attributeIndex++);
+          if (uniforms.has(name)) value.__uniforms.set(name, new WebGLUniformLocation(value, name, webglResourceConstructionToken));
+        }
+      }
+    }
+    getProgramParameter(program, parameter) {
+      if (!webglActive(this)) return null;
+      const value = webglOwned(this, program, WebGLProgram, false, true);
+      if (!value) return null;
+      if (parameter === WEBGL_CONSTANTS.LINK_STATUS || parameter === WEBGL_CONSTANTS.VALIDATE_STATUS) return value.__linked;
+      if (parameter === WEBGL_CONSTANTS.DELETE_STATUS) return value.__deleted;
+      if (parameter === WEBGL_CONSTANTS.ATTACHED_SHADERS) return value.__shaders.length;
+      if (parameter === WEBGL_CONSTANTS.ACTIVE_ATTRIBUTES) return value.__attributes.size;
+      if (parameter === WEBGL_CONSTANTS.ACTIVE_UNIFORMS) return value.__uniforms.size;
+      webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
+      return null;
+    }
+    getProgramInfoLog(program) {
+      if (!webglActive(this)) return null;
+      const value = webglOwned(this, program, WebGLProgram, false, true);
+      return value ? value.__infoLog : null;
+    }
+    deleteProgram(program) {
+      if (program === null) return;
+      const value = webglDeletable(this, program, WebGLProgram);
+      if (!value) return;
+      if (value.__deleted) return;
+      value.__deleted = true;
+      this.__state.programs.delete(value);
+      if (this.__state.currentProgram === value) this.__state.currentProgram = null;
+    }
+    useProgram(program) {
+      if (!webglActive(this)) return;
+      if (program === null) { this.__state.currentProgram = null; return; }
+      const value = webglOwned(this, program, WebGLProgram);
+      if (!value) return;
+      if (!value.__linked) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      this.__state.currentProgram = value;
+    }
+    getAttribLocation(program, name) {
+      if (!webglActive(this)) return -1;
+      const value = webglOwned(this, program, WebGLProgram);
+      if (!value) return -1;
+      if (!value.__linked) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return -1; }
+      return value.__attributes.has(String(name)) ? value.__attributes.get(String(name)) : -1;
+    }
+    getUniformLocation(program, name) {
+      if (!webglActive(this)) return null;
+      const value = webglOwned(this, program, WebGLProgram);
+      if (!value) return null;
+      if (!value.__linked) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return null; }
+      return value.__uniforms.get(String(name)) || null;
+    }
+    getActiveAttrib(program, index) {
+      if (!webglActive(this)) return null;
+      const value = webglOwned(this, program, WebGLProgram);
+      if (!value || !value.__linked) return null;
+      const entries = Array.from(value.__attributes.entries());
+      const entry = entries[Number(index)];
+      return entry ? { name: entry[0], size: 1, type: WEBGL_CONSTANTS.FLOAT } : null;
+    }
+    getActiveUniform(program, index) {
+      if (!webglActive(this)) return null;
+      const value = webglOwned(this, program, WebGLProgram);
+      if (!value || !value.__linked) return null;
+      const entries = Array.from(value.__uniforms.keys());
+      const name = entries[Number(index)];
+      return name === undefined ? null : { name, size: 1, type: WEBGL_CONSTANTS.FLOAT };
+    }
+    getAttachedShaders(program) {
+      if (!webglActive(this)) return null;
+      const value = webglOwned(this, program, WebGLProgram);
+      return value ? value.__shaders.slice() : null;
+    }
+    drawArrays(mode, first, count) {
+      if (!webglActive(this)) return;
+      if (!WEBGL_DRAW_MODES.includes(mode)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (!Number.isFinite(Number(first)) || !Number.isFinite(Number(count)) || Number(first) < 0 || Number(count) < 0 || Math.trunc(Number(first)) !== Number(first) || Math.trunc(Number(count)) !== Number(count)) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+      if (!this.__state.currentProgram) webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION);
+    }
+    drawElements(mode, count, type, offset) {
+      if (!webglActive(this)) return;
+      if (!WEBGL_DRAW_MODES.includes(mode)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (![WEBGL_CONSTANTS.UNSIGNED_BYTE, WEBGL_CONSTANTS.UNSIGNED_SHORT].includes(type)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (!Number.isFinite(Number(count)) || Number(count) < 0 || !Number.isFinite(Number(offset)) || Number(offset) < 0) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+      if (!this.__state.currentProgram || !this.__state.elementArrayBuffer) webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION);
+    }
+    readPixels(x, y, width, height, format, type, pixels) {
+      if (!webglActive(this)) return;
+      const values = [x, y, width, height].map(Number);
+      if (values.some(value => !Number.isFinite(value) || Math.trunc(value) !== value) || values[2] < 0 || values[3] < 0) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE);
+        return;
+      }
+      if (format !== WEBGL_CONSTANTS.RGBA || type !== WEBGL_CONSTANTS.UNSIGNED_BYTE) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_ENUM);
+        return;
+      }
+      if (!ArrayBuffer.isView(pixels)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION);
+        return;
+      }
+      const required = values[2] * values[3] * 4;
+      if (pixels.byteLength < required) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION);
+        return;
+      }
+      const state = canvasState(this.canvas);
+      if (values[0] < 0 || values[1] < 0 || values[0] + values[2] > state.width || values[1] + values[3] > state.height) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE);
+        return;
+      }
+      const bytes = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+      for (let row = 0; row < values[3]; row++) {
+        for (let column = 0; column < values[2]; column++) {
+          const sourceX = values[0] + column;
+          const sourceY = values[1] + (values[3] - row - 1);
+          const target = (row * values[2] + column) * 4;
+          const source = (sourceY * state.width + sourceX) * 4;
+          bytes.set(state.pixels.subarray(source, source + 4), target);
+        }
+      }
+    }
+    getExtension() { return null; }
+    getSupportedExtensions() { return this.__state.lost ? null : []; }
+  }
+  for (const [name, value] of Object.entries(WEBGL_CONSTANTS)) {
+    Object.defineProperty(WebGLRenderingContext, name, { value, writable: false, enumerable: false, configurable: false });
+    Object.defineProperty(WebGLRenderingContext.prototype, name, { value, writable: false, enumerable: false, configurable: false });
+  }
+
+  function resetHtmlCanvasState(canvas) {
+    const previous = canvasStates.get(canvas);
+    canvasStates.delete(canvas);
+    const next = canvasState(canvas);
+    if (!previous) return;
+    // Resizing resets the backing store but does not release the canvas's
+    // context mode. Preserve the context identity so a subsequent getContext
+    // call remains exclusive to its original API.
+    next.contextMode = previous.contextMode;
+    next.context = previous.context;
+    next.webgl = previous.webgl;
+  }
+
   class HTMLCanvasElement extends HTMLElement {
-    get width(){return canvasDimensions(this)[0];} set width(value){this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));canvasStates.delete(this);canvasState(this);}
-    get height(){return canvasDimensions(this)[1];} set height(value){this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));canvasStates.delete(this);canvasState(this);}
-    getContext(type){if(String(type).toLowerCase()!=="2d")return null;const s=canvasState(this);return s.context||(s.context=new CanvasRenderingContext2D(this));}
+    get width(){return canvasDimensions(this)[0];} set width(value){this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
+    get height(){return canvasDimensions(this)[1];} set height(value){this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
+    getContext(type){
+      const requested=String(type).toLowerCase(),s=canvasState(this);
+      if(requested==="2d"){
+        if(s.contextMode&&s.contextMode!=="2d")return null;
+        s.contextMode="2d";
+        return s.context||(s.context=new CanvasRenderingContext2D(this));
+      }
+      if(requested==="webgl"||requested==="experimental-webgl"){
+        if(s.contextMode&&s.contextMode!=="webgl")return null;
+        s.contextMode="webgl";
+        return s.webgl||(s.webgl=new WebGLRenderingContext(this,webglContextConstructionToken));
+      }
+      return null;
+    }
     toDataURL(type="image/png"){canvasState(this);return String(type).toLowerCase()==="image/png"?__omoikane_canvas_data_url(this.__id):__omoikane_canvas_data_url(this.__id);}
   }
 
+  const nativeCanvasPng = globalThis.__omoikane_canvas_png;
+  try { delete globalThis.__omoikane_canvas_png; } catch (_) {}
+  const imageBitmapConstructionToken = {};
+  function offscreenDimension(value, name) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || Math.trunc(number) !== number || number < 0 || number > 32768) {
+      throw new DOMException("The " + name + " dimension is invalid", "IndexSizeError");
+    }
+    return number;
+  }
+  function canvasStateChecked(canvas) {
+    try {
+      return canvasState(canvas);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        throw new DOMException("Canvas dimensions are too large", "IndexSizeError");
+      }
+      throw error;
+    }
+  }
+  function canvasSnapshot(canvas) {
+    try {
+      const state = canvasStateChecked(canvas);
+      return { width: state.width, height: state.height, pixels: state.pixels.slice() };
+    } catch (error) {
+      if (error instanceof RangeError) {
+        throw new DOMException("Canvas dimensions are too large", "IndexSizeError");
+      }
+      throw error;
+    }
+  }
+  function imageBitmapSource(source) {
+    if (source instanceof ImageBitmap) {
+      if (source.__detached) throw new DOMException("The ImageBitmap is detached", "InvalidStateError");
+      return { width: source.width, height: source.height, pixels: source.__pixels };
+    }
+    const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
+    if (isHtmlCanvas || source instanceof OffscreenCanvas) return canvasSnapshot(source);
+    const raw = source && source.__id != null ? __omoikane_canvas_image_source(source.__id) : null;
+    if (raw === null) throw new DOMException("Image source is unavailable", "InvalidStateError");
+    const decoded = JSON.parse(raw);
+    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels) };
+  }
+
+  class ImageBitmap {
+    constructor(token, width, height, pixels) {
+      if (token !== imageBitmapConstructionToken) throw new TypeError("Illegal constructor");
+      this.__width = width;
+      this.__height = height;
+      this.__pixels = pixels;
+      this.__detached = false;
+    }
+    get width() { return this.__detached ? 0 : this.__width; }
+    get height() { return this.__detached ? 0 : this.__height; }
+    close() { this.__detached = true; this.__width = 0; this.__height = 0; this.__pixels = new Uint8ClampedArray(0); }
+    get [Symbol.toStringTag]() { return "ImageBitmap"; }
+  }
+
+  class OffscreenCanvasRenderingContext2D extends CanvasRenderingContext2D {
+    get [Symbol.toStringTag]() { return "OffscreenCanvasRenderingContext2D"; }
+  }
+
+  class OffscreenCanvas {
+    constructor(width, height) {
+      this.__width = offscreenDimension(width, "width");
+      this.__height = offscreenDimension(height, "height");
+      this.__contextMode = null;
+      this.__context = null;
+      this.__detached = false;
+    }
+    get width() { return this.__detached ? 0 : this.__width; }
+    set width(value) { this.__resize("width", value); }
+    get height() { return this.__detached ? 0 : this.__height; }
+    set height(value) { this.__resize("height", value); }
+    __resize(name, value) {
+      if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
+      const property = "__" + name;
+      const previous = this[property];
+      this[property] = offscreenDimension(value, name);
+      canvasStates.delete(this);
+      try {
+        canvasStateChecked(this);
+      } catch (error) {
+        this[property] = previous;
+        canvasStates.delete(this);
+        throw error;
+      }
+    }
+    getContext(type, options = undefined) {
+      if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
+      const requested = String(type).toLowerCase();
+      if (requested !== "2d") return null;
+      if (this.__contextMode !== null && this.__contextMode !== requested) return null;
+      this.__contextMode = requested;
+      const state = canvasStateChecked(this);
+      if (!this.__context) this.__context = new OffscreenCanvasRenderingContext2D(this, options);
+      state.context = this.__context;
+      return this.__context;
+    }
+    transferToImageBitmap() {
+      if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
+      const snapshot = canvasSnapshot(this);
+      return new ImageBitmap(imageBitmapConstructionToken, snapshot.width, snapshot.height, snapshot.pixels);
+    }
+    convertToBlob(options = {}) {
+      if (this.__detached) return Promise.reject(new DOMException("The OffscreenCanvas is detached", "InvalidStateError"));
+      const requested = String(options && options.type || "image/png").toLowerCase();
+      const type = requested === "image/png" ? requested : "image/png";
+      const snapshot = canvasSnapshot(this);
+      if (snapshot.width === 0 || snapshot.height === 0) return Promise.resolve(new Blob([], { type }));
+      const encodingError = () => Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
+      if (typeof nativeCanvasPng !== "function") return encodingError();
+      let encoded;
+      try {
+        encoded = nativeCanvasPng(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
+      } catch (_) {
+        return encodingError();
+      }
+      if (typeof encoded !== "string") return encodingError();
+      const comma = encoded.indexOf(",");
+      if (comma < 0) return encodingError();
+      try {
+        return Promise.resolve(new Blob([bytesFromBase64(encoded.slice(comma + 1))], { type }));
+      } catch (_) {
+        return encodingError();
+      }
+    }
+    get [Symbol.toStringTag]() { return "OffscreenCanvas"; }
+  }
+
+  globalThis.createImageBitmap = function createImageBitmap(source, sx = 0, sy = 0, sw = undefined, sh = undefined) {
+    try {
+      const input = imageBitmapSource(source);
+      const cropX = Math.trunc(Number(sx));
+      const cropY = Math.trunc(Number(sy));
+      const cropWidth = sw === undefined ? input.width - cropX : Math.trunc(Number(sw));
+      const cropHeight = sh === undefined ? input.height - cropY : Math.trunc(Number(sh));
+      if (!Number.isFinite(cropX) || !Number.isFinite(cropY) || !Number.isFinite(cropWidth) || !Number.isFinite(cropHeight) || cropX < 0 || cropY < 0 || cropWidth <= 0 || cropHeight <= 0 || cropX + cropWidth > input.width || cropY + cropHeight > input.height) {
+        throw new DOMException("The crop rectangle is outside the image", "IndexSizeError");
+      }
+      const pixels = new Uint8ClampedArray(cropWidth * cropHeight * 4);
+      for (let y = 0; y < cropHeight; y++) {
+        const from = ((cropY + y) * input.width + cropX) * 4;
+        pixels.set(input.pixels.slice(from, from + cropWidth * 4), y * cropWidth * 4);
+      }
+      return Promise.resolve(new ImageBitmap(imageBitmapConstructionToken, cropWidth, cropHeight, pixels));
+    } catch (error) {
+      return Promise.reject(error instanceof RangeError
+        ? new DOMException("Canvas dimensions are too large", "IndexSizeError")
+        : error);
+    }
+  };
+
   class HTMLLinkElement extends HTMLElement {
+    setAttribute(name, value) {
+      const attribute = String(name).toLowerCase();
+      const isHref = attribute === "href";
+      const isRel = attribute === "rel";
+      if (isHref) noteElementResourceStart(this);
+      super.setAttribute(name, value);
+      const href = this.getAttribute("href");
+      if ((isHref || isRel) &&
+          (this.relList.contains("stylesheet") || this.relList.contains("preload")) &&
+          /^(?:data:|blob:)/i.test(String(href || ""))) {
+        finishElementResourceTiming(this, 200, false);
+      }
+    }
     get rel() {
       return this.getAttribute("rel") || "";
     }
     set rel(value) {
       this.setAttribute("rel", String(value));
+    }
+    get href() {
+      const raw = this.getAttribute("href");
+      return raw === null ? "" : __omoikane_resolve_url(raw);
+    }
+    set href(value) {
+      this.setAttribute("href", String(value));
     }
     get relList() {
       const link = this;
@@ -5823,22 +7373,910 @@
     }
   }
 
-  // Minimal SVG DOM layer. Rendering remains owned by src/svg; these wrappers
-  // only provide the interfaces exercised by script and Acid3.
+  // SVG DOM layer. Painting remains owned by src/svg, while these wrappers
+  // expose the deterministic geometry interfaces used by scripts.  The
+  // native DOM deliberately keeps no layout-specific SVG state, so geometry
+  // is derived from the element attributes and the SVG ancestor chain here.
+  function finiteSvgNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+  }
+
+  function svgAttributeNumber(element, name, fallback = 0) {
+    const value = element && element.getAttribute(name);
+    if (value === null || String(value).trim() === "") return fallback;
+    const number = Number.parseFloat(String(value));
+    return Number.isFinite(number) ? number : fallback;
+  }
+
+  function svgNumberList(value) {
+    if (value === null || value === undefined) return [];
+    const numbers = String(value).match(/[+-]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?/g);
+    return numbers ? numbers.map(number => Number(number)).filter(Number.isFinite) : [];
+  }
+
+  function svgRectBounds(points) {
+    if (!points || points.length === 0) return new SVGRect();
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const point of points) {
+      const x = finiteSvgNumber(point[0]);
+      const y = finiteSvgNumber(point[1]);
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    return new SVGRect(minX, minY, Math.max(0, maxX - minX), Math.max(0, maxY - minY));
+  }
+
+  function svgUnionRect(left, right) {
+    if (!left) return right;
+    if (!right) return left;
+    const minX = Math.min(left.x, right.x);
+    const minY = Math.min(left.y, right.y);
+    const maxX = Math.max(left.x + left.width, right.x + right.width);
+    const maxY = Math.max(left.y + left.height, right.y + right.height);
+    return new SVGRect(minX, minY, Math.max(0, maxX - minX), Math.max(0, maxY - minY));
+  }
+
+  class SVGRect {
+    constructor(x = 0, y = 0, width = 0, height = 0) {
+      this.x = finiteSvgNumber(x);
+      this.y = finiteSvgNumber(y);
+      this.width = Math.max(0, finiteSvgNumber(width));
+      this.height = Math.max(0, finiteSvgNumber(height));
+    }
+    get [Symbol.toStringTag]() { return "SVGRect"; }
+  }
+
+  class SVGPoint {
+    constructor(x = 0, y = 0) {
+      this.x = finiteSvgNumber(x);
+      this.y = finiteSvgNumber(y);
+    }
+    matrixTransform(matrix) {
+      const m = svgMatrixFrom(matrix);
+      return new DOMPoint(
+        m.a * this.x + m.c * this.y + m.e,
+        m.b * this.x + m.d * this.y + m.f,
+      );
+    }
+    get [Symbol.toStringTag]() { return "SVGPoint"; }
+  }
+
+  class DOMPoint extends SVGPoint {
+    get [Symbol.toStringTag]() { return "DOMPoint"; }
+  }
+
+  function svgMatrixFrom(value) {
+    if (value instanceof DOMMatrix) return value;
+    if (value && typeof value === "object") {
+      return new DOMMatrix([
+        finiteSvgNumber(value.a, 1), finiteSvgNumber(value.b),
+        finiteSvgNumber(value.c), finiteSvgNumber(value.d, 1),
+        finiteSvgNumber(value.e), finiteSvgNumber(value.f),
+      ]);
+    }
+    return new DOMMatrix(value);
+  }
+
+  function multiplySvgMatrices(left, right) {
+    return [
+      left.a * right.a + left.c * right.b,
+      left.b * right.a + left.d * right.b,
+      left.a * right.c + left.c * right.d,
+      left.b * right.c + left.d * right.d,
+      left.a * right.e + left.c * right.f + left.e,
+      left.b * right.e + left.d * right.f + left.f,
+    ];
+  }
+
+  class DOMMatrix {
+    constructor(init) {
+      let values;
+      if (init === undefined || init === null) {
+        values = [1, 0, 0, 1, 0, 0];
+      } else if (typeof init === "string") {
+        values = svgTransformMatrix(init).toArray();
+      } else if (Array.isArray(init) || ArrayBuffer.isView(init)) {
+        values = Array.from(init).map(value => finiteSvgNumber(value));
+        if (values.length === 16) {
+          values = [values[0], values[1], values[4], values[5], values[12], values[13]];
+        }
+        if (values.length < 6) values = [1, 0, 0, 1, 0, 0];
+      } else if (typeof init === "object") {
+        values = [
+          finiteSvgNumber(init.a, 1), finiteSvgNumber(init.b),
+          finiteSvgNumber(init.c), finiteSvgNumber(init.d, 1),
+          finiteSvgNumber(init.e), finiteSvgNumber(init.f),
+        ];
+      } else {
+        values = [1, 0, 0, 1, 0, 0];
+      }
+      [this.a, this.b, this.c, this.d, this.e, this.f] = values.slice(0, 6);
+    }
+
+    get m11() { return this.a; }
+    set m11(value) { this.a = finiteSvgNumber(value); }
+    get m12() { return this.b; }
+    set m12(value) { this.b = finiteSvgNumber(value); }
+    get m21() { return this.c; }
+    set m21(value) { this.c = finiteSvgNumber(value); }
+    get m22() { return this.d; }
+    set m22(value) { this.d = finiteSvgNumber(value); }
+    get m41() { return this.e; }
+    set m41(value) { this.e = finiteSvgNumber(value); }
+    get m42() { return this.f; }
+    set m42(value) { this.f = finiteSvgNumber(value); }
+    get is2D() { return true; }
+    get isIdentity() {
+      return this.a === 1 && this.b === 0 && this.c === 0 && this.d === 1 &&
+        this.e === 0 && this.f === 0;
+    }
+    multiply(other) {
+      const rhs = svgMatrixFrom(other);
+      return new DOMMatrix(multiplySvgMatrices(this, rhs));
+    }
+    translate(tx, ty = 0) {
+      return this.multiply(new DOMMatrix([1, 0, 0, 1, finiteSvgNumber(tx), finiteSvgNumber(ty)]));
+    }
+    scale(scaleX, scaleY = scaleX) {
+      return this.multiply(new DOMMatrix([
+        finiteSvgNumber(scaleX), 0, 0, finiteSvgNumber(scaleY), 0, 0,
+      ]));
+    }
+    rotate(angle = 0) {
+      const radians = finiteSvgNumber(angle) * Math.PI / 180;
+      const cosine = Math.cos(radians), sine = Math.sin(radians);
+      return this.multiply(new DOMMatrix([cosine, sine, -sine, cosine, 0, 0]));
+    }
+    inverse() {
+      const determinant = this.a * this.d - this.b * this.c;
+      if (determinant === 0) {
+        throw new DOMException("The matrix is not invertible.", "InvalidStateError");
+      }
+      return new DOMMatrix([
+        this.d / determinant, -this.b / determinant,
+        -this.c / determinant, this.a / determinant,
+        (this.c * this.f - this.d * this.e) / determinant,
+        (this.b * this.e - this.a * this.f) / determinant,
+      ]);
+    }
+    transformPoint(point) {
+      return new DOMPoint(
+        this.a * finiteSvgNumber(point && point.x) + this.c * finiteSvgNumber(point && point.y) + this.e,
+        this.b * finiteSvgNumber(point && point.x) + this.d * finiteSvgNumber(point && point.y) + this.f,
+      );
+    }
+    toArray() { return [this.a, this.b, this.c, this.d, this.e, this.f]; }
+    get [Symbol.toStringTag]() { return "DOMMatrix"; }
+  }
+
+  class SVGMatrix extends DOMMatrix {
+    get [Symbol.toStringTag]() { return "SVGMatrix"; }
+  }
+
+  function svgTransformMatrix(value) {
+    const result = new DOMMatrix();
+    const source = String(value || "");
+    const expression = /([a-zA-Z]+)\s*\(([^)]*)\)/g;
+    let match;
+    while ((match = expression.exec(source))) {
+      const name = match[1].toLowerCase();
+      const values = svgNumberList(match[2]);
+      let operation = null;
+      if (name === "matrix" && values.length >= 6) {
+        operation = new DOMMatrix(values.slice(0, 6));
+      } else if (name === "translate" && values.length >= 1) {
+        operation = new DOMMatrix([1, 0, 0, 1, values[0], values[1] || 0]);
+      } else if (name === "scale" && values.length >= 1) {
+        operation = new DOMMatrix([values[0], 0, 0, values.length > 1 ? values[1] : values[0], 0, 0]);
+      } else if (name === "rotate" && values.length >= 1) {
+        operation = new DOMMatrix().rotate(values[0]);
+        if (values.length >= 3) {
+          operation = new DOMMatrix().translate(values[1], values[2])
+            .multiply(operation)
+            .translate(-values[1], -values[2]);
+        }
+      } else if (name === "skewx" && values.length >= 1) {
+        operation = new DOMMatrix([1, 0, Math.tan(values[0] * Math.PI / 180), 1, 0, 0]);
+      } else if (name === "skewy" && values.length >= 1) {
+        operation = new DOMMatrix([1, Math.tan(values[0] * Math.PI / 180), 0, 1, 0, 0]);
+      }
+      if (operation) {
+        // SVG transform lists are matrix products in source order.
+        const next = multiplySvgMatrices(result, operation);
+        [result.a, result.b, result.c, result.d, result.e, result.f] = next;
+      }
+    }
+    return result;
+  }
+
+  function svgTransformForElement(element) {
+    let matrix = new DOMMatrix();
+    const tag = String(element && element.localName || "").toLowerCase();
+    if (tag === "svg") {
+      matrix = matrix.translate(svgAttributeNumber(element, "x"), svgAttributeNumber(element, "y"));
+    }
+    const transform = element && element.getAttribute("transform");
+    if (transform) matrix = matrix.multiply(svgTransformMatrix(transform));
+    if (tag === "svg") {
+      const values = svgNumberList(element.getAttribute("viewBox") || element.getAttribute("viewbox"));
+      if (values.length >= 4 && values[2] > 0 && values[3] > 0) {
+        const width = svgAttributeNumber(element, "width", values[2]);
+        const height = svgAttributeNumber(element, "height", values[3]);
+        if (width > 0 && height > 0) {
+          matrix = matrix.multiply(new DOMMatrix([
+            width / values[2], 0, 0, height / values[3],
+            -values[0] * width / values[2], -values[1] * height / values[3],
+          ]));
+        }
+      }
+    }
+    return matrix;
+  }
+
+  function svgTransformRect(rect, matrix) {
+    if (!rect) return null;
+    return svgRectBounds([
+      [matrix.a * rect.x + matrix.c * rect.y + matrix.e,
+        matrix.b * rect.x + matrix.d * rect.y + matrix.f],
+      [matrix.a * (rect.x + rect.width) + matrix.c * rect.y + matrix.e,
+        matrix.b * (rect.x + rect.width) + matrix.d * rect.y + matrix.f],
+      [matrix.a * rect.x + matrix.c * (rect.y + rect.height) + matrix.e,
+        matrix.b * rect.x + matrix.d * (rect.y + rect.height) + matrix.f],
+      [matrix.a * (rect.x + rect.width) + matrix.c * (rect.y + rect.height) + matrix.e,
+        matrix.b * (rect.x + rect.width) + matrix.d * (rect.y + rect.height) + matrix.f],
+    ]);
+  }
+
+  function svgPathPoints(value) {
+    const tokens = [];
+    const expression = /([a-zA-Z])|([+-]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?)/g;
+    let match;
+    while ((match = expression.exec(String(value || "")))) {
+      tokens.push(match[1] ? { command: match[1] } : { number: Number(match[2]) });
+    }
+    const parameterCount = { m: 2, l: 2, h: 1, v: 1, c: 6, s: 4, q: 4, t: 2, a: 7 };
+    const subpaths = [];
+    let points = null;
+    let cursorX = 0, cursorY = 0, startX = 0, startY = 0;
+    let command = null, previousControl = null, previousCommand = null;
+    const add = (x, y) => {
+      if (!points) { points = []; subpaths.push(points); }
+      points.push([x, y]);
+    };
+    const addCubic = (x0, y0, x1, y1, x2, y2, x3, y3) => {
+      for (let step = 1; step <= 20; step++) {
+        const t = step / 20, u = 1 - t;
+        add(
+          u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
+          u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3,
+        );
+      }
+    };
+    const addQuadratic = (x0, y0, x1, y1, x2, y2) => {
+      for (let step = 1; step <= 20; step++) {
+        const t = step / 20, u = 1 - t;
+        add(u * u * x0 + 2 * u * t * x1 + t * t * x2,
+          u * u * y0 + 2 * u * t * y1 + t * t * y2);
+      }
+    };
+    while (tokens.length) {
+      if (tokens[0].command) {
+        command = tokens.shift().command;
+        if (command === "Z" || command === "z") {
+          if (points && points.length) add(startX, startY);
+          cursorX = startX; cursorY = startY;
+          previousControl = null; previousCommand = command;
+          command = null;
+        }
+        continue;
+      }
+      if (!command) { tokens.shift(); continue; }
+      const lower = command.toLowerCase();
+      const count = parameterCount[lower];
+      if (!count || tokens.length < count || tokens.slice(0, count).some(token => token.number === undefined)) {
+        command = null;
+        continue;
+      }
+      const values = tokens.splice(0, count).map(token => token.number);
+      const relative = command === lower;
+      const x = value => relative ? cursorX + value : value;
+      const y = value => relative ? cursorY + value : value;
+      const oldX = cursorX, oldY = cursorY;
+      if (lower === "m") {
+        const nextX = x(values[0]), nextY = y(values[1]);
+        points = []; subpaths.push(points); points.push([nextX, nextY]);
+        cursorX = startX = nextX; cursorY = startY = nextY;
+        command = relative ? "l" : "L";
+        previousControl = null; previousCommand = "m";
+      } else if (lower === "l") {
+        cursorX = x(values[0]); cursorY = y(values[1]); add(cursorX, cursorY);
+        previousControl = null; previousCommand = lower;
+      } else if (lower === "h") {
+        cursorX = x(values[0]); add(cursorX, cursorY);
+        previousControl = null; previousCommand = lower;
+      } else if (lower === "v") {
+        cursorY = y(values[0]); add(cursorX, cursorY);
+        previousControl = null; previousCommand = lower;
+      } else if (lower === "c") {
+        const x1 = x(values[0]), y1 = y(values[1]);
+        const x2 = x(values[2]), y2 = y(values[3]);
+        cursorX = x(values[4]); cursorY = y(values[5]);
+        addCubic(oldX, oldY, x1, y1, x2, y2, cursorX, cursorY);
+        previousControl = [x2, y2]; previousCommand = lower;
+      } else if (lower === "s") {
+        const x1 = (previousCommand === "c" || previousCommand === "s") && previousControl
+          ? 2 * oldX - previousControl[0] : oldX;
+        const y1 = (previousCommand === "c" || previousCommand === "s") && previousControl
+          ? 2 * oldY - previousControl[1] : oldY;
+        const x2 = x(values[0]), y2 = y(values[1]);
+        cursorX = x(values[2]); cursorY = y(values[3]);
+        addCubic(oldX, oldY, x1, y1, x2, y2, cursorX, cursorY);
+        previousControl = [x2, y2]; previousCommand = lower;
+      } else if (lower === "q") {
+        const x1 = x(values[0]), y1 = y(values[1]);
+        cursorX = x(values[2]); cursorY = y(values[3]);
+        addQuadratic(oldX, oldY, x1, y1, cursorX, cursorY);
+        previousControl = [x1, y1]; previousCommand = lower;
+      } else if (lower === "t") {
+        const x1 = (previousCommand === "q" || previousCommand === "t") && previousControl
+          ? 2 * oldX - previousControl[0] : oldX;
+        const y1 = (previousCommand === "q" || previousCommand === "t") && previousControl
+          ? 2 * oldY - previousControl[1] : oldY;
+        cursorX = x(values[0]); cursorY = y(values[1]);
+        addQuadratic(oldX, oldY, x1, y1, cursorX, cursorY);
+        previousControl = [x1, y1]; previousCommand = lower;
+      } else if (lower === "a") {
+        const rx = Math.abs(values[0]), ry = Math.abs(values[1]);
+        cursorX = x(values[5]); cursorY = y(values[6]);
+        // The exact elliptical-arc extrema are unnecessary for the DOM
+        // surface's deterministic bounds; include the endpoint and the
+        // radius envelope so common icon paths remain conservative.
+        add(oldX - rx, oldY - ry); add(oldX + rx, oldY + ry);
+        add(cursorX - rx, cursorY - ry); add(cursorX + rx, cursorY + ry);
+        previousControl = null; previousCommand = lower;
+      }
+    }
+    return subpaths;
+  }
+
+  function svgShapeBBox(element) {
+    const tag = String(element && element.localName || "").toLowerCase();
+    if (tag === "text" || tag === "tspan" || tag === "textpath") {
+      return svgTextElementBBox(element);
+    }
+    if (tag === "rect") {
+      return new SVGRect(
+        svgAttributeNumber(element, "x"), svgAttributeNumber(element, "y"),
+        Math.max(0, svgAttributeNumber(element, "width")),
+        Math.max(0, svgAttributeNumber(element, "height")),
+      );
+    }
+    if (tag === "circle") {
+      const radius = Math.max(0, svgAttributeNumber(element, "r"));
+      return new SVGRect(
+        svgAttributeNumber(element, "cx") - radius,
+        svgAttributeNumber(element, "cy") - radius,
+        radius * 2, radius * 2,
+      );
+    }
+    if (tag === "ellipse") {
+      const rx = Math.max(0, svgAttributeNumber(element, "rx"));
+      const ry = Math.max(0, svgAttributeNumber(element, "ry"));
+      return new SVGRect(svgAttributeNumber(element, "cx") - rx,
+        svgAttributeNumber(element, "cy") - ry, rx * 2, ry * 2);
+    }
+    if (tag === "line") {
+      return svgRectBounds([
+        [svgAttributeNumber(element, "x1"), svgAttributeNumber(element, "y1")],
+        [svgAttributeNumber(element, "x2"), svgAttributeNumber(element, "y2")],
+      ]);
+    }
+    if (tag === "polyline" || tag === "polygon") {
+      const values = svgNumberList(element.getAttribute("points"));
+      const points = [];
+      for (let index = 0; index + 1 < values.length; index += 2) {
+        points.push([values[index], values[index + 1]]);
+      }
+      return svgRectBounds(points);
+    }
+    if (tag === "path") {
+      const points = [];
+      for (const subpath of svgPathPoints(element.getAttribute("d"))) points.push(...subpath);
+      return svgRectBounds(points);
+    }
+    return null;
+  }
+
+  function svgElementBBox(element) {
+    const own = svgShapeBBox(element);
+    if (own) return own;
+    let result = null;
+    for (const child of element && element.children || []) {
+      if (!(child instanceof SVGElement)) continue;
+      const childBox = svgElementBBox(child);
+      if (childBox) result = svgUnionRect(result, svgTransformRect(childBox, svgTransformForElement(child)));
+    }
+    return result || new SVGRect();
+  }
+
+  // Text layout is intentionally deterministic rather than font-platform
+  // dependent.  The native renderer already uses a 0.6em advance for its
+  // canvas text approximation; using the same value here keeps SVG geometry
+  // queries stable in headless and WPT smoke environments alike.
+  function svgTextNumberList(element, name) {
+    return svgNumberList(element && element.getAttribute(name) || "");
+  }
+
+  function svgTextCssValue(element, name) {
+    if (!element) return "";
+    const attribute = element.getAttribute(name);
+    if (attribute !== null && String(attribute).trim() !== "") return String(attribute);
+    try {
+      const inline = element.style && element.style.getPropertyValue(name);
+      if (inline) return String(inline);
+    } catch (_) {}
+    try {
+      const computed = globalThis.getComputedStyle && globalThis.getComputedStyle(element);
+      if (computed) {
+        const value = computed.getPropertyValue(name) || computed[name];
+        if (value) return String(value);
+      }
+    } catch (_) {}
+    return "";
+  }
+
+  function svgTextDeclaredValue(element, name) {
+    if (!element) return "";
+    const attribute = element.getAttribute(name);
+    if (attribute !== null && String(attribute).trim() !== "") return String(attribute);
+    try {
+      const inline = element.style && element.style.getPropertyValue(name);
+      if (inline) return String(inline);
+    } catch (_) {}
+    return "";
+  }
+
+  function svgTextFontSize(element) {
+    for (let current = element; current && current.nodeType === 1; current = current.parentNode) {
+      const value = Number.parseFloat(svgTextDeclaredValue(current, "font-size"));
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    const computed = Number.parseFloat(svgTextCssValue(element, "font-size"));
+    if (Number.isFinite(computed) && computed > 0) return computed;
+    return 16;
+  }
+
+  function svgTextLetterSpacing(element) {
+    const value = Number.parseFloat(svgTextCssValue(element, "letter-spacing"));
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  function svgTextTransformPoint(point, matrix) {
+    return {
+      x: matrix.a * point.x + matrix.c * point.y + matrix.e,
+      y: matrix.b * point.x + matrix.d * point.y + matrix.f,
+    };
+  }
+
+  function svgTextRelativeTransform(element, owner) {
+    const path = [];
+    for (let current = element; current && current !== owner; current = current.parentNode) {
+      if (current.nodeType === 1 && current.namespaceURI === SVG_NAMESPACE) path.push(current);
+    }
+    let matrix = new DOMMatrix();
+    for (let index = path.length - 1; index >= 0; index -= 1) {
+      matrix = matrix.multiply(svgTransformMatrix(path[index].getAttribute("transform") || ""));
+    }
+    return matrix;
+  }
+
+  function svgTextLayout(element) {
+    const records = [];
+    if (!element || element.nodeType !== 1) return records;
+    let owner = element.parentNode;
+    while (owner && owner.nodeType === 1 && owner.namespaceURI === SVG_NAMESPACE) {
+      if (String(owner.localName || "").toLowerCase() === "text") break;
+      owner = owner.parentNode;
+    }
+    if (!owner || owner.nodeType !== 1 || owner.namespaceURI !== SVG_NAMESPACE ||
+        String(owner.localName || "").toLowerCase() !== "text") {
+      owner = null;
+    }
+    if (owner && owner !== element) {
+      const allRecords = svgTextLayout(owner);
+      let offset = 0;
+      let found = false;
+      const countBefore = node => {
+        if (node === element) {
+          found = true;
+          return;
+        }
+        if (node.nodeType === 3) {
+          offset += String(node.data || "").length;
+          return;
+        }
+        for (const child of node.childNodes || []) {
+          if (found) break;
+          countBefore(child);
+        }
+      };
+      countBefore(owner);
+      if (found) {
+        const length = String(element.textContent || "").length;
+        const sliced = allRecords.slice(offset, offset + length);
+        const relative = svgTextRelativeTransform(element, owner);
+        if (relative.isIdentity) return sliced;
+        let inverse;
+        try {
+          inverse = relative.inverse();
+        } catch (_) {
+          // A singular SVG transform has no local coordinate system. Keep the
+          // owning text's records usable instead of making geometry queries
+          // throw merely because a transform cannot be inverted.
+          return sliced;
+        }
+        return sliced.map(record => {
+          const start = inverse.transformPoint(record.start);
+          const end = inverse.transformPoint(record.end);
+          const corners = [
+            [record.box.x, record.box.y],
+            [record.box.x + record.box.width, record.box.y],
+            [record.box.x, record.box.y + record.box.height],
+            [record.box.x + record.box.width, record.box.y + record.box.height],
+          ].map(([x, y]) => inverse.transformPoint({ x, y }));
+          return {
+            ...record,
+            start: new SVGPoint(start.x, start.y),
+            end: new SVGPoint(end.x, end.y),
+            box: svgRectBounds(corners.map(point => [point.x, point.y])),
+          };
+        });
+      }
+    }
+    const cursor = {
+      x: svgTextNumberList(element, "x")[0] || 0,
+      y: svgTextNumberList(element, "y")[0] || 0,
+    };
+    let characterIndex = 0;
+    const contexts = [];
+
+    const emitText = (text, context) => {
+      const value = String(text || "");
+      const fontSize = svgTextFontSize(context.element);
+      const glyphWidth = fontSize * 0.6;
+      const letterSpacing = svgTextLetterSpacing(context.element);
+      for (let offset = 0; offset < value.length; offset += 1) {
+        const active = contexts;
+        let x = cursor.x;
+        let y = cursor.y;
+        let dx = 0;
+        let dy = 0;
+        for (const entry of active) {
+          const index = characterIndex - entry.startIndex;
+          if (entry.x[index] !== undefined) {
+            x = entry.x[index];
+          }
+          if (entry.y[index] !== undefined) {
+            y = entry.y[index];
+          }
+          if (entry.dx[index] !== undefined) dx += entry.dx[index];
+          if (entry.dy[index] !== undefined) dy += entry.dy[index];
+        }
+        x += dx;
+        y += dy;
+        cursor.x = x;
+        cursor.y = y;
+        const start = svgTextTransformPoint({ x, y }, context.matrix);
+        const end = svgTextTransformPoint({ x: x + glyphWidth, y }, context.matrix);
+        const topLeft = svgTextTransformPoint({ x, y: y - fontSize * 0.8 }, context.matrix);
+        const topRight = svgTextTransformPoint({ x: x + glyphWidth, y: y - fontSize * 0.8 }, context.matrix);
+        const bottomLeft = svgTextTransformPoint({ x, y: y + fontSize * 0.2 }, context.matrix);
+        const bottomRight = svgTextTransformPoint({ x: x + glyphWidth, y: y + fontSize * 0.2 }, context.matrix);
+        const box = svgRectBounds([
+          [topLeft.x, topLeft.y], [topRight.x, topRight.y],
+          [bottomLeft.x, bottomLeft.y], [bottomRight.x, bottomRight.y],
+        ]);
+        records.push({
+          index: characterIndex,
+          start: new SVGPoint(start.x, start.y),
+          end: new SVGPoint(end.x, end.y),
+          box,
+          width: glyphWidth,
+          letterSpacing,
+        });
+        cursor.x += glyphWidth + letterSpacing;
+        characterIndex += 1;
+      }
+    };
+
+    const walk = (node, inheritedMatrix, isRoot = false) => {
+      if (!node) return;
+      if (node.nodeType === 3) {
+        const context = contexts[contexts.length - 1];
+        if (context) emitText(node.data, context);
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      const matrix = isRoot
+        ? inheritedMatrix
+        : inheritedMatrix.multiply(svgTransformMatrix(node.getAttribute("transform") || ""));
+      const context = {
+        element: node,
+        matrix,
+        startIndex: characterIndex,
+        x: svgTextNumberList(node, "x"),
+        y: svgTextNumberList(node, "y"),
+        dx: svgTextNumberList(node, "dx"),
+        dy: svgTextNumberList(node, "dy"),
+      };
+      contexts.push(context);
+      for (const child of node.childNodes || []) walk(child, matrix, false);
+      contexts.pop();
+    };
+
+    walk(element, new DOMMatrix(), true);
+    return records;
+  }
+
+  function svgTextLength(records, start = 0, end = records.length) {
+    let length = 0;
+    for (let index = start; index < end; index += 1) {
+      const record = records[index];
+      length += record.width;
+      if (index + 1 < end) length += record.letterSpacing;
+    }
+    return length;
+  }
+
+  function svgTextElementBBox(element) {
+    let result = null;
+    for (const record of svgTextLayout(element)) {
+      result = svgUnionRect(result, record.box);
+    }
+    return result || new SVGRect();
+  }
+
+  function svgTextIndex(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) return 0xffffffff;
+    return Math.trunc(numeric);
+  }
+
+  function svgTextRecord(records, charnum) {
+    const index = svgTextIndex(charnum);
+    if (index >= records.length) {
+      throw new DOMException("The character index is outside the text.", "IndexSizeError");
+    }
+    return records[index];
+  }
+
+  function svgTextRange(records, charnum, nchars) {
+    const start = svgTextIndex(charnum);
+    const count = svgTextIndex(nchars);
+    if (start > records.length || count > records.length - start) {
+      throw new DOMException("The text range is outside the text.", "IndexSizeError");
+    }
+    return [start, start + count];
+  }
+
+  function svgAncestorChain(element) {
+    const chain = [];
+    let current = element;
+    while (current && current.nodeType === 1 && current.namespaceURI === SVG_NAMESPACE) {
+      chain.push(current);
+      current = current.parentNode;
+    }
+    return chain.reverse();
+  }
+
   class SVGElement extends Element {}
-  class SVGSVGElement extends SVGElement {}
-  class SVGRectElement extends SVGElement {
-    get width() {
-      if (!this.__width) this.__width = {};
-      return this.__width;
+  class SVGGraphicsElement extends SVGElement {
+    getBBox(options = {}) {
+      const box = svgElementBBox(this);
+      const stroke = this.getAttribute("stroke") || (this.style && this.style.stroke) || "";
+      if (options && options.stroke && stroke && String(stroke).toLowerCase() !== "none") {
+        const width = Math.max(0, svgAttributeNumber(this, "stroke-width", 1));
+        return new SVGRect(box.x - width / 2, box.y - width / 2,
+          box.width + width, box.height + width);
+      }
+      return box;
+    }
+    getCTM() {
+      const chain = svgAncestorChain(this);
+      if (!chain.length) return null;
+      let matrix = new DOMMatrix();
+      for (const element of chain) matrix = matrix.multiply(svgTransformForElement(element));
+      return matrix;
+    }
+    getScreenCTM() { return this.getCTM(); }
+  }
+  class SVGGeometryElement extends SVGGraphicsElement {
+    isPointInFill(point) {
+      const box = this.getBBox();
+      return !!point && point.x >= box.x && point.x <= box.x + box.width &&
+        point.y >= box.y && point.y <= box.y + box.height;
+    }
+    isPointInStroke(point) {
+      const box = this.getBBox({ stroke: true });
+      return !!point && point.x >= box.x && point.x <= box.x + box.width &&
+        point.y >= box.y && point.y <= box.y + box.height;
     }
   }
-  class SVGTextContentElement extends SVGElement {
+  class SVGSVGElement extends SVGGraphicsElement {
+    createSVGPoint() { return new SVGPoint(); }
+    createSVGRect() { return new SVGRect(); }
+    getElementById(id) {
+      const wanted = String(id);
+      let result = null;
+      const visit = node => {
+        for (const child of node.children || []) {
+          if (child.getAttribute("id") === wanted) { result = child; return; }
+          visit(child);
+          if (result) return;
+        }
+      };
+      visit(this);
+      return result;
+    }
+    get viewBox() {
+      if (!this.__viewBox) {
+        this.__viewBox = new SVGAnimatedRect(this);
+      }
+      return this.__viewBox;
+    }
+  }
+  class SVGRectElement extends SVGGeometryElement {}
+  class SVGCircleElement extends SVGGeometryElement {}
+  class SVGEllipseElement extends SVGGeometryElement {}
+  class SVGLineElement extends SVGGeometryElement {}
+  class SVGPathElement extends SVGGeometryElement {}
+  class SVGPolylineElement extends SVGGeometryElement {}
+  class SVGPolygonElement extends SVGGeometryElement {}
+  class SVGTextContentElement extends SVGGraphicsElement {
     getNumberOfChars() {
-      return String(this.textContent || "").length;
+      return svgTextLayout(this).length;
+    }
+    getComputedTextLength() {
+      return svgTextLength(svgTextLayout(this));
+    }
+    getSubStringLength(charnum, nchars) {
+      if (arguments.length < 2) {
+        throw new TypeError("getSubStringLength requires 2 arguments");
+      }
+      const records = svgTextLayout(this);
+      const [start, end] = svgTextRange(records, charnum, nchars);
+      return svgTextLength(records, start, end);
+    }
+    getStartPositionOfChar(charnum) {
+      if (arguments.length < 1) {
+        throw new TypeError("getStartPositionOfChar requires 1 argument");
+      }
+      return svgTextRecord(svgTextLayout(this), charnum).start;
+    }
+    getEndPositionOfChar(charnum) {
+      if (arguments.length < 1) {
+        throw new TypeError("getEndPositionOfChar requires 1 argument");
+      }
+      return svgTextRecord(svgTextLayout(this), charnum).end;
+    }
+    getExtentOfChar(charnum) {
+      if (arguments.length < 1) {
+        throw new TypeError("getExtentOfChar requires 1 argument");
+      }
+      const box = svgTextRecord(svgTextLayout(this), charnum).box;
+      return new SVGRect(box.x, box.y, box.width, box.height);
     }
   }
-  class SVGTextElement extends SVGTextContentElement {}
+  class SVGTextPositioningElement extends SVGTextContentElement {}
+  class SVGTextElement extends SVGTextPositioningElement {}
+  class SVGTSpanElement extends SVGTextPositioningElement {}
+  class SVGTextPathElement extends SVGTextContentElement {}
+
+  function svgViewBoxValues(element) {
+    const values = svgNumberList(element.getAttribute("viewBox") || element.getAttribute("viewbox"));
+    return [values[0] || 0, values[1] || 0, values[2] || 0, values[3] || 0];
+  }
+
+  function svgWriteViewBoxValue(element, index, value) {
+    const values = svgViewBoxValues(element);
+    values[index] = finiteSvgNumber(value);
+    element.setAttribute("viewBox", values.join(" "));
+  }
+
+  function svgMakeViewBoxValue(element, writable) {
+    const value = new SVGRect();
+    const names = ["x", "y", "width", "height"];
+    for (let index = 0; index < names.length; index++) {
+      const descriptor = {
+        configurable: true,
+        enumerable: true,
+        get: () => svgViewBoxValues(element)[index],
+      };
+      if (writable) descriptor.set = next => svgWriteViewBoxValue(element, index, next);
+      Object.defineProperty(value, names[index], descriptor);
+    }
+    return value;
+  }
+
+  class SVGAnimatedRect {
+    constructor(element) {
+      Object.defineProperty(this, "baseVal", {
+        configurable: true, enumerable: true, writable: false,
+        value: svgMakeViewBoxValue(element, true),
+      });
+      Object.defineProperty(this, "animVal", {
+        configurable: true, enumerable: true, writable: false,
+        value: svgMakeViewBoxValue(element, false),
+      });
+    }
+    get [Symbol.toStringTag]() { return "SVGAnimatedRect"; }
+  }
+
+  class SVGAnimatedLength {
+    constructor(element, name) {
+      this.__element = element;
+      this.__name = name;
+      const value = () => svgAttributeNumber(this.__element, this.__name);
+      const baseVal = {};
+      Object.defineProperty(baseVal, "value", {
+        configurable: true,
+        enumerable: true,
+        get: value,
+        set: next => this.__element.setAttribute(this.__name, String(finiteSvgNumber(next))),
+      });
+      Object.defineProperty(baseVal, "valueAsString", {
+        configurable: true, enumerable: true,
+        get: () => this.__element.getAttribute(this.__name) || "0",
+        set: next => this.__element.setAttribute(this.__name, String(next)),
+      });
+      Object.defineProperty(this, "baseVal", {
+        configurable: true, enumerable: true, writable: false, value: baseVal,
+      });
+      Object.defineProperty(this, "animVal", {
+        configurable: true, enumerable: true, writable: false, value: baseVal,
+      });
+    }
+    get [Symbol.toStringTag]() { return "SVGAnimatedLength"; }
+  }
+
+  function defineSvgAnimatedLengthProperties(ctor, names) {
+    for (const name of names) {
+      Object.defineProperty(ctor.prototype, name, {
+        configurable: true,
+        enumerable: false,
+        get() {
+          const key = "__animated_" + name;
+          if (!this[key]) this[key] = new SVGAnimatedLength(this, name);
+          return this[key];
+        },
+      });
+    }
+  }
+
+  defineSvgAnimatedLengthProperties(SVGRectElement, ["x", "y", "width", "height", "rx", "ry"]);
+  defineSvgAnimatedLengthProperties(SVGCircleElement, ["cx", "cy", "r"]);
+  defineSvgAnimatedLengthProperties(SVGEllipseElement, ["cx", "cy", "rx", "ry"]);
+  defineSvgAnimatedLengthProperties(SVGLineElement, ["x1", "y1", "x2", "y2"]);
+  defineSvgAnimatedLengthProperties(SVGSVGElement, ["x", "y", "width", "height"]);
+
+  for (const [ctor, tag] of [
+    [SVGElement, "SVGElement"], [SVGGraphicsElement, "SVGGraphicsElement"],
+    [SVGGeometryElement, "SVGGeometryElement"], [SVGSVGElement, "SVGSVGElement"],
+    [SVGRectElement, "SVGRectElement"], [SVGCircleElement, "SVGCircleElement"],
+    [SVGEllipseElement, "SVGEllipseElement"], [SVGLineElement, "SVGLineElement"],
+    [SVGPathElement, "SVGPathElement"], [SVGPolylineElement, "SVGPolylineElement"],
+    [SVGPolygonElement, "SVGPolygonElement"], [SVGTextContentElement, "SVGTextContentElement"],
+    [SVGTextPositioningElement, "SVGTextPositioningElement"],
+    [SVGTextElement, "SVGTextElement"], [SVGTSpanElement, "SVGTSpanElement"],
+    [SVGTextPathElement, "SVGTextPathElement"],
+  ]) {
+    Object.defineProperty(ctor.prototype, Symbol.toStringTag, {
+      configurable: true, value: tag,
+    });
+  }
 
   // HTMLOrSVGElement and ElementCSSInlineStyle are shared by HTML and SVG
   // elements, but not by arbitrary Node objects.
@@ -5875,8 +8313,24 @@
 
   const SVG_ELEMENT_CTORS = {
     svg: SVGSVGElement,
+    g: SVGGraphicsElement,
+    a: SVGGraphicsElement,
+    defs: SVGGraphicsElement,
+    symbol: SVGGraphicsElement,
+    use: SVGGraphicsElement,
+    image: SVGGraphicsElement,
+    foreignobject: SVGGraphicsElement,
+    switch: SVGGraphicsElement,
     rect: SVGRectElement,
+    circle: SVGCircleElement,
+    ellipse: SVGEllipseElement,
+    line: SVGLineElement,
+    path: SVGPathElement,
+    polyline: SVGPolylineElement,
+    polygon: SVGPolygonElement,
     text: SVGTextElement,
+    tspan: SVGTSpanElement,
+    textpath: SVGTextPathElement,
   };
 
   // Tag-name → constructor table consulted by wrapNode() for element nodes.
@@ -5903,6 +8357,8 @@
     option: HTMLOptionElement,
     iframe: HTMLIFrameElement,
     object: HTMLObjectElement,
+    audio: HTMLAudioElement,
+    video: HTMLVideoElement,
     img: HTMLImageElement,
     canvas: HTMLCanvasElement,
     link: HTMLLinkElement,
@@ -6311,7 +8767,8 @@
     "click", "dblclick", "mousedown", "mouseup", "mouseover", "mousemove",
     "mouseout", "mouseenter", "mouseleave", "submit", "reset", "change",
     "input", "focus", "blur", "keydown", "keyup", "keypress", "select",
-    "contextmenu", "wheel", "error", "abort", "slotchange", "scroll",
+    "contextmenu", "wheel", "drag", "dragstart", "dragend", "dragenter",
+    "dragleave", "dragover", "drop", "error", "abort", "slotchange", "scroll",
     "cancel", "close",
   ];
   for (const type of EVENT_HANDLER_TYPES) {
@@ -6371,6 +8828,172 @@
   }
 
   const cryptoConstructionToken = {};
+  const cryptoKeyConstructionToken = {};
+  const cryptoKeyPairConstructionToken = {};
+  const cryptoKeyData = new WeakMap();
+  const cryptoHashNames = Object.freeze(["SHA-1", "SHA-256", "SHA-384", "SHA-512"]);
+  const cryptoHmacUsages = Object.freeze(["sign", "verify"]);
+  let cryptoLifecycleActive = true;
+
+  function cryptoLifecycleError() {
+    return new DOMException("The CryptoKey operation belongs to a torn-down document.", "InvalidStateError");
+  }
+
+  function normalizeCryptoHash(value) {
+    const selected = typeof value === "object" && value !== null ? value.name : value;
+    const name = String(selected).toUpperCase();
+    if (!cryptoHashNames.includes(name)) {
+      throw new DOMException("Unrecognized hash algorithm", "NotSupportedError");
+    }
+    return name;
+  }
+
+  function hashOutputBits(hash) {
+    return hash === "SHA-1" ? 160 : hash === "SHA-256" ? 256 : hash === "SHA-384" ? 384 : 512;
+  }
+
+  function normalizeHmacAlgorithm(algorithm, requireHash) {
+    const objectAlgorithm = typeof algorithm === "object" && algorithm !== null ? algorithm : null;
+    const selected = objectAlgorithm ? objectAlgorithm.name : algorithm;
+    if (String(selected).toUpperCase() !== "HMAC") {
+      throw new DOMException("The requested algorithm is not supported.", "NotSupportedError");
+    }
+    let hash = null;
+    if (objectAlgorithm && objectAlgorithm.hash !== undefined) hash = normalizeCryptoHash(objectAlgorithm.hash);
+    if (requireHash && hash === null) {
+      throw new DOMException("HMAC requires a hash algorithm.", "NotSupportedError");
+    }
+    let length = null;
+    if (objectAlgorithm && objectAlgorithm.length !== undefined) {
+      length = Number(objectAlgorithm.length);
+      if (!Number.isSafeInteger(length) || length < 8 || length % 8 !== 0 || length > 524280) {
+        throw new DOMException("Invalid HMAC key length.", "OperationError");
+      }
+    }
+    return { name: "HMAC", hash, length };
+  }
+
+  function normalizeCryptoUsages(usages, allowed) {
+    if (usages === null || usages === undefined || typeof usages === "string") {
+      throw new TypeError("keyUsages must be an iterable sequence");
+    }
+    const iterator = usages[Symbol.iterator];
+    if (typeof iterator !== "function") throw new TypeError("keyUsages must be an iterable sequence");
+    const result = [];
+    for (const usage of usages) {
+      const normalized = String(usage);
+      if (!allowed.includes(normalized)) {
+        throw new DOMException("Invalid key usage.", "SyntaxError");
+      }
+      if (!result.includes(normalized)) result.push(normalized);
+    }
+    return result;
+  }
+
+  function cryptoBytesToBase64Url(bytes) {
+    const chunks = [];
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      chunks.push(String.fromCharCode(...bytes.slice(offset, offset + 0x8000)));
+    }
+    const binary = chunks.join("");
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  function cryptoBase64UrlToBytes(value) {
+    if (typeof value !== "string" || !/^[A-Za-z0-9_-]*$/.test(value)) {
+      throw new DOMException("Invalid JWK key encoding.", "DataError");
+    }
+    const padding = (4 - (value.length % 4)) % 4;
+    try {
+      const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat(padding));
+      return Array.from(binary, character => character.charCodeAt(0));
+    } catch (_) {
+      throw new DOMException("Invalid JWK key encoding.", "DataError");
+    }
+  }
+
+  function hmacJwkAlgorithm(hash) {
+    return hash === "SHA-256" ? "HS256" : hash === "SHA-384" ? "HS384" : hash === "SHA-512" ? "HS512" : null;
+  }
+
+  function hmacAlgorithmForJwk(algorithm) {
+    return algorithm === "HS256" ? "SHA-256" : algorithm === "HS384" ? "SHA-384" : algorithm === "HS512" ? "SHA-512" : null;
+  }
+
+  function makeHmacKey(bytes, hash, extractable, usages) {
+    const keyBytes = Array.from(bytes);
+    const algorithm = Object.freeze({
+      name: "HMAC",
+      hash: Object.freeze({ name: hash }),
+      length: keyBytes.length * 8,
+    });
+    return new CryptoKey(cryptoKeyConstructionToken, {
+      extractable: !!extractable,
+      algorithm,
+      usages,
+      bytes: keyBytes,
+    });
+  }
+
+  function assertCryptoKey(key) {
+    if (!(key instanceof CryptoKey) || !cryptoKeyData.has(key)) {
+      throw new TypeError("Expected a CryptoKey");
+    }
+    return cryptoKeyData.get(key);
+  }
+
+  function assertHmacKey(key, usage, algorithm) {
+    const metadata = assertCryptoKey(key);
+    if (metadata.algorithm.name !== "HMAC") {
+      throw new DOMException("The key algorithm is incompatible with HMAC.", "InvalidAccessError");
+    }
+    if (!metadata.usages.includes(usage)) {
+      throw new DOMException("The key does not permit this operation.", "InvalidAccessError");
+    }
+    const normalized = normalizeHmacAlgorithm(algorithm, false);
+    if (normalized.hash !== null && normalized.hash !== metadata.algorithm.hash.name) {
+      throw new DOMException("The algorithm hash does not match the key.", "InvalidAccessError");
+    }
+    return metadata;
+  }
+
+  function cryptoOperation(callback) {
+    return Promise.resolve().then(() => {
+      if (!cryptoLifecycleActive) throw cryptoLifecycleError();
+      return callback();
+    });
+  }
+
+  class CryptoKey {
+    constructor(token, details) {
+      if (token !== cryptoKeyConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperties(this, {
+        type: { value: "secret", enumerable: true },
+        extractable: { value: !!details.extractable, enumerable: true },
+        algorithm: { value: details.algorithm, enumerable: true },
+        usages: { value: Object.freeze(details.usages.slice()), enumerable: true },
+      });
+      cryptoKeyData.set(this, {
+        bytes: details.bytes.slice(),
+        algorithm: details.algorithm,
+        extractable: !!details.extractable,
+        usages: details.usages.slice(),
+      });
+    }
+    get [Symbol.toStringTag]() { return "CryptoKey"; }
+  }
+
+  class CryptoKeyPair {
+    constructor(token, details) {
+      if (token !== cryptoKeyPairConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperties(this, {
+        publicKey: { value: details.publicKey, enumerable: true },
+        privateKey: { value: details.privateKey, enumerable: true },
+      });
+    }
+    get [Symbol.toStringTag]() { return "CryptoKeyPair"; }
+  }
+
   class SubtleCrypto {
     constructor(token) {
       if (token !== cryptoConstructionToken) throw new TypeError("Illegal constructor");
@@ -6382,7 +9005,7 @@
         const selected = typeof algorithm === "object" && algorithm !== null
           ? algorithm.name : algorithm;
         name = String(selected).toUpperCase();
-        if (!["SHA-1", "SHA-256", "SHA-384", "SHA-512"].includes(name)) {
+        if (!cryptoHashNames.includes(name)) {
           throw new DOMException("Unrecognized digest algorithm", "NotSupportedError");
         }
         bytes = copyBufferSourceBytes(data);
@@ -6390,10 +9013,150 @@
         return Promise.reject(error);
       }
       return Promise.resolve().then(() => {
-        const digest = JSON.parse(__omoikane_crypto_digest(name, JSON.stringify(bytes)));
+        if (!cryptoLifecycleActive) throw cryptoLifecycleError();
+        const digest = JSON.parse(nativeCryptoDigest(name, JSON.stringify(bytes)));
         return new Uint8Array(digest).buffer;
       });
     }
+
+    generateKey(algorithm, extractable, keyUsages) {
+      return cryptoOperation(() => {
+        const normalized = normalizeHmacAlgorithm(algorithm, true);
+        const usages = normalizeCryptoUsages(keyUsages, cryptoHmacUsages);
+        if (usages.length === 0) throw new DOMException("At least one key usage is required.", "SyntaxError");
+        const bits = normalized.length === null ? hashOutputBits(normalized.hash) : normalized.length;
+        const bytes = JSON.parse(nativeCryptoRandom(bits / 8));
+        if (!Array.isArray(bytes) || bytes.length !== bits / 8) {
+          throw new DOMException("Unable to generate an HMAC key.", "OperationError");
+        }
+        return makeHmacKey(bytes, normalized.hash, extractable, usages);
+      });
+    }
+
+    importKey(format, keyData, algorithm, extractable, keyUsages) {
+      let rawSnapshot = null;
+      try {
+        if (String(format).toLowerCase() === "raw") rawSnapshot = copyBufferSourceBytes(keyData);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return cryptoOperation(() => {
+        const selectedFormat = String(format).toLowerCase();
+        if (selectedFormat !== "raw" && selectedFormat !== "jwk") {
+          throw new DOMException("The key format is not supported.", "NotSupportedError");
+        }
+        const normalized = normalizeHmacAlgorithm(algorithm, true);
+        const usages = normalizeCryptoUsages(keyUsages, cryptoHmacUsages);
+        if (usages.length === 0) throw new DOMException("At least one key usage is required.", "SyntaxError");
+        let bytes;
+        if (selectedFormat === "raw") {
+          bytes = rawSnapshot;
+          if (bytes.length === 0) throw new DOMException("The HMAC key must not be empty.", "DataError");
+        } else {
+          if (keyData === null || typeof keyData !== "object" || Array.isArray(keyData)) {
+            throw new DOMException("The JWK key is invalid.", "DataError");
+          }
+          if (keyData.kty !== "oct" || typeof keyData.k !== "string") {
+            throw new DOMException("The JWK key is invalid.", "DataError");
+          }
+          bytes = cryptoBase64UrlToBytes(keyData.k);
+          if (bytes.length === 0) throw new DOMException("The HMAC key must not be empty.", "DataError");
+          if (keyData.alg !== undefined && keyData.alg !== null) {
+            const jwkHash = hmacAlgorithmForJwk(String(keyData.alg));
+            if (jwkHash === null || jwkHash !== normalized.hash) {
+              throw new DOMException("The JWK algorithm does not match HMAC.", "DataError");
+            }
+          }
+          if (keyData.key_ops !== undefined) {
+            const normalizedKeyOps = Array.isArray(keyData.key_ops)
+              ? keyData.key_ops.map(usage => String(usage)) : null;
+            if (normalizedKeyOps === null ||
+                normalizedKeyOps.some(usage => !cryptoHmacUsages.includes(usage)) ||
+                usages.some(usage => !normalizedKeyOps.includes(usage))) {
+              throw new DOMException("The JWK key operations do not permit this key.", "DataError");
+            }
+          }
+          if (keyData.ext === false && extractable) {
+            throw new DOMException("The JWK key is not extractable.", "DataError");
+          }
+        }
+        if (normalized.length !== null && normalized.length !== bytes.length * 8) {
+          throw new DOMException("The HMAC key length does not match the algorithm.", "DataError");
+        }
+        return makeHmacKey(bytes, normalized.hash, extractable, usages);
+      });
+    }
+
+    exportKey(format, key) {
+      return cryptoOperation(() => {
+        const selectedFormat = String(format).toLowerCase();
+        if (selectedFormat !== "raw" && selectedFormat !== "jwk") {
+          throw new DOMException("The key format is not supported.", "NotSupportedError");
+        }
+        const metadata = assertCryptoKey(key);
+        if (!metadata.extractable) {
+          throw new DOMException("The key is not extractable.", "InvalidAccessError");
+        }
+        if (metadata.algorithm.name !== "HMAC") {
+          throw new DOMException("The key algorithm is not supported.", "NotSupportedError");
+        }
+        if (selectedFormat === "raw") return new Uint8Array(metadata.bytes).buffer;
+        const jwk = {
+          kty: "oct",
+          k: cryptoBytesToBase64Url(metadata.bytes),
+          key_ops: metadata.usages.slice(),
+          ext: metadata.extractable,
+        };
+        const alg = hmacJwkAlgorithm(metadata.algorithm.hash.name);
+        if (alg !== null) jwk.alg = alg;
+        return jwk;
+      });
+    }
+
+    sign(algorithm, key, data) {
+      let bytes;
+      try { bytes = copyBufferSourceBytes(data); }
+      catch (error) { return Promise.reject(error); }
+      return cryptoOperation(() => {
+        const metadata = assertHmacKey(key, "sign", algorithm);
+        const signed = JSON.parse(nativeCryptoHmac(
+          metadata.algorithm.hash.name,
+          JSON.stringify(metadata.bytes),
+          JSON.stringify(bytes),
+        ));
+        return new Uint8Array(signed).buffer;
+      });
+    }
+
+    verify(algorithm, key, signature, data) {
+      let signatureBytes;
+      let dataBytes;
+      try {
+        signatureBytes = copyBufferSourceBytes(signature);
+        dataBytes = copyBufferSourceBytes(data);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return cryptoOperation(() => {
+        const metadata = assertHmacKey(key, "verify", algorithm);
+        const expected = JSON.parse(nativeCryptoHmac(
+          metadata.algorithm.hash.name,
+          JSON.stringify(metadata.bytes),
+          JSON.stringify(dataBytes),
+        ));
+        if (signatureBytes.length !== expected.length) return false;
+        let difference = 0;
+        for (let index = 0; index < expected.length; index++) difference |= signatureBytes[index] ^ expected[index];
+        return difference === 0;
+      });
+    }
+
+    encrypt() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    decrypt() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    deriveBits() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    deriveKey() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    wrapKey() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
+    unwrapKey() { return Promise.reject(new DOMException("The requested algorithm is not supported.", "NotSupportedError")); }
   }
 
   class Crypto {
@@ -6408,7 +9171,7 @@
       if (array.byteLength > 65536) {
         throw new DOMException("The requested length exceeds 65,536 bytes", "QuotaExceededError");
       }
-      const bytes = JSON.parse(__omoikane_crypto_random(array.byteLength));
+      const bytes = JSON.parse(nativeCryptoRandom(array.byteLength));
       new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(bytes);
       return array;
     }
@@ -6424,6 +9187,11 @@
   }
   globalThis.Crypto = Crypto;
   globalThis.SubtleCrypto = SubtleCrypto;
+  globalThis.CryptoKey = CryptoKey;
+  globalThis.CryptoKeyPair = CryptoKeyPair;
+  globalThis.__omoikane_crypto_teardown = () => {
+    cryptoLifecycleActive = false;
+  };
   // Omoikane does not yet model mixed-content/security contexts, so realms are
   // currently treated as secure and expose the complete core API.
   globalThis.crypto = new Crypto(cryptoConstructionToken);
@@ -6458,6 +9226,24 @@
   globalThis.HTMLImageElement = HTMLImageElement;
   globalThis.HTMLCanvasElement = HTMLCanvasElement;
   globalThis.CanvasRenderingContext2D = CanvasRenderingContext2D;
+  globalThis.WebGLRenderingContext = WebGLRenderingContext;
+  globalThis.WebGLBuffer = WebGLBuffer;
+  globalThis.WebGLShader = WebGLShader;
+  globalThis.WebGLProgram = WebGLProgram;
+  globalThis.WebGLUniformLocation = WebGLUniformLocation;
+  globalThis.__omoikane_webgl_lose_context = function(target) {
+    const context = target instanceof WebGLRenderingContext ? target
+      : target && target instanceof HTMLCanvasElement ? target.getContext("webgl") : null;
+    return !!context && context.__lose();
+  };
+  globalThis.__omoikane_webgl_restore_context = function(target) {
+    const context = target instanceof WebGLRenderingContext ? target
+      : target && target instanceof HTMLCanvasElement ? target.getContext("webgl") : null;
+    return !!context && context.__restore();
+  };
+  globalThis.OffscreenCanvas = OffscreenCanvas;
+  globalThis.OffscreenCanvasRenderingContext2D = OffscreenCanvasRenderingContext2D;
+  globalThis.ImageBitmap = ImageBitmap;
   globalThis.ImageData = ImageData;
   globalThis.Image = function(width, height) {
     const image = document.createElement("img");
@@ -6470,15 +9256,44 @@
   globalThis.HTMLScriptElement = HTMLScriptElement;
   globalThis.HTMLIFrameElement = HTMLIFrameElement;
   globalThis.HTMLObjectElement = HTMLObjectElement;
+  globalThis.HTMLMediaElement = HTMLMediaElement;
+  globalThis.HTMLAudioElement = HTMLAudioElement;
+  globalThis.HTMLVideoElement = HTMLVideoElement;
+  globalThis.MediaError = MediaError;
+  globalThis.Audio = function Audio(src) {
+    const element = document.createElement("audio");
+    if (arguments.length > 0) element.src = src;
+    return element;
+  };
+  globalThis.Audio.prototype = HTMLAudioElement.prototype;
   globalThis.SVGElement = SVGElement;
+  globalThis.SVGGraphicsElement = SVGGraphicsElement;
+  globalThis.SVGGeometryElement = SVGGeometryElement;
   globalThis.SVGSVGElement = SVGSVGElement;
+  globalThis.SVGRect = SVGRect;
+  globalThis.SVGPoint = SVGPoint;
+  globalThis.SVGMatrix = SVGMatrix;
+  globalThis.SVGAnimatedLength = SVGAnimatedLength;
+  globalThis.SVGAnimatedRect = SVGAnimatedRect;
+  globalThis.DOMPoint = DOMPoint;
+  globalThis.DOMMatrix = DOMMatrix;
   globalThis.SVGRectElement = SVGRectElement;
+  globalThis.SVGCircleElement = SVGCircleElement;
+  globalThis.SVGEllipseElement = SVGEllipseElement;
+  globalThis.SVGLineElement = SVGLineElement;
+  globalThis.SVGPathElement = SVGPathElement;
+  globalThis.SVGPolylineElement = SVGPolylineElement;
+  globalThis.SVGPolygonElement = SVGPolygonElement;
   globalThis.SVGTextContentElement = SVGTextContentElement;
+  globalThis.SVGTextPositioningElement = SVGTextPositioningElement;
   globalThis.SVGTextElement = SVGTextElement;
+  globalThis.SVGTSpanElement = SVGTSpanElement;
+  globalThis.SVGTextPathElement = SVGTextPathElement;
   globalThis.Event = Event;
   globalThis.CustomEvent = CustomEvent;
   globalThis.MessageEvent = MessageEvent;
   globalThis.MouseEvent = MouseEvent;
+  globalThis.DragEvent = DragEvent;
   globalThis.WheelEvent = WheelEvent;
   globalThis.KeyboardEvent = KeyboardEvent;
   globalThis.FocusEvent = FocusEvent;
@@ -6618,18 +9433,204 @@
   globalThis.__omoikane_wire_inline_handlers = function() {
     wireInlineHandlers(globalThis.document);
   };
-  globalThis.__omoikane_dispatch_resource_load = function(id) {
+  globalThis.__omoikane_dispatch_resource_load = function(id, url = "", redirected = false, elapsedMs = 0) {
     const element = wrapNode(id);
-    if (element) element.dispatchEvent(new Event("load", { bubbles: false }));
+    if (element) {
+      finishElementResourceTiming(element, 200, false, { url, redirected, elapsedMs });
+      element.dispatchEvent(new Event("load", { bubbles: false }));
+    }
   };
   // A resource that could not be fetched fires `error`, not `load`. Loaders that
   // fall back when a script is unavailable listen for exactly this.
-  globalThis.__omoikane_dispatch_resource_error = function(id) {
+  globalThis.__omoikane_dispatch_resource_error = function(id, url = "", redirected = false, elapsedMs = 0) {
     const element = wrapNode(id);
-    if (element) element.dispatchEvent(new Event("error", { bubbles: false }));
+    if (element) {
+      finishElementResourceTiming(element, 0, true, { url, redirected, elapsedMs });
+      element.dispatchEvent(new Event("error", { bubbles: false }));
+    }
   };
+  // CDP mouse input uses pointer id 1. Keep captures scoped to their owner
+  // document so a pointer captured in an iframe cannot leak an event path into
+  // an unrelated browsing context. The native mouse bridge releases a pointer
+  // across all documents when the button is released.
+  const pointerCaptureTargets = new Map();
+  function normalizePointerId(pointerId) {
+    const value = Number(pointerId);
+    const integer = Math.trunc(value);
+    if (!Number.isFinite(value) || integer <= 0) {
+      throw new TypeError("pointerId must be a positive finite number");
+    }
+    return integer;
+  }
+  function pointerCaptureKey(doc, pointerId) {
+    const owner = doc && doc.nodeType === 9 ? doc : doc && doc.ownerDocument;
+    const id = owner && owner.__id !== undefined ? owner.__id : __omoikane_document_id;
+    return String(id) + ":" + pointerId;
+  }
+  function pointerCaptureTarget(doc, pointerId) {
+    const key = pointerCaptureKey(doc, pointerId);
+    const target = pointerCaptureTargets.get(key);
+    if (target && target.isConnected) {
+      return target;
+    }
+    if (target) pointerCaptureTargets.delete(key);
+    return null;
+  }
+  function setPointerCaptureTarget(target, pointerId) {
+    if (!(target instanceof Element) || !target.isConnected) {
+      throw new DOMException("The pointer capture target is not connected.", "NotFoundError");
+    }
+    const doc = target.ownerDocument;
+    if (!doc) throw new DOMException("The pointer has no owner document.", "NotFoundError");
+    pointerCaptureTargets.set(pointerCaptureKey(doc, pointerId), target);
+  }
+  function releasePointerCaptureTarget(target, pointerId) {
+    const doc = target && target.ownerDocument;
+    const key = pointerCaptureKey(doc, pointerId);
+    if (pointerCaptureTargets.get(key) === target) pointerCaptureTargets.delete(key);
+  }
+  function capturedInputTarget(target, pointerId = 1) {
+    const doc = target && target.nodeType === 9 ? target : target && target.ownerDocument;
+    return pointerCaptureTarget(doc || document, normalizePointerId(pointerId)) || target;
+  }
+  globalThis.__omoikane_release_pointer_capture = function(pointerId = 1) {
+    const normalized = normalizePointerId(pointerId);
+    const suffix = ":" + normalized;
+    for (const key of pointerCaptureTargets.keys()) {
+      if (key.endsWith(suffix)) pointerCaptureTargets.delete(key);
+    }
+  };
+
+  function draggableAncestor(target) {
+    for (let current = target; current && current.nodeType === 1; current = current.parentNode) {
+      if (current instanceof HTMLElement && current.draggable) return current;
+    }
+    return null;
+  }
+
+  const dragInputState = {
+    candidate: null,
+    source: null,
+    dataTransfer: null,
+    currentTarget: null,
+    dropAllowed: false,
+    active: false,
+  };
+  function resetDragInputState() {
+    dragInputState.candidate = null;
+    dragInputState.source = null;
+    dragInputState.dataTransfer = null;
+    dragInputState.currentTarget = null;
+    dragInputState.dropAllowed = false;
+    dragInputState.active = false;
+  }
+  function dragEvent(type, init, dataTransfer, relatedTarget = null, cancelable = true) {
+    return new DragEvent(type, {
+      ...init,
+      bubbles: true,
+      cancelable,
+      composed: true,
+      dataTransfer,
+      relatedTarget,
+    });
+  }
+  function dragInputTarget(id, init = {}) {
+    return capturedInputTarget(wrapNode(id) || document, init.pointerId || 1) || document;
+  }
+  function updateDragInputTarget(target, init) {
+    const changed = target !== dragInputState.currentTarget;
+    if (changed) {
+      const previous = dragInputState.currentTarget;
+      if (previous) {
+        previous.dispatchEvent(dragEvent(
+          "dragleave", init, dragInputState.dataTransfer, target, false,
+        ));
+      }
+      dragInputState.currentTarget = target;
+      target.dispatchEvent(dragEvent(
+        "dragenter", init, dragInputState.dataTransfer, previous,
+      ));
+      const over = target.dispatchEvent(dragEvent(
+        "dragover", init, dragInputState.dataTransfer,
+      ));
+      dragInputState.dropAllowed = !over;
+    }
+    return changed;
+  }
+  globalThis.__omoikane_prepare_drag_input = function(id, init = {}) {
+    const target = dragInputTarget(id, init);
+    const source = draggableAncestor(target);
+    resetDragInputState();
+    dragInputState.candidate = source;
+    return !!source;
+  };
+  globalThis.__omoikane_dispatch_drag_input = function(id, phase, init = {}) {
+    if (phase === "cancel") {
+      if (dragInputState.active && dragInputState.source) {
+        dragInputState.source.dispatchEvent(dragEvent(
+          "dragend", init, dragInputState.dataTransfer, null, false,
+        ));
+      }
+      const wasActive = dragInputState.active;
+      resetDragInputState();
+      return wasActive;
+    }
+    if (phase === "move") {
+      if (!dragInputState.active) {
+        const source = dragInputState.candidate;
+        if (!source) return false;
+        const dataTransfer = new DataTransfer();
+        const start = source.dispatchEvent(dragEvent("dragstart", init, dataTransfer));
+        if (!start) {
+          resetDragInputState();
+          return false;
+        }
+        dragInputState.source = source;
+        dragInputState.dataTransfer = dataTransfer;
+        dragInputState.active = true;
+        dragInputState.candidate = null;
+      }
+      const target = dragInputTarget(id, init);
+      dragInputState.source.dispatchEvent(dragEvent(
+        "drag", init, dragInputState.dataTransfer, target,
+      ));
+      const targetChanged = updateDragInputTarget(target, init);
+      if (!targetChanged) {
+        const over = target.dispatchEvent(dragEvent(
+          "dragover", init, dragInputState.dataTransfer,
+        ));
+        dragInputState.dropAllowed = !over;
+      }
+      return true;
+    }
+    if (phase === "end") {
+      if (!dragInputState.active) {
+        resetDragInputState();
+        return false;
+      }
+      const source = dragInputState.source;
+      const dataTransfer = dragInputState.dataTransfer;
+      const finalTarget = dragInputTarget(id, init);
+      const targetChanged = updateDragInputTarget(finalTarget, init);
+      const target = dragInputState.currentTarget;
+      if (target && !targetChanged) {
+        const over = target.dispatchEvent(dragEvent(
+          "dragover", init, dataTransfer,
+        ));
+        dragInputState.dropAllowed = !over;
+      }
+      if (target && dragInputState.dropAllowed) {
+        target.dispatchEvent(dragEvent("drop", init, dataTransfer));
+      }
+      source.dispatchEvent(dragEvent("dragend", init, dataTransfer, null, false));
+      resetDragInputState();
+      return true;
+    }
+    return false;
+  };
+
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
-    const target = wrapNode(id) || document;
+    const target = capturedInputTarget(wrapNode(id) || document, init && init.pointerId || 1) || document;
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
@@ -6928,6 +9929,1022 @@
     *[Symbol.iterator]() {}
     get [Symbol.toStringTag]() { return "MimeTypeArray"; }
   }
+  const clipboardConstructionToken = {};
+  class Clipboard {
+    constructor(token) {
+      if (token !== clipboardConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    readText() {
+      return Promise.resolve().then(() => {
+        if (!nativeIsSecureContext()) {
+          throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
+        }
+        const text = nativeClipboardReadText();
+        if (text === null) {
+          throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
+        }
+        return String(text);
+      });
+    }
+    writeText(value) {
+      if (arguments.length < 1) {
+        throw new TypeError("Clipboard.writeText requires one argument");
+      }
+      return Promise.resolve().then(() => {
+        if (!nativeIsSecureContext()) {
+          throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
+        }
+        if (!nativeClipboardWriteText(String(value))) {
+          throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
+        }
+      });
+    }
+    get [Symbol.toStringTag]() { return "Clipboard"; }
+  }
+  const geolocationConstructionToken = {};
+  const nativeGeolocationRequest = globalThis.__omoikane_geolocation_request;
+  const nativeGeolocationClearWatch = globalThis.__omoikane_geolocation_clear_watch;
+  try { delete globalThis.__omoikane_geolocation_request; } catch (_) {}
+  try { delete globalThis.__omoikane_geolocation_clear_watch; } catch (_) {}
+
+  class GeolocationCoordinates {
+    constructor(token, data) {
+      if (token !== geolocationConstructionToken) throw new TypeError("Illegal constructor");
+      const values = data || {};
+      const define = (name, value) => Object.defineProperty(this, name, {
+        configurable: false, enumerable: true, writable: false, value,
+      });
+      define("latitude", Number(values.latitude));
+      define("longitude", Number(values.longitude));
+      define("accuracy", Number(values.accuracy));
+      define("altitude", values.altitude == null ? null : Number(values.altitude));
+      define("altitudeAccuracy", values.altitudeAccuracy == null ? null : Number(values.altitudeAccuracy));
+      define("heading", values.heading == null ? null : Number(values.heading));
+      define("speed", values.speed == null ? null : Number(values.speed));
+    }
+    get [Symbol.toStringTag]() { return "GeolocationCoordinates"; }
+  }
+
+  class GeolocationPosition {
+    constructor(token, data) {
+      if (token !== geolocationConstructionToken) throw new TypeError("Illegal constructor");
+      const values = data || {};
+      Object.defineProperty(this, "coords", {
+        configurable: false, enumerable: true, writable: false,
+        value: new GeolocationCoordinates(geolocationConstructionToken, values.coords || {}),
+      });
+      Object.defineProperty(this, "timestamp", {
+        configurable: false, enumerable: true, writable: false, value: Number(values.timestamp),
+      });
+    }
+    get [Symbol.toStringTag]() { return "GeolocationPosition"; }
+  }
+
+  class GeolocationPositionError {
+    constructor(token, code, message) {
+      if (token !== geolocationConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperty(this, "code", {
+        configurable: false, enumerable: true, writable: false, value: Number(code),
+      });
+      Object.defineProperty(this, "message", {
+        configurable: false, enumerable: true, writable: false, value: String(message || ""),
+      });
+    }
+    get [Symbol.toStringTag]() { return "GeolocationPositionError"; }
+  }
+  GeolocationPositionError.PERMISSION_DENIED = 1;
+  GeolocationPositionError.POSITION_UNAVAILABLE = 2;
+  GeolocationPositionError.TIMEOUT = 3;
+  for (const name of ["PERMISSION_DENIED", "POSITION_UNAVAILABLE", "TIMEOUT"]) {
+    GeolocationPositionError.prototype[name] = GeolocationPositionError[name];
+  }
+
+  function normalizeGeolocationOptions(options) {
+    if (options == null) return { timeout: Infinity, maximumAge: 0 };
+    const value = Object(options);
+    let timeout = value.timeout === undefined ? Infinity : Number(value.timeout);
+    let maximumAge = value.maximumAge === undefined ? 0 : Number(value.maximumAge);
+    if (Number.isNaN(timeout) || timeout < 0 || Number.isNaN(maximumAge) || maximumAge < 0) {
+      throw new RangeError("geolocation timeout and maximumAge must be non-negative");
+    }
+    if (Number.isFinite(timeout)) timeout = Math.floor(timeout);
+    if (Number.isFinite(maximumAge)) maximumAge = Math.floor(maximumAge);
+    return { timeout, maximumAge };
+  }
+
+  class Geolocation {
+    constructor(token) {
+      if (token !== geolocationConstructionToken) throw new TypeError("Illegal constructor");
+      this.__nextWatchId = 1;
+    }
+    getCurrentPosition(success, error = undefined, options = undefined) {
+      if (typeof success !== "function") throw new TypeError("success callback must be callable");
+      if (error != null && typeof error !== "function") throw new TypeError("error callback must be callable");
+      const normalized = normalizeGeolocationOptions(options);
+      nativeGeolocationRequest(success, error == null ? undefined : error, -1,
+        normalized.timeout, normalized.maximumAge);
+    }
+    watchPosition(success, error = undefined, options = undefined) {
+      if (typeof success !== "function") throw new TypeError("success callback must be callable");
+      if (error != null && typeof error !== "function") throw new TypeError("error callback must be callable");
+      const normalized = normalizeGeolocationOptions(options);
+      const id = this.__nextWatchId++ >>> 0;
+      nativeGeolocationRequest(success, error == null ? undefined : error, id,
+        normalized.timeout, normalized.maximumAge);
+      return id;
+    }
+    clearWatch(id) {
+      const number = Number(id);
+      if (!Number.isFinite(number)) return;
+      nativeGeolocationClearWatch(number >>> 0);
+    }
+    get [Symbol.toStringTag]() { return "Geolocation"; }
+  }
+
+  globalThis.__omoikane_dispatch_geolocation_task = function() {
+    const status = globalThis.__omoikane_geolocation_status;
+    const callback = globalThis.__omoikane_geolocation_callback;
+    if (status === "success") {
+      if (typeof callback === "function") {
+        callback(new GeolocationPosition(
+          geolocationConstructionToken,
+          JSON.parse(globalThis.__omoikane_geolocation_payload || "{}"),
+        ));
+      }
+    } else if (typeof globalThis.__omoikane_geolocation_error_callback === "function") {
+      globalThis.__omoikane_geolocation_error_callback(new GeolocationPositionError(
+        geolocationConstructionToken,
+        globalThis.__omoikane_geolocation_error_code,
+        globalThis.__omoikane_geolocation_error_message,
+      ));
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // Service Worker registration/container lifecycle core.
+  //
+  // Script execution and fetch interception are intentionally out of scope
+  // for this deterministic model.  Registrations still retain their
+  // same-origin script/scope URLs, expose the installing/active state
+  // transitions, and select the longest matching scope for the current
+  // document.  Keeping records in this realm avoids moving Boa objects across
+  // runtimes while preserving the Web IDL-facing object graph.
+  // -------------------------------------------------------------------------
+  const serviceWorkerConstructionToken = {};
+  const serviceWorkerContainerConstructionToken = {};
+
+  // EventTarget is declared later in this bootstrap (after Navigator is
+  // constructed).  This bridge keeps construction safe during that initial
+  // pass, then adopts the real EventTarget prototype once it is installed.
+  class ServiceWorkerEventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(...args) { return globalThis.EventTarget.prototype.addEventListener.call(this, ...args); }
+    removeEventListener(...args) { return globalThis.EventTarget.prototype.removeEventListener.call(this, ...args); }
+    dispatchEvent(...args) { return globalThis.EventTarget.prototype.dispatchEvent.call(this, ...args); }
+  }
+
+  function serviceWorkerURL(value, base) {
+    return new URL(String(value), base || String(globalThis.location && globalThis.location.href || ""));
+  }
+
+  function serviceWorkerOrigin(url) {
+    return String(url.origin || "");
+  }
+
+  function serviceWorkerCurrentOrigin() {
+    return String(globalThis.location && globalThis.location.origin || "");
+  }
+
+  function serviceWorkerScopeURL(scriptURL, options) {
+    const requested = options && options.scope !== undefined
+      ? serviceWorkerURL(options.scope, scriptURL.href)
+      : serviceWorkerURL(scriptURL.pathname.slice(0, scriptURL.pathname.lastIndexOf("/") + 1), scriptURL.href);
+    requested.hash = "";
+    return requested;
+  }
+
+  class ServiceWorker extends ServiceWorkerEventTarget {
+    constructor(record, state, token) {
+      if (token !== serviceWorkerConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this.scriptURL = record.scriptURL;
+      this._state = String(state);
+      this._record = record;
+      this._onstatechange = null;
+    }
+    get state() { return this._state; }
+    __setState(state) {
+      const next = String(state);
+      if (next === this._state) return;
+      this._state = next;
+      this.dispatchEvent(new Event("statechange"));
+    }
+    postMessage() {
+      throw new DOMException("Service worker script execution is not available.", "InvalidStateError");
+    }
+    get onstatechange() { return this._onstatechange; }
+    set onstatechange(callback) {
+      if (this._onstatechange) this.removeEventListener("statechange", this._onstatechange);
+      this._onstatechange = typeof callback === "function" ? callback : null;
+      if (this._onstatechange) this.addEventListener("statechange", this._onstatechange);
+    }
+    get [Symbol.toStringTag]() { return "ServiceWorker"; }
+  }
+
+  class ServiceWorkerRegistration extends ServiceWorkerEventTarget {
+    constructor(record, container, token) {
+      if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this._record = record;
+      this._container = container;
+      this.scope = record.scope;
+      this.installing = record.worker;
+      this.waiting = null;
+      this.active = null;
+      this._onupdatefound = null;
+    }
+    update() {
+      return Promise.resolve(undefined);
+    }
+    unregister() {
+      return Promise.resolve().then(() => {
+        if (!this._container._records.has(this.scope)) return false;
+        this._container._records.delete(this.scope);
+        this.installing = null;
+        this.waiting = null;
+        this.active = null;
+        this._container.__updateController();
+        return true;
+      });
+    }
+    get onupdatefound() { return this._onupdatefound; }
+    set onupdatefound(callback) {
+      if (this._onupdatefound) this.removeEventListener("updatefound", this._onupdatefound);
+      this._onupdatefound = typeof callback === "function" ? callback : null;
+      if (this._onupdatefound) this.addEventListener("updatefound", this._onupdatefound);
+    }
+    get [Symbol.toStringTag]() { return "ServiceWorkerRegistration"; }
+  }
+
+  class ServiceWorkerContainer extends ServiceWorkerEventTarget {
+    constructor(token) {
+      if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this._records = new Map();
+      this.controller = null;
+      this._readyResolved = false;
+      this._readyResolve = null;
+      this.ready = new Promise(resolve => { this._readyResolve = resolve; });
+      this._oncontrollerchange = null;
+    }
+    __validateRegistration(scriptURL, options) {
+      const script = serviceWorkerURL(scriptURL);
+      const origin = serviceWorkerCurrentOrigin();
+      if (!origin || origin === "null" || serviceWorkerOrigin(script) !== origin) {
+        throw new DOMException("Service worker script must be same-origin.", "SecurityError");
+      }
+      const scope = serviceWorkerScopeURL(script, options || {});
+      if (serviceWorkerOrigin(scope) !== origin) {
+        throw new DOMException("Service worker scope must be same-origin.", "SecurityError");
+      }
+      return { script: script.href, scope: scope.href };
+    }
+    register(scriptURL, options = undefined) {
+      return Promise.resolve().then(() => {
+        if (typeof nativeIsSecureContext !== "function" || !nativeIsSecureContext()) {
+          throw new DOMException("Service workers require a secure context.", "SecurityError");
+        }
+        const validated = this.__validateRegistration(scriptURL, options || {});
+        let record = this._records.get(validated.scope);
+        if (record) {
+          if (record.scriptURL !== validated.script) {
+            record.scriptURL = validated.script;
+            record.worker = new ServiceWorker(record, "installing", serviceWorkerConstructionToken);
+            record.registration.installing = record.worker;
+            record.registration.waiting = null;
+            record.registration.active = null;
+            record.registration.dispatchEvent(new Event("updatefound"));
+          }
+        } else {
+          record = { scriptURL: validated.script, scope: validated.scope, worker: null, registration: null };
+          record.worker = new ServiceWorker(record, "installing", serviceWorkerConstructionToken);
+          record.registration = new ServiceWorkerRegistration(record, this, serviceWorkerContainerConstructionToken);
+          this._records.set(validated.scope, record);
+        }
+        const registration = record.registration;
+        // The core has no script evaluator, so install/activate is a single
+        // deterministic microtask transition after registration creation.
+        queueMicrotask(() => {
+          if (!this._records.has(record.scope)) return;
+          record.worker.__setState("activated");
+          registration.installing = null;
+          registration.waiting = null;
+          registration.active = record.worker;
+          this.__updateController();
+          if (!this._readyResolved && this.controller === record.worker) {
+            this._readyResolved = true;
+            this._readyResolve(registration);
+          }
+        });
+        return registration;
+      });
+    }
+    getRegistration(clientURL = undefined) {
+      return Promise.resolve().then(() => {
+        const target = serviceWorkerURL(clientURL === undefined ? globalThis.location.href : clientURL);
+        if (serviceWorkerOrigin(target) !== serviceWorkerCurrentOrigin()) return undefined;
+        let match = null;
+        for (const record of this._records.values()) {
+          if (target.href.startsWith(record.scope) && (!match || record.scope.length > match.scope.length)) {
+            match = record;
+          }
+        }
+        return match ? match.registration : undefined;
+      });
+    }
+    getRegistrations() {
+      return Promise.resolve().then(() => Array.from(this._records.values(), record => record.registration));
+    }
+    __updateController() {
+      const href = String(globalThis.location && globalThis.location.href || "");
+      let match = null;
+      for (const record of this._records.values()) {
+        if (record.registration.active && href.startsWith(record.scope) && (!match || record.scope.length > match.scope.length)) {
+          match = record;
+        }
+      }
+      const next = match ? match.registration.active : null;
+      if (next === this.controller) return;
+      this.controller = next;
+      queueMicrotask(() => this.dispatchEvent(new Event("controllerchange")));
+    }
+    get oncontrollerchange() { return this._oncontrollerchange; }
+    set oncontrollerchange(callback) {
+      if (this._oncontrollerchange) this.removeEventListener("controllerchange", this._oncontrollerchange);
+      this._oncontrollerchange = typeof callback === "function" ? callback : null;
+      if (this._oncontrollerchange) this.addEventListener("controllerchange", this._oncontrollerchange);
+    }
+    get [Symbol.toStringTag]() { return "ServiceWorkerContainer"; }
+  }
+
+  globalThis.ServiceWorker = ServiceWorker;
+  globalThis.ServiceWorkerRegistration = ServiceWorkerRegistration;
+  globalThis.ServiceWorkerContainer = ServiceWorkerContainer;
+
+  // -------------------------------------------------------------------------
+  // WebGPU deterministic adapter/device/queue core.
+  //
+  // Omoikane intentionally does not bind a host GPU backend.  The implementation
+  // below nevertheless keeps the WebGPU object graph and the parts of the
+  // validation/state machine that are useful to headless callers deterministic:
+  // one software adapter, an in-memory device, mapped buffers, queue writes,
+  // and copy/clear command buffers.  Shader/pipeline/texture presentation APIs
+  // remain outside this core and are rejected through the normal validation
+  // error path rather than pretending that a GPU exists.
+  // -------------------------------------------------------------------------
+  const gpuConstructionToken = {};
+  const gpuAdapterConstructionToken = {};
+  const gpuDeviceConstructionToken = {};
+  const gpuBufferConstructionToken = {};
+  const gpuCommandConstructionToken = {};
+  const gpuErrorConstructionToken = {};
+
+  // Keep constants as frozen arrays/objects instead of long-lived Set objects.
+  // Boa's Set finalizer can otherwise retain a borrow while the web API surface
+  // probe tears down a realm.
+  const WEBGPU_FEATURES = Object.freeze([]);
+  const WEBGPU_LIMITS = Object.freeze({
+    maxTextureDimension1D: 8192,
+    maxTextureDimension2D: 8192,
+    maxTextureDimension3D: 2048,
+    maxTextureArrayLayers: 256,
+    maxBindGroups: 4,
+    maxBindGroupsPlusVertexBuffers: 24,
+    maxBindingsPerBindGroup: 1000,
+    maxDynamicUniformBuffersPerPipelineLayout: 8,
+    maxDynamicStorageBuffersPerPipelineLayout: 4,
+    maxSampledTexturesPerShaderStage: 16,
+    maxSamplersPerShaderStage: 16,
+    maxStorageBuffersPerShaderStage: 8,
+    maxStorageTexturesPerShaderStage: 4,
+    maxUniformBuffersPerShaderStage: 12,
+    maxUniformBufferBindingSize: 65536,
+    maxStorageBufferBindingSize: 134217728,
+    minUniformBufferOffsetAlignment: 256,
+    minStorageBufferOffsetAlignment: 256,
+    maxVertexBuffers: 8,
+    maxBufferSize: 268435456,
+    maxVertexAttributes: 16,
+    maxVertexBufferArrayStride: 2048,
+    maxInterStageShaderComponents: 60,
+    maxInterStageShaderVariables: 16,
+    maxColorAttachments: 8,
+    maxColorAttachmentBytesPerSample: 32,
+    maxComputeWorkgroupStorageSize: 16384,
+    maxComputeInvocationsPerWorkgroup: 256,
+    maxComputeWorkgroupSizeX: 256,
+    maxComputeWorkgroupSizeY: 256,
+    maxComputeWorkgroupSizeZ: 64,
+    maxComputeWorkgroupsPerDimension: 65535,
+  });
+  const WEBGPU_BUFFER_USAGE = Object.freeze({
+    MAP_READ: 0x0001,
+    MAP_WRITE: 0x0002,
+    COPY_SRC: 0x0004,
+    COPY_DST: 0x0008,
+    INDEX: 0x0010,
+    VERTEX: 0x0020,
+    UNIFORM: 0x0040,
+    STORAGE: 0x0080,
+    INDIRECT: 0x0100,
+    QUERY_RESOLVE: 0x0200,
+  });
+  const WEBGPU_MAP_MODE = Object.freeze({ READ: 0x0001, WRITE: 0x0002 });
+  const WEBGPU_SHADER_STAGE = Object.freeze({ VERTEX: 0x0001, FRAGMENT: 0x0002, COMPUTE: 0x0004 });
+  const WEBGPU_TEXTURE_USAGE = Object.freeze({
+    COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04,
+    STORAGE_BINDING: 0x08, RENDER_ATTACHMENT: 0x10,
+  });
+
+  // EventTarget is installed later in this bootstrap.  This bridge mirrors the
+  // ServiceWorker bridge above so GPUDevice can expose EventTarget semantics as
+  // soon as the global constructor is available.
+  class GPUEventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(...args) { return globalThis.EventTarget.prototype.addEventListener.call(this, ...args); }
+    removeEventListener(...args) { return globalThis.EventTarget.prototype.removeEventListener.call(this, ...args); }
+    dispatchEvent(...args) { return globalThis.EventTarget.prototype.dispatchEvent.call(this, ...args); }
+  }
+
+  class GPUError {
+    constructor(message = "") {
+      Object.defineProperty(this, "message", {
+        configurable: false, enumerable: true, writable: false, value: String(message),
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUError"; }
+  }
+  class GPUValidationError extends GPUError {
+    get [Symbol.toStringTag]() { return "GPUValidationError"; }
+  }
+  class GPUOutOfMemoryError extends GPUError {
+    get [Symbol.toStringTag]() { return "GPUOutOfMemoryError"; }
+  }
+  class GPUInternalError extends GPUError {
+    get [Symbol.toStringTag]() { return "GPUInternalError"; }
+  }
+  class GPUDeviceLostInfo {
+    constructor(token, reason, message) {
+      if (token !== gpuErrorConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperties(this, {
+        reason: { value: String(reason), enumerable: true },
+        message: { value: String(message), enumerable: true },
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUDeviceLostInfo"; }
+  }
+  class GPUUncapturedErrorEvent extends Event {
+    constructor(type = "uncapturederror", init = {}) {
+      super(type, init);
+      Object.defineProperty(this, "error", {
+        configurable: false, enumerable: true, writable: false, value: init.error || null,
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUUncapturedErrorEvent"; }
+  }
+
+  class GPUSupportedFeatures {
+    constructor(token, values = []) {
+      if (token !== gpuAdapterConstructionToken) throw new TypeError("Illegal constructor");
+      this.__values = Object.freeze(Array.from(values, String));
+    }
+    get size() { return this.__values.length; }
+    has(value) { return this.__values.includes(String(value)); }
+    keys() { return this.__values[Symbol.iterator](); }
+    values() { return this.__values[Symbol.iterator](); }
+    entries() { return this.__values.map(value => [value, value])[Symbol.iterator](); }
+    forEach(callback, thisArg = undefined) {
+      if (typeof callback !== "function") throw new TypeError("callback must be callable");
+      for (const value of this.__values) callback.call(thisArg, value, value, this);
+    }
+    [Symbol.iterator]() { return this.values(); }
+    get [Symbol.toStringTag]() { return "GPUSupportedFeatures"; }
+  }
+
+  class GPUSupportedLimits {
+    constructor(token, values = WEBGPU_LIMITS) {
+      if (token !== gpuAdapterConstructionToken && token !== gpuDeviceConstructionToken) {
+        throw new TypeError("Illegal constructor");
+      }
+      this.__values = Object.freeze({ ...values });
+      for (const name of Object.keys(this.__values)) {
+        Object.defineProperty(this, name, {
+          configurable: false, enumerable: true, get: () => this.__values[name],
+        });
+      }
+    }
+    get [Symbol.toStringTag]() { return "GPUSupportedLimits"; }
+  }
+
+  class GPUAdapterInfo {
+    constructor(token, values) {
+      if (token !== gpuAdapterConstructionToken) throw new TypeError("Illegal constructor");
+      const source = values || {};
+      Object.defineProperties(this, {
+        architecture: { value: String(source.architecture || "deterministic"), enumerable: true },
+        description: { value: String(source.description || "Omoikane deterministic WebGPU adapter"), enumerable: true },
+        device: { value: String(source.device || "software"), enumerable: true },
+        vendor: { value: String(source.vendor || "Omoikane"), enumerable: true },
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUAdapterInfo"; }
+  }
+
+  function webgpuOperationError(message) {
+    return new DOMException(String(message || "WebGPU operation failed."), "OperationError");
+  }
+  function webgpuValidationError(message) {
+    return new GPUValidationError(String(message || "WebGPU validation failed."));
+  }
+  function webgpuInteger(value, name) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || Math.trunc(number) !== number || number < 0) {
+      throw new TypeError(name + " must be a non-negative integer");
+    }
+    return number;
+  }
+  function webgpuBytes(value) {
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    throw new TypeError("data must be an ArrayBuffer or ArrayBufferView");
+  }
+  function webgpuDeviceActive(device, operation) {
+    if (!device || device.__destroyed) {
+      if (device) webgpuRecordError(device, "validation", (operation || "Operation") + " used a destroyed device.");
+      return false;
+    }
+    return true;
+  }
+  function webgpuRecordError(device, filter, message) {
+    if (!device) return;
+    const error = filter === "out-of-memory"
+      ? new GPUOutOfMemoryError(message)
+      : filter === "internal" ? new GPUInternalError(message) : webgpuValidationError(message);
+    const scope = device.__errorScopes.length ? device.__errorScopes[device.__errorScopes.length - 1] : null;
+    if (scope && scope.filter === filter) {
+      if (!scope.error) scope.error = error;
+      return;
+    }
+    if (scope && scope.filter !== filter && filter === "validation") {
+      // A validation error cannot be hidden by an out-of-memory/internal scope.
+      // Leave it uncaptured, matching the browser's uncaptured error surface.
+    }
+    queueMicrotask(() => {
+      if (device.__destroyed && device.__uncapturedSuppressed) return;
+      const event = new GPUUncapturedErrorEvent("uncapturederror", { error });
+      try { device.dispatchEvent(event); } catch (_) {}
+    });
+  }
+
+  class GPUBuffer {
+    constructor(device, descriptor, token, invalid = false) {
+      if (token !== gpuBufferConstructionToken) throw new TypeError("Illegal constructor");
+      this.__device = device;
+      this.__invalid = !!invalid;
+      this.__destroyed = false;
+      this.__size = Number(descriptor.size) || 0;
+      this.__usage = Number(descriptor.usage) || 0;
+      this.__label = descriptor.label === undefined ? "" : String(descriptor.label);
+      this.__data = new Uint8Array(Math.max(0, this.__size));
+      this.__mapState = "unmapped";
+      this.__map = null;
+      if (!this.__invalid && descriptor.mappedAtCreation) {
+        this.__mapState = "mapped";
+        this.__map = { mode: WEBGPU_MAP_MODE.WRITE, offset: 0, size: this.__size,
+          buffer: this.__data.slice().buffer, views: [] };
+      }
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    get size() { return this.__size; }
+    get usage() { return this.__usage; }
+    get mapState() { return this.__mapState; }
+    mapAsync(mode, offset = 0, size = undefined) {
+      const normalizedMode = Number(mode);
+      if (this.__invalid || this.__destroyed || !webgpuDeviceActive(this.__device, "GPUBuffer.mapAsync")) {
+        return Promise.reject(webgpuOperationError("The GPUBuffer is unavailable."));
+      }
+      if (normalizedMode !== WEBGPU_MAP_MODE.READ && normalizedMode !== WEBGPU_MAP_MODE.WRITE) {
+        return Promise.reject(new TypeError("mapMode must be READ or WRITE"));
+      }
+      if (this.__mapState !== "unmapped") return Promise.reject(webgpuOperationError("The GPUBuffer is already mapped."));
+      let start;
+      let length;
+      try {
+        start = webgpuInteger(offset, "offset");
+        length = size === undefined ? this.__size - start : webgpuInteger(size, "size");
+      } catch (error) { return Promise.reject(error); }
+      if (start % 8 !== 0 || length % 4 !== 0 || start > this.__size || start + length > this.__size) {
+        return Promise.reject(webgpuOperationError("The mapped range is outside the buffer or is misaligned."));
+      }
+      if ((normalizedMode === WEBGPU_MAP_MODE.READ && !(this.__usage & WEBGPU_BUFFER_USAGE.MAP_READ)) ||
+          (normalizedMode === WEBGPU_MAP_MODE.WRITE && !(this.__usage & WEBGPU_BUFFER_USAGE.MAP_WRITE))) {
+        return Promise.reject(webgpuOperationError("The requested map mode is not enabled for this buffer."));
+      }
+      this.__mapState = "pending";
+      return Promise.resolve().then(() => {
+        if (this.__destroyed || this.__device.__destroyed) {
+          this.__mapState = "unmapped";
+          throw webgpuOperationError("The GPUBuffer was destroyed while mapping.");
+        }
+        this.__mapState = "mapped";
+        this.__map = { mode: normalizedMode, offset: start, size: length,
+          buffer: this.__data.slice(start, start + length).buffer, views: [] };
+      });
+    }
+    getMappedRange(offset = undefined, size = undefined) {
+      if (this.__mapState !== "mapped" || !this.__map) throw webgpuOperationError("The GPUBuffer is not mapped.");
+      // WebGPU's getMappedRange offset is relative to the beginning of the
+      // mapped range (unlike mapAsync's buffer-relative offset).
+      const relative = offset === undefined ? 0 : webgpuInteger(offset, "offset");
+      const length = size === undefined ? this.__map.size - relative : webgpuInteger(size, "size");
+      if (relative < 0 || relative > this.__map.size || length < 0 || relative + length > this.__map.size ||
+          relative % 8 !== 0 || length % 4 !== 0) throw webgpuOperationError("The mapped range is invalid or misaligned.");
+      if (relative === 0 && length === this.__map.size) return this.__map.buffer;
+      const view = this.__map.buffer.slice(relative, relative + length);
+      this.__map.views.push({ offset: relative, buffer: view });
+      return view;
+    }
+    unmap() {
+      if (this.__mapState !== "mapped" || !this.__map) return;
+      if (this.__map.mode === WEBGPU_MAP_MODE.WRITE && !this.__destroyed) {
+        const base = new Uint8Array(this.__map.buffer);
+        this.__data.set(base, this.__map.offset);
+        for (const view of this.__map.views) {
+          this.__data.set(new Uint8Array(view.buffer), this.__map.offset + view.offset);
+        }
+      }
+      this.__map = null;
+      this.__mapState = "unmapped";
+    }
+    destroy() {
+      if (this.__destroyed) return;
+      this.unmap();
+      this.__destroyed = true;
+      // WebGPU exposes only unmapped/pending/mapped map states.  A destroyed
+      // buffer is no longer mapped, so keep the enum at its unmapped value.
+      this.__mapState = "unmapped";
+      this.__data = new Uint8Array(0);
+    }
+    get [Symbol.toStringTag]() { return "GPUBuffer"; }
+  }
+
+  class GPUCommandBuffer {
+    constructor(device, commands, label, invalid, token) {
+      if (token !== gpuCommandConstructionToken) throw new TypeError("Illegal constructor");
+      this.__device = device;
+      this.__commands = commands;
+      this.__invalid = !!invalid;
+      this.__submitted = false;
+      this.__label = label;
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    get [Symbol.toStringTag]() { return "GPUCommandBuffer"; }
+  }
+
+  class GPUCommandEncoder {
+    constructor(device, descriptor, token) {
+      if (token !== gpuDeviceConstructionToken) throw new TypeError("Illegal constructor");
+      this.__device = device;
+      this.__commands = [];
+      this.__finished = false;
+      this.__invalid = false;
+      this.__label = descriptor && descriptor.label !== undefined ? String(descriptor.label) : "";
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    __ensureOpen() {
+      if (this.__finished) throw webgpuOperationError("The GPUCommandEncoder is already finished.");
+      return webgpuDeviceActive(this.__device, "GPUCommandEncoder");
+    }
+    copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+      if (!this.__ensureOpen()) return;
+      const srcOffset = Number(sourceOffset), dstOffset = Number(destinationOffset), length = Number(size);
+      const validBuffer = value => value instanceof GPUBuffer && value.__device === this.__device &&
+        !value.__destroyed && !value.__invalid && value.mapState === "unmapped";
+      if (!validBuffer(source) || !validBuffer(destination) ||
+          !Number.isFinite(srcOffset) || !Number.isFinite(dstOffset) || !Number.isFinite(length) ||
+          Math.trunc(srcOffset) !== srcOffset || Math.trunc(dstOffset) !== dstOffset || Math.trunc(length) !== length ||
+          srcOffset < 0 || dstOffset < 0 || length < 0 || srcOffset % 4 || dstOffset % 4 || length % 4 ||
+          srcOffset + length > source.size || dstOffset + length > destination.size ||
+          !(source.usage & WEBGPU_BUFFER_USAGE.COPY_SRC) || !(destination.usage & WEBGPU_BUFFER_USAGE.COPY_DST)) {
+        this.__invalid = true;
+        webgpuRecordError(this.__device, "validation", "copyBufferToBuffer arguments are invalid.");
+        return;
+      }
+      this.__commands.push({ type: "copy", source, sourceOffset: srcOffset, destination,
+        destinationOffset: dstOffset, size: length });
+    }
+    clearBuffer(buffer, offset = 0, size = undefined) {
+      if (!this.__ensureOpen()) return;
+      const start = Number(offset);
+      const length = size === undefined ? (buffer && buffer.size - start) : Number(size);
+      if (!(buffer instanceof GPUBuffer) || buffer.__device !== this.__device || buffer.__destroyed || buffer.__invalid ||
+          buffer.mapState !== "unmapped" ||
+          !Number.isFinite(start) || !Number.isFinite(length) || Math.trunc(start) !== start || Math.trunc(length) !== length ||
+          start < 0 || length < 0 || start % 4 || length % 4 || start + length > buffer.size ||
+          !(buffer.usage & WEBGPU_BUFFER_USAGE.COPY_DST)) {
+        this.__invalid = true;
+        webgpuRecordError(this.__device, "validation", "clearBuffer arguments are invalid.");
+        return;
+      }
+      this.__commands.push({ type: "clear", buffer, offset: start, size: length });
+    }
+    finish(descriptor = undefined) {
+      if (this.__finished) throw webgpuOperationError("The GPUCommandEncoder is already finished.");
+      this.__finished = true;
+      const label = descriptor && descriptor.label !== undefined ? String(descriptor.label) : this.__label;
+      return new GPUCommandBuffer(this.__device, this.__commands.slice(), label, this.__invalid, gpuCommandConstructionToken);
+    }
+    get [Symbol.toStringTag]() { return "GPUCommandEncoder"; }
+  }
+
+  class GPUQueue {
+    constructor(device, descriptor, token) {
+      if (token !== gpuDeviceConstructionToken) throw new TypeError("Illegal constructor");
+      this.__device = device;
+      this.__label = descriptor && descriptor.label !== undefined ? String(descriptor.label) : "";
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    writeBuffer(buffer, bufferOffset, data, dataOffset = 0, size = undefined) {
+      if (!webgpuDeviceActive(this.__device, "GPUQueue.writeBuffer")) return;
+      const bytes = webgpuBytes(data);
+      const destination = Number(bufferOffset);
+      // Both dataOffset and size are byte counts into the supplied
+      // ArrayBuffer/ArrayBufferView, independent of the view's element width.
+      const source = Number(dataOffset);
+      const length = size === undefined ? bytes.byteLength - source : Number(size);
+      if (!(buffer instanceof GPUBuffer) || buffer.__device !== this.__device || buffer.__invalid || buffer.__destroyed ||
+          buffer.mapState !== "unmapped" || !Number.isFinite(destination) || !Number.isFinite(source) || !Number.isFinite(length) ||
+          Math.trunc(destination) !== destination || Math.trunc(source) !== source || Math.trunc(length) !== length ||
+          destination < 0 || source < 0 || length < 0 || destination % 4 || source % 4 || length % 4 ||
+          source + length > bytes.byteLength || destination + length > buffer.size ||
+          !(buffer.usage & WEBGPU_BUFFER_USAGE.COPY_DST)) {
+        webgpuRecordError(this.__device, "validation", "writeBuffer arguments are invalid.");
+        return;
+      }
+      buffer.__data.set(bytes.subarray(source, source + length), destination);
+    }
+    submit(commandBuffers) {
+      if (!webgpuDeviceActive(this.__device, "GPUQueue.submit")) return;
+      let list;
+      try { list = Array.from(commandBuffers); }
+      catch (_) { throw new TypeError("commandBuffers must be iterable"); }
+      for (const command of list) {
+        if (!(command instanceof GPUCommandBuffer) || command.__device !== this.__device || command.__submitted) {
+          webgpuRecordError(this.__device, "validation", "GPUQueue.submit received an invalid command buffer.");
+          continue;
+        }
+        command.__submitted = true;
+        if (command.__invalid) continue;
+        for (const entry of command.__commands) {
+          if (entry.type === "copy") {
+            const valid = entry.source instanceof GPUBuffer && entry.destination instanceof GPUBuffer &&
+              entry.source.__device === this.__device && entry.destination.__device === this.__device &&
+              !entry.source.__destroyed && !entry.destination.__destroyed &&
+              !entry.source.__invalid && !entry.destination.__invalid &&
+              entry.source.mapState === "unmapped" && entry.destination.mapState === "unmapped" &&
+              entry.sourceOffset + entry.size <= entry.source.size && entry.destinationOffset + entry.size <= entry.destination.size;
+            if (!valid) {
+              webgpuRecordError(this.__device, "validation", "copyBufferToBuffer resources are no longer valid at submit time.");
+              continue;
+            }
+            const bytes = entry.source.__data.slice(entry.sourceOffset, entry.sourceOffset + entry.size);
+            entry.destination.__data.set(bytes, entry.destinationOffset);
+          } else if (entry.type === "clear") {
+            if (!(entry.buffer instanceof GPUBuffer) || entry.buffer.__device !== this.__device ||
+                entry.buffer.__destroyed || entry.buffer.__invalid || entry.buffer.mapState !== "unmapped" ||
+                entry.offset + entry.size > entry.buffer.size) {
+              webgpuRecordError(this.__device, "validation", "clearBuffer resources are no longer valid at submit time.");
+              continue;
+            }
+            entry.buffer.__data.fill(0, entry.offset, entry.offset + entry.size);
+          }
+        }
+      }
+    }
+    onSubmittedWorkDone() {
+      if (this.__device.__destroyed) return Promise.reject(webgpuOperationError("The device is lost."));
+      return new Promise(resolve => queueMicrotask(resolve));
+    }
+    get [Symbol.toStringTag]() { return "GPUQueue"; }
+  }
+
+  class GPUDevice extends GPUEventTarget {
+    constructor(adapter, descriptor, token) {
+      if (token !== gpuDeviceConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this.__adapter = adapter;
+      this.__destroyed = false;
+      this.__uncapturedSuppressed = false;
+      this.__errorScopes = [];
+      this.__buffers = [];
+      this.__label = descriptor && descriptor.label !== undefined ? String(descriptor.label) : "";
+      Object.defineProperties(this, {
+        features: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUSupportedFeatures(gpuAdapterConstructionToken, adapter.__features),
+        },
+        limits: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUSupportedLimits(gpuDeviceConstructionToken, adapter.__limits),
+        },
+        queue: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUQueue(this, descriptor && descriptor.defaultQueue || {}, gpuDeviceConstructionToken),
+        },
+      });
+      this.__onuncapturederror = null;
+      this.__lostResolve = null;
+      this.lost = new Promise(resolve => { this.__lostResolve = resolve; });
+    }
+    get label() { return this.__label; }
+    set label(value) { this.__label = String(value); }
+    createBuffer(descriptor = undefined) {
+      if (!isDictionary(descriptor)) throw new TypeError("GPUBufferDescriptor is required");
+      const values = descriptor || {};
+      if (!webgpuDeviceActive(this, "GPUDevice.createBuffer")) {
+        const buffer = new GPUBuffer(this, { ...values, size: 0, usage: 0 }, gpuBufferConstructionToken, true);
+        this.__buffers.push(buffer);
+        return buffer;
+      }
+      const size = Number(values.size);
+      const usage = Number(values.usage);
+      let invalid = false;
+      if (!Number.isFinite(size) || Math.trunc(size) !== size || size <= 0 || size > this.limits.maxBufferSize || size % 4) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "GPUBuffer size must be a positive multiple of four within maxBufferSize.");
+      }
+      const knownUsage = Object.values(WEBGPU_BUFFER_USAGE).reduce((bits, value) => bits | value, 0);
+      if (!Number.isFinite(usage) || Math.trunc(usage) !== usage || usage <= 0 || (usage & ~knownUsage)) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "GPUBuffer usage contains unsupported bits.");
+      }
+      if ((usage & WEBGPU_BUFFER_USAGE.MAP_READ) && (usage & ~ (WEBGPU_BUFFER_USAGE.MAP_READ | WEBGPU_BUFFER_USAGE.COPY_DST))) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "MAP_READ buffers may only use COPY_DST.");
+      }
+      if ((usage & WEBGPU_BUFFER_USAGE.MAP_WRITE) && (usage & ~ (WEBGPU_BUFFER_USAGE.MAP_WRITE | WEBGPU_BUFFER_USAGE.COPY_SRC))) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "MAP_WRITE buffers may only use COPY_SRC.");
+      }
+      if (values.mappedAtCreation && !(usage & WEBGPU_BUFFER_USAGE.MAP_WRITE)) {
+        invalid = true;
+        webgpuRecordError(this, "validation", "mappedAtCreation requires MAP_WRITE usage.");
+      }
+      const buffer = new GPUBuffer(this, { ...values, size: invalid ? 0 : size, usage }, gpuBufferConstructionToken, invalid);
+      this.__buffers.push(buffer);
+      return buffer;
+    }
+    createCommandEncoder(descriptor = undefined) {
+      if (descriptor !== undefined && !isDictionary(descriptor)) throw new TypeError("GPUCommandEncoderDescriptor must be a dictionary");
+      if (!webgpuDeviceActive(this, "GPUDevice.createCommandEncoder")) {
+        return new GPUCommandEncoder(this, {}, gpuDeviceConstructionToken);
+      }
+      return new GPUCommandEncoder(this, descriptor || {}, gpuDeviceConstructionToken);
+    }
+    pushErrorScope(filter) {
+      const value = String(filter);
+      if (value !== "validation" && value !== "out-of-memory" && value !== "internal") {
+        throw new TypeError("GPU error scope filter is invalid");
+      }
+      this.__errorScopes.push({ filter: value, error: null });
+    }
+    popErrorScope() {
+      if (!this.__errorScopes.length) return Promise.reject(webgpuOperationError("No GPU error scope is active."));
+      const scope = this.__errorScopes.pop();
+      return Promise.resolve(scope.error);
+    }
+    destroy() {
+      if (this.__destroyed) return;
+      this.__destroyed = true;
+      for (const buffer of this.__buffers) buffer.destroy();
+      this.__uncapturedSuppressed = true;
+      this.__lostResolve(new GPUDeviceLostInfo(gpuErrorConstructionToken, "destroyed", "Device was destroyed."));
+    }
+    get onuncapturederror() { return this.__onuncapturederror; }
+    set onuncapturederror(callback) {
+      if (this.__onuncapturederror) this.removeEventListener("uncapturederror", this.__onuncapturederror);
+      this.__onuncapturederror = typeof callback === "function" ? callback : null;
+      if (this.__onuncapturederror) this.addEventListener("uncapturederror", this.__onuncapturederror);
+    }
+    get [Symbol.toStringTag]() { return "GPUDevice"; }
+  }
+
+  class GPUAdapter {
+    constructor(options, token) {
+      if (token !== gpuConstructionToken) throw new TypeError("Illegal constructor");
+      this.__features = WEBGPU_FEATURES.slice();
+      this.__limits = { ...WEBGPU_LIMITS };
+      this.__fallback = !!options.forceFallbackAdapter;
+      this.__powerPreference = options.powerPreference || "low-power";
+      this.__info = new GPUAdapterInfo(gpuAdapterConstructionToken, {
+        architecture: "deterministic",
+        description: "Omoikane deterministic WebGPU adapter",
+        device: "software",
+        vendor: "Omoikane",
+      });
+      Object.defineProperties(this, {
+        features: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUSupportedFeatures(gpuAdapterConstructionToken, this.__features),
+        },
+        limits: {
+          configurable: false, enumerable: true, writable: false,
+          value: new GPUSupportedLimits(gpuAdapterConstructionToken, this.__limits),
+        },
+      });
+    }
+    get isFallbackAdapter() { return this.__fallback; }
+    get info() { return this.__info; }
+    requestAdapterInfo() { return Promise.resolve(this.__info); }
+    requestDevice(descriptor = undefined) {
+      return Promise.resolve().then(() => {
+        if (descriptor !== undefined && !isDictionary(descriptor)) throw new TypeError("GPUDeviceDescriptor must be a dictionary");
+        const values = descriptor || {};
+        let features;
+        try { features = values.requiredFeatures === undefined ? [] : Array.from(values.requiredFeatures, String); }
+        catch (_) { throw new TypeError("requiredFeatures must be iterable"); }
+        for (const feature of features) {
+          if (!this.__features.includes(feature)) throw new DOMException("Unsupported required feature: " + feature, "NotSupportedError");
+        }
+        const requiredLimits = values.requiredLimits === undefined || values.requiredLimits === null ? {} : values.requiredLimits;
+        if (!isDictionary(requiredLimits)) throw new TypeError("requiredLimits must be a dictionary");
+        for (const name of Object.keys(requiredLimits)) {
+          if (!Object.prototype.hasOwnProperty.call(this.__limits, name)) {
+            throw new TypeError("Unknown GPU limit: " + name);
+          }
+          const requested = Number(requiredLimits[name]);
+          if (!Number.isFinite(requested) || Math.trunc(requested) !== requested || requested < 0 || requested > this.__limits[name]) {
+            throw new DOMException("Required GPU limit is unsupported: " + name, "NotSupportedError");
+          }
+        }
+        const queue = values.defaultQueue === undefined || values.defaultQueue === null ? {} : values.defaultQueue;
+        if (!isDictionary(queue)) throw new TypeError("defaultQueue must be a dictionary");
+        return new GPUDevice(this, { ...values, defaultQueue: queue }, gpuDeviceConstructionToken);
+      });
+    }
+    get [Symbol.toStringTag]() { return "GPUAdapter"; }
+  }
+
+  class GPU {
+    constructor(token) {
+      if (token !== gpuConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    requestAdapter(options = undefined) {
+      return Promise.resolve().then(() => {
+        if (options !== undefined && !isDictionary(options)) throw new TypeError("GPURequestAdapterOptions must be a dictionary");
+        const values = options || {};
+        const power = values.powerPreference === undefined ? "low-power" : String(values.powerPreference);
+        if (power !== "low-power" && power !== "high-performance") {
+          throw new TypeError("powerPreference must be low-power or high-performance");
+        }
+        if (values.forceFallbackAdapter !== undefined && typeof values.forceFallbackAdapter !== "boolean") {
+          throw new TypeError("forceFallbackAdapter must be boolean");
+        }
+        if (values.xrCompatible !== undefined && Boolean(values.xrCompatible)) {
+          throw new DOMException("XR-compatible adapters are not supported.", "NotSupportedError");
+        }
+        return new GPUAdapter({ powerPreference: power, forceFallbackAdapter: !!values.forceFallbackAdapter }, gpuConstructionToken);
+      });
+    }
+    getPreferredCanvasFormat() { return "rgba8unorm"; }
+    get [Symbol.toStringTag]() { return "GPU"; }
+  }
+
+  globalThis.GPU = GPU;
+  globalThis.GPUAdapter = GPUAdapter;
+  globalThis.GPUAdapterInfo = GPUAdapterInfo;
+  globalThis.GPUSupportedFeatures = GPUSupportedFeatures;
+  globalThis.GPUSupportedLimits = GPUSupportedLimits;
+  globalThis.GPUDevice = GPUDevice;
+  globalThis.GPUQueue = GPUQueue;
+  globalThis.GPUBuffer = GPUBuffer;
+  globalThis.GPUCommandEncoder = GPUCommandEncoder;
+  globalThis.GPUCommandBuffer = GPUCommandBuffer;
+  globalThis.GPUError = GPUError;
+  globalThis.GPUValidationError = GPUValidationError;
+  globalThis.GPUOutOfMemoryError = GPUOutOfMemoryError;
+  globalThis.GPUInternalError = GPUInternalError;
+  globalThis.GPUDeviceLostInfo = GPUDeviceLostInfo;
+  globalThis.GPUUncapturedErrorEvent = GPUUncapturedErrorEvent;
+  globalThis.GPUBufferUsage = WEBGPU_BUFFER_USAGE;
+  globalThis.GPUMapMode = WEBGPU_MAP_MODE;
+  globalThis.GPUShaderStage = WEBGPU_SHADER_STAGE;
+  globalThis.GPUTextureUsage = WEBGPU_TEXTURE_USAGE;
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -6939,13 +10956,31 @@
       this.onLine = true;
       this.plugins = new PluginArray(navigatorConstructionToken);
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
+      this.clipboard = new Clipboard(clipboardConstructionToken);
+      this.geolocation = new Geolocation(geolocationConstructionToken);
+      this.serviceWorker = new ServiceWorkerContainer(serviceWorkerContainerConstructionToken);
+      // The Permissions object is installed after EventTarget is defined
+      // below.  Keep the property present while Navigator is constructed so
+      // its shape is stable during bootstrap and in worker globals.
+      this.permissions = null;
+      this.gpu = new GPU(gpuConstructionToken);
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
   globalThis.PluginArray = PluginArray;
   globalThis.MimeTypeArray = MimeTypeArray;
   globalThis.Navigator = Navigator;
+  globalThis.Clipboard = Clipboard;
+  globalThis.Geolocation = Geolocation;
+  globalThis.GeolocationCoordinates = GeolocationCoordinates;
+  globalThis.GeolocationPosition = GeolocationPosition;
+  globalThis.GeolocationPositionError = GeolocationPositionError;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
+  Object.defineProperty(globalThis, "isSecureContext", {
+    configurable: true,
+    enumerable: true,
+    get() { return nativeIsSecureContext(); },
+  });
   if (globalThis.Intl === undefined) {
     class IntlFormatter {
       constructor(locales, options) {
@@ -7501,9 +11536,38 @@
     return hours + ":" + minutes + ":" + seconds;
   };
 
-  // Performance Timeline, User Timing, and observation of User Timing entries.
-  // Resource/Navigation/Paint Timing remain outside this core implementation.
+  // Performance Timeline, User Timing, Resource/Navigation Timing, and
+  // observation of all entries implemented by this runtime.  Network timing is
+  // recorded at the JS/native boundary below (fetch/XHR and resource element
+  // completion), so every entry uses the host's monotonic clock and the same
+  // time origin as User Timing.
   const performanceEntryToken = Symbol("PerformanceEntry internal constructor");
+  const nativePerformanceNow = __omoikane_performance_now;
+  const navigationTimingValues = new WeakMap();
+
+  function navigationTimingState(target) {
+    let state = navigationTimingValues.get(target);
+    if (!state) {
+      state = Object.create(null);
+      navigationTimingValues.set(target, state);
+    }
+    return state;
+  }
+
+  function defineNavigationTimingField(target, field, value) {
+    const state = navigationTimingState(target);
+    state[field] = value;
+    if (Object.prototype.hasOwnProperty.call(target, field)) return;
+    Object.defineProperty(target, field, {
+      get() {
+        const state = navigationTimingValues.get(this);
+        return state ? state[field] : 0;
+      },
+      enumerable: true,
+      configurable: false,
+    });
+  }
+
   function isDictionary(value) {
     return value !== null && (typeof value === "object" || typeof value === "function");
   }
@@ -7515,8 +11579,15 @@
         name: { value: String(name), enumerable: true },
         entryType: { value: String(entryType), enumerable: true },
         startTime: { value: Number(startTime), enumerable: true },
-        duration: { value: Number(duration), enumerable: true },
       });
+      if (String(entryType) === "navigation") {
+        defineNavigationTimingField(this, "duration", Number(duration));
+      } else {
+        Object.defineProperty(this, "duration", {
+          value: Number(duration),
+          enumerable: true,
+        });
+      }
     }
     toJSON() {
       return {
@@ -7533,7 +11604,7 @@
       options = options ?? {};
       if (!isDictionary(options)) throw new TypeError("PerformanceMark options must be a dictionary");
       const startTime = options.startTime === undefined
-        ? __omoikane_performance_now()
+        ? nativePerformanceNow()
         : Number(options.startTime);
       if (Number.isNaN(startTime) || startTime < 0) {
         throw new TypeError("PerformanceMark startTime must be a non-negative number");
@@ -7553,11 +11624,113 @@
     toJSON() { return { ...super.toJSON(), detail: this.detail }; }
   }
 
+  const performanceResourceTimingNumericFields = [
+    "workerStart", "redirectStart", "redirectEnd", "fetchStart",
+    "domainLookupStart", "domainLookupEnd", "connectStart", "connectEnd",
+    "secureConnectionStart", "requestStart", "responseStart", "responseEnd",
+    "transferSize", "encodedBodySize", "decodedBodySize", "responseStatus",
+  ];
+  const performanceNavigationTimingNumericFields = [
+    "unloadEventStart", "unloadEventEnd", "domInteractive",
+    "domContentLoadedEventStart", "domContentLoadedEventEnd", "domComplete",
+    "loadEventStart", "loadEventEnd", "activationStart", "criticalCHRestart",
+  ];
+  const performanceResourceTimingStringFields = [
+    "initiatorType", "nextHopProtocol", "renderBlockingStatus",
+  ];
+
+  function definePerformanceTimingFields(target, options, fields) {
+    const isNavigation = options.entryType === "navigation" ||
+      fields === performanceNavigationTimingNumericFields;
+    for (const field of fields) {
+      const value = options[field] === undefined ? 0 : Number(options[field]);
+      const normalized = Number.isFinite(value) && value >= 0 ? value : 0;
+      if (isNavigation) {
+        defineNavigationTimingField(target, field, normalized);
+      } else {
+        Object.defineProperty(target, field, {
+          value: normalized,
+          enumerable: true,
+        });
+      }
+    }
+    for (const field of performanceResourceTimingStringFields) {
+      if (fields !== performanceNavigationTimingNumericFields &&
+          options[field] === undefined && field === "renderBlockingStatus") continue;
+      const value = options[field] === undefined ? "" : String(options[field]);
+      if (isNavigation) {
+        defineNavigationTimingField(target, field, value);
+      } else {
+        Object.defineProperty(target, field, {
+          value,
+          enumerable: true,
+        });
+      }
+    }
+  }
+
+  function performanceTimingJSON(entry, fields) {
+    const result = entry.toJSONBase();
+    for (const field of performanceResourceTimingNumericFields) result[field] = entry[field];
+    for (const field of performanceNavigationTimingNumericFields) {
+      if (field in entry) result[field] = entry[field];
+    }
+    for (const field of performanceResourceTimingStringFields) {
+      if (field in entry) result[field] = entry[field];
+    }
+    if (fields === "navigation") {
+      result.type = entry.type;
+      result.redirectCount = entry.redirectCount;
+    }
+    if ("serverTiming" in entry) result.serverTiming = entry.serverTiming.slice();
+    return result;
+  }
+
+  class PerformanceResourceTiming extends PerformanceEntry {
+    constructor(token, options = {}) {
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      const startTime = Number(options.startTime ?? 0);
+      const responseEnd = Number(options.responseEnd ?? startTime);
+      const safeStart = Number.isFinite(startTime) && startTime >= 0 ? startTime : 0;
+      const safeEnd = Number.isFinite(responseEnd) && responseEnd >= safeStart ? responseEnd : safeStart;
+      super(performanceEntryToken, options.name ?? "", options.entryType ?? "resource", safeStart, safeEnd - safeStart);
+      definePerformanceTimingFields(this, { ...options, responseEnd: safeEnd }, performanceResourceTimingNumericFields);
+      Object.defineProperty(this, "serverTiming", {
+        value: Object.freeze(Array.isArray(options.serverTiming) ? options.serverTiming.slice() : []),
+        enumerable: true,
+      });
+    }
+    toJSONBase() { return super.toJSON(); }
+    toJSON() { return performanceTimingJSON(this, "resource"); }
+  }
+
+  class PerformanceNavigationTiming extends PerformanceResourceTiming {
+    constructor(token, options = {}) {
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(token, { ...options, entryType: "navigation" });
+      definePerformanceTimingFields(this, options, performanceNavigationTimingNumericFields);
+      Object.defineProperty(this, "type", {
+        value: options.type === undefined ? "navigate" : String(options.type),
+        enumerable: true,
+      });
+      Object.defineProperty(this, "redirectCount", {
+        value: Math.max(0, Math.trunc(Number(options.redirectCount) || 0)),
+        enumerable: true,
+      });
+    }
+    toJSON() { return performanceTimingJSON(this, "navigation"); }
+  }
+
   const performanceEntries = [];
   let performanceEntrySequence = 0;
   const performanceObservers = [];
   let pendingPerformanceObservers = [];
   let performanceObserverDeliveryScheduled = false;
+  let resourceTimingBufferSize = 250;
+  let resourceTimingBufferFull = false;
+  let resourceEntryCount = 0;
+  const resourceTimingTextEncoder = new TextEncoder();
+  const finishedResourceTimings = new WeakSet();
 
   function sortedPerformanceEntries(entries) {
     return entries.slice().sort((a, b) =>
@@ -7657,19 +11830,217 @@
     }
   }
   Object.defineProperty(PerformanceObserver, "supportedEntryTypes", {
-    get() { return Object.freeze(["mark", "measure"]); },
+    get() { return Object.freeze(["navigation", "resource", "mark", "measure"]); },
     enumerable: true,
   });
 
   function addPerformanceEntry(entry) {
+    if (entry.entryType === "resource") {
+      if (resourceEntryCount >= resourceTimingBufferSize) {
+        if (!resourceTimingBufferFull) {
+          resourceTimingBufferFull = true;
+          Promise.resolve().then(() => {
+            const handler = performance.onresourcetimingbufferfull;
+            if (typeof handler === "function") {
+              const event = new Event("resourcetimingbufferfull");
+              // This event is delivered through the `on…` property rather
+              // than `dispatchEvent`, so seed the propagation path that
+              // `composedPath()` uses while the handler is running.
+              event.__path = [{
+                node: performance,
+                closedRoots: [],
+                target: performance,
+                relatedTarget: null,
+                hostTarget: false,
+              }];
+              event.target = performance;
+              event.currentTarget = performance;
+              event.eventPhase = 2;
+              event.__dispatching = true;
+              try { handler.call(performance, event); } catch (_) {} finally {
+                event.__dispatching = false;
+                event.currentTarget = null;
+                event.eventPhase = 0;
+                event.__path = [];
+              }
+            }
+          });
+        }
+        return null;
+      }
+    }
     Object.defineProperty(entry, "__sequence", { value: performanceEntrySequence++ });
     performanceEntries.push(entry);
+    if (entry.entryType === "resource") resourceEntryCount += 1;
     for (const observer of performanceObservers) {
       if (!observer._entryTypes.has(entry.entryType)) continue;
       observer._queue.push(entry);
       schedulePerformanceObserver(observer);
     }
     return entry;
+  }
+
+  function normalizeTimingNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : fallback;
+  }
+
+  function resourceTimingBase64ByteLength(value) {
+    const normalized = String(value).replace(/[^A-Za-z0-9+/=]/g, "");
+    const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+    return Math.max(0, Math.floor(normalized.length * 3 / 4) - padding);
+  }
+
+  function recordResourceTiming(options = {}) {
+    const now = nativePerformanceNow();
+    const startTime = normalizeTimingNumber(options.startTime, now);
+    const responseEnd = normalizeTimingNumber(options.responseEnd, now);
+    const responseStart = normalizeTimingNumber(options.responseStart, responseEnd);
+    const fetchStart = normalizeTimingNumber(options.fetchStart, startTime);
+    const requestStart = normalizeTimingNumber(options.requestStart, fetchStart);
+    const timing = {
+      ...options,
+      name: String(options.name ?? ""),
+      startTime,
+      fetchStart,
+      requestStart,
+      responseStart: Math.max(responseStart, requestStart),
+      responseEnd: Math.max(responseEnd, responseStart, requestStart),
+    };
+    return addPerformanceEntry(new PerformanceResourceTiming(performanceEntryToken, timing));
+  }
+
+  function beginResourceTiming(name, initiatorType, startAt = undefined) {
+    const sampledStart = startAt === undefined ? nativePerformanceNow() : Number(startAt);
+    const startTime = Number.isFinite(sampledStart) && sampledStart >= 0
+      ? sampledStart
+      : Math.max(0, nativePerformanceNow());
+    return {
+      name: String(name),
+      initiatorType: String(initiatorType),
+      startTime,
+      fetchStart: startTime,
+      requestStart: startTime,
+      domainLookupStart: startTime,
+      domainLookupEnd: startTime,
+      connectStart: startTime,
+      connectEnd: startTime,
+      secureConnectionStart: 0,
+      responseStart: startTime,
+    };
+  }
+
+  function finishResourceTiming(timing, data = {}, error = false) {
+    if (!timing || finishedResourceTimings.has(timing)) return null;
+    finishedResourceTimings.add(timing);
+    const responseEnd = data && data.responseEnd !== undefined
+      ? normalizeTimingNumber(data.responseEnd, normalizeTimingNumber(timing.responseEnd, 0))
+      : nativePerformanceNow();
+    const responseStart = data && data.responseStart !== undefined
+      ? normalizeTimingNumber(data.responseStart, responseEnd)
+      : responseEnd;
+    const bodyText = data && data.bodyText !== undefined ? String(data.bodyText) : "";
+    const bodyBytes = data && data.bodyBase64 !== undefined && data.bodyBase64 !== null
+      ? resourceTimingBase64ByteLength(data.bodyBase64)
+      : resourceTimingTextEncoder.encode(bodyText).length;
+    const status = error ? 0 : normalizeTimingNumber(data.responseStatus ?? data.status, 0);
+    const redirected = Boolean(data.redirected);
+    const redirectStart = normalizeTimingNumber(timing.startTime, 0);
+    const effectiveResponseStart = redirected
+      ? Math.max(redirectStart, responseStart)
+      : responseStart;
+    const redirectEnd = redirected
+      ? Math.min(effectiveResponseStart, Math.max(redirectStart, responseEnd - 0.001))
+      : 0;
+    const fetchStart = redirected
+      ? Math.max(normalizeTimingNumber(timing.fetchStart, redirectStart), redirectEnd)
+      : timing.fetchStart;
+    const requestStart = redirected
+      ? Math.max(normalizeTimingNumber(timing.requestStart, fetchStart), fetchStart)
+      : timing.requestStart;
+    const responseName = data && data.url !== undefined && data.url !== null
+      ? String(data.url)
+      : "";
+    return recordResourceTiming({
+      ...timing,
+      responseStart: effectiveResponseStart,
+      responseEnd,
+      fetchStart,
+      requestStart,
+      redirectStart: redirected ? redirectStart : 0,
+      redirectEnd,
+      transferSize: error ? 0 : bodyBytes,
+      encodedBodySize: error ? 0 : bodyBytes,
+      decodedBodySize: error ? 0 : bodyBytes,
+      responseStatus: status,
+      name: responseName || timing.name,
+    });
+  }
+
+  function finishElementResourceTiming(element, status = 200, error = false, timing = {}) {
+    if (!element || element.__resourceTimingRecorded) return;
+    const fallbackSource = typeof element.getAttribute === "function"
+      ? element.getAttribute("src")
+      : "";
+    const rawName = element.src || element.data || element.href || fallbackSource || "";
+    if (!rawName) return;
+    const timingData = timing && typeof timing === "object" ? timing : {};
+    const effectiveName = timingData.url === undefined || timingData.url === null
+      ? ""
+      : String(timingData.url);
+    const name = effectiveName || String(__omoikane_resolve_url(rawName));
+    if (!name) return;
+    const startTime = element.__resourceTimingStart === undefined
+      ? Math.max(0, nativePerformanceNow() - 0.001)
+      : element.__resourceTimingStart;
+    const responseTime = nativePerformanceNow();
+    const elapsed = normalizeTimingNumber(timingData.elapsedMs, 0);
+    const responseStart = timingData.responseStart === undefined
+      ? Math.max(startTime, responseTime - elapsed)
+      : normalizeTimingNumber(timingData.responseStart, responseTime);
+    const redirected = Boolean(timingData.redirected);
+    const redirectEnd = redirected
+      ? Math.min(Math.max(startTime, responseStart), Math.max(startTime, responseTime - 0.001))
+      : 0;
+    const fetchStart = redirected ? Math.max(startTime, redirectEnd) : startTime;
+    const requestStart = redirected ? Math.max(startTime, fetchStart) : startTime;
+    setElementResourceTimingState(element, "__resourceTimingRecorded", true);
+    recordResourceTiming({
+      name,
+      initiatorType: String(element.localName || "other"),
+      startTime,
+      fetchStart,
+      requestStart,
+      responseStart,
+      responseEnd: responseTime,
+      redirectStart: redirected ? startTime : 0,
+      redirectEnd,
+      responseStatus: error ? 0 : status,
+      transferSize: 0,
+      encodedBodySize: 0,
+      decodedBodySize: 0,
+    });
+  }
+
+  function noteElementResourceStart(element) {
+    if (!element) return;
+    setElementResourceTimingState(element, "__resourceTimingStart", nativePerformanceNow());
+    setElementResourceTimingState(element, "__resourceTimingRecorded", false);
+  }
+
+  function setElementResourceTimingState(element, field, value) {
+    try {
+      Object.defineProperty(element, field, {
+        value,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    } catch (_) {
+      // If page code made the internal slot non-configurable, preserve the
+      // previous best-effort behavior without breaking resource completion.
+      try { element[field] = value; } catch (_) { void 0; }
+    }
   }
 
   function resolvePerformanceTime(value, defaultValue) {
@@ -7688,9 +12059,30 @@
     return time;
   }
 
+  // A fresh global starts with one navigation entry.  The native runtime has
+  // already established the URL and time origin before this bootstrap runs, so
+  // the initial navigation is represented by the same zero-based clock as all
+  // subsequent resource entries.  Load-pipeline code may add resource entries
+  // later without replacing this entry.
+  let navigationEntryForLifecycle = null;
+  const initialNavigationEntry = new PerformanceNavigationTiming(
+    performanceEntryToken,
+    {
+      name: String(__omoikane_location_href),
+      startTime: 0,
+      fetchStart: 0,
+      requestStart: 0,
+      responseStart: 0,
+      responseEnd: 0,
+      type: "navigate",
+      redirectCount: 0,
+      initiatorType: "navigation",
+    },
+  );
+
   const performance = {
     timing: {},
-    now() { return __omoikane_performance_now(); },
+    now() { return nativePerformanceNow(); },
     mark(name, options = {}) {
       return addPerformanceEntry(new PerformanceMark(name, options));
     },
@@ -7756,7 +12148,36 @@
         }
       }
     },
+    setResourceTimingBufferSize(maxSize) {
+      const numeric = Number(maxSize);
+      if (!Number.isFinite(numeric) || numeric < 0) {
+        throw new TypeError("The resource timing buffer size must be non-negative");
+      }
+      resourceTimingBufferSize = Math.floor(numeric);
+      if (resourceEntryCount < resourceTimingBufferSize) {
+        resourceTimingBufferFull = false;
+      }
+    },
+    clearResourceTimings() {
+      let writeIndex = 0;
+      for (let readIndex = 0; readIndex < performanceEntries.length; readIndex += 1) {
+        const entry = performanceEntries[readIndex];
+        if (entry.entryType !== "resource") {
+          performanceEntries[writeIndex] = entry;
+          writeIndex += 1;
+        }
+      }
+      performanceEntries.length = writeIndex;
+      resourceEntryCount = 0;
+      resourceTimingBufferFull = false;
+    },
   };
+  Object.defineProperty(performance, "onresourcetimingbufferfull", {
+    value: null,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
   Object.defineProperty(performance, "timeOrigin", {
     value: Number(__omoikane_performance_time_origin),
     enumerable: true,
@@ -7764,9 +12185,53 @@
   globalThis.PerformanceEntry = PerformanceEntry;
   globalThis.PerformanceMark = PerformanceMark;
   globalThis.PerformanceMeasure = PerformanceMeasure;
+  globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
+  globalThis.PerformanceNavigationTiming = PerformanceNavigationTiming;
   globalThis.PerformanceObserver = PerformanceObserver;
   globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
   globalThis.performance = performance;
+  addPerformanceEntry(initialNavigationEntry);
+  navigationEntryForLifecycle = initialNavigationEntry;
+  globalThis.__omoikane_performance_navigation_event = function(type) {
+    if (!navigationEntryForLifecycle) return;
+    const state = navigationTimingValues.get(navigationEntryForLifecycle);
+    if (!state) return;
+    const now = nativePerformanceNow();
+    const update = field => {
+      const previous = Number(state[field]) || 0;
+      state[field] = Math.max(previous, now);
+    };
+    const updateDuration = () => {
+      const startTime = Number(navigationEntryForLifecycle.startTime) || 0;
+      const loadEventEnd = Number(state.loadEventEnd) || 0;
+      state.duration = Math.max(0, loadEventEnd - startTime);
+    };
+    switch (String(type)) {
+      case "domInteractive": update("domInteractive"); break;
+      case "domContentLoadedStart": update("domContentLoadedEventStart"); break;
+      case "domContentLoadedEnd": update("domContentLoadedEventEnd"); break;
+      case "domComplete": update("domComplete"); break;
+      case "loadStart": update("loadEventStart"); break;
+      case "loadEnd": update("loadEventEnd"); updateDuration(); break;
+      default: break;
+    }
+  };
+  // Host-side document/module loaders complete outside the JS fetch wrapper.
+  // They report their terminal status through this small host bridge so
+  // initial parser-discovered resources participate in the same timeline.
+  globalThis.__omoikane_record_resource_timing = function(name, initiatorType, status, error, redirected = false, elapsedMs = 0) {
+    const responseEnd = nativePerformanceNow();
+    const elapsed = normalizeTimingNumber(elapsedMs, 0);
+    const startTime = Math.max(0, responseEnd - elapsed);
+    const timing = beginResourceTiming(String(name), String(initiatorType || "other"), startTime);
+    finishResourceTiming(timing, {
+      status: Number(status) || 0,
+      redirected: Boolean(redirected),
+      responseStart: responseEnd,
+      responseEnd,
+      url: String(name),
+    }, Boolean(error));
+  };
 
   globalThis.DOMParser = class DOMParser {
     parseFromString(source, type) {
@@ -7780,9 +12245,16 @@
         parsed.body.innerHTML = input;
         return parsed;
       }
-      const match = input.match(/<([A-Za-z_][A-Za-z0-9_.:-]*)(?:\s[^<>]*)?\s*\/?\s*>/);
-      if (!match) return document.implementation.createDocument("", "parsererror", null);
-      return document.implementation.createDocument("", match[1], null);
+      const parsedId = __omoikane_parse_xml(input);
+      if (parsedId !== null && parsedId !== undefined) {
+        const parsed = wrapNode(parsedId);
+        parsed.__documentURL = "about:blank";
+        return parsed;
+      }
+      const error = document.implementation.createDocument("", "parsererror", null);
+      error.__documentURL = "about:blank";
+      error.documentElement.textContent = "XML parse error";
+      return error;
     }
   };
 
@@ -7806,37 +12278,175 @@
       forEach(cb) { this._params.forEach((v, k) => cb(v, k, this)); }
     };
   }
+
+  // XHR and XMLHttpRequestUpload use ProgressEvent for every observable
+  // transfer lifecycle event.  The native binding is installed before this
+  // bootstrap, while ProgressEvent itself is defined later in this file; the
+  // lookup therefore intentionally happens when a request is dispatched.
+  const xhrProgressEventTypes = new Set([
+    "loadstart", "progress", "load", "error", "abort", "timeout", "loadend",
+  ]);
+  function createXhrEvent(type, init = {}) {
+    const EventConstructor = xhrProgressEventTypes.has(String(type))
+      ? globalThis.ProgressEvent
+      : globalThis.Event;
+    return typeof EventConstructor === "function"
+      ? new EventConstructor(type, init)
+      : { type: String(type) };
+  }
+  function invokeXhrListener(listener, target, event) {
+    if (typeof listener === "function") listener.call(target, event);
+    else if (listener && typeof listener.handleEvent === "function") {
+      listener.handleEvent.call(listener, event);
+    }
+  }
+
+  class XMLHttpRequestUpload {
+    constructor() {
+      this._listeners = {};
+      this.onloadstart = null;
+      this.onprogress = null;
+      this.onload = null;
+      this.onabort = null;
+      this.onerror = null;
+      this.onloadend = null;
+    }
+    addEventListener(type, callback, options = false) {
+      if (callback == null ||
+          (typeof callback !== "function" && typeof callback.handleEvent !== "function")) return;
+      const key = String(type);
+      const listeners = this._listeners[key] || [];
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+      if (!listeners.some(entry => entry.listener === callback && entry.capture === capture)) {
+        listeners.push({ listener: callback, capture });
+      }
+      this._listeners[key] = listeners;
+    }
+    removeEventListener(type, callback, options = false) {
+      const key = String(type);
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+      this._listeners[key] = (this._listeners[key] || [])
+        .filter(entry => !(entry.listener === callback && entry.capture === capture));
+    }
+    dispatchEvent(event) {
+      const dispatched = event instanceof Event ? event : createXhrEvent(event);
+      dispatched.target = this;
+      dispatched.currentTarget = this;
+      const handler = this["on" + dispatched.type];
+      if (typeof handler === "function") handler.call(this, dispatched);
+      for (const entry of (this._listeners[dispatched.type] || []).slice()) {
+        invokeXhrListener(entry.listener, this, dispatched);
+      }
+      dispatched.currentTarget = null;
+      return !dispatched.defaultPrevented;
+    }
+    _notify(type, init = {}) {
+      return this.dispatchEvent(createXhrEvent(type, init));
+    }
+    get [Symbol.toStringTag]() { return "XMLHttpRequestUpload"; }
+  }
+  globalThis.XMLHttpRequestUpload = XMLHttpRequestUpload;
+
   globalThis.XMLHttpRequest = class XMLHttpRequest {
     constructor() {
       this._listeners = {};
       this.readyState = 0;
       this.status = 0;
       this.statusText = "";
-      this.responseText = "";
-      this.response = "";
-      this.responseType = "";
+      this._responseText = "";
+      this._responseType = "";
+      this.response = null;
       this.responseURL = "";
-      this.timeout = 0;
+      this._timeout = 0;
+      this._timeoutTimer = null;
+      this._terminal = false;
+      this._downloadLoaded = 0;
+      this._downloadTotal = 0;
+      this._downloadLengthComputable = false;
+      this._uploadCompleted = true;
+      this._uploadLengthComputable = false;
+      this.upload = new XMLHttpRequestUpload();
       this.withCredentials = false;
       this.onreadystatechange = null;
+      this.onloadstart = null;
+      this.onprogress = null;
       this.onload = null;
       this.onerror = null;
+      this.onabort = null;
+      this.ontimeout = null;
       this.onloadend = null;
       this._headers = {};
       this._responseHeaders = [];
       this._requestId = 0;
       this._sendFlag = false;
+      this.__resourceTiming = null;
+      Object.defineProperty(this, "timeout", {
+        enumerable: true,
+        configurable: true,
+        get() { return this._timeout; },
+        set(value) {
+          const number = Number(value);
+          if (!Number.isFinite(number)) {
+            this._timeout = 0;
+            return;
+          }
+          const integer = Math.trunc(number);
+          const modulo = 0x100000000;
+          this._timeout = ((integer % modulo) + modulo) % modulo;
+        },
+      });
+      Object.defineProperty(this, "responseText", {
+        enumerable: true,
+        configurable: true,
+        get() {
+          if (this._responseType !== "" && this._responseType !== "text") {
+            throw new DOMException("responseText is unavailable for this responseType", "InvalidStateError");
+          }
+          return this._responseText;
+        },
+        // Keep legacy embedders that assign this diagnostic property from
+        // throwing, while all network state changes use the internal slot.
+        set(value) { this._responseText = String(value); },
+      });
+      Object.defineProperty(this, "responseType", {
+        enumerable: true,
+        configurable: true,
+        get() { return this._responseType; },
+        set(value) {
+          if (this._sendFlag || this.readyState >= XMLHttpRequest.HEADERS_RECEIVED) {
+            throw new DOMException("responseType cannot change after loading starts", "InvalidStateError");
+          }
+          const normalized = String(value);
+          if (!["", "text", "arraybuffer", "blob", "document", "json"].includes(normalized)) {
+            throw new DOMException("Unsupported responseType", "SyntaxError");
+          }
+          this._responseType = normalized;
+        },
+      });
     }
     open(method, url, async = true) {
+      // Re-opening an active request aborts the old fetch.  Preserve the
+      // Resource Timing entry even though no terminal network payload arrives.
+      this._clearTimeout();
+      if (this.__resourceTiming) {
+        finishResourceTiming(this.__resourceTiming, {}, true);
+        this.__resourceTiming = null;
+      }
       this._requestId++;
       this.status = 0;
       this.statusText = "";
-      this.responseText = "";
-      this.response = "";
+      this._responseText = "";
+      this.response = null;
       this.responseURL = "";
       this._headers = {};
       this._responseHeaders = [];
       this._sendFlag = false;
+      this._terminal = false;
+      this._downloadLoaded = 0;
+      this._downloadTotal = 0;
+      this._downloadLengthComputable = false;
+      this._uploadCompleted = true;
+      this._uploadLengthComputable = false;
       this._method = String(method).toUpperCase();
       this._url = isBlobUrl(url) ? String(url) : resolveNetworkUrl(url);
       this._async = async !== false;
@@ -7868,35 +12478,86 @@
         .map(([, value]) => String(value));
       return values.length ? values.join(", ") : null;
     }
-    addEventListener(type, callback) {
-      (this._listeners[type] ||= []).push(callback);
+    addEventListener(type, callback, options = false) {
+      if (callback == null ||
+          (typeof callback !== "function" && typeof callback.handleEvent !== "function")) return;
+      const key = String(type);
+      const listeners = this._listeners[key] || [];
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+      if (!listeners.some(entry => entry.listener === callback && entry.capture === capture)) {
+        listeners.push({ listener: callback, capture });
+      }
+      this._listeners[key] = listeners;
     }
-    removeEventListener(type, callback) {
-      this._listeners[type] = (this._listeners[type] || []).filter(item => item !== callback);
+    removeEventListener(type, callback, options = false) {
+      const key = String(type);
+      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+      this._listeners[key] = (this._listeners[key] || [])
+        .filter(entry => !(entry.listener === callback && entry.capture === capture));
     }
     abort() {
-      this._requestId++;
+      const active = this._sendFlag && !this._terminal;
+      if (!active) {
+        this._clearTimeout();
+        return;
+      }
+      if (this.__resourceTiming) {
+        finishResourceTiming(this.__resourceTiming, {}, true);
+        this.__resourceTiming = null;
+      }
+      this._clearTimeout();
+      const abortRequestId = ++this._requestId;
+      this._terminal = true;
       this.readyState = 0;
       this.status = 0;
       this.statusText = "";
-      this.responseText = "";
-      this.response = "";
+      this._responseText = "";
+      this.response = null;
       this.responseURL = "";
       this._responseHeaders = [];
       this._sendFlag = false;
-      this._notify("abort");
-      this._notify("loadend");
+      this._queueNetworking(() => {
+        if (this._requestId !== abortRequestId) return;
+        if (!this._uploadCompleted) {
+          this._uploadCompleted = true;
+          this.upload._notify("abort", this._uploadProgressInit(0));
+          this.upload._notify("loadend", this._uploadProgressInit(0));
+        }
+        this._notify("abort");
+        this._notify("loadend");
+      });
     }
     send(body = null) {
       if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
       this._sendFlag = true;
+      this._terminal = false;
       const requestId = this._requestId;
+      this.__resourceTiming = beginResourceTiming(this._url, "xmlhttprequest");
       const requestBody = this._method === "GET" || this._method === "HEAD"
         ? EMPTY_BODY
         : extractBody(body);
+      const hasUploadBody = this._method !== "GET" && this._method !== "HEAD" &&
+        body !== null && body !== undefined;
+      this._uploadTotal = hasUploadBody ? bodyAsBytes(requestBody).byteLength : 0;
+      this._uploadLengthComputable = hasUploadBody;
+      this._uploadCompleted = !hasUploadBody;
+      this._downloadLoaded = 0;
+      this._downloadTotal = 0;
       if (requestBody.contentType !== null && !("content-type" in this._headers)) {
         this._headers["content-type"] = requestBody.contentType;
       }
+      this._queueNetworking(() => {
+        if (requestId !== this._requestId || this._terminal) return;
+        this._notify("loadstart", this._downloadProgressInit(0));
+        if (hasUploadBody) {
+          this.upload._notify("loadstart", this._uploadProgressInit(0));
+          this.upload._notify("progress", this._uploadProgressInit(this._uploadTotal));
+          this.upload._notify("load", this._uploadProgressInit(this._uploadTotal));
+          this.upload._notify("loadend", this._uploadProgressInit(this._uploadTotal));
+          this._uploadCompleted = true;
+        }
+      });
+      this._armTimeout(requestId);
       // A blob URL resolves from the object URL store; anything else goes to the
       // host fetch binding. Both settle to the same payload shape.
       const payload = isBlobUrl(this._url)
@@ -7911,6 +12572,10 @@
               type: "basic",
               headers: [["content-type", blob.type], ["content-length", String(blob.size)]],
               bodyText: blob.__text(),
+              bodyBase64: ["arraybuffer", "blob"].includes(this._responseType)
+                ? base64FromBytes(blob.__bytes)
+                : null,
+              bodyPresent: true,
             };
           })
         : Promise.resolve().then(() =>
@@ -7922,52 +12587,189 @@
               "cors",
               this.withCredentials ? "include" : "same-origin",
               "follow",
+              this._timeout,
             )
           ).then(raw => JSON.parse(String(raw)));
       payload.then(data => {
-        if (requestId !== this._requestId) return;
-        this.status = data.status;
-        this.statusText = data.statusText;
-        this.responseURL = data.url;
-        this._responseHeaders = data.headers;
-        this.readyState = 2;
-        this._notify("readystatechange");
-        this.readyState = 3;
-        this._notify("readystatechange");
-        this.responseText = data.bodyText;
-        if (this.responseType === "json") {
-          try { this.response = JSON.parse(this.responseText); }
-          catch (_) { this.response = null; }
-        } else {
-          this.response = this.responseText;
+        if (requestId !== this._requestId || this._terminal) return;
+        if (data && data.__omoikane_timeout === true) {
+          this._queueNetworking(() => this._finishTimeout(requestId));
+          return;
         }
-        this.readyState = 4;
-        this._sendFlag = false;
-        this._notify("readystatechange");
-        this._notify("load");
-        this._notify("loadend");
-      }).catch(() => {
-        if (requestId !== this._requestId) return;
-        this.status = 0;
-        this.statusText = "";
-        this.responseText = "";
-        this.response = "";
-        this.responseURL = "";
-        this._responseHeaders = [];
-        this.readyState = 4;
-        this._sendFlag = false;
-        this._notify("readystatechange");
-        this._notify("error");
-        this._notify("loadend");
+        this._queueNetworking(() => this._finishSuccess(data, requestId));
+      }).catch(error => {
+        if (requestId !== this._requestId || this._terminal) return;
+        if (error && error.__omoikane_timeout === true) {
+          this._queueNetworking(() => this._finishTimeout(requestId));
+          return;
+        }
+        this._queueNetworking(() => this._finishError(requestId));
       });
     }
-    _notify(type) {
-      const event = new Event(type);
-      const handler = this["on" + type];
-      if (typeof handler === "function") handler.call(this, event);
-      for (const callback of this._listeners[type] || []) callback.call(this, event);
+    _queueNetworking(callback) {
+      if (typeof __omoikane_queue_networking_task === "function") {
+        __omoikane_queue_networking_task(callback);
+      } else {
+        setTimeout(callback, 0);
+      }
     }
+    _clearTimeout() {
+      if (this._timeoutTimer !== null) {
+        clearTimeout(this._timeoutTimer);
+        this._timeoutTimer = null;
+      }
+    }
+    _armTimeout(requestId) {
+      this._clearTimeout();
+      if (!this._async || this._timeout <= 0) return;
+      this._timeoutTimer = setTimeout(
+        () => this._queueNetworking(() => this._finishTimeout(requestId)),
+        this._timeout,
+      );
+    }
+    _downloadProgressInit(loaded = this._downloadLoaded) {
+      const value = Number(loaded) || 0;
+      return {
+        lengthComputable: this._downloadLengthComputable,
+        loaded: value,
+        total: this._downloadTotal,
+      };
+    }
+    _uploadProgressInit(loaded = 0) {
+      const value = Number(loaded) || 0;
+      return {
+        lengthComputable: this._uploadLengthComputable,
+        loaded: value,
+        total: this._uploadTotal,
+      };
+    }
+    _finishSuccess(data, requestId) {
+      if (requestId !== this._requestId || this._terminal) return;
+      this._clearTimeout();
+      finishResourceTiming(this.__resourceTiming, data, false);
+      this.__resourceTiming = null;
+      this.status = data.status;
+      this.statusText = data.statusText;
+      this.responseURL = data.url;
+      this._responseHeaders = data.headers;
+      this.readyState = 2;
+      this._notify("readystatechange");
+      this.readyState = 3;
+      this._notify("readystatechange");
+      this._responseText = data.bodyText === undefined ? "" : String(data.bodyText);
+      const bytes = xhrResponseBytes(data);
+      const contentLength = xhrResponseContentLength(data.headers);
+      this._downloadLoaded = bytes.byteLength;
+      this._downloadLengthComputable = contentLength !== null;
+      this._downloadTotal = contentLength === null ? 0 : contentLength;
+      this._notify("progress", this._downloadProgressInit(this._downloadLoaded));
+      switch (this._responseType) {
+        case "arraybuffer":
+          this.response = bytes.slice().buffer;
+          break;
+        case "blob":
+          this.response = new Blob([bytes], { type: xhrResponseMime(data.headers) });
+          break;
+        case "json":
+          try { this.response = JSON.parse(this._responseText); }
+          catch (_) { this.response = null; }
+          break;
+        case "document": {
+          const contentType = xhrResponseMime(data.headers);
+          const mime = contentType.includes("xml") ? "text/xml" : "text/html";
+          try { this.response = new DOMParser().parseFromString(this._responseText, mime); }
+          catch (_) { this.response = null; }
+          break;
+        }
+        default:
+          this.response = this._responseText;
+          break;
+      }
+      this.readyState = 4;
+      this._sendFlag = false;
+      this._terminal = true;
+      this._notify("readystatechange");
+      this._notify("load", this._downloadProgressInit(this._downloadLoaded));
+      this._notify("loadend", this._downloadProgressInit(this._downloadLoaded));
+    }
+    _finishError(requestId) {
+      if (requestId !== this._requestId || this._terminal) return;
+      this._clearTimeout();
+      finishResourceTiming(this.__resourceTiming, {}, true);
+      this.__resourceTiming = null;
+      this.status = 0;
+      this.statusText = "";
+      this._responseText = "";
+      this.response = null;
+      this.responseURL = "";
+      this._responseHeaders = [];
+      this.readyState = 4;
+      this._sendFlag = false;
+      this._terminal = true;
+      this._notify("readystatechange");
+      this._notify("error", this._downloadProgressInit(0));
+      this._notify("loadend", this._downloadProgressInit(0));
+    }
+    _finishTimeout(requestId) {
+      if (requestId !== this._requestId || this._terminal || !this._sendFlag) return;
+      this._clearTimeout();
+      if (this.__resourceTiming) {
+        finishResourceTiming(this.__resourceTiming, {}, true);
+        this.__resourceTiming = null;
+      }
+      this._requestId++;
+      this.status = 0;
+      this.statusText = "";
+      this._responseText = "";
+      this.response = null;
+      this.responseURL = "";
+      this._responseHeaders = [];
+      this.readyState = 4;
+      this._sendFlag = false;
+      this._terminal = true;
+      this._notify("readystatechange");
+      this._notify("timeout", this._downloadProgressInit(this._downloadLoaded));
+      this._notify("loadend", this._downloadProgressInit(this._downloadLoaded));
+    }
+    _notify(type, init = {}) {
+      const event = init instanceof Event ? init : createXhrEvent(type, init);
+      return this.dispatchEvent(event);
+    }
+    dispatchEvent(event) {
+      const dispatched = event instanceof Event ? event : createXhrEvent(event);
+      dispatched.target = this;
+      dispatched.currentTarget = this;
+      const handler = this["on" + dispatched.type];
+      if (typeof handler === "function") handler.call(this, dispatched);
+      for (const entry of (this._listeners[dispatched.type] || []).slice()) {
+        invokeXhrListener(entry.listener, this, dispatched);
+      }
+      dispatched.currentTarget = null;
+      return !dispatched.defaultPrevented;
+    }
+    get [Symbol.toStringTag]() { return "XMLHttpRequest"; }
   };
+
+  function xhrResponseBytes(data) {
+    if (!data || data.bodyPresent === false) return new Uint8Array();
+    if (data.bodyBase64 !== undefined && data.bodyBase64 !== null) {
+      return bytesFromBase64(data.bodyBase64);
+    }
+    return blobTextEncoder.encode(data.bodyText === undefined ? "" : String(data.bodyText));
+  }
+
+  function xhrResponseContentLength(headers) {
+    const entry = (headers || []).find(([name]) => String(name).toLowerCase() === "content-length");
+    if (!entry) return null;
+    const value = Number(entry[1]);
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
+  }
+
+  function xhrResponseMime(headers) {
+    const entry = (headers || []).find(([name]) => String(name).toLowerCase() === "content-type");
+    return entry ? String(entry[1]).split(";", 1)[0].trim().toLowerCase() : "";
+  }
+
   globalThis.XMLHttpRequest.UNSENT = 0;
   globalThis.XMLHttpRequest.OPENED = 1;
   globalThis.XMLHttpRequest.HEADERS_RECEIVED = 2;
@@ -7977,62 +12779,125 @@
   class ReadableStreamDefaultController {
     constructor(stream) { this._stream = stream; }
     enqueue(chunk) {
-      if (this._stream._closed) throw new TypeError("ReadableStream is closed");
-      const waiter = this._stream._waiters.shift();
+      const stream = this._stream;
+      if (stream._closed || stream._errorSet) throw new TypeError("ReadableStream is closed");
+      const waiter = stream._waiters.shift();
       if (waiter) waiter.resolve({ value: chunk, done: false });
-      else this._stream._queue.push(chunk);
+      else stream._queue.push(chunk);
     }
     close() {
-      if (this._stream._closed) return;
-      this._stream._closed = true;
-      for (const waiter of this._stream._waiters.splice(0)) {
+      const stream = this._stream;
+      if (stream._closed || stream._errorSet) return;
+      stream._closed = true;
+      if (stream._closedResolve) {
+        stream._closedResolve();
+        stream._closedResolve = null;
+        stream._closedReject = null;
+      }
+      for (const waiter of stream._waiters.splice(0)) {
         waiter.resolve({ value: undefined, done: true });
       }
     }
     error(reason) {
-      this._stream._error = reason;
-      this._stream._closed = true;
-      for (const waiter of this._stream._waiters.splice(0)) waiter.reject(reason);
+      const stream = this._stream;
+      if (stream._closed || stream._errorSet) return;
+      stream._error = reason;
+      stream._errorSet = true;
+      stream._closed = true;
+      stream._queue.length = 0;
+      if (stream._closedReject) {
+        stream._closedReject(reason);
+        stream._closedResolve = null;
+        stream._closedReject = null;
+      }
+      for (const waiter of stream._waiters.splice(0)) waiter.reject(reason);
     }
-    get desiredSize() { return this._stream._closed ? 0 : 1; }
+    get desiredSize() { return this._stream._closed || this._stream._errorSet ? 0 : 1; }
   }
   class ReadableStreamDefaultReader {
     constructor(stream) {
       if (!(stream instanceof ReadableStream) || stream.locked) throw new TypeError("Invalid or locked stream");
       this._stream = stream;
       stream._reader = this;
-      this.closed = stream._closed ? Promise.resolve() : new Promise(resolve => { stream._closedResolve = resolve; });
+      this.closed = stream._closed
+        ? (stream._errorSet ? Promise.reject(stream._error) : Promise.resolve())
+        : new Promise((resolve, reject) => {
+            stream._closedResolve = resolve;
+            stream._closedReject = reject;
+          });
     }
     read() {
       const stream = this._stream;
       if (!stream) return Promise.reject(new TypeError("Reader has no stream"));
+      stream._markDisturbed();
       if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
-      if (stream._error !== undefined) return Promise.reject(stream._error);
+      if (stream._errorSet) return Promise.reject(stream._error);
       if (stream._closed) return Promise.resolve({ value: undefined, done: true });
       return new Promise((resolve, reject) => stream._waiters.push({ resolve, reject }));
     }
-    cancel(reason) { return this._stream ? this._stream.cancel(reason) : Promise.reject(new TypeError("Reader has no stream")); }
-    releaseLock() { if (this._stream) this._stream._reader = null; this._stream = null; }
+    cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(new TypeError("Reader has no stream")); }
+    releaseLock() {
+      const stream = this._stream;
+      if (!stream) return;
+      if (stream._reader === this) {
+        stream._reader = null;
+        const reject = stream._closedReject;
+        stream._closedResolve = null;
+        stream._closedReject = null;
+        if (reject && !stream._closed && !stream._errorSet) {
+          reject(new TypeError("Reader lock was released"));
+        }
+      }
+      this._stream = null;
+    }
   }
   class ReadableStream {
     constructor(underlyingSource = {}) {
       this._queue = []; this._waiters = []; this._reader = null;
-      this._closed = false; this._error = undefined; this._source = underlyingSource || {};
+      this._closed = false; this._error = undefined; this._errorSet = false;
+      this._source = underlyingSource || {};
+      this._closedResolve = null; this._closedReject = null;
+      this._disturbed = false; this._onDisturb = null; this._cancelled = false;
       this._controller = new ReadableStreamDefaultController(this);
       if (typeof this._source.start === "function") {
-        Promise.resolve(this._source.start(this._controller)).catch(e => this._controller.error(e));
+        try {
+          Promise.resolve(this._source.start(this._controller)).catch(e => this._controller.error(e));
+        } catch (error) {
+          this._controller.error(error);
+        }
       }
     }
     get locked() { return this._reader !== null; }
+    get [Symbol.toStringTag]() { return "ReadableStream"; }
+    _markDisturbed() {
+      if (this._disturbed) return;
+      this._disturbed = true;
+      if (typeof this._onDisturb === "function") this._onDisturb();
+    }
     getReader() { return new ReadableStreamDefaultReader(this); }
     cancel(reason) {
-      this._queue.length = 0; this._controller.close();
-      return Promise.resolve(typeof this._source.cancel === "function" ? this._source.cancel(reason) : undefined);
+      if (this.locked) return Promise.reject(new TypeError("ReadableStream is locked"));
+      return this._cancel(reason);
+    }
+    _cancel(reason) {
+      if (this._cancelled) return Promise.resolve();
+      this._markDisturbed();
+      this._cancelled = true;
+      this._queue.length = 0;
+      if (!this._closed && !this._errorSet) this._controller.close();
+      try {
+        return Promise.resolve(typeof this._source.cancel === "function" ? this._source.cancel(reason) : undefined);
+      } catch (error) {
+        return Promise.reject(error);
+      }
     }
     pipeTo(destination) {
       const reader = this.getReader(); const writer = destination.getWriter();
-      const pump = () => reader.read().then(result => result.done ? writer.close() : Promise.resolve(writer.write(result.value)).then(pump));
-      return pump().finally(() => reader.releaseLock());
+      const pump = () => reader.read().then(result => result.done
+        ? writer.close()
+        : Promise.resolve(writer.write(result.value)).then(pump));
+      return pump().catch(error => Promise.resolve(writer.abort(error)).then(() => { throw error; }))
+        .finally(() => reader.releaseLock());
     }
     pipeThrough(pair) { this.pipeTo(pair.writable); return pair.readable; }
   }
@@ -8091,6 +12956,22 @@
   globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
   globalThis.TransformStream = TransformStream;
 
+  // Body streams are byte streams in the Fetch/File APIs.  The current host
+  // keeps response bytes in memory, so one immutable chunk is sufficient while
+  // preserving the observable ReadableStream lifecycle (locked, disturbed,
+  // cancel and close) for consumers.
+  function readableByteStream(bytes, onDisturb = null) {
+    const snapshot = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes || []);
+    const stream = new ReadableStream({
+      start(controller) {
+        if (snapshot.length) controller.enqueue(snapshot);
+        controller.close();
+      },
+    });
+    stream._onDisturb = onDisturb;
+    return stream;
+  }
+
   class EventTarget {
     constructor() { this._listeners = new Map(); }
     addEventListener(type, callback, options = {}) {
@@ -8128,6 +13009,722 @@
       return !event.defaultPrevented;
     }
   }
+
+  // Notifications are modeled as a deterministic, task-queued lifecycle.
+  // Omoikane does not own an OS notification backend, so permission and
+  // show/click/close state remain observable in the realm without opening a
+  // platform window.  The engine hook below lets conformance tests inject a
+  // granted/denied decision without making page code responsible for a UI
+  // prompt.
+  const nativeNotificationPermission = globalThis.__omoikane_notification_permission;
+  const nativeNotificationRequestPermission = globalThis.__omoikane_notification_request_permission;
+  try { delete globalThis.__omoikane_notification_permission; } catch (_) {}
+  try { delete globalThis.__omoikane_notification_request_permission; } catch (_) {}
+  const notificationPermissionValues = new Set(["default", "granted", "denied"]);
+  const normalizeNotificationPermission = value => {
+    const normalized = String(value);
+    return notificationPermissionValues.has(normalized) ? normalized : "default";
+  };
+  const currentNotificationPermission = () => {
+    try {
+      return typeof nativeNotificationPermission === "function"
+        ? normalizeNotificationPermission(nativeNotificationPermission()) : "default";
+    } catch (_) {
+      return "default";
+    }
+  };
+  const requestNotificationPermission = () => {
+    const before = currentNotificationPermission();
+    let result;
+    try {
+      result = typeof nativeNotificationRequestPermission === "function"
+        ? normalizeNotificationPermission(nativeNotificationRequestPermission())
+        : currentNotificationPermission();
+    } catch (_) {
+      result = currentNotificationPermission();
+    }
+    if (result !== before && typeof globalThis.__omoikane_permission_changed === "function") {
+      globalThis.__omoikane_permission_changed("notifications", result === "default" ? "prompt" : result);
+    }
+    return result;
+  };
+  const closedNotifications = new WeakSet();
+  const notificationTask = callback => {
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(callback);
+    } else {
+      setTimeout(callback, 0);
+    }
+  };
+  // Web Audio is represented as a deterministic graph/state model.  The
+  // runtime has no platform audio sink, but keeping context time, node
+  // connections, AudioParam automation, and oscillator lifecycle observable
+  // lets applications exercise the API without producing host audio.
+  const audioConstructionToken = {};
+  const nativeAudioEventLoopNow = globalThis.__omoikane_event_loop_now;
+  try { delete globalThis.__omoikane_event_loop_now; } catch (_) {}
+  const audioTask = callback => {
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(callback);
+    } else {
+      setTimeout(callback, 0);
+    }
+  };
+  const audioClockNow = () => typeof nativeAudioEventLoopNow === "function"
+    ? Number(nativeAudioEventLoopNow()) : 0;
+  const audioNow = context => {
+    if (context.state !== "running") return context.__currentTime;
+    const now = audioClockNow();
+    return context.__currentTime + Math.max(0, now - context.__runningAt) / 1000;
+  };
+  function audioNumber(value, name) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new TypeError(name + " must be finite");
+    return number;
+  }
+  function audioTime(value, name) {
+    const time = audioNumber(value, name);
+    if (time < 0) throw new RangeError(name + " must be non-negative");
+    return time;
+  }
+  function audioContextValue(context) {
+    if (!(context instanceof AudioContext)) throw new TypeError("An AudioContext is required");
+    return context;
+  }
+
+  class AudioParam {
+    constructor(token, context, defaultValue, minValue, maxValue) {
+      if (token !== audioConstructionToken) throw new TypeError("Illegal constructor");
+      this.__context = context;
+      Object.defineProperty(this, "defaultValue", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Number(defaultValue),
+      });
+      Object.defineProperty(this, "minValue", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Number(minValue),
+      });
+      Object.defineProperty(this, "maxValue", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Number(maxValue),
+      });
+      this.__value = this.defaultValue;
+      this.__events = [];
+      this.automationRate = "a-rate";
+    }
+    __valueAt(time) {
+      let value = this.__value;
+      let lastTime = 0;
+      for (let index = 0; index < this.__events.length; index++) {
+        const event = this.__events[index];
+        if (event.time > time) {
+          if (event.kind === "linear" || event.kind === "exponential") {
+            const progress = Math.min(1, Math.max(0, (time - lastTime) / (event.time - lastTime)));
+            return event.kind === "exponential" && value > 0 && event.value > 0
+              ? value * Math.pow(event.value / value, progress)
+              : value + (event.value - value) * progress;
+          }
+          return value;
+        }
+        if (event.kind === "target") {
+          const nextTime = index + 1 < this.__events.length ? this.__events[index + 1].time : time;
+          const evaluatedTime = Math.min(time, nextTime);
+          value = event.value + (value - event.value) * Math.exp(-(evaluatedTime - event.time) / event.timeConstant);
+          lastTime = evaluatedTime;
+          if (time < nextTime) return value;
+        } else {
+          value = event.value;
+          lastTime = event.time;
+        }
+      }
+      return value;
+    }
+    get value() { return this.__valueAt(audioNow(this.__context)); }
+    set value(next) {
+      this.__value = Math.min(this.maxValue, Math.max(this.minValue, audioNumber(next, "AudioParam.value")));
+    }
+    __schedule(kind, value, time) {
+      const numeric = audioNumber(value, "AudioParam value");
+      const at = audioTime(time, "AudioParam time");
+      const event = { kind, value: numeric, time: at };
+      this.__events = this.__events.filter(existing => existing.time !== at);
+      this.__events.push(event);
+      this.__events.sort((left, right) => left.time - right.time);
+      return this;
+    }
+    setValueAtTime(value, startTime) { return this.__schedule("set", value, startTime); }
+    linearRampToValueAtTime(value, endTime) { return this.__schedule("linear", value, endTime); }
+    exponentialRampToValueAtTime(value, endTime) {
+      const numeric = audioNumber(value, "AudioParam value");
+      const at = audioTime(endTime, "AudioParam time");
+      if (numeric <= 0 || this.__valueAt(at) <= 0) throw new RangeError("Exponential values must be positive.");
+      return this.__schedule("exponential", numeric, at);
+    }
+    setTargetAtTime(target, startTime, timeConstant) {
+      const value = audioNumber(target, "AudioParam target");
+      const start = audioTime(startTime, "AudioParam time");
+      const constant = audioNumber(timeConstant, "AudioParam timeConstant");
+      if (constant <= 0) throw new RangeError("AudioParam timeConstant must be positive");
+      this.__events = this.__events.filter(existing => existing.time !== start);
+      this.__events.push({ kind: "target", value, time: start, timeConstant: constant });
+      this.__events.sort((left, right) => left.time - right.time);
+      return this;
+    }
+    cancelScheduledValues(cancelTime) {
+      const at = audioTime(cancelTime, "AudioParam time");
+      this.__events = this.__events.filter(event => event.time < at);
+      return this;
+    }
+    cancelAndHoldAtTime(cancelTime) {
+      const at = audioTime(cancelTime, "AudioParam time");
+      const held = this.__valueAt(at);
+      this.cancelScheduledValues(at);
+      this.__events.push({ kind: "set", value: held, time: at });
+      this.__events.sort((left, right) => left.time - right.time);
+      return this;
+    }
+    get [Symbol.toStringTag]() { return "AudioParam"; }
+  }
+
+  class AudioNode extends EventTarget {
+    constructor(token, context, inputs = 1, outputs = 1) {
+      super();
+      if (token !== audioConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperty(this, "context", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: context,
+      });
+      this.__context = context;
+      Object.defineProperty(this, "numberOfInputs", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: inputs,
+      });
+      Object.defineProperty(this, "numberOfOutputs", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: outputs,
+      });
+      this.channelCount = 2;
+      this.channelCountMode = "max";
+      this.channelInterpretation = "speakers";
+      this.__connections = [];
+      if (context && context.__nodes) context.__nodes.add(this);
+    }
+    connect(destination, output = 0, input = 0) {
+      if (!(destination instanceof AudioNode) && !(destination instanceof AudioParam)) {
+        throw new TypeError("AudioNode.connect destination must be an AudioNode or AudioParam");
+      }
+      if (destination.__context !== this.__context) {
+        throw new DOMException("Nodes belong to different AudioContexts.", "InvalidAccessError");
+      }
+      const outNumber = Number(output);
+      const inputNumber = Number(input);
+      const out = Math.trunc(outNumber);
+      const inputIndex = Math.trunc(inputNumber);
+      const destinationInputCount = destination instanceof AudioNode ? destination.numberOfInputs : 1;
+      if (!Number.isFinite(outNumber) || !Number.isFinite(inputNumber) || out < 0 || out >= this.numberOfOutputs || inputIndex < 0 || inputIndex >= destinationInputCount) {
+        throw new DOMException("The AudioNode output or input is invalid.", "IndexSizeError");
+      }
+      this.__connections.push({ destination, output: out, input: inputIndex });
+      return destination instanceof AudioParam ? undefined : destination;
+    }
+    disconnect(destination = undefined, output = undefined, input = undefined) {
+      if (destination === undefined) {
+        this.__connections = [];
+        return;
+      }
+      if (typeof destination === "number" && output === undefined && input === undefined) {
+        const outputNumber = Number(destination);
+        const outputIndex = Math.trunc(outputNumber);
+        if (!Number.isFinite(outputNumber) || outputIndex < 0 || outputIndex >= this.numberOfOutputs) {
+          throw new DOMException("The AudioNode output is invalid.", "IndexSizeError");
+        }
+        const before = this.__connections.length;
+        this.__connections = this.__connections.filter(connection => connection.output !== outputIndex);
+        if (this.__connections.length === before) {
+          throw new DOMException("The specified connection was not found.", "InvalidAccessError");
+        }
+        return;
+      }
+      if (!(destination instanceof AudioNode) && !(destination instanceof AudioParam)) {
+        throw new TypeError("AudioNode.disconnect destination must be an AudioNode or AudioParam");
+      }
+      if (destination.__context !== this.__context) {
+        throw new DOMException("Nodes belong to different AudioContexts.", "InvalidAccessError");
+      }
+      const hasOutput = output !== undefined;
+      const hasInput = input !== undefined;
+      let outputIndex;
+      let inputIndex;
+      if (hasOutput) {
+        const outputNumber = Number(output);
+        outputIndex = Math.trunc(outputNumber);
+        if (!Number.isFinite(outputNumber) || outputIndex < 0 || outputIndex >= this.numberOfOutputs) {
+          throw new DOMException("The AudioNode output is invalid.", "IndexSizeError");
+        }
+      }
+      if (hasInput) {
+        const inputNumber = Number(input);
+        inputIndex = Math.trunc(inputNumber);
+        const destinationInputCount = destination instanceof AudioNode ? destination.numberOfInputs : 1;
+        if (!Number.isFinite(inputNumber) || inputIndex < 0 || inputIndex >= destinationInputCount) {
+          throw new DOMException("The AudioNode input is invalid.", "IndexSizeError");
+        }
+      }
+      const before = this.__connections.length;
+      this.__connections = this.__connections.filter(connection => (
+        connection.destination !== destination ||
+        (hasOutput && connection.output !== outputIndex) ||
+        (hasInput && connection.input !== inputIndex)
+      ));
+      if (this.__connections.length === before) {
+        throw new DOMException("The specified connection was not found.", "InvalidAccessError");
+      }
+    }
+    get [Symbol.toStringTag]() { return "AudioNode"; }
+  }
+
+  class AudioDestinationNode extends AudioNode {
+    constructor(token, context) {
+      super(token, context, 1, 0);
+      this.maxChannelCount = 2;
+    }
+    get [Symbol.toStringTag]() { return "AudioDestinationNode"; }
+  }
+
+  class GainNode extends AudioNode {
+    constructor(context, options = {}) {
+      const owner = audioContextValue(context);
+      const init = options === null || options === undefined ? {} : options;
+      if (typeof init !== "object" && typeof init !== "function") throw new TypeError("GainNode options must be a dictionary");
+      super(audioConstructionToken, owner, 1, 1);
+      Object.defineProperty(this, "gain", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: new AudioParam(audioConstructionToken, owner, init.gain ?? 1, -3.402823466e38, 3.402823466e38),
+      });
+    }
+    get [Symbol.toStringTag]() { return "GainNode"; }
+  }
+
+  class OscillatorNode extends AudioNode {
+    constructor(context, options = {}) {
+      const owner = audioContextValue(context);
+      const init = options === null || options === undefined ? {} : options;
+      if (typeof init !== "object" && typeof init !== "function") throw new TypeError("OscillatorNode options must be a dictionary");
+      super(audioConstructionToken, owner, 0, 1);
+      this.type = init.type === undefined ? "sine" : String(init.type);
+      if (!["sine", "square", "sawtooth", "triangle", "custom"].includes(this.type)) {
+        throw new TypeError("Unsupported oscillator type");
+      }
+      Object.defineProperty(this, "frequency", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: new AudioParam(audioConstructionToken, owner, init.frequency ?? 440, -3.402823466e38, 3.402823466e38),
+      });
+      Object.defineProperty(this, "detune", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: new AudioParam(audioConstructionToken, owner, init.detune ?? 0, -3.402823466e38, 3.402823466e38),
+      });
+      this.onended = null;
+      this.__started = false;
+      this.__stopped = false;
+      this.__stopCalled = false;
+      this.__startRequested = 0;
+      this.__stopTimer = null;
+    }
+    start(when = 0) {
+      if (this.__started) throw new DOMException("OscillatorNode.start() was already called.", "InvalidStateError");
+      const startAt = audioNumber(when, "OscillatorNode start time");
+      if (startAt < 0) throw new RangeError("OscillatorNode start time must be non-negative");
+      this.__startRequested = startAt;
+      this.__started = true;
+      this.__schedulePendingStop();
+    }
+    stop(when = 0) {
+      if (this.__stopCalled) throw new DOMException("OscillatorNode.stop() was already called.", "InvalidStateError");
+      const stopAt = audioNumber(when, "OscillatorNode stop time");
+      if (stopAt < 0) throw new RangeError("OscillatorNode stop time must be non-negative");
+      this.__stopCalled = true;
+      this.__stopRequested = stopAt;
+      this.__schedulePendingStop();
+    }
+    __pauseScheduledStop() {
+      if (this.__stopTimer !== null) clearTimeout(this.__stopTimer);
+      this.__stopTimer = null;
+    }
+    __schedulePendingStop() {
+      if (this.__stopped || !this.__started || this.__stopRequested === undefined || this.__context.state !== "running") return;
+      if (this.__stopTimer !== null) clearTimeout(this.__stopTimer);
+      const effectiveStop = Math.max(this.__stopRequested, this.__startRequested);
+      const delay = Math.max(0, (effectiveStop - audioNow(this.__context)) * 1000);
+      if (delay <= 0) {
+        this.__finish();
+        return;
+      }
+      this.__stopTimer = setTimeout(() => {
+        this.__stopTimer = null;
+        if (this.__context.state === "running") this.__finish();
+      }, delay);
+    }
+    __finish() {
+      if (this.__stopped) return;
+      this.__stopped = true;
+      this.__stopTimer = null;
+      audioTask(() => {
+        const event = new Event("ended");
+        if (typeof this.onended === "function") this.onended.call(this, event);
+        this.dispatchEvent(event);
+      });
+    }
+    get [Symbol.toStringTag]() { return "OscillatorNode"; }
+  }
+
+  class AudioContext extends EventTarget {
+    constructor(options = {}) {
+      super();
+      const init = options === null || options === undefined ? {} : Object(options);
+      const sampleRate = init.sampleRate === undefined ? 44100 : audioNumber(init.sampleRate, "AudioContext sampleRate");
+      if (sampleRate <= 0) throw new DOMException("The sampleRate must be positive.", "NotSupportedError");
+      Object.defineProperty(this, "sampleRate", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: sampleRate,
+      });
+      Object.defineProperty(this, "baseLatency", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: 0,
+      });
+      Object.defineProperty(this, "outputLatency", {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: 0,
+      });
+      this.latencyHint = init.latencyHint === undefined ? "interactive" : init.latencyHint;
+      this.__state = "suspended";
+      this.__currentTime = 0;
+      this.__runningAt = 0;
+      this.__nodes = new Set();
+      this.__destination = new AudioDestinationNode(audioConstructionToken, this);
+      this.listener = Object.create(null);
+      this.onstatechange = null;
+    }
+    get state() { return this.__state; }
+    get currentTime() { return audioNow(this); }
+    get destination() { return this.__destination; }
+    resume() {
+      if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
+      if (this.__state === "running") return Promise.resolve();
+      this.__runningAt = audioClockNow();
+      this.__state = "running";
+      for (const node of this.__nodes) if (typeof node.__schedulePendingStop === "function") node.__schedulePendingStop();
+      const context = this;
+      return new Promise(resolve => audioTask(() => {
+        const event = new Event("statechange");
+        try {
+          const handler = context.onstatechange;
+          if (typeof handler === "function") handler.call(context, event);
+          context.dispatchEvent(event);
+        } finally {
+          resolve();
+        }
+      }));
+    }
+    suspend() {
+      if (this.__state === "closed") return Promise.reject(new DOMException("The AudioContext is closed.", "InvalidStateError"));
+      if (this.__state === "suspended") return Promise.resolve();
+      this.__currentTime = this.currentTime;
+      this.__state = "suspended";
+      for (const node of this.__nodes) if (typeof node.__pauseScheduledStop === "function") node.__pauseScheduledStop();
+      const context = this;
+      return new Promise(resolve => audioTask(() => {
+        const event = new Event("statechange");
+        try {
+          const handler = context.onstatechange;
+          if (typeof handler === "function") handler.call(context, event);
+          context.dispatchEvent(event);
+        } finally {
+          resolve();
+        }
+      }));
+    }
+    close() {
+      if (this.__state === "closed") return Promise.resolve();
+      this.__currentTime = this.currentTime;
+      this.__state = "closed";
+      for (const node of this.__nodes) if (typeof node.__pauseScheduledStop === "function") node.__pauseScheduledStop();
+      const context = this;
+      return new Promise(resolve => audioTask(() => {
+        const event = new Event("statechange");
+        try {
+          const handler = context.onstatechange;
+          if (typeof handler === "function") handler.call(context, event);
+          context.dispatchEvent(event);
+        } finally {
+          resolve();
+        }
+      }));
+    }
+    createGain() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new GainNode(this); }
+    createOscillator() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new OscillatorNode(this); }
+    get [Symbol.toStringTag]() { return "AudioContext"; }
+  }
+  globalThis.AudioParam = AudioParam;
+  globalThis.AudioNode = AudioNode;
+  globalThis.AudioDestinationNode = AudioDestinationNode;
+  globalThis.GainNode = GainNode;
+  globalThis.OscillatorNode = OscillatorNode;
+  globalThis.AudioContext = AudioContext;
+  function notificationOptionString(options, name, fallback = "") {
+    const value = options && options[name];
+    return value === undefined ? fallback : String(value);
+  }
+  function notificationOptionBoolean(options, name, fallback = false) {
+    return options && options[name] === undefined ? fallback : !!(options && options[name]);
+  }
+  class Notification extends EventTarget {
+    constructor(title, options = {}) {
+      super();
+      if (arguments.length < 1) throw new TypeError("Notification requires a title");
+      if (!nativeIsSecureContext()) {
+        throw new DOMException("Notifications require a secure context.", "NotAllowedError");
+      }
+      if (currentNotificationPermission() !== "granted") {
+        throw new DOMException("Notification permission is not granted.", "NotAllowedError");
+      }
+      const init = options === null || options === undefined ? {} : Object(options);
+      const direction = notificationOptionString(init, "dir", "auto").toLowerCase();
+      const data = init.data === undefined ? null : globalThis.structuredClone(init.data);
+      const actions = Array.isArray(init.actions)
+        ? init.actions.map(action => ({
+            action: notificationOptionString(action, "action"),
+            title: notificationOptionString(action, "title"),
+            icon: notificationOptionString(action, "icon"),
+          }))
+        : [];
+      const values = {
+        title: String(title),
+        dir: ["auto", "ltr", "rtl"].includes(direction) ? direction : "auto",
+        lang: notificationOptionString(init, "lang"),
+        body: notificationOptionString(init, "body"),
+        tag: notificationOptionString(init, "tag"),
+        image: notificationOptionString(init, "image"),
+        icon: notificationOptionString(init, "icon"),
+        badge: notificationOptionString(init, "badge"),
+        vibrate: init.vibrate === undefined ? [] : (Array.isArray(init.vibrate) ? init.vibrate.slice() : [init.vibrate]),
+        timestamp: init.timestamp === undefined ? Date.now() : Number(init.timestamp),
+        renotify: notificationOptionBoolean(init, "renotify"),
+        silent: notificationOptionBoolean(init, "silent"),
+        requireInteraction: notificationOptionBoolean(init, "requireInteraction"),
+        data,
+        actions,
+      };
+      for (const [name, value] of Object.entries(values)) {
+        Object.defineProperty(this, name, {
+          configurable: false,
+          enumerable: true,
+          writable: false,
+          value,
+        });
+      }
+      for (const type of ["show", "click", "error", "close"]) {
+        Object.defineProperty(this, "on" + type, {
+          configurable: true,
+          enumerable: false,
+          get: () => this["__on" + type] || null,
+          set: callback => { this["__on" + type] = typeof callback === "function" ? callback : null; },
+        });
+      }
+      notificationTask(() => {
+        if (!closedNotifications.has(this)) fireRealtimeEvent(this, new Event("show"));
+      });
+    }
+    close() {
+      if (closedNotifications.has(this)) return;
+      closedNotifications.add(this);
+      notificationTask(() => fireRealtimeEvent(this, new Event("close")));
+    }
+    get [Symbol.toStringTag]() { return "Notification"; }
+    static get permission() { return currentNotificationPermission(); }
+    static requestPermission(callback) {
+      const result = Promise.resolve().then(() => {
+        if (!nativeIsSecureContext()) {
+          throw new DOMException("Notifications require a secure context.", "NotAllowedError");
+        }
+        // There is no native prompt in this headless engine. A default
+        // decision therefore follows the browser's non-granting fallback.
+        return requestNotificationPermission();
+      });
+      if (typeof callback === "function") result.then(callback);
+      return result;
+    }
+  }
+  globalThis.Notification = Notification;
+  globalThis.__omoikane_dispatch_notification_click = notification => {
+    if (!(notification instanceof Notification) || closedNotifications.has(notification)) return false;
+    notificationTask(() => {
+      if (!closedNotifications.has(notification)) fireRealtimeEvent(notification, new Event("click"));
+    });
+    return true;
+  };
+
+  // -------------------------------------------------------------------------
+  // Permissions API query/lifecycle core.
+  //
+  // The host has deterministic permission state for the APIs that already
+  // exist in this runtime (Notifications, Geolocation, and Async Clipboard).
+  // Keep PermissionStatus objects in this realm and fan out host transitions
+  // through a small weak registry, so no Boa object crosses a runtime boundary
+  // and stale statuses do not keep a document alive after teardown.
+  // -------------------------------------------------------------------------
+  const permissionsConstructionToken = {};
+  const permissionStatusEntries = new Map();
+  const permissionStatusUsesWeakRefs = typeof WeakRef === "function";
+  let permissionLifecycleActive = true;
+  const supportedPermissionNames = Object.freeze([
+    "notifications", "geolocation", "clipboard-read", "clipboard-write",
+  ]);
+
+  function permissionDescriptorName(descriptor) {
+    if (descriptor === null || descriptor === undefined) {
+      throw new TypeError("Permissions.query requires a permission descriptor");
+    }
+    const value = Object(descriptor);
+    const name = String(value.name);
+    if (!supportedPermissionNames.includes(name)) {
+      throw new DOMException(`The permission descriptor '${name}' is not supported.`, "NotSupportedError");
+    }
+    return name;
+  }
+
+  function permissionStateFor(name) {
+    if (name === "notifications") {
+      const permission = currentNotificationPermission();
+      return permission === "default" ? "prompt" : permission;
+    }
+    if (name === "geolocation") {
+      try {
+        return nativeGeolocationPermission() ? "granted" : "denied";
+      } catch (_) {
+        return "denied";
+      }
+    }
+    try {
+      return nativeIsSecureContext() && nativeClipboardPermission() ? "granted" : "denied";
+    } catch (_) {
+      return "denied";
+    }
+  }
+
+  function registerPermissionStatus(status) {
+    const entries = permissionStatusEntries.get(status.__permissionName) || [];
+    entries.push(permissionStatusUsesWeakRefs ? new WeakRef(status) : status);
+    permissionStatusEntries.set(status.__permissionName, entries);
+  }
+
+  function notifyPermissionStatuses(name, state) {
+    if (!permissionLifecycleActive || !supportedPermissionNames.includes(name)) return;
+    const entries = permissionStatusEntries.get(name) || [];
+    const retained = [];
+    for (const entry of entries) {
+      const status = permissionStatusUsesWeakRefs ? entry.deref() : entry;
+      if (!status) continue;
+      if (status.__active) status.__setState(state);
+      if (status.__active) retained.push(entry);
+    }
+    permissionStatusEntries.set(name, retained);
+  }
+
+  class PermissionStatus extends EventTarget {
+    constructor(name, state) {
+      super();
+      if (!supportedPermissionNames.includes(name)) {
+        throw new TypeError("Illegal constructor");
+      }
+      this.__permissionName = name;
+      this.__state = state;
+      this.__active = true;
+      this.__onchange = null;
+    }
+    get state() { return this.__state; }
+    get onchange() { return this.__onchange; }
+    set onchange(callback) {
+      this.__onchange = typeof callback === "function" ? callback : null;
+    }
+    __setState(state) {
+      if (!this.__active || state === this.__state) return;
+      this.__state = state;
+      queueMicrotask(() => {
+        if (this.__active) fireRealtimeEvent(this, new Event("change"));
+      });
+    }
+    __teardown() {
+      this.__active = false;
+      this.__onchange = null;
+      this._listeners.clear();
+    }
+    get [Symbol.toStringTag]() { return "PermissionStatus"; }
+  }
+
+  class Permissions {
+    constructor(token) {
+      if (token !== permissionsConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    query(descriptor) {
+      // Dictionary conversion and descriptor validation happen in the
+      // promise job, preserving the asynchronous ordering of the platform
+      // API and making getter exceptions observable as rejections.
+      return Promise.resolve().then(() => {
+        const name = permissionDescriptorName(descriptor);
+        const status = new PermissionStatus(name, permissionStateFor(name));
+        registerPermissionStatus(status);
+        return status;
+      });
+    }
+    get [Symbol.toStringTag]() { return "Permissions"; }
+  }
+
+  globalThis.PermissionStatus = PermissionStatus;
+  globalThis.Permissions = Permissions;
+  navigator.permissions = new Permissions(permissionsConstructionToken);
+  globalThis.__omoikane_permission_changed = (name, _state) => {
+    const normalizedName = String(name);
+    if (!supportedPermissionNames.includes(normalizedName)) return;
+    // The host transition argument is only a notification hint.  Always
+    // recompute from the authoritative source so page code cannot forge a
+    // granted/denied state by calling this private-looking global directly.
+    notifyPermissionStatuses(normalizedName, permissionStateFor(normalizedName));
+  };
+  globalThis.__omoikane_permission_teardown = () => {
+    if (!permissionLifecycleActive) return;
+    permissionLifecycleActive = false;
+    for (const entries of permissionStatusEntries.values()) {
+      for (const entry of entries) {
+        const status = permissionStatusUsesWeakRefs ? entry.deref() : entry;
+        if (status) status.__teardown();
+      }
+    }
+    permissionStatusEntries.clear();
+  };
 
   class Animation extends EventTarget {
     constructor(target, keyframes, options = {}) {
@@ -8267,6 +13864,15 @@
     }
   }
   globalThis.EventTarget = EventTarget;
+  // XMLHttpRequestUpload is declared beside XMLHttpRequest so the latter can
+  // construct it before this general EventTarget definition is reached.  Link
+  // the prototype chain once EventTarget is initialized so standard brand
+  // checks (`upload instanceof EventTarget`) still behave as expected.
+  Object.setPrototypeOf(XMLHttpRequestUpload.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(XMLHttpRequest.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(WebGLEventTarget.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(ServiceWorkerEventTarget.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(GPUEventTarget.prototype, EventTarget.prototype);
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
 
@@ -8335,6 +13941,1304 @@
     }
     return cloneStructuredValue(value, new Map());
   };
+
+  // -------------------------------------------------------------------------
+  // WebRTC deterministic signaling/data-channel core.
+  //
+  // Omoikane deliberately does not open sockets or run ICE/DTLS.  The model
+  // below keeps the Web IDL-facing state machine useful by pairing two
+  // RTCPeerConnection objects in the same JS realm.  Offers carry an internal
+  // owner marker (and are also indexed by their deterministic SDP), so the
+  // normal offer/answer exchange can discover the in-memory peer without
+  // exposing a cross-realm object.  `RTCPeerConnection.createPair()` and the
+  // `__omoikane_create_webrtc_peer_pair` hook provide an explicit test seam.
+  // -------------------------------------------------------------------------
+  const webrtcDescriptionOwners = new Map();
+  let webrtcConnectionSerial = 1;
+  let webrtcDataChannelSerial = 0;
+  const WEBRTC_DESCRIPTION_TYPES = new Set(["offer", "answer", "pranswer", "rollback"]);
+  const WEBRTC_BUNDLE_POLICIES = new Set(["balanced", "max-compat", "max-bundle"]);
+  const WEBRTC_ICE_TRANSPORT_POLICIES = new Set(["all", "relay"]);
+  const WEBRTC_RTCP_MUX_POLICIES = new Set(["negotiate", "require"]);
+
+  function webrtcQueue(callback) {
+    queueMicrotask(callback);
+  }
+
+  function webrtcEventHandler(target, eventType, property, callback) {
+    const previous = target[property];
+    if (previous) target.removeEventListener(eventType, previous);
+    const next = typeof callback === "function" ? callback : null;
+    target[property] = next;
+    if (next) target.addEventListener(eventType, next);
+  }
+
+  function webrtcState(target, property, eventType, value) {
+    if (target[property] === value) return false;
+    target[property] = value;
+    webrtcQueue(() => target.dispatchEvent(new Event(eventType)));
+    return true;
+  }
+
+  function webrtcInvalidState(message) {
+    return new DOMException(message || "The RTCPeerConnection is closed.", "InvalidStateError");
+  }
+
+  function webrtcSessionDescription(type, sdp, owner = null) {
+    const description = new RTCSessionDescription({ type, sdp });
+    if (owner) {
+      Object.defineProperty(description, "__owner", {
+        configurable: false, enumerable: false, writable: false, value: owner,
+      });
+      webrtcDescriptionOwners.set(description.sdp, owner);
+    }
+    return description;
+  }
+
+  function webrtcDescriptionOwner(description) {
+    return (description && description.__owner) ||
+      (description && webrtcDescriptionOwners.get(description.sdp)) || null;
+  }
+
+  function webrtcNormalizeSessionDescription(value) {
+    if (value instanceof RTCSessionDescription) return value;
+    if (value == null || typeof value !== "object") {
+      throw new TypeError("An RTCSessionDescriptionInit dictionary is required");
+    }
+    return new RTCSessionDescription(value);
+  }
+
+  class RTCSessionDescription {
+    constructor(init = {}) {
+      if (init == null || typeof init !== "object") {
+        throw new TypeError("RTCSessionDescriptionInit must be an object");
+      }
+      const type = String(init.type === undefined ? "" : init.type);
+      if (!WEBRTC_DESCRIPTION_TYPES.has(type)) {
+        throw new TypeError("Invalid RTCSessionDescription type");
+      }
+      const sdp = init.sdp === undefined || init.sdp === null ? "" : String(init.sdp);
+      Object.defineProperty(this, "type", {
+        configurable: false, enumerable: true, writable: false, value: type,
+      });
+      Object.defineProperty(this, "sdp", {
+        configurable: false, enumerable: true, writable: false, value: sdp,
+      });
+    }
+    toJSON() { return { type: this.type, sdp: this.sdp }; }
+    get [Symbol.toStringTag]() { return "RTCSessionDescription"; }
+  }
+
+  class RTCIceCandidate {
+    constructor(init = {}) {
+      if (typeof init === "string") init = { candidate: init };
+      if (init == null || typeof init !== "object") {
+        throw new TypeError("RTCIceCandidateInit must be an object");
+      }
+      const candidate = init.candidate === undefined || init.candidate === null
+        ? "" : String(init.candidate);
+      const sdpMid = init.sdpMid === undefined || init.sdpMid === null ? null : String(init.sdpMid);
+      const sdpMLineIndex = init.sdpMLineIndex === undefined || init.sdpMLineIndex === null
+        ? null : Number(init.sdpMLineIndex);
+      if (sdpMLineIndex !== null && (!Number.isInteger(sdpMLineIndex) || sdpMLineIndex < 0)) {
+        throw new TypeError("sdpMLineIndex must be a non-negative integer or null");
+      }
+      const usernameFragment = init.usernameFragment === undefined || init.usernameFragment === null
+        ? null : String(init.usernameFragment);
+      Object.defineProperty(this, "candidate", {
+        configurable: false, enumerable: true, writable: false, value: candidate,
+      });
+      Object.defineProperty(this, "sdpMid", {
+        configurable: false, enumerable: true, writable: false, value: sdpMid,
+      });
+      Object.defineProperty(this, "sdpMLineIndex", {
+        configurable: false, enumerable: true, writable: false, value: sdpMLineIndex,
+      });
+      Object.defineProperty(this, "foundation", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? "0" : null,
+      });
+      Object.defineProperty(this, "component", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? 1 : null,
+      });
+      Object.defineProperty(this, "priority", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? 1 : null,
+      });
+      Object.defineProperty(this, "address", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? "127.0.0.1" : null,
+      });
+      Object.defineProperty(this, "protocol", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? "udp" : null,
+      });
+      Object.defineProperty(this, "port", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? 9 : null,
+      });
+      Object.defineProperty(this, "type", {
+        configurable: false, enumerable: true, writable: false,
+        value: candidate ? "host" : null,
+      });
+      Object.defineProperty(this, "tcpType", {
+        configurable: false, enumerable: true, writable: false, value: null,
+      });
+      Object.defineProperty(this, "relatedAddress", {
+        configurable: false, enumerable: true, writable: false, value: null,
+      });
+      Object.defineProperty(this, "relatedPort", {
+        configurable: false, enumerable: true, writable: false, value: null,
+      });
+      Object.defineProperty(this, "usernameFragment", {
+        configurable: false, enumerable: true, writable: false, value: usernameFragment,
+      });
+    }
+    toJSON() {
+      return {
+        candidate: this.candidate,
+        sdpMid: this.sdpMid,
+        sdpMLineIndex: this.sdpMLineIndex,
+        usernameFragment: this.usernameFragment,
+      };
+    }
+    get [Symbol.toStringTag]() { return "RTCIceCandidate"; }
+  }
+
+  class RTCPeerConnectionIceEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.candidate = init.candidate === undefined ? null : init.candidate;
+      this.url = init.url === undefined || init.url === null ? null : String(init.url);
+    }
+    get [Symbol.toStringTag]() { return "RTCPeerConnectionIceEvent"; }
+  }
+
+  function webrtcChannelBytes(value) {
+    if (typeof value === "string") return value.length;
+    if (value instanceof ArrayBuffer) return value.byteLength;
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+    if (typeof Blob === "function" && value instanceof Blob) return value.size;
+    return 0;
+  }
+
+  function webrtcChannelPayload(value) {
+    if (typeof value === "string") return value;
+    if (value instanceof ArrayBuffer) return value.slice(0);
+    if (ArrayBuffer.isView(value)) {
+      return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+    }
+    if (typeof Blob === "function" && value instanceof Blob) return value;
+    throw new TypeError("RTCDataChannel.send requires a string or binary data");
+  }
+
+  const webrtcDataChannelConstructionToken = {};
+  class RTCDataChannel extends EventTarget {
+    constructor(token, owner, label, options, id) {
+      if (token !== webrtcDataChannelConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this.__owner = owner;
+      this.__peer = null;
+      this.__announced = false;
+      this.__closedEvent = false;
+      this.__onopen = null;
+      this.__onmessage = null;
+      this.__onclose = null;
+      this.__onerror = null;
+      this.__onbufferedamountlow = null;
+      this.label = String(label);
+      this.ordered = options.ordered !== false;
+      this.maxPacketLifeTime = options.maxPacketLifeTime == null ? null : Number(options.maxPacketLifeTime);
+      this.maxRetransmits = options.maxRetransmits == null ? null : Number(options.maxRetransmits);
+      this.protocol = options.protocol === undefined ? "" : String(options.protocol);
+      this.negotiated = options.negotiated === true;
+      this.id = id;
+      this.readyState = "connecting";
+      this.bufferedAmount = 0;
+      this.bufferedAmountLowThreshold = 0;
+      this.__binaryType = "blob";
+    }
+    get binaryType() { return this.__binaryType; }
+    set binaryType(value) {
+      const next = String(value);
+      if (next !== "blob" && next !== "arraybuffer") throw new TypeError("Invalid binaryType");
+      this.__binaryType = next;
+    }
+    send(data) {
+      if (this.readyState !== "open") throw webrtcInvalidState("RTCDataChannel is not open");
+      const payload = webrtcChannelPayload(data);
+      const bytes = webrtcChannelBytes(payload);
+      this.bufferedAmount += bytes;
+      const peer = this.__peer;
+      if (!peer || peer.readyState !== "open") {
+        this.__drainBufferedAmount(bytes);
+        throw webrtcInvalidState("The peer RTCDataChannel is closed");
+      }
+      let cloned;
+      try {
+        cloned = typeof payload === "string" ? payload
+          : payload instanceof ArrayBuffer ? payload.slice(0)
+          : (typeof Blob === "function" && payload instanceof Blob) ? payload.slice(0)
+          : cloneStructuredValue(payload, new Map());
+      } catch (error) {
+        this.__drainBufferedAmount(bytes);
+        throw error;
+      }
+      webrtcQueue(() => {
+        this.__drainBufferedAmount(bytes);
+        if (peer.readyState !== "open") return;
+        let dataForPeer = cloned;
+        if (peer.binaryType === "arraybuffer" && typeof Blob === "function" && cloned instanceof Blob) {
+          // Blob.arrayBuffer() is asynchronous in the host model; retaining a
+          // Blob here is deterministic and still a valid binary message.
+          dataForPeer = cloned;
+        }
+        peer.dispatchEvent(new MessageEvent("message", { data: dataForPeer }));
+      });
+    }
+    close() {
+      if (this.readyState === "closed" || this.readyState === "closing") return;
+      this.readyState = "closing";
+      const peer = this.__peer;
+      webrtcQueue(() => {
+        this.__closeInternal();
+        if (peer) peer.__closeInternal();
+      });
+    }
+    __drainBufferedAmount(bytes) {
+      const previous = this.bufferedAmount;
+      this.bufferedAmount = Math.max(0, this.bufferedAmount - bytes);
+      if (previous > this.bufferedAmountLowThreshold &&
+          this.bufferedAmount <= this.bufferedAmountLowThreshold) {
+        webrtcQueue(() => this.dispatchEvent(new Event("bufferedamountlow")));
+      }
+    }
+    __open() {
+      if (this.readyState !== "connecting") return;
+      this.readyState = "open";
+      webrtcQueue(() => this.dispatchEvent(new Event("open")));
+    }
+    __closeInternal() {
+      if (this.__closedEvent) return;
+      this.readyState = "closed";
+      this.__closedEvent = true;
+      webrtcQueue(() => this.dispatchEvent(new Event("close")));
+    }
+    __error(error) {
+      webrtcQueue(() => this.dispatchEvent(new Event("error")));
+      return error;
+    }
+    get onopen() { return this.__onopen; }
+    set onopen(callback) { webrtcEventHandler(this, "open", "__onopen", callback); }
+    get onmessage() { return this.__onmessage; }
+    set onmessage(callback) { webrtcEventHandler(this, "message", "__onmessage", callback); }
+    get onclose() { return this.__onclose; }
+    set onclose(callback) { webrtcEventHandler(this, "close", "__onclose", callback); }
+    get onerror() { return this.__onerror; }
+    set onerror(callback) { webrtcEventHandler(this, "error", "__onerror", callback); }
+    get onbufferedamountlow() { return this.__onbufferedamountlow; }
+    set onbufferedamountlow(callback) {
+      webrtcEventHandler(this, "bufferedamountlow", "__onbufferedamountlow", callback);
+    }
+    get [Symbol.toStringTag]() { return "RTCDataChannel"; }
+  }
+
+  function webrtcValidateConfiguration(configuration) {
+    if (configuration == null) return {};
+    if (typeof configuration !== "object") throw new TypeError("RTCConfiguration must be an object");
+    const result = {};
+    if (configuration.bundlePolicy !== undefined) {
+      result.bundlePolicy = String(configuration.bundlePolicy);
+      if (!WEBRTC_BUNDLE_POLICIES.has(result.bundlePolicy)) throw new TypeError("Invalid bundlePolicy");
+    } else result.bundlePolicy = "balanced";
+    if (configuration.iceTransportPolicy !== undefined) {
+      result.iceTransportPolicy = String(configuration.iceTransportPolicy);
+      if (!WEBRTC_ICE_TRANSPORT_POLICIES.has(result.iceTransportPolicy)) throw new TypeError("Invalid iceTransportPolicy");
+    } else result.iceTransportPolicy = "all";
+    if (configuration.rtcpMuxPolicy !== undefined) {
+      result.rtcpMuxPolicy = String(configuration.rtcpMuxPolicy);
+      if (!WEBRTC_RTCP_MUX_POLICIES.has(result.rtcpMuxPolicy)) throw new TypeError("Invalid rtcpMuxPolicy");
+    } else result.rtcpMuxPolicy = "require";
+    const poolSize = configuration.iceCandidatePoolSize === undefined
+      ? 0 : Number(configuration.iceCandidatePoolSize);
+    if (!Number.isInteger(poolSize) || poolSize < 0 || poolSize > 255) {
+      throw new TypeError("iceCandidatePoolSize must be an integer from 0 to 255");
+    }
+    result.iceCandidatePoolSize = poolSize;
+    if (configuration.iceServers !== undefined) {
+      if (!Array.isArray(configuration.iceServers)) throw new TypeError("iceServers must be an array");
+      result.iceServers = configuration.iceServers.map(server => {
+        if (typeof server === "string") return { urls: server };
+        if (server == null || typeof server !== "object") throw new TypeError("Invalid ice server");
+        const urls = server.urls === undefined ? [] : server.urls;
+        if (!(typeof urls === "string" || Array.isArray(urls))) throw new TypeError("Invalid ice server urls");
+        return { urls: Array.isArray(urls) ? urls.map(String) : String(urls),
+          username: server.username === undefined ? undefined : String(server.username),
+          credential: server.credential === undefined ? undefined : server.credential };
+      });
+    } else result.iceServers = [];
+    return result;
+  }
+
+  function webrtcSdp(id, type) {
+    return [
+      "v=0",
+      "o=- " + id + " 2 IN IP4 127.0.0.1",
+      "s=omoikane-deterministic-webrtc",
+      "t=0 0",
+      "a=group:BUNDLE 0",
+      "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+      "a=mid:0",
+      "a=sctp-port:5000",
+      "a=setup:" + (type === "offer" ? "actpass" : "active"),
+    ].join("\r\n") + "\r\n";
+  }
+
+  class RTCPeerConnection extends EventTarget {
+    constructor(configuration = {}) {
+      super();
+      this.__configuration = webrtcValidateConfiguration(configuration);
+      this.__serial = webrtcConnectionSerial++;
+      this.__peer = null;
+      this.__closed = false;
+      this.__channels = new Set();
+      this.__localDescription = null;
+      this.__remoteDescription = null;
+      this.__pendingLocalDescription = null;
+      this.__pendingRemoteDescription = null;
+      this.__connectionState = "new";
+      this.__iceConnectionState = "new";
+      this.__iceGatheringState = "new";
+      this.__signalingState = "stable";
+      this.__onconnectionstatechange = null;
+      this.__onicecandidate = null;
+      this.__onicecandidateerror = null;
+      this.__oniceconnectionstatechange = null;
+      this.__onicegatheringstatechange = null;
+      this.__onnegotiationneeded = null;
+      this.__onsignalingstatechange = null;
+      this.__ondatachannel = null;
+      this.__ontrack = null;
+    }
+    get canTrickleIceCandidates() { return this.__remoteDescription ? true : null; }
+    get connectionState() { return this.__connectionState; }
+    get iceConnectionState() { return this.__iceConnectionState; }
+    get iceGatheringState() { return this.__iceGatheringState; }
+    get signalingState() { return this.__signalingState; }
+    get localDescription() { return this.__localDescription; }
+    get currentLocalDescription() {
+      return this.__signalingState === "stable" ? this.__localDescription : null;
+    }
+    get pendingLocalDescription() { return this.__pendingLocalDescription; }
+    get remoteDescription() { return this.__remoteDescription; }
+    get currentRemoteDescription() {
+      return this.__signalingState === "stable" ? this.__remoteDescription : null;
+    }
+    get pendingRemoteDescription() { return this.__pendingRemoteDescription; }
+    get sctp() { return null; }
+    getConfiguration() { return JSON.parse(JSON.stringify(this.__configuration)); }
+    setConfiguration(configuration) {
+      if (this.__closed) throw webrtcInvalidState();
+      this.__configuration = webrtcValidateConfiguration(configuration);
+    }
+    createOffer() {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      const description = webrtcSessionDescription("offer", webrtcSdp(this.__serial, "offer"), this);
+      return Promise.resolve(description);
+    }
+    createAnswer() {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      if (this.__signalingState !== "have-remote-offer" && this.__signalingState !== "have-local-pranswer") {
+        return Promise.reject(new DOMException("Cannot create an answer in the current signaling state.", "InvalidStateError"));
+      }
+      const description = webrtcSessionDescription("answer", webrtcSdp(this.__serial, "answer"), this);
+      return Promise.resolve(description);
+    }
+    setLocalDescription(description = undefined) {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      let normalized;
+      try {
+        if (description === undefined) {
+          normalized = this.__signalingState === "stable"
+            ? webrtcSessionDescription("offer", webrtcSdp(this.__serial, "offer"), this)
+            : this.__signalingState === "have-remote-offer"
+              ? webrtcSessionDescription("answer", webrtcSdp(this.__serial, "answer"), this)
+              : (() => { throw new DOMException("Cannot infer a local description.", "InvalidStateError"); })();
+        } else normalized = webrtcNormalizeSessionDescription(description);
+        this.__applyLocalDescription(normalized);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return Promise.resolve();
+    }
+    setRemoteDescription(description) {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      let normalized;
+      try {
+        normalized = webrtcNormalizeSessionDescription(description);
+        this.__applyRemoteDescription(normalized);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return Promise.resolve();
+    }
+    addIceCandidate(candidate = null) {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      if (candidate !== null && candidate !== undefined &&
+          !(candidate instanceof RTCIceCandidate) && typeof candidate !== "object") {
+        return Promise.reject(new TypeError("RTCIceCandidateInit must be an object"));
+      }
+      if (!this.__remoteDescription && candidate != null && candidate.candidate !== "") {
+        return Promise.reject(new DOMException("Remote description is not set.", "InvalidStateError"));
+      }
+      return Promise.resolve();
+    }
+    createDataChannel(label, options = undefined) {
+      if (this.__closed) throw webrtcInvalidState();
+      const value = options == null ? {} : Object(options);
+      if (value.maxPacketLifeTime != null && value.maxRetransmits != null) {
+        throw new TypeError("maxPacketLifeTime and maxRetransmits are mutually exclusive");
+      }
+      const lifetime = value.maxPacketLifeTime == null ? null : Number(value.maxPacketLifeTime);
+      const retransmits = value.maxRetransmits == null ? null : Number(value.maxRetransmits);
+      if (lifetime !== null && (!Number.isInteger(lifetime) || lifetime < 0)) throw new TypeError("Invalid maxPacketLifeTime");
+      if (retransmits !== null && (!Number.isInteger(retransmits) || retransmits < 0)) throw new TypeError("Invalid maxRetransmits");
+      const normalized = {
+        ordered: value.ordered !== false,
+        maxPacketLifeTime: lifetime,
+        maxRetransmits: retransmits,
+        protocol: value.protocol === undefined ? "" : String(value.protocol),
+        negotiated: value.negotiated === true,
+      };
+      const id = value.negotiated ? (value.id === undefined ? null : Number(value.id)) : webrtcDataChannelSerial++;
+      if (normalized.negotiated && (!Number.isInteger(id) || id < 0 || id > 65534)) {
+        throw new TypeError("negotiated data channels require an id from 0 to 65534");
+      }
+      const channel = new RTCDataChannel(webrtcDataChannelConstructionToken, this, label, normalized, id);
+      this.__channels.add(channel);
+      this.__attachChannel(channel);
+      return channel;
+    }
+    restartIce() {
+      if (this.__closed) throw webrtcInvalidState();
+      if (this.__signalingState === "stable") webrtcQueue(() => this.dispatchEvent(new Event("negotiationneeded")));
+    }
+    getStats() {
+      if (this.__closed) return Promise.reject(webrtcInvalidState());
+      return Promise.resolve(new Map());
+    }
+    close() {
+      if (this.__closed) return;
+      this.__closed = true;
+      this.__connectionState = "closed";
+      this.__iceConnectionState = "closed";
+      this.__signalingState = "closed";
+      webrtcQueue(() => {
+        this.dispatchEvent(new Event("connectionstatechange"));
+        this.dispatchEvent(new Event("iceconnectionstatechange"));
+        this.dispatchEvent(new Event("signalingstatechange"));
+      });
+      for (const channel of this.__channels) channel.__closeInternal();
+      if (this.__peer && !this.__peer.__closed) {
+        const peer = this.__peer;
+        this.__peer = null;
+        peer.__peer = null;
+        peer.__closeFromPeer();
+      }
+      this.__channels.clear();
+    }
+    __closeFromPeer() {
+      if (this.__closed) return;
+      this.__closed = true;
+      this.__connectionState = "closed";
+      this.__iceConnectionState = "closed";
+      this.__signalingState = "closed";
+      webrtcQueue(() => {
+        this.dispatchEvent(new Event("connectionstatechange"));
+        this.dispatchEvent(new Event("iceconnectionstatechange"));
+        this.dispatchEvent(new Event("signalingstatechange"));
+      });
+      for (const channel of this.__channels) {
+        channel.__closeInternal();
+        if (channel.__peer) channel.__peer.__closeInternal();
+      }
+      this.__channels.clear();
+    }
+    __applyLocalDescription(description) {
+      const type = description.type;
+      if (type === "rollback") {
+        if (this.__signalingState !== "have-local-offer" && this.__signalingState !== "have-remote-pranswer") {
+          throw new DOMException("Cannot rollback in the current signaling state.", "InvalidStateError");
+        }
+        this.__pendingLocalDescription = null;
+        this.__pendingRemoteDescription = null;
+        if (this.__localDescription && (this.__localDescription.type === "offer" ||
+            this.__localDescription.type === "pranswer")) this.__localDescription = null;
+        this.__setSignalingState("stable");
+        return;
+      }
+      const valid = (type === "offer" && this.__signalingState === "stable") ||
+        (type === "answer" && this.__signalingState === "have-remote-offer") ||
+        (type === "pranswer" && this.__signalingState === "have-remote-offer");
+      if (!valid) throw new DOMException("Invalid local description for the current signaling state.", "InvalidStateError");
+      this.__localDescription = description;
+      this.__pendingLocalDescription = type === "offer" || type === "pranswer" ? description : null;
+      if (type === "offer") this.__setSignalingState("have-local-offer");
+      else if (type === "pranswer") this.__setSignalingState("have-local-pranswer");
+      else {
+        this.__pendingLocalDescription = null;
+        this.__setSignalingState("stable");
+      }
+      this.__beginIceGathering();
+      this.__maybeConnect();
+    }
+    __applyRemoteDescription(description) {
+      const type = description.type;
+      if (type === "rollback") {
+        if (this.__signalingState !== "have-remote-offer" && this.__signalingState !== "have-local-pranswer") {
+          throw new DOMException("Cannot rollback in the current signaling state.", "InvalidStateError");
+        }
+        this.__pendingRemoteDescription = null;
+        this.__pendingLocalDescription = null;
+        if (this.__remoteDescription && (this.__remoteDescription.type === "offer" ||
+            this.__remoteDescription.type === "pranswer")) this.__remoteDescription = null;
+        this.__setSignalingState("stable");
+        return;
+      }
+      const valid = (type === "offer" && this.__signalingState === "stable") ||
+        (type === "answer" && this.__signalingState === "have-local-offer") ||
+        (type === "pranswer" && this.__signalingState === "have-local-offer");
+      if (!valid) throw new DOMException("Invalid remote description for the current signaling state.", "InvalidStateError");
+      this.__remoteDescription = description;
+      this.__pendingRemoteDescription = type === "offer" || type === "pranswer" ? description : null;
+      const owner = webrtcDescriptionOwner(description);
+      if (owner && owner !== this) this.__linkPeer(owner);
+      if (type === "offer") this.__setSignalingState("have-remote-offer");
+      else if (type === "pranswer") this.__setSignalingState("have-remote-pranswer");
+      else {
+        this.__pendingRemoteDescription = null;
+        this.__setSignalingState("stable");
+      }
+      this.__maybeConnect();
+    }
+    __setSignalingState(value) {
+      if (this.__signalingState === value) return;
+      this.__signalingState = value;
+      webrtcQueue(() => this.dispatchEvent(new Event("signalingstatechange")));
+    }
+    __beginIceGathering() {
+      if (this.__iceGatheringState !== "new") return;
+      this.__iceGatheringState = "gathering";
+      webrtcQueue(() => {
+        this.dispatchEvent(new Event("icegatheringstatechange"));
+        const candidateEvent = new RTCPeerConnectionIceEvent("icecandidate", { candidate: null });
+        this.dispatchEvent(candidateEvent);
+        this.__iceGatheringState = "complete";
+        this.dispatchEvent(new Event("icegatheringstatechange"));
+      });
+    }
+    __attachChannel(channel) {
+      if (!this.__peer) return;
+      this.__pairChannel(channel, this.__peer);
+    }
+    __pairChannel(channel, peer) {
+      if (channel.__peer || !peer || peer.__closed) return;
+      const remote = new RTCDataChannel(
+        webrtcDataChannelConstructionToken, peer, channel.label,
+        { ordered: channel.ordered, maxPacketLifeTime: channel.maxPacketLifeTime,
+          maxRetransmits: channel.maxRetransmits, protocol: channel.protocol,
+          negotiated: channel.negotiated }, channel.id,
+      );
+      channel.__peer = remote;
+      remote.__peer = channel;
+      peer.__channels.add(remote);
+      if (peer.__connectionState === "connected") peer.__openChannels();
+    }
+    __linkPeer(peer) {
+      if (!peer || peer === this || peer.__closed || this.__closed) return;
+      if (this.__peer === peer) return;
+      this.__peer = peer;
+      if (peer.__peer !== this) peer.__peer = this;
+      for (const channel of this.__channels) this.__pairChannel(channel, peer);
+      for (const channel of peer.__channels) peer.__pairChannel(channel, this);
+      this.__maybeConnect();
+      peer.__maybeConnect();
+    }
+    __maybeConnect() {
+      const peer = this.__peer;
+      if (!peer || this.__closed || peer.__closed) return;
+      const localType = this.__localDescription && this.__localDescription.type;
+      const remoteType = this.__remoteDescription && this.__remoteDescription.type;
+      const negotiated = (localType === "offer" && remoteType === "answer") ||
+        (localType === "answer" && remoteType === "offer");
+      if (this.__signalingState !== "stable" || peer.__signalingState !== "stable" || !negotiated) {
+        if (this.__signalingState === "have-local-offer" || this.__signalingState === "have-remote-offer") {
+          webrtcState(this, "__connectionState", "connectionstatechange", "connecting");
+          webrtcState(this, "__iceConnectionState", "iceconnectionstatechange", "checking");
+        }
+        return;
+      }
+      webrtcQueue(() => {
+        if (this.__closed || peer.__closed) return;
+        for (const connection of [this, peer]) {
+          webrtcState(connection, "__connectionState", "connectionstatechange", "connected");
+          webrtcState(connection, "__iceConnectionState", "iceconnectionstatechange", "completed");
+        }
+        this.__openChannels();
+        peer.__openChannels();
+      });
+    }
+    __openChannels() {
+      for (const channel of this.__channels) {
+        if (!channel.__peer || channel.__announced) continue;
+        channel.__announced = true;
+        const remote = channel.__peer;
+        remote.__announced = true;
+        const remoteOwner = remote.__owner;
+        webrtcQueue(() => {
+          if (remote.readyState === "connecting") {
+            const event = new MessageEvent("datachannel", { data: undefined });
+            event.channel = remote;
+            remoteOwner.dispatchEvent(event);
+            remote.__open();
+            channel.__open();
+          }
+        });
+      }
+    }
+    get onconnectionstatechange() { return this.__onconnectionstatechange; }
+    set onconnectionstatechange(callback) { webrtcEventHandler(this, "connectionstatechange", "__onconnectionstatechange", callback); }
+    get onicecandidate() { return this.__onicecandidate; }
+    set onicecandidate(callback) { webrtcEventHandler(this, "icecandidate", "__onicecandidate", callback); }
+    get onicecandidateerror() { return this.__onicecandidateerror; }
+    set onicecandidateerror(callback) { webrtcEventHandler(this, "icecandidateerror", "__onicecandidateerror", callback); }
+    get oniceconnectionstatechange() { return this.__oniceconnectionstatechange; }
+    set oniceconnectionstatechange(callback) { webrtcEventHandler(this, "iceconnectionstatechange", "__oniceconnectionstatechange", callback); }
+    get onicegatheringstatechange() { return this.__onicegatheringstatechange; }
+    set onicegatheringstatechange(callback) { webrtcEventHandler(this, "icegatheringstatechange", "__onicegatheringstatechange", callback); }
+    get onnegotiationneeded() { return this.__onnegotiationneeded; }
+    set onnegotiationneeded(callback) { webrtcEventHandler(this, "negotiationneeded", "__onnegotiationneeded", callback); }
+    get onsignalingstatechange() { return this.__onsignalingstatechange; }
+    set onsignalingstatechange(callback) { webrtcEventHandler(this, "signalingstatechange", "__onsignalingstatechange", callback); }
+    get ondatachannel() { return this.__ondatachannel; }
+    set ondatachannel(callback) { webrtcEventHandler(this, "datachannel", "__ondatachannel", callback); }
+    get ontrack() { return this.__ontrack; }
+    set ontrack(callback) { webrtcEventHandler(this, "track", "__ontrack", callback); }
+    get [Symbol.toStringTag]() { return "RTCPeerConnection"; }
+    static createPair(leftConfiguration = {}, rightConfiguration = {}) {
+      const left = new RTCPeerConnection(leftConfiguration);
+      const right = new RTCPeerConnection(rightConfiguration);
+      left.__linkPeer(right);
+      const pair = [left, right];
+      pair.left = left;
+      pair.right = right;
+      pair.local = left;
+      pair.remote = right;
+      pair.peers = pair;
+      return pair;
+    }
+    static createDeterministicPair(leftConfiguration = {}, rightConfiguration = {}) {
+      return RTCPeerConnection.createPair(leftConfiguration, rightConfiguration);
+    }
+  }
+
+  globalThis.RTCSessionDescription = RTCSessionDescription;
+  globalThis.RTCIceCandidate = RTCIceCandidate;
+  globalThis.RTCPeerConnectionIceEvent = RTCPeerConnectionIceEvent;
+  globalThis.RTCDataChannel = RTCDataChannel;
+  globalThis.RTCPeerConnection = RTCPeerConnection;
+  globalThis.__omoikane_create_webrtc_peer_pair = function(leftConfiguration = {}, rightConfiguration = {}) {
+    return RTCPeerConnection.createPair(leftConfiguration, rightConfiguration);
+  };
+  globalThis.__omoikane_create_webrtc_pair = globalThis.__omoikane_create_webrtc_peer_pair;
+  globalThis.__omoikane_connect_webrtc_peers = function(left, right) {
+    if (!(left instanceof RTCPeerConnection) || !(right instanceof RTCPeerConnection)) {
+      throw new TypeError("RTCPeerConnection peers are required");
+    }
+    left.__linkPeer(right);
+    return [left, right];
+  };
+  RTCPeerConnection.__createPair = RTCPeerConnection.createPair;
+  RTCPeerConnection.__createPeerPair = RTCPeerConnection.createPair;
+  RTCPeerConnection.connectPeers = function(left, right) {
+    return globalThis.__omoikane_connect_webrtc_peers(left, right);
+  };
+
+  // -------------------------------------------------------------------------
+  // WebTransport deterministic client/session/stream core.
+  //
+  // The real WebTransport transport is QUIC/HTTP-3 based and therefore cannot
+  // be provided by the in-process engine without introducing a network
+  // backend.  This model keeps the Web IDL-facing lifecycle useful by
+  // connecting two clients through an explicit same-realm pair hook.  Every
+  // byte delivered through that hook is copied before it is queued, so tests
+  // observe the same ownership boundary as a structured-clone/message path.
+  // There is deliberately no network, TLS, proxy, congestion, or certificate
+  // implementation here.
+  // -------------------------------------------------------------------------
+  const WEBTRANSPORT_CLOSE_CODE_MAX = 0xFFFFFFFF;
+  const WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK = 16;
+  const WEBTRANSPORT_MAX_PENDING_WRITES = 64;
+  const WEBTRANSPORT_MAX_DATAGRAM_SIZE = 65536;
+  const WEBTRANSPORT_CONGESTION_CONTROLS = ["default", "throughput"];
+  const WEBTRANSPORT_STREAM_SOURCES = ["stream", "session"];
+
+  function webTransportInvalidState(message = "The WebTransport is closed.") {
+    return new DOMException(message, "InvalidStateError");
+  }
+
+  function webTransportBufferSource(value) {
+    if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    }
+    throw new TypeError("WebTransport data must be an ArrayBuffer or ArrayBufferView");
+  }
+
+  function webTransportNumber(value, fallback, name, max = Infinity) {
+    if (value === undefined) return fallback;
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 0 || number > max) {
+      throw new TypeError(`${name} must be a non-negative integer`);
+    }
+    return number;
+  }
+
+  function webTransportReadable(hwm = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK, onConsume = null, onCancel = null, target = null) {
+    const stream = target || new ReadableStream();
+    stream.__webTransportHighWaterMark = hwm;
+    stream.__webTransportClosed = false;
+    stream.__webTransportPending = [];
+    stream.__webTransportCanEnqueue = () =>
+      !stream.__webTransportClosed && stream._queue.length < stream.__webTransportHighWaterMark;
+    stream.__webTransportEnqueue = value => {
+      if (!stream.__webTransportCanEnqueue()) return false;
+      stream._controller.enqueue(value);
+      return true;
+    };
+    stream.__webTransportFlush = () => {
+      while (stream.__webTransportPending.length && stream.__webTransportCanEnqueue()) {
+        const pending = stream.__webTransportPending.shift();
+        if (stream.__webTransportEnqueue(pending.value)) pending.resolve();
+        else pending.reject(webTransportInvalidState());
+      }
+    };
+    stream.__webTransportClose = () => {
+      if (stream.__webTransportClosed) return;
+      stream.__webTransportClosed = true;
+      stream._controller.close();
+      for (const pending of stream.__webTransportPending.splice(0)) {
+        pending.reject(webTransportInvalidState());
+      }
+    };
+    stream.__webTransportError = reason => {
+      if (stream.__webTransportClosed) return;
+      stream.__webTransportClosed = true;
+      stream._controller.error(reason);
+      for (const pending of stream.__webTransportPending.splice(0)) pending.reject(reason);
+    };
+    const originalGetReader = stream.getReader.bind(stream);
+    stream.getReader = function(...args) {
+      const reader = originalGetReader(...args);
+      const originalRead = reader.read.bind(reader);
+      reader.read = function(...readArgs) {
+        return originalRead(...readArgs).then(result => {
+          if (result && !result.done) {
+            if (typeof onConsume === "function") onConsume();
+            stream.__webTransportFlush();
+          }
+          return result;
+        });
+      };
+      const originalCancel = reader.cancel.bind(reader);
+      reader.cancel = function(reason) {
+        return originalCancel(reason);
+      };
+      return reader;
+    };
+    const originalCancel = stream.cancel.bind(stream);
+    stream.cancel = function(reason) {
+      if (!stream.__webTransportClosed) {
+        if (typeof onCancel === "function") onCancel(reason);
+        stream.__webTransportClose();
+      }
+      return originalCancel(reason);
+    };
+    return stream;
+  }
+
+  class WebTransportError extends Error {
+    constructor(init = {}) {
+      const source = typeof init === "object" && init !== null ? init : { message: init };
+      super(source.message === undefined ? "" : String(source.message));
+      this.name = "WebTransportError";
+      this.source = WEBTRANSPORT_STREAM_SOURCES.includes(source.source) ? source.source : "stream";
+      this.streamErrorCode = source.streamErrorCode === undefined || source.streamErrorCode === null
+        ? null : webTransportNumber(source.streamErrorCode, 0, "streamErrorCode", WEBTRANSPORT_CLOSE_CODE_MAX);
+    }
+    get [Symbol.toStringTag]() { return "WebTransportError"; }
+  }
+
+  class WebTransportCloseInfo {
+    constructor(init = {}) {
+      if (init == null || typeof init !== "object") throw new TypeError("WebTransportCloseInfo must be an object");
+      const closeCode = webTransportNumber(init.closeCode, 0, "closeCode", WEBTRANSPORT_CLOSE_CODE_MAX);
+      const reason = init.reason === undefined ? "" : String(init.reason);
+      if (reason.length > 1024) throw new TypeError("WebTransport close reason is too long");
+      Object.defineProperty(this, "closeCode", { configurable: false, enumerable: true, writable: false, value: closeCode });
+      Object.defineProperty(this, "reason", { configurable: false, enumerable: true, writable: false, value: reason });
+    }
+    toJSON() { return { closeCode: this.closeCode, reason: this.reason }; }
+    get [Symbol.toStringTag]() { return "WebTransportCloseInfo"; }
+  }
+
+  class WebTransportReadableStream extends ReadableStream {
+    constructor(hwm, onConsume = null, onCancel = null) {
+      super();
+      return webTransportReadable(hwm, onConsume, onCancel, this);
+    }
+    get [Symbol.toStringTag]() { return "ReadableStream"; }
+  }
+
+  class WebTransportWritableStream extends WritableStream {
+    constructor(send, close, abort) {
+      super({});
+      this.__webTransportSend = send;
+      this.__webTransportClose = close;
+      this.__webTransportAbort = abort;
+    }
+    _write(chunk) {
+      if (this._closed) return Promise.reject(webTransportInvalidState());
+      try { return Promise.resolve(this.__webTransportSend(chunk)); }
+      catch (error) { return Promise.reject(error); }
+    }
+    _close() {
+      if (this._closed) return Promise.resolve();
+      this._closed = true;
+      let result;
+      try { result = this.__webTransportClose(); }
+      catch (error) { this._closedResolve(); return Promise.reject(error); }
+      this._closedResolve();
+      return Promise.resolve(result);
+    }
+    abort(reason) {
+      if (this._closed) return Promise.resolve();
+      this._closed = true;
+      let result;
+      try { result = this.__webTransportAbort(reason); }
+      catch (error) { this._closedResolve(); return Promise.reject(error); }
+      this._closedResolve();
+      return Promise.resolve(result);
+    }
+    get [Symbol.toStringTag]() { return "WritableStream"; }
+  }
+
+  class WebTransportReceiveStream extends WebTransportReadableStream {
+    get [Symbol.toStringTag]() { return "WebTransportReceiveStream"; }
+  }
+
+  class WebTransportSendStream extends WebTransportWritableStream {
+    get [Symbol.toStringTag]() { return "WebTransportSendStream"; }
+  }
+
+  class WebTransportDatagrams {
+    constructor(owner) {
+      this.__owner = owner;
+      this.__incomingHighWaterMark = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK;
+      this.__outgoingHighWaterMark = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK;
+      this.incomingMaxAge = 0;
+      this.outgoingMaxAge = 0;
+      this.incomingHighWaterMark = this.__incomingHighWaterMark;
+      this.outgoingHighWaterMark = this.__outgoingHighWaterMark;
+      this.readable = owner.__datagramReadable;
+      this.writable = new WebTransportWritableStream(
+        value => owner.__writeDatagram(value),
+        () => owner.__closeDatagrams(),
+        reason => owner.__abortDatagrams(reason),
+      );
+    }
+    get incomingHighWaterMark() { return this.__incomingHighWaterMark; }
+    set incomingHighWaterMark(value) {
+      this.__incomingHighWaterMark = webTransportNumber(value, WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK, "incomingHighWaterMark", 65536);
+      if (this.readable) this.readable.__webTransportHighWaterMark = this.__incomingHighWaterMark;
+    }
+    get outgoingHighWaterMark() { return this.__outgoingHighWaterMark; }
+    set outgoingHighWaterMark(value) {
+      this.__outgoingHighWaterMark = webTransportNumber(value, WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK, "outgoingHighWaterMark", 65536);
+    }
+    get [Symbol.toStringTag]() { return "WebTransportDatagrams"; }
+  }
+
+  class WebTransportBidirectionalStream {
+    constructor(owner, readHighWaterMark = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK) {
+      this.__owner = owner;
+      this.__peerStream = null;
+      this.__writableClosed = false;
+      this.__readableClosed = false;
+      this.readable = new WebTransportReceiveStream(
+        readHighWaterMark,
+        () => this.__flushReadable(),
+        reason => this.__cancelReadable(reason),
+      );
+      this.writable = new WebTransportSendStream(
+        value => this.__write(value),
+        () => this.__closeWritable(),
+        reason => this.__abortWritable(reason),
+      );
+    }
+    __write(value) {
+      if (this.__writableClosed || this.__owner.__closed) return Promise.reject(webTransportInvalidState());
+      const bytes = webTransportBufferSource(value);
+      if (!this.__peerStream || this.__peerStream.__owner.__closed) return Promise.reject(webTransportInvalidState("The peer WebTransport is closed."));
+      return this.__peerStream.__enqueueReadable(bytes);
+    }
+    __closeWritable() {
+      if (this.__writableClosed) return Promise.resolve();
+      this.__writableClosed = true;
+      if (this.__peerStream) this.__peerStream.__closeReadable();
+      return Promise.resolve();
+    }
+    __abortWritable(reason) {
+      if (this.__writableClosed) return Promise.resolve();
+      this.__writableClosed = true;
+      if (this.__peerStream) this.__peerStream.__errorReadable(new WebTransportError({
+        source: "stream", message: reason === undefined ? "The stream was aborted." : String(reason),
+      }));
+      return Promise.resolve();
+    }
+    __enqueueReadable(value) {
+      if (this.__readableClosed) return Promise.reject(webTransportInvalidState("The receive stream is closed."));
+      const pending = this.readable.__webTransportEnqueue(value);
+      if (pending) return Promise.resolve();
+      if (this.readable.__webTransportPending.length >= WEBTRANSPORT_MAX_PENDING_WRITES) {
+        return Promise.reject(new WebTransportError({ source: "stream", message: "The receive stream backpressure limit was exceeded." }));
+      }
+      return new Promise((resolve, reject) => {
+        this.readable.__webTransportPending.push({ value, resolve, reject });
+      });
+    }
+    __flushReadable() { this.readable.__webTransportFlush(); }
+    __closeReadable() {
+      if (this.__readableClosed) return;
+      this.__readableClosed = true;
+      this.readable.__webTransportClose();
+    }
+    __errorReadable(reason) {
+      if (this.__readableClosed) return;
+      this.__readableClosed = true;
+      this.readable.__webTransportError(reason);
+    }
+    __cancelReadable(reason) {
+      if (this.__peerStream && !this.__peerStream.__writableClosed) this.__peerStream.__abortWritable(reason);
+    }
+    __closeInternal(reason = undefined) {
+      if (!this.__writableClosed) {
+        this.__writableClosed = true;
+        if (this.__peerStream && !this.__peerStream.__readableClosed) {
+          if (reason === undefined) this.__peerStream.__closeReadable();
+          else this.__peerStream.__errorReadable(reason);
+        }
+      }
+      this.__closeReadable();
+    }
+    get [Symbol.toStringTag]() { return "WebTransportBidirectionalStream"; }
+  }
+
+  class WebTransport extends EventTarget {
+    constructor(url, options = {}) {
+      super();
+      if (options == null || typeof options !== "object") throw new TypeError("WebTransport options must be an object");
+      this.url = WebTransport.__normalizeURL(url);
+      const congestionControl = options.congestionControl === undefined ? "default" : String(options.congestionControl);
+      if (!WEBTRANSPORT_CONGESTION_CONTROLS.includes(congestionControl)) {
+        throw new TypeError("Invalid WebTransport congestionControl");
+      }
+      if (options.requireUnreliable !== undefined && typeof options.requireUnreliable !== "boolean") {
+        throw new TypeError("WebTransport requireUnreliable must be a boolean");
+      }
+      if (options.allowPooling !== undefined && typeof options.allowPooling !== "boolean") {
+        throw new TypeError("WebTransport allowPooling must be a boolean");
+      }
+      if (options.serverCertificateHashes !== undefined) {
+        if (options.serverCertificateHashes == null || typeof options.serverCertificateHashes[Symbol.iterator] !== "function") {
+          throw new TypeError("serverCertificateHashes must be iterable");
+        }
+        for (const hash of options.serverCertificateHashes) {
+          if (hash == null || typeof hash !== "object" || typeof hash.algorithm !== "string" || hash.value === undefined) {
+            throw new TypeError("Invalid serverCertificateHashes entry");
+          }
+          webTransportBufferSource(hash.value);
+        }
+      }
+      this.congestionControl = congestionControl;
+      this.requireUnreliable = options.requireUnreliable === true;
+      this.allowPooling = options.allowPooling !== false;
+      this.__state = "connecting";
+      this.__peer = null;
+      this.__closed = false;
+      this.__streams = new Set();
+      this.__pendingDatagrams = [];
+      this.__pendingIncomingBidirectional = [];
+      this.__pendingIncomingUnidirectional = [];
+      this.__datagramReadable = webTransportReadable(WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK,
+        () => this.__flushDatagrams(), reason => this.__abortDatagrams(reason));
+      this.__datagramReadable.__webTransportHighWaterMark = WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK;
+      this.datagrams = new WebTransportDatagrams(this);
+      this.incomingBidirectionalStreams = webTransportReadable(WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK,
+        () => this.__flushIncoming(this.__pendingIncomingBidirectional, this.incomingBidirectionalStreams));
+      this.incomingUnidirectionalStreams = webTransportReadable(WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK,
+        () => this.__flushIncoming(this.__pendingIncomingUnidirectional, this.incomingUnidirectionalStreams));
+      this.__incomingBidirectional = this.incomingBidirectionalStreams;
+      this.__incomingUnidirectional = this.incomingUnidirectionalStreams;
+      this.__ready = new Promise((resolve, reject) => { this.__readyResolve = resolve; this.__readyReject = reject; });
+      this.__closedPromise = new Promise(resolve => { this.__closedResolve = resolve; });
+      this.ready = this.__ready;
+      this.closed = this.__closedPromise;
+      this.draining = false;
+      this.__closeInfo = null;
+      this.__onclose = null;
+      this.__onstatechange = null;
+      this.__onerror = null;
+    }
+    static __normalizeURL(value) {
+      let parsed;
+      try {
+        parsed = value instanceof URL ? new URL(value.href) : new URL(String(value), globalThis.location && globalThis.location.href || "https://omoikane.invalid/");
+      } catch (_) {
+        throw new TypeError("Invalid WebTransport URL");
+      }
+      if (parsed.protocol !== "https:") throw new DOMException("WebTransport requires a secure URL.", "SecurityError");
+      if (parsed.username || parsed.password || parsed.hash) throw new TypeError("Invalid WebTransport URL");
+      return parsed.href;
+    }
+    __dispatchState() {
+      const event = new Event("statechange");
+      this.dispatchEvent(event);
+      if (typeof this.__onstatechange === "function") this.__onstatechange.call(this, event);
+    }
+    __connect(peer) {
+      if (this.__closed || !peer || peer.__closed) return;
+      if (this.__peer === peer && this.__state === "connected") return;
+      this.__peer = peer;
+      this.__state = "connected";
+      queueMicrotask(() => {
+        if (this.__closed) return;
+        this.__readyResolve(this);
+        this.__dispatchState();
+      });
+    }
+    __whenReady(action) {
+      if (this.__closed) return Promise.reject(webTransportInvalidState());
+      if (this.__state === "connected") return Promise.resolve().then(action);
+      return this.ready.then(() => action());
+    }
+    __writeDatagram(value) {
+      if (this.__closed) return Promise.reject(webTransportInvalidState());
+      let bytes;
+      try { bytes = webTransportBufferSource(value); }
+      catch (error) { return Promise.reject(error); }
+      if (bytes.byteLength > WEBTRANSPORT_MAX_DATAGRAM_SIZE) {
+        return Promise.reject(new DOMException("The datagram is too large.", "QuotaExceededError"));
+      }
+      if (this.__state !== "connected") return this.ready.then(() => this.__writeDatagram(bytes));
+      if (!this.__peer || this.__peer.__closed) return Promise.reject(webTransportInvalidState("The peer WebTransport is closed."));
+      return this.__peer.__enqueueDatagram(bytes);
+    }
+    __enqueueDatagram(bytes) {
+      if (this.__closed) return Promise.reject(webTransportInvalidState("The peer WebTransport is closed."));
+      if (this.__datagramReadable.__webTransportEnqueue(new Uint8Array(bytes))) return Promise.resolve();
+      if (this.__pendingDatagrams.length >= WEBTRANSPORT_MAX_PENDING_WRITES) {
+        return Promise.reject(new DOMException("The incoming datagram queue is full.", "QuotaExceededError"));
+      }
+      return new Promise((resolve, reject) => this.__pendingDatagrams.push({ value: new Uint8Array(bytes), resolve, reject }));
+    }
+    __flushDatagrams() {
+      while (this.__pendingDatagrams.length && this.__datagramReadable.__webTransportCanEnqueue()) {
+        const pending = this.__pendingDatagrams.shift();
+        if (this.__datagramReadable.__webTransportEnqueue(pending.value)) pending.resolve();
+        else pending.reject(webTransportInvalidState());
+      }
+    }
+    __closeDatagrams() { return Promise.resolve(); }
+    __abortDatagrams(reason) {
+      const error = reason instanceof WebTransportError ? reason : new WebTransportError({
+        source: "session", message: String(reason === undefined ? "Datagrams were aborted." : reason),
+      });
+      this.__datagramReadable.__webTransportError(error);
+      for (const pending of this.__pendingDatagrams.splice(0)) pending.reject(error);
+      return Promise.resolve();
+    }
+    __flushIncoming(pending, readable) {
+      while (pending.length && readable.__webTransportCanEnqueue()) {
+        const stream = pending.shift();
+        if (!readable.__webTransportEnqueue(stream)) break;
+      }
+    }
+    __enqueueIncoming(readable, pending, stream) {
+      if (this.__closed) {
+        if (typeof stream.__closeInternal === "function") stream.__closeInternal(webTransportInvalidState());
+        else if (typeof stream.__webTransportError === "function") stream.__webTransportError(webTransportInvalidState());
+        return;
+      }
+      if (!readable.__webTransportEnqueue(stream)) pending.push(stream);
+    }
+    createBidirectionalStream(options = {}) {
+      if (options == null || typeof options !== "object") return Promise.reject(new TypeError("Stream options must be an object"));
+      if (options.sendOrder !== undefined) {
+        try { webTransportNumber(options.sendOrder, 0, "sendOrder"); }
+        catch (error) { return Promise.reject(error); }
+      }
+      return this.__whenReady(() => {
+        if (this.__closed || !this.__peer || this.__peer.__closed) throw webTransportInvalidState();
+        const local = new WebTransportBidirectionalStream(this);
+        const remote = new WebTransportBidirectionalStream(this.__peer);
+        local.__peerStream = remote; remote.__peerStream = local;
+        this.__streams.add(local); this.__peer.__streams.add(remote);
+        this.__peer.__enqueueIncoming(this.__peer.__incomingBidirectional, this.__peer.__pendingIncomingBidirectional, remote);
+        return local;
+      });
+    }
+    createUnidirectionalStream(options = {}) {
+      if (options == null || typeof options !== "object") return Promise.reject(new TypeError("Stream options must be an object"));
+      if (options.sendOrder !== undefined) {
+        try { webTransportNumber(options.sendOrder, 0, "sendOrder"); }
+        catch (error) { return Promise.reject(error); }
+      }
+      return this.__whenReady(() => {
+        if (this.__closed || !this.__peer || this.__peer.__closed) throw webTransportInvalidState();
+        const local = { __owner: this, __writableClosed: false, __peerStream: null };
+        const remote = new WebTransportReceiveStream(WEBTRANSPORT_DEFAULT_HIGH_WATER_MARK,
+          () => remote.__webTransportFlush(), reason => { if (local.__peerStream) local.__peerStream.__abort(reason); });
+        remote.__closeInternal = reason => {
+          if (reason === undefined) remote.__webTransportClose();
+          else remote.__webTransportError(reason);
+        };
+        const send = new WebTransportSendStream(
+          value => {
+            if (local.__writableClosed || this.__closed) return Promise.reject(webTransportInvalidState());
+            const bytes = webTransportBufferSource(value);
+            return remote.__webTransportEnqueue(bytes) ? Promise.resolve() : new Promise((resolve, reject) => {
+              if (remote.__webTransportPending.length >= WEBTRANSPORT_MAX_PENDING_WRITES) reject(new WebTransportError({ source: "stream", message: "The receive stream backpressure limit was exceeded." }));
+              else remote.__webTransportPending.push({ value: bytes, resolve, reject });
+            });
+          },
+          () => { local.__writableClosed = true; remote.__webTransportClose(); },
+          reason => { local.__writableClosed = true; remote.__webTransportError(new WebTransportError({ source: "stream", message: String(reason === undefined ? "The stream was aborted." : reason) })); },
+        );
+        local.__closeInternal = reason => {
+          if (local.__writableClosed) return;
+          local.__writableClosed = true;
+          if (reason === undefined) remote.__webTransportClose();
+          else remote.__webTransportError(reason);
+        };
+        local.writable = send;
+        local.__peerStream = remote;
+        this.__streams.add(local);
+        this.__peer.__streams.add(remote);
+        this.__peer.__enqueueIncoming(this.__peer.__incomingUnidirectional, this.__peer.__pendingIncomingUnidirectional, remote);
+        return send;
+      });
+    }
+    close(info = {}) {
+      if (info == null || typeof info !== "object") throw new TypeError("WebTransportCloseInfo must be an object");
+      if (this.__closed) return;
+      const closeInfo = new WebTransportCloseInfo(info);
+      this.__closed = true;
+      this.__state = "closed";
+      this.__closeInfo = closeInfo;
+      this.draining = false;
+      this.__readyReject(webTransportInvalidState("The WebTransport was closed before it became ready."));
+      this.__datagramReadable.__webTransportClose();
+      this.__incomingBidirectional.__webTransportClose();
+      this.__incomingUnidirectional.__webTransportClose();
+      this.__datagramReadable._queue.length = 0;
+      this.__incomingBidirectional._queue.length = 0;
+      this.__incomingUnidirectional._queue.length = 0;
+      if (this.datagrams && this.datagrams.writable && !this.datagrams.writable._closed) {
+        this.datagrams.writable._close();
+      }
+      for (const pending of this.__pendingDatagrams.splice(0)) pending.reject(webTransportInvalidState());
+      for (const stream of this.__streams) stream.__closeInternal();
+      this.__pendingIncomingBidirectional.length = 0;
+      this.__pendingIncomingUnidirectional.length = 0;
+      this.__streams.clear();
+      this.__closedResolve(closeInfo);
+      queueMicrotask(() => {
+        const event = new Event("close");
+        this.dispatchEvent(event);
+        if (typeof this.__onclose === "function") this.__onclose.call(this, event);
+      });
+      if (this.__peer && !this.__peer.__closed) this.__peer.__closeFromPeer(closeInfo);
+      this.__peer = null;
+    }
+    __closeFromPeer(closeInfo) {
+      if (this.__closed) return;
+      this.__closed = true;
+      this.__state = "closed";
+      this.__closeInfo = new WebTransportCloseInfo(closeInfo);
+      this.__readyReject(webTransportInvalidState("The peer WebTransport was closed before this transport became ready."));
+      this.__datagramReadable.__webTransportClose();
+      this.__incomingBidirectional.__webTransportClose();
+      this.__incomingUnidirectional.__webTransportClose();
+      this.__datagramReadable._queue.length = 0;
+      this.__incomingBidirectional._queue.length = 0;
+      this.__incomingUnidirectional._queue.length = 0;
+      if (this.datagrams && this.datagrams.writable && !this.datagrams.writable._closed) {
+        this.datagrams.writable._close();
+      }
+      for (const pending of this.__pendingDatagrams.splice(0)) pending.reject(webTransportInvalidState());
+      for (const stream of this.__streams) stream.__closeInternal();
+      this.__pendingIncomingBidirectional.length = 0;
+      this.__pendingIncomingUnidirectional.length = 0;
+      this.__streams.clear();
+      this.__closedResolve(this.__closeInfo);
+      queueMicrotask(() => {
+        const event = new Event("close");
+        this.dispatchEvent(event);
+        if (typeof this.__onclose === "function") this.__onclose.call(this, event);
+      });
+      this.__peer = null;
+    }
+    get maxDatagramSize() { return WEBTRANSPORT_MAX_DATAGRAM_SIZE; }
+    get onclose() { return this.__onclose; }
+    set onclose(callback) { this.__onclose = typeof callback === "function" ? callback : null; }
+    get onstatechange() { return this.__onstatechange; }
+    set onstatechange(callback) { this.__onstatechange = typeof callback === "function" ? callback : null; }
+    get onerror() { return this.__onerror; }
+    set onerror(callback) { this.__onerror = typeof callback === "function" ? callback : null; }
+    get [Symbol.toStringTag]() { return "WebTransport"; }
+    static createPair(leftURL = "https://omoikane.invalid/transport", rightURL = leftURL, leftOptions = {}, rightOptions = {}) {
+      const left = new WebTransport(leftURL, leftOptions);
+      const right = new WebTransport(rightURL, rightOptions);
+      left.__connect(right); right.__connect(left);
+      const pair = [left, right];
+      pair.left = left; pair.right = right; pair.local = left; pair.remote = right; pair.peers = pair;
+      return pair;
+    }
+    static createDeterministicPair(leftURL, rightURL, leftOptions, rightOptions) {
+      return WebTransport.createPair(leftURL, rightURL, leftOptions, rightOptions);
+    }
+  }
+
+  globalThis.WebTransportError = WebTransportError;
+  globalThis.WebTransportCloseInfo = WebTransportCloseInfo;
+  globalThis.WebTransportDatagrams = WebTransportDatagrams;
+  globalThis.WebTransportBidirectionalStream = WebTransportBidirectionalStream;
+  globalThis.WebTransportReceiveStream = WebTransportReceiveStream;
+  globalThis.WebTransportSendStream = WebTransportSendStream;
+  globalThis.WebTransport = WebTransport;
+  globalThis.__omoikane_create_webtransport_pair = function(leftURL, rightURL, leftOptions, rightOptions) {
+    return WebTransport.createPair(leftURL, rightURL, leftOptions, rightOptions);
+  };
+  globalThis.__omoikane_connect_webtransport_peers = function(left, right) {
+    if (!(left instanceof WebTransport) || !(right instanceof WebTransport)) throw new TypeError("WebTransport peers are required");
+    left.__connect(right); right.__connect(left);
+    return [left, right];
+  };
+  WebTransport.__createPair = WebTransport.createPair;
+  WebTransport.__createPeerPair = WebTransport.createPair;
+  WebTransport.connectPeers = globalThis.__omoikane_connect_webtransport_peers;
 
   // Dedicated workers execute in a separate Boa realm. Passing a JsValue
   // object directly between those realms would retain the sender's
@@ -8563,6 +15467,113 @@
   globalThis.MessagePort = MessagePort;
   globalThis.MessageChannel = MessageChannel;
 
+  // SharedWorker ports are message endpoints whose other side lives in a
+  // dedicated shared-worker runtime.  The native bridge carries only the
+  // context-independent structured-clone wire; this realm owns the endpoint
+  // object and its started/queued state.
+  const createSharedWorkerPort = (() => {
+    // Keep the concrete endpoint private.  SharedWorker callers obtain it via
+    // `worker.port` / connect events, while its MessagePort superclass still
+    // provides the expected `instanceof MessagePort` behavior.
+    const sharedWorkerPortConstructionToken = {};
+    class SharedWorkerPort extends MessagePort {
+      constructor(token, id) {
+        if (token !== sharedWorkerPortConstructionToken) throw new TypeError("Illegal constructor");
+        super(messagePortConstructionToken);
+        this._id = String(id);
+        this._started = false;
+        this._closed = false;
+        this._pendingMessages = [];
+        this._onmessage = null;
+        this._onmessageerror = null;
+      }
+      postMessage(message, options = undefined) {
+        if (this._closed) throw new DOMException("The SharedWorker port is closed.", "InvalidStateError");
+        const wire = __omoikane_encode_worker_message(message, options);
+        __omoikane_shared_worker_port_post(this._id, wire);
+      }
+      start() {
+        if (this._closed || this._started) return;
+        this._started = true;
+        for (const data of this._pendingMessages.splice(0)) {
+          __omoikane_enqueue_posted_message(this, data);
+        }
+      }
+      close() {
+        if (this._closed) return;
+        this._closed = true;
+        this._pendingMessages.length = 0;
+        __omoikane_shared_worker_port_close(this._id);
+        if (typeof globalThis.__omoikane_remove_shared_worker_port === "function") {
+          globalThis.__omoikane_remove_shared_worker_port(this._id, this);
+        }
+      }
+      _queueMessage(data) {
+        if (this._closed) return;
+        if (!this._started) { this._pendingMessages.push(data); return; }
+        __omoikane_enqueue_posted_message(this, data);
+      }
+      _acceptMessage(data) {
+        if (this._closed) return;
+        this.dispatchEvent(new MessageEvent("message", {
+          data,
+          origin: "",
+          source: null,
+          ports: [],
+        }));
+      }
+      get onmessage() { return this._onmessage; }
+      set onmessage(callback) {
+        if (this._onmessage) this.removeEventListener("message", this._onmessage);
+        this._onmessage = typeof callback === "function" ? callback : null;
+        if (this._onmessage) {
+          this.addEventListener("message", this._onmessage);
+          this.start();
+        }
+      }
+      get onmessageerror() { return this._onmessageerror; }
+      set onmessageerror(callback) {
+        if (this._onmessageerror) this.removeEventListener("messageerror", this._onmessageerror);
+        this._onmessageerror = typeof callback === "function" ? callback : null;
+        if (this._onmessageerror) this.addEventListener("messageerror", this._onmessageerror);
+      }
+      get [Symbol.toStringTag]() { return "MessagePort"; }
+    }
+    return function createSharedWorkerPort(id) {
+      return new SharedWorkerPort(sharedWorkerPortConstructionToken, id);
+    };
+  })();
+  globalThis.MessagePort = MessagePort;
+
+  class SharedWorker extends EventTarget {
+    constructor(url, options = undefined) {
+      super();
+      if (arguments.length < 1) throw new TypeError("SharedWorker requires a script URL");
+      const requested = String(url);
+      let name = "";
+      if (typeof options === "string") name = options;
+      else if (options && options.name !== undefined) name = String(options.name);
+      if (options && options.type !== undefined && String(options.type) !== "classic") {
+        throw new TypeError("Only classic SharedWorkers are supported");
+      }
+      this.url = requested;
+      this.name = name;
+      this.__closed = false;
+      this.__id = String(__omoikane_shared_worker_connect(requested, name));
+      this.port = createSharedWorkerPort(this.__id);
+      __omoikane_shared_worker_bind_port(this.__id, this.port, this);
+      this.onerror = null;
+    }
+    get [Symbol.toStringTag]() { return "SharedWorker"; }
+    set onerror(callback) {
+      if (this.__onerror) this.removeEventListener("error", this.__onerror);
+      this.__onerror = typeof callback === "function" ? callback : null;
+      if (this.__onerror) this.addEventListener("error", this.__onerror);
+    }
+    get onerror() { return this.__onerror || null; }
+  }
+  globalThis.SharedWorker = SharedWorker;
+
   // BroadcastChannel endpoints are registered natively by origin/name.  The
   // native side only queues a context-independent structured-clone wire; the
   // target runtime decodes it when its posted-message task runs, preserving
@@ -8676,12 +15687,33 @@
       "HTMLImageElement", "HTMLIFrameElement", "HTMLScriptElement", "SVGElement",
       "SVGSVGElement", "HTMLTemplateElement", "HTMLFormElement", "HTMLInputElement",
       "HTMLTextAreaElement", "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
+      "HTMLMediaElement", "HTMLAudioElement", "HTMLVideoElement", "Audio",
+      "MediaError", "AudioContext", "AudioNode", "AudioParam", "AudioDestinationNode",
+      "GainNode", "OscillatorNode",
+      "Geolocation", "GeolocationCoordinates", "GeolocationPosition",
+      "GeolocationPositionError",
+      "Notification",
     ]) {
       try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
     }
     try { delete globalThis.getComputedStyle; } catch (_) { globalThis.getComputedStyle = undefined; }
     try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
+    // Async Clipboard is a Window-only surface in this runtime. Keep the
+    // worker navigator object, but do not expose a page clipboard handle from
+    // a DedicatedWorkerGlobalScope.
+    try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
+    try { if (globalThis.navigator) delete globalThis.navigator.geolocation; } catch (_) {}
+    try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
+    try { delete globalThis.__omoikane_dispatch_notification_click; } catch (_) {}
+    for (const name of ["Geolocation", "GeolocationCoordinates", "GeolocationPosition", "GeolocationPositionError"]) {
+      try { delete globalThis[name]; } catch (_) { globalThis[name] = undefined; }
+    }
     try { delete globalThis.__omoikane_install_window_named_properties; } catch (_) {}
+    Object.defineProperty(globalThis, "isSecureContext", {
+      configurable: true,
+      enumerable: true,
+      get() { return nativeIsSecureContext(); },
+    });
     Object.defineProperty(globalThis, "_listeners", {
       configurable: true,
       value: new Map(),
@@ -8728,6 +15760,198 @@
     };
     globalThis.close = function() {
       __omoikane_worker_close();
+    };
+  };
+
+  globalThis.__omoikane_install_shared_worker_global = function(url, sharedWorkerId) {
+    // Reuse the dedicated-worker global sanitisation and then install the
+    // SharedWorkerGlobalScope-specific connect/port surface.
+    globalThis.__omoikane_install_worker_global(url, sharedWorkerId);
+    try { delete globalThis.Worker; } catch (_) { globalThis.Worker = undefined; }
+    try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
+    try { delete globalThis.SharedWorkerPort; } catch (_) { globalThis.SharedWorkerPort = undefined; }
+    globalThis.SharedWorkerGlobalScope = Object;
+    const ports = new Map();
+    globalThis.__omoikane_get_shared_worker_port = function(connectionId) {
+      const id = String(connectionId);
+      let port = ports.get(id);
+      if (!port) {
+        port = createSharedWorkerPort(id);
+        ports.set(id, port);
+      }
+      return port;
+    };
+    globalThis.__omoikane_remove_shared_worker_port = function(connectionId, port) {
+      const id = String(connectionId);
+      if (ports.get(id) === port) ports.delete(id);
+    };
+    let workerOnConnect = null;
+    Object.defineProperty(globalThis, "onconnect", {
+      configurable: true,
+      get() { return workerOnConnect; },
+      set(callback) {
+        if (workerOnConnect) EventTarget.prototype.removeEventListener.call(globalThis, "connect", workerOnConnect);
+        workerOnConnect = typeof callback === "function" ? callback : null;
+        if (workerOnConnect) EventTarget.prototype.addEventListener.call(globalThis, "connect", workerOnConnect);
+      },
+    });
+    globalThis.__omoikane_dispatch_shared_worker_connect = function(connectionId) {
+      const port = globalThis.__omoikane_get_shared_worker_port(connectionId);
+      globalThis.dispatchEvent(new MessageEvent("connect", { ports: [port] }));
+    };
+    // SharedWorkerGlobalScope communicates through the ports in connect
+    // events; a global postMessage call is therefore intentionally inert.
+    globalThis.postMessage = function() {
+      throw new DOMException("SharedWorkerGlobalScope has no owner window.", "InvalidStateError");
+    };
+  };
+
+  // -------------------------------------------------------------------------
+  // Worklet / WorkletGlobalScope core.
+  //
+  // A Worklet owns a separate, same-origin Boa runtime.  `addModule()` is
+  // promise-shaped at the page boundary, while the native side evaluates the
+  // fetched module in FIFO order and drains that realm's microtasks before
+  // resolving the page promise.  The global deliberately exposes no Window or
+  // DOM objects; paint registration is retained as metadata for the
+  // deterministic CSS.paintWorklet seam rather than invoking a renderer.
+  // -------------------------------------------------------------------------
+  const workletConstructionToken = {};
+  class WorkletGlobalScope {
+    constructor() { throw new TypeError("Illegal constructor"); }
+    get [Symbol.toStringTag]() { return "WorkletGlobalScope"; }
+  }
+
+  class Worklet {
+    constructor(token) {
+      if (token !== workletConstructionToken) throw new TypeError("Illegal constructor");
+      const id = nativeCreateWorklet();
+      Object.defineProperty(this, "__id", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: String(id),
+      });
+      Object.defineProperty(this, "__terminated", {
+        configurable: false,
+        enumerable: false,
+        writable: true,
+        value: false,
+      });
+    }
+    addModule(url, options = undefined) {
+      if (this.__terminated) {
+        return Promise.reject(new DOMException("Worklet has been torn down.", "InvalidStateError"));
+      }
+      if (arguments.length < 1) return Promise.reject(new TypeError("Worklet.addModule requires a module URL"));
+      if (options !== undefined && (options === null || typeof options !== "object")) {
+        return Promise.reject(new TypeError("Worklet.addModule options must be an object"));
+      }
+      if (options && options.credentials !== undefined &&
+          !["omit", "same-origin", "include"].includes(String(options.credentials))) {
+        return Promise.reject(new TypeError("Unsupported Worklet credentials mode"));
+      }
+      let status;
+      try {
+        status = JSON.parse(nativeWorkletAddModule(this.__id, String(url)));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return Promise.resolve().then(() => {
+        if (!status || status.ok !== true) {
+          const name = status && status.name ? String(status.name) : "OperationError";
+          const message = status && status.message ? String(status.message) : "Worklet module failed";
+          throw new DOMException(message, name);
+        }
+        return undefined;
+      });
+    }
+    get registeredNames() {
+      try {
+        const names = JSON.parse(nativeWorkletRegisteredNames(this.__id));
+        return Object.freeze(Array.isArray(names) ? names.map(String) : []);
+      } catch (_) {
+        return Object.freeze([]);
+      }
+    }
+    get moduleCount() {
+      try { return Number(nativeWorkletModuleCount(this.__id)); }
+      catch (_) { return 0; }
+    }
+    teardown() {
+      if (this.__terminated) return Promise.resolve();
+      let result = false;
+      try { result = !!nativeWorkletTeardown(this.__id); } catch (_) {}
+      this.__terminated = true;
+      // Teardown is deliberately promise-shaped so callers can order it after
+      // the final addModule() checkpoint and observe it deterministically.
+      return Promise.resolve().then(() => undefined);
+    }
+    terminate() { return this.teardown(); }
+    get [Symbol.toStringTag]() { return "Worklet"; }
+  }
+  globalThis.Worklet = Worklet;
+  globalThis.WorkletGlobalScope = WorkletGlobalScope;
+
+  // CSS.paintWorklet is a stable Worklet instance.  Keep this assignment near
+  // the Worklet definition because the CSS namespace itself is created much
+  // earlier in the bootstrap.
+  if (globalThis.CSS && typeof globalThis.CSS === "object") {
+    Object.defineProperty(globalThis.CSS, "paintWorklet", {
+      configurable: true,
+      enumerable: true,
+      writable: false,
+      value: new Worklet(workletConstructionToken),
+    });
+  }
+
+  globalThis.__omoikane_install_worklet_global = function(url, workletId) {
+    // Worklets share language primitives with workers but are not message
+    // endpoints. Reusing the sanitizer guarantees `document` and `window` are
+    // absent while preserving timers, URL, structuredClone and microtasks.
+    globalThis.__omoikane_install_worker_global(url, workletId);
+    try { delete globalThis.Worker; } catch (_) { globalThis.Worker = undefined; }
+    try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
+    try { delete globalThis.SharedWorkerGlobalScope; } catch (_) {}
+    try { delete globalThis.Worklet; } catch (_) { globalThis.Worklet = undefined; }
+    try { delete globalThis.WorkletGlobalScope; } catch (_) {}
+    try { delete globalThis.CSS; } catch (_) { globalThis.CSS = undefined; }
+    try { delete globalThis.onmessage; } catch (_) {}
+    try { delete globalThis.postMessage; } catch (_) {}
+    try { delete globalThis.close; } catch (_) {}
+    const nativeRegister = nativeWorkletRegister;
+    const registrations = new Map();
+    const scope = class WorkletGlobalScope {};
+    globalThis.WorkletGlobalScope = scope;
+    globalThis.__omoikane_worklet_registrations = registrations;
+    globalThis.registerPaint = function(name, paintCtor, inputProperties = [], inputArguments = []) {
+      const key = String(name);
+      if (!key) throw new DOMException("A paint worklet name is required.", "SyntaxError");
+      if (typeof paintCtor !== "function") throw new TypeError("Paint definition must be callable");
+      if (registrations.has(key)) throw new DOMException("Paint name already registered.", "InvalidModificationError");
+      if (!Array.isArray(inputProperties) || !Array.isArray(inputArguments)) {
+        throw new TypeError("Paint input lists must be arrays");
+      }
+      if (typeof nativeRegister !== "function" || !nativeRegister(workletId, key)) {
+        throw new DOMException("WorkletGlobalScope has been torn down.", "InvalidStateError");
+      }
+      registrations.set(key, Object.freeze({
+        name: key,
+        constructor: paintCtor,
+        inputProperties: Object.freeze(inputProperties.map(String)),
+        inputArguments: Object.freeze(inputArguments.map(String)),
+      }));
+    };
+    // Generic registration is useful to deterministic Worklet consumers that
+    // do not need the paint-specific constructor contract.
+    globalThis.registerWorklet = function(name, value = undefined) {
+      const key = String(name);
+      if (!key) throw new DOMException("A worklet name is required.", "SyntaxError");
+      if (registrations.has(key)) throw new DOMException("Worklet name already registered.", "InvalidModificationError");
+      if (typeof nativeRegister !== "function" || !nativeRegister(workletId, key)) {
+        throw new DOMException("WorkletGlobalScope has been torn down.", "InvalidStateError");
+      }
+      registrations.set(key, Object.freeze({ name: key, value }));
     };
   };
 
@@ -8940,6 +16164,7 @@
     text() { return Promise.resolve(this.__text()); }
     arrayBuffer() { return Promise.resolve(this.__bytes.slice().buffer); }
     bytes() { return Promise.resolve(this.__bytes.slice()); }
+    stream() { return readableByteStream(this.__bytes); }
     // Synchronous UTF-8 decode used by the platform internals that already hold
     // the bytes (`XMLHttpRequest.responseText`, fetch body text).
     __text() { return blobTextDecoder.decode(this.__bytes); }
@@ -8962,23 +16187,157 @@
     get [Symbol.toStringTag]() { return "File"; }
   }
 
-  // Read-only, index-accessible list of files. Omoikane has no file picker, so a
-  // file control's list is always empty; the type exists so pages that reach for
-  // `input.files.length` behave instead of throwing.
+  // Read-only, index-accessible list of files. The list itself is immutable from
+  // script, while DataTransfer keeps one live instance and refreshes its indexed
+  // view when items are added or removed.
   class FileList {
     constructor(files = []) {
-      Object.defineProperty(this, "__files", { value: Array.from(files) });
+      Object.defineProperty(this, "__files", { value: [], configurable: false });
+      this.__replace(files);
+    }
+    __replace(files) {
+      for (let index = 0; index < this.__files.length; index++) delete this[index];
+      this.__files.splice(0, this.__files.length, ...Array.from(files));
       for (let index = 0; index < this.__files.length; index++) {
-        Object.defineProperty(this, index, { value: this.__files[index], enumerable: true });
+        Object.defineProperty(this, index, {
+          configurable: true, enumerable: true, value: this.__files[index], writable: false,
+        });
       }
     }
     get length() { return this.__files.length; }
     item(index) {
-      const position = Math.trunc(Number(index)) || 0;
-      return this.__files[position] ?? null;
+      const number = Number(index);
+      if (!Number.isFinite(number) || number < 0) return null;
+      return this.__files[Math.trunc(number)] ?? null;
     }
     [Symbol.iterator]() { return this.__files[Symbol.iterator](); }
     get [Symbol.toStringTag]() { return "FileList"; }
+  }
+
+  class DataTransferItem {
+    constructor(kind, type, value) {
+      this.__kind = kind;
+      this.__type = type;
+      this.__value = value;
+    }
+    get kind() { return this.__kind; }
+    get type() { return this.__type; }
+    getAsFile() { return this.__kind === "file" ? this.__value : null; }
+    getAsString(callback) {
+      if (typeof callback !== "function") throw new TypeError("getAsString callback must be callable");
+      if (this.__kind !== "string") {
+        queueMicrotask(() => callback(null));
+        return;
+      }
+      const value = this.__value;
+      queueMicrotask(() => callback(value));
+    }
+    webkitGetAsEntry() { return null; }
+    get [Symbol.toStringTag]() { return "DataTransferItem"; }
+  }
+
+  class DataTransferItemList {
+    constructor(owner) {
+      this.__owner = owner;
+      this.__items = [];
+    }
+    __syncIndices() {
+      for (const key of Object.keys(this)) {
+        if (/^\d+$/.test(key)) delete this[key];
+      }
+      for (let index = 0; index < this.__items.length; index++) {
+        Object.defineProperty(this, index, {
+          configurable: true, enumerable: true, get: () => this.__items[index],
+        });
+      }
+    }
+    get length() { return this.__items.length; }
+    item(index) {
+      const number = Number(index);
+      if (!Number.isFinite(number) || number < 0) return null;
+      return this.__items[Math.trunc(number)] ?? null;
+    }
+    add(data, type = undefined) {
+      let item;
+      if (data instanceof File) {
+        if (type !== undefined) throw new TypeError("A File item does not accept a type argument");
+        item = new DataTransferItem("file", data.type, data);
+      } else {
+        if (type === undefined) throw new TypeError("DataTransferItemList.add requires a File or string type");
+        const mime = String(type).toLowerCase();
+        if (!mime) throw new DOMException("The item type must not be empty.", "InvalidStateError");
+        if (this.__items.some(existing => existing.kind === "string" && existing.type === mime)) {
+          throw new DOMException("An item of this type already exists.", "NotSupportedError");
+        }
+        item = new DataTransferItem("string", mime, String(data));
+      }
+      this.__items.push(item);
+      this.__syncIndices();
+      this.__owner.__syncFiles();
+      return item;
+    }
+    remove(index) {
+      const number = Number(index);
+      const position = Math.trunc(number);
+      if (!Number.isFinite(number) || position < 0 || position >= this.__items.length) {
+        throw new DOMException("The item index is out of range.", "IndexSizeError");
+      }
+      this.__items.splice(position, 1);
+      this.__syncIndices();
+      this.__owner.__syncFiles();
+    }
+    clear() {
+      this.__items.length = 0;
+      this.__syncIndices();
+      this.__owner.__syncFiles();
+    }
+    [Symbol.iterator]() { return this.__items[Symbol.iterator](); }
+    get [Symbol.toStringTag]() { return "DataTransferItemList"; }
+  }
+
+  class DataTransfer {
+    constructor() {
+      this.dropEffect = "none";
+      this.effectAllowed = "none";
+      this.__files = new FileList();
+      this.items = new DataTransferItemList(this);
+    }
+    __syncFiles() {
+      this.__files.__replace(this.items.__items
+        .filter(item => item.kind === "file")
+        .map(item => item.getAsFile()));
+    }
+    get files() { return this.__files; }
+    get types() {
+      const types = [];
+      for (const item of this.items) {
+        if (item.kind === "string" && !types.includes(item.type)) types.push(item.type);
+      }
+      if (this.__files.length > 0) types.push("Files");
+      return types;
+    }
+    setData(format, data) {
+      const type = String(format).toLowerCase();
+      const existing = this.items.__items.find(item => item.kind === "string" && item.type === type);
+      if (existing) existing.__value = String(data);
+      else this.items.add(String(data), type);
+    }
+    getData(format) {
+      const type = String(format).toLowerCase();
+      return this.items.__items.find(item => item.kind === "string" && item.type === type)?.__value || "";
+    }
+    clearData(format = undefined) {
+      if (format === undefined) {
+        this.items.__items = this.items.__items.filter(item => item.kind !== "string");
+      } else {
+        const type = String(format).toLowerCase();
+        this.items.__items = this.items.__items.filter(item => !(item.kind === "string" && item.type === type));
+      }
+      this.items.__syncIndices();
+      this.__syncFiles();
+    }
+    setDragImage(_element, _x, _y) {}
+    get [Symbol.toStringTag]() { return "DataTransfer"; }
   }
 
   class ProgressEvent extends Event {
@@ -9127,6 +16486,9 @@
   globalThis.Blob = Blob;
   globalThis.File = File;
   globalThis.FileList = FileList;
+  globalThis.DataTransfer = DataTransfer;
+  globalThis.DataTransferItem = DataTransferItem;
+  globalThis.DataTransferItemList = DataTransferItemList;
   globalThis.FileReader = FileReader;
   globalThis.ProgressEvent = ProgressEvent;
   globalThis.URL.createObjectURL = createObjectURL;
@@ -9344,6 +16706,17 @@
 
   function extractBody(source) {
     if (source === null || source === undefined) return EMPTY_BODY;
+    if (source instanceof ReadableStream) {
+      if (source.locked || source._disturbed) throw new TypeError("ReadableStream body is unusable");
+      if (source._errorSet) throw source._error;
+      // The host keeps Fetch bodies as immutable snapshots.  A stream whose
+      // producer has not closed yet cannot be synchronously extracted without
+      // dropping future chunks, so reject it instead of silently truncating it.
+      if (!source._closed) throw new TypeError("ReadableStream body is not ready");
+      const chunks = source._queue.splice(0);
+      source._markDisturbed();
+      return bodyRecord(null, blobPartsToBytes(chunks), null);
+    }
     if (source instanceof Blob) {
       return bodyRecord(null, source.__bytes, source.type || null);
     }
@@ -9390,6 +16763,156 @@
     return new Blob([bodyAsBytes(body)], { type: headers.get("content-type") ?? "" });
   }
 
+  function bodyStreamFor(owner) {
+    if (bodyIsEmpty(owner.__body)) return null;
+    if (owner.__stream === null) {
+      owner.__stream = readableByteStream(bodyAsBytes(owner.__body), () => {
+        owner.__bodyUsed = true;
+      });
+      if (owner.bodyUsed) {
+        owner.__stream._markDisturbed();
+        owner.__stream._queue.length = 0;
+        owner.__stream._cancelled = true;
+      }
+    }
+    return owner.__stream;
+  }
+
+  function bodyIsDisturbed(owner) {
+    return owner.bodyUsed || (owner.__stream !== null &&
+      (owner.__stream._disturbed || owner.__stream.locked));
+  }
+
+  function disturbBody(owner) {
+    owner.__bodyUsed = true;
+    if (owner.__stream !== null) {
+      owner.__stream._markDisturbed();
+      owner.__stream._queue.length = 0;
+      owner.__stream._cancelled = true;
+      if (!owner.__stream._closed && !owner.__stream._errorSet) owner.__stream._controller.close();
+    }
+  }
+
+  // The convenience methods consume the same body represented by `.body`.
+  // Marking an exposed-but-not-yet-read stream as consumed prevents a later
+  // reader from observing a second copy of the payload.
+  function consumeBody(owner, callback) {
+    if (bodyIsDisturbed(owner)) {
+      return Promise.reject(new TypeError("Body is unusable"));
+    }
+    disturbBody(owner);
+    return Promise.resolve().then(() => callback(owner.__body));
+  }
+
+  function formDataPercentDecode(value) {
+    try {
+      return decodeURIComponent(String(value).replace(/\+/g, " "));
+    } catch (_) {
+      throw new TypeError("Invalid application/x-www-form-urlencoded body");
+    }
+  }
+
+  function formDataFromUrlEncoded(body) {
+    const form = new FormData();
+    const text = bodyAsText(body);
+    if (text === "") return form;
+    for (const pair of text.split("&")) {
+      if (pair === "") continue;
+      const separator = pair.indexOf("=");
+      const key = separator < 0 ? pair : pair.slice(0, separator);
+      const value = separator < 0 ? "" : pair.slice(separator + 1);
+      form.append(formDataPercentDecode(key), formDataPercentDecode(value));
+    }
+    return form;
+  }
+
+  function multipartHeaderParameter(header, name) {
+    const pattern = new RegExp("(?:^|;)\\s*" + name + "\\s*=\\s*(?:\\\"([^\\\"]*)\\\"|([^;\\s]*))", "i");
+    const match = pattern.exec(header);
+    return match ? (match[1] ?? match[2] ?? "") : null;
+  }
+
+  function byteSequenceIndexOf(bytes, needle, start = 0) {
+    if (needle.length === 0) return Math.min(start, bytes.length);
+    const limit = bytes.length - needle.length;
+    for (let offset = Math.max(0, start); offset <= limit; offset++) {
+      let match = true;
+      for (let index = 0; index < needle.length; index++) {
+        if (bytes[offset + index] !== needle[index]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return offset;
+    }
+    return -1;
+  }
+
+  function byteSequenceAfter(bytes, offset, sequence) {
+    if (offset < 0 || offset + sequence.length > bytes.length) return false;
+    for (let index = 0; index < sequence.length; index++) {
+      if (bytes[offset + index] !== sequence[index]) return false;
+    }
+    return true;
+  }
+
+  function formDataFromMultipart(body, boundary) {
+    if (!boundary) throw new TypeError("Multipart boundary is missing");
+    const bytes = bodyAsBytes(body);
+    const delimiter = blobTextEncoder.encode("--" + boundary);
+    const delimiterWithPrefix = new Uint8Array(delimiter.length + 2);
+    delimiterWithPrefix.set([13, 10]);
+    delimiterWithPrefix.set(delimiter, 2);
+    const form = new FormData();
+    let cursor = byteSequenceIndexOf(bytes, delimiter);
+    if (cursor < 0) throw new TypeError("Malformed multipart body");
+    while (cursor >= 0) {
+      let after = cursor + delimiter.length;
+      if (byteSequenceAfter(bytes, after, new Uint8Array([45, 45]))) break;
+      if (!byteSequenceAfter(bytes, after, new Uint8Array([13, 10]))) {
+        throw new TypeError("Malformed multipart boundary");
+      }
+      const headerStart = after + 2;
+      const headerEnd = byteSequenceIndexOf(bytes, new Uint8Array([13, 10, 13, 10]), headerStart);
+      if (headerEnd < 0) throw new TypeError("Malformed multipart headers");
+      const headerText = blobTextDecoder.decode(bytes.slice(headerStart, headerEnd));
+      const headers = new Map();
+      for (const line of headerText.split("\r\n")) {
+        const separator = line.indexOf(":");
+        if (separator <= 0) throw new TypeError("Malformed multipart header");
+        headers.set(line.slice(0, separator).trim().toLowerCase(), line.slice(separator + 1).trim());
+      }
+      const disposition = headers.get("content-disposition") || "";
+      if (!/^form-data\s*(?:;|$)/i.test(disposition)) throw new TypeError("Invalid multipart disposition");
+      const name = multipartHeaderParameter(disposition, "name");
+      if (name === null) throw new TypeError("Multipart field name is missing");
+      const bodyStart = headerEnd + 4;
+      const bodyEnd = byteSequenceIndexOf(bytes, delimiterWithPrefix, bodyStart);
+      if (bodyEnd < 0) throw new TypeError("Malformed multipart body");
+      const partBytes = bytes.slice(bodyStart, bodyEnd);
+      const filename = multipartHeaderParameter(disposition, "filename");
+      if (filename !== null) {
+        form.append(name, new File([partBytes], filename, {
+          type: headers.get("content-type") || "application/octet-stream",
+        }));
+      } else {
+        form.append(name, blobTextDecoder.decode(partBytes));
+      }
+      cursor = bodyEnd + 2;
+    }
+    return form;
+  }
+
+  function formDataFromBody(body, contentType) {
+    const type = String(contentType || "").split(";", 1)[0].trim().toLowerCase();
+    if (type === "application/x-www-form-urlencoded") return formDataFromUrlEncoded(body);
+    if (type === "multipart/form-data") {
+      const match = /(?:^|;)\s*boundary\s*=\s*(?:\"([^\"]*)\"|([^;\s]*))/i.exec(String(contentType));
+      return formDataFromMultipart(body, match ? (match[1] ?? match[2] ?? "") : "");
+    }
+    throw new TypeError("Unsupported form data content type");
+  }
+
   class Request {
     constructor(input, init = {}) {
       const source = input instanceof Request ? input : null;
@@ -9404,8 +16927,12 @@
       const body = init.body === undefined
         ? (source ? source.__body : EMPTY_BODY)
         : extractBody(init.body);
+      if (source && init.body === undefined && bodyIsDisturbed(source)) {
+        throw new TypeError("Cannot construct a Request from a used body");
+      }
       this.__body = body;
-      this.bodyUsed = false;
+      this.__stream = null;
+      this.__bodyUsed = false;
       if (body.contentType !== null && !this.headers.has("content-type")) {
         this.headers.set("content-type", body.contentType);
       }
@@ -9423,18 +16950,17 @@
         throw new TypeError("Request with GET/HEAD method cannot have body");
       }
     }
-    // Non-standard: the spec exposes a `ReadableStream`. Omoikane exposes the
-    // payload itself — the text of a text body, otherwise a `Blob` over its
-    // bytes — because scripts only read it back to inspect what they sent.
-    get body() {
-      if (this.__body.text !== null) return this.__body.text;
-      return this.__body.bytes === null ? null : new Blob([this.__body.bytes]);
-    }
-    text() { this.bodyUsed = true; return Promise.resolve(bodyAsText(this.__body)); }
+    get bodyUsed() { return this.__bodyUsed; }
+    get body() { return bodyStreamFor(this); }
+    text() { return consumeBody(this, bodyAsText); }
     json() { return this.text().then(JSON.parse); }
-    arrayBuffer() { this.bodyUsed = true; return Promise.resolve(bodyAsBytes(this.__body).slice().buffer); }
-    blob() { this.bodyUsed = true; return Promise.resolve(bodyAsBlob(this.__body, this.headers)); }
-    clone() { return new Request(this); }
+    arrayBuffer() { return consumeBody(this, body => bodyAsBytes(body).slice().buffer); }
+    blob() { return consumeBody(this, body => bodyAsBlob(body, this.headers)); }
+    formData() { return consumeBody(this, body => formDataFromBody(body, this.headers.get("content-type"))); }
+    clone() {
+      if (bodyIsDisturbed(this)) throw new TypeError("Cannot clone a used body");
+      return new Request(this);
+    }
   }
   class Response {
     constructor(body = null, init = {}) {
@@ -9449,18 +16975,19 @@
       this.url = init.url || "";
       this.type = "basic";
       this.redirected = Boolean(init.redirected);
-      this.bodyUsed = false;
+      this.__stream = null;
+      this.__bodyUsed = false;
     }
+    get bodyUsed() { return this.__bodyUsed; }
     get ok() { return this.status >= 200 && this.status <= 299; }
-    get body() {
-      if (this.__body.text !== null) return this.__body.text;
-      return this.__body.bytes === null ? null : new Blob([this.__body.bytes]);
-    }
-    text() { this.bodyUsed = true; return Promise.resolve(bodyAsText(this.__body)); }
+    get body() { return bodyStreamFor(this); }
+    text() { return consumeBody(this, bodyAsText); }
     json() { return this.text().then(JSON.parse); }
-    arrayBuffer() { this.bodyUsed = true; return Promise.resolve(bodyAsBytes(this.__body).slice().buffer); }
-    blob() { this.bodyUsed = true; return Promise.resolve(bodyAsBlob(this.__body, this.headers)); }
+    arrayBuffer() { return consumeBody(this, body => bodyAsBytes(body).slice().buffer); }
+    blob() { return consumeBody(this, body => bodyAsBlob(body, this.headers)); }
+    formData() { return consumeBody(this, body => formDataFromBody(body, this.headers.get("content-type"))); }
     clone() {
+      if (bodyIsDisturbed(this)) throw new TypeError("Cannot clone a used body");
       const response = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, redirected: this.redirected });
       // A body is an immutable snapshot, so both responses can share it.
       response.__body = this.__body;
@@ -9495,11 +17022,13 @@
     // Both forms are retained: `text()` must not re-decode, and for a payload
     // that is not valid UTF-8 the lossy decoding is still the defined text
     // result while the bytes remain available to `blob()`/`arrayBuffer()`.
-    response.__body = bodyRecord(
-      data.bodyText,
-      data.bodyBase64 == null ? null : bytesFromBase64(data.bodyBase64),
-      null,
-    );
+    response.__body = data.bodyPresent === false || data.type === "opaque" || data.type === "opaqueredirect"
+      ? EMPTY_BODY
+      : bodyRecord(
+          data.bodyText,
+          data.bodyBase64 == null ? null : bytesFromBase64(data.bodyBase64),
+          null,
+        );
     response.type = data.type;
     return response;
   }
@@ -9516,14 +17045,27 @@
   }
 
   globalThis.fetch = function(input, init = {}) {
-    const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
+    const source = input instanceof Request ? input : null;
+    const request = new Request(input, init);
+    if (source && init.body === undefined && !bodyIsEmpty(source.__body)) disturbBody(source);
     if (request.signal && request.signal.aborted) return Promise.reject(request.signal.reason);
+    const resourceTiming = beginResourceTiming(request.url, "fetch");
     if (isBlobUrl(request.url)) {
       return Promise.resolve().then(() => {
         if (request.signal && request.signal.aborted) throw request.signal.reason;
         const response = blobUrlResponse(request.url, request.method);
         if (response === null) throw new TypeError("Failed to fetch blob URL");
         return response;
+      }).then(response => {
+        finishResourceTiming(resourceTiming, {
+          status: response.status,
+          bodyText: response.__body && response.__body.text,
+          url: response.url,
+        });
+        return response;
+      }, error => {
+        finishResourceTiming(resourceTiming, {}, true);
+        throw error;
       });
     }
     return Promise.resolve().then(() => {
@@ -9539,9 +17081,1012 @@
       );
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
-      return responseFromFetchPayload(JSON.parse(String(raw)));
+      const data = JSON.parse(String(raw));
+      finishResourceTiming(resourceTiming, data, false);
+      return responseFromFetchPayload(data);
+    }).catch(error => {
+      finishResourceTiming(resourceTiming, {}, true);
+      throw error;
     });
   };
+
+  // -------------------------------------------------------------------------
+  // Cache Storage
+  // -------------------------------------------------------------------------
+  //
+  // Cache and CacheStorage objects are realm-local wrappers around a native
+  // origin-partitioned snapshot store.  A cache operation is deliberately
+  // delivered through the networking task source: native-boundary operations
+  // observe a pending Promise until the next event-loop turn, and Promise
+  // reactions run at the normal checkpoint after that task.  Input validation
+  // may reject before a task is queued.  Only JSON snapshots cross the native
+  // boundary; Request/Response objects and their bodies never do.
+
+  const CACHE_CONSTRUCTION_TOKEN = {};
+  const CACHE_STORAGE_CONSTRUCTION_TOKEN = {};
+
+  function cacheNative(operation, name = "", payload = "") {
+    // Window realms use the same origin validation as Web Storage.  Keep this
+    // inside the networking task callback (all callers reach this helper from
+    // queueCacheTask) so opaque-origin failures reject the operation's Promise
+    // with the standard SecurityError DOMException.  Dedicated workers do not
+    // expose `document`; their host-side binding still applies the worker
+    // origin partition and validation.
+    if (typeof document !== "undefined" && document) {
+      storageOrigin(document);
+    }
+    const raw = __omoikane_cache_storage(
+      String(operation),
+      String(name),
+      typeof payload === "string" ? payload : JSON.stringify(payload),
+    );
+    return JSON.parse(String(raw));
+  }
+
+  function queueCacheTask(callback) {
+    return new Promise((resolve, reject) => {
+      try {
+        __omoikane_queue_networking_task(() => {
+          try {
+            resolve(callback());
+          } catch (error) {
+            reject(error);
+          }
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  function cacheBodySnapshot(body) {
+    return {
+      text: body.text,
+      bytes: body.bytes === null ? null : base64FromBytes(body.bytes),
+      contentType: body.contentType,
+    };
+  }
+
+  function cacheBodyFromSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") return EMPTY_BODY;
+    return bodyRecord(
+      snapshot.text == null ? null : String(snapshot.text),
+      snapshot.bytes == null ? null : bytesFromBase64(snapshot.bytes),
+      snapshot.contentType == null ? null : String(snapshot.contentType),
+    );
+  }
+
+  function cacheRequestSnapshot(request) {
+    return {
+      url: String(request.url),
+      method: String(request.method).toUpperCase(),
+      headers: Array.from(request.headers.entries()),
+      credentials: request.credentials,
+      mode: request.mode,
+      redirect: request.redirect,
+      body: cacheBodySnapshot(request.__body),
+    };
+  }
+
+  function cacheResponseSnapshot(response) {
+    return {
+      status: Number(response.status),
+      statusText: String(response.statusText),
+      headers: Array.from(response.headers.entries()),
+      url: String(response.url || ""),
+      type: String(response.type || "basic"),
+      redirected: Boolean(response.redirected),
+      body: cacheBodySnapshot(response.__body),
+    };
+  }
+
+  function cacheRestoreRequest(snapshot) {
+    const request = new Request(snapshot.url, {
+      method: snapshot.method,
+      headers: snapshot.headers,
+      credentials: snapshot.credentials,
+      mode: snapshot.mode,
+      redirect: snapshot.redirect,
+    });
+    // Cache entries are immutable snapshots.  Assigning this private record
+    // avoids re-extracting (and potentially re-encoding) a binary body.
+    request.__body = cacheBodyFromSnapshot(snapshot.body);
+    request.__bodyUsed = false;
+    return request;
+  }
+
+  function cacheRestoreResponse(snapshot) {
+    const response = new Response(null, {
+      status: snapshot.status,
+      statusText: snapshot.statusText,
+      headers: snapshot.headers,
+      url: snapshot.url,
+      redirected: snapshot.redirected,
+    });
+    response.__body = cacheBodyFromSnapshot(snapshot.body);
+    response.type = snapshot.type || "basic";
+    response.__bodyUsed = false;
+    return response;
+  }
+
+  function cacheRequestForInput(input, init = undefined) {
+    if (input instanceof Request) {
+      return init === undefined ? input : new Request(input, init);
+    }
+    return new Request(input, init || {});
+  }
+
+  function cacheURLKey(url, ignoreSearch) {
+    try {
+      const parsed = new URL(String(url));
+      return parsed.protocol + "//" + parsed.host + parsed.pathname +
+        (ignoreSearch ? "" : parsed.search);
+    } catch (_) {
+      const withoutFragment = String(url).split("#", 1)[0];
+      return ignoreSearch ? withoutFragment.split("?", 1)[0] : withoutFragment;
+    }
+  }
+
+  function cacheHeaderValue(headers, name) {
+    const found = headers.find(entry => String(entry[0]).toLowerCase() === name);
+    return found === undefined ? null : String(found[1]);
+  }
+
+  function cacheEntryMatches(entry, request, options = {}) {
+    let storedRequest;
+    let storedResponse;
+    try {
+      storedRequest = JSON.parse(String(entry.request));
+      storedResponse = JSON.parse(String(entry.response));
+    } catch (_) {
+      return false;
+    }
+    const ignoreMethod = Boolean(options && options.ignoreMethod);
+    const ignoreSearch = Boolean(options && options.ignoreSearch);
+    if (!ignoreMethod && String(storedRequest.method).toUpperCase() !== String(request.method).toUpperCase()) {
+      return false;
+    }
+    if (cacheURLKey(storedRequest.url, ignoreSearch) !== cacheURLKey(request.url, ignoreSearch)) {
+      return false;
+    }
+    if (Boolean(options && options.ignoreVary)) return true;
+
+    const vary = cacheHeaderValue(storedResponse.headers || [], "vary");
+    if (vary === null) return true;
+    for (const field of vary.split(",")) {
+      const name = field.trim().toLowerCase();
+      if (!name) continue;
+      if (name === "*") return false;
+      const storedValue = cacheHeaderValue(storedRequest.headers || [], name);
+      const currentValue = request.headers.get(name);
+      if (storedValue !== currentValue) return false;
+    }
+    return true;
+  }
+
+  function cacheMatchingEntries(entries, request, options = {}) {
+    return entries.filter(entry => cacheEntryMatches(entry, request, options));
+  }
+
+  class Cache {
+    constructor(name, token) {
+      if (token !== CACHE_CONSTRUCTION_TOKEN) {
+        throw new TypeError("Cache objects cannot be constructed directly");
+      }
+      this._name = String(name);
+    }
+
+    get [Symbol.toStringTag]() { return "Cache"; }
+
+    match(request, options = {}) {
+      let normalized;
+      try {
+        normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const entries = cacheNative("entries", this._name);
+        const match = cacheMatchingEntries(entries, normalized, options)[0];
+        if (!match) return undefined;
+        return cacheRestoreResponse(JSON.parse(String(match.response)));
+      });
+    }
+
+    matchAll(request = undefined, options = {}) {
+      let normalized = null;
+      try {
+        if (request !== undefined) normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const entries = cacheNative("entries", this._name);
+        const matches = normalized === null
+          ? entries
+          : cacheMatchingEntries(entries, normalized, options);
+        return matches.map(entry => cacheRestoreResponse(JSON.parse(String(entry.response))));
+      });
+    }
+
+    put(request, response) {
+      let normalizedRequest;
+      let requestSnapshot;
+      let responseSnapshot;
+      try {
+        normalizedRequest = cacheRequestForInput(request);
+        if (!(response instanceof Response)) {
+          throw new TypeError("Cache.put requires a Response");
+        }
+        if (normalizedRequest.method !== "GET") {
+          throw new TypeError("Cache.put only supports GET requests");
+        }
+        if (["opaque", "opaqueredirect", "error"].includes(String(response.type))) {
+          throw new TypeError("Cache.put cannot store an opaque response");
+        }
+        if (Number(response.status) === 0 || Number(response.status) === 206) {
+          throw new TypeError("Cache.put cannot store a partial response");
+        }
+        const vary = response.headers.get("vary");
+        if (vary !== null && vary.split(",").some(field => field.trim() === "*")) {
+          throw new TypeError("Cache.put cannot store a Vary: * response");
+        }
+        requestSnapshot = cacheRequestSnapshot(normalizedRequest);
+        responseSnapshot = cacheResponseSnapshot(response);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        cacheNative("put", this._name, {
+          request: JSON.stringify(requestSnapshot),
+          response: JSON.stringify(responseSnapshot),
+        });
+        return undefined;
+      });
+    }
+
+    add(request) {
+      let normalized;
+      try {
+        normalized = cacheRequestForInput(request);
+        if (normalized.method !== "GET") {
+          throw new TypeError("Cache.add only supports GET requests");
+        }
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      // Fetch errors and non-successful responses are surfaced as Promise
+      // rejections, matching Cache.add rather than silently caching failures.
+      return fetch(normalized.clone()).then(response => {
+        if (!response.ok || ["opaque", "opaqueredirect", "error"].includes(String(response.type))) {
+          throw new TypeError("Cache.add received a non-successful response");
+        }
+        return this.put(normalized, response);
+      });
+    }
+
+    addAll(requests) {
+      let values;
+      try {
+        values = Array.from(requests, request => cacheRequestForInput(request));
+        for (const request of values) {
+          if (request.method !== "GET") throw new TypeError("Cache.addAll only supports GET requests");
+        }
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      // Fetch the complete batch before mutating the cache.  In particular, a
+      // later network failure must not leave an earlier request half-installed.
+      return Promise.all(values.map(request => fetch(request.clone()).then(response => {
+        if (!response.ok || ["opaque", "opaqueredirect", "error"].includes(String(response.type))) {
+          throw new TypeError("Cache.addAll received a non-successful response");
+        }
+        return response;
+      }))).then(responses => {
+        let result = Promise.resolve();
+        responses.forEach((response, index) => {
+          result = result.then(() => this.put(values[index], response));
+        });
+        return result.then(() => undefined);
+      });
+    }
+
+    delete(request, options = {}) {
+      let normalized;
+      try {
+        normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const entries = cacheNative("entries", this._name);
+        const matches = cacheMatchingEntries(entries, normalized, options);
+        let deleted = false;
+        for (const entry of matches) {
+          deleted = cacheNative("delete-entry", this._name, String(entry.id)) || deleted;
+        }
+        return deleted;
+      });
+    }
+
+    keys(request = undefined, options = {}) {
+      let normalized = null;
+      try {
+        if (request !== undefined) normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const entries = cacheNative("entries", this._name);
+        const matches = normalized === null
+          ? entries
+          : cacheMatchingEntries(entries, normalized, options);
+        return matches.map(entry => cacheRestoreRequest(JSON.parse(String(entry.request))));
+      });
+    }
+  }
+
+  class CacheStorage {
+    constructor(token) {
+      if (token !== CACHE_STORAGE_CONSTRUCTION_TOKEN) {
+        throw new TypeError("CacheStorage objects cannot be constructed directly");
+      }
+      this._cacheObjects = new Map();
+    }
+
+    get [Symbol.toStringTag]() { return "CacheStorage"; }
+
+    _cache(name) {
+      const key = String(name);
+      let cache = this._cacheObjects.get(key);
+      if (!cache) {
+        cache = new Cache(key, CACHE_CONSTRUCTION_TOKEN);
+        this._cacheObjects.set(key, cache);
+      }
+      return cache;
+    }
+
+    open(name) {
+      const key = String(name);
+      return queueCacheTask(() => {
+        cacheNative("open", key);
+        return this._cache(key);
+      });
+    }
+
+    has(name) {
+      return queueCacheTask(() => Boolean(cacheNative("has", String(name))));
+    }
+
+    keys() {
+      return queueCacheTask(() => cacheNative("keys"));
+    }
+
+    delete(name) {
+      const key = String(name);
+      return queueCacheTask(() => {
+        const deleted = Boolean(cacheNative("delete", key));
+        if (deleted) this._cacheObjects.delete(key);
+        return deleted;
+      });
+    }
+
+    match(request, options = {}) {
+      let normalized;
+      try {
+        normalized = cacheRequestForInput(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return queueCacheTask(() => {
+        const names = cacheNative("keys");
+        for (const name of names) {
+          const entries = cacheNative("entries", name);
+          const match = cacheMatchingEntries(entries, normalized, options)[0];
+          if (match) return cacheRestoreResponse(JSON.parse(String(match.response)));
+        }
+        return undefined;
+      });
+    }
+  }
+
+  globalThis.Cache = Cache;
+  globalThis.CacheStorage = CacheStorage;
+  globalThis.caches = new CacheStorage(CACHE_STORAGE_CONSTRUCTION_TOKEN);
+
+  // -------------------------------------------------------------------------
+  // IndexedDB
+  // -------------------------------------------------------------------------
+  //
+  // IndexedDB is intentionally an in-memory, origin-partitioned model here.
+  // The observable request/transaction and schema semantics are kept separate
+  // from durability so pages can exercise the API without making the JS realm
+  // depend on a host database or a process-global lock.
+
+  const IDB_CONSTRUCTION_TOKEN = {};
+  const indexedDatabaseRecords = new Map();
+
+  function idbQueueTask(callback) {
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(callback);
+    } else {
+      setTimeout(callback, 0);
+    }
+  }
+
+  function idbOriginKey(name) {
+    const origin = globalThis.location && globalThis.location.origin
+      ? String(globalThis.location.origin) : "null";
+    return origin + "\u0000" + String(name);
+  }
+
+  function idbError(name, message) {
+    return new DOMException(message || name, name);
+  }
+
+  function idbDispatch(target, event) {
+    // fireRealtimeEvent invokes an `on*` property before EventTarget's normal
+    // dispatch path assigns target. IndexedDB handlers commonly read
+    // event.target.result, so establish the target before invoking them.
+    event.target = target;
+    fireRealtimeEvent(target, event);
+  }
+
+  function idbNormalizeKey(value) {
+    if (value instanceof Date) {
+      const time = value.getTime();
+      if (!Number.isFinite(time)) throw idbError("DataError", "The key is not valid.");
+      return time === 0 ? 0 : time;
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value) || Number.isNaN(value)) {
+        throw idbError("DataError", "The key is not valid.");
+      }
+      return Object.is(value, -0) ? 0 : value;
+    }
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return value.map(idbNormalizeKey);
+    throw idbError("DataError", "The key is not valid.");
+  }
+
+  function idbKeyToken(key) {
+    if (typeof key === "number") return "number:" + String(key);
+    if (typeof key === "string") return "string:" + key;
+    return "array:" + JSON.stringify(key);
+  }
+
+  function idbCompareKey(left, right) {
+    const a = idbNormalizeKey(left);
+    const b = idbNormalizeKey(right);
+    const rank = value => typeof value === "number" ? 0 : typeof value === "string" ? 1 : 2;
+    const ar = rank(a);
+    const br = rank(b);
+    if (ar !== br) return ar - br;
+    if (ar === 0 || ar === 1) return a < b ? -1 : a > b ? 1 : 0;
+    const length = Math.min(a.length, b.length);
+    for (let index = 0; index < length; index++) {
+      const compared = idbCompareKey(a[index], b[index]);
+      if (compared !== 0) return compared;
+    }
+    return a.length - b.length;
+  }
+
+  function idbExtractKey(value, keyPath) {
+    if (keyPath === null || keyPath === undefined) return undefined;
+    let current = value;
+    for (const part of String(keyPath).split(".")) {
+      if (current === null || current === undefined) return undefined;
+      current = current[part];
+    }
+    return current;
+  }
+
+  function idbAssignKey(value, keyPath, key) {
+    const parts = String(keyPath).split(".");
+    let current = value;
+    for (let index = 0; index < parts.length - 1; index++) {
+      const part = parts[index];
+      if (current[part] === undefined) current[part] = {};
+      if (current[part] === null || typeof current[part] !== "object") {
+        throw idbError("DataError", "The key path cannot be assigned.");
+      }
+      current = current[part];
+    }
+    current[parts[parts.length - 1]] = key;
+  }
+
+  function idbNameList(names) {
+    const values = Array.from(names, String).sort();
+    const result = {
+      get length() { return values.length; },
+      item(index) { return values[Math.trunc(Number(index))] ?? null; },
+      contains(name) { return values.includes(String(name)); },
+      [Symbol.iterator]() { return values[Symbol.iterator](); },
+      get [Symbol.toStringTag]() { return "DOMStringList"; },
+    };
+    for (let index = 0; index < values.length; index++) {
+      Object.defineProperty(result, index, { enumerable: true, value: values[index] });
+    }
+    return result;
+  }
+
+  class IDBVersionChangeEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.oldVersion = Number(init.oldVersion) || 0;
+      this.newVersion = init.newVersion === null || init.newVersion === undefined
+        ? null : Number(init.newVersion);
+    }
+    get [Symbol.toStringTag]() { return "IDBVersionChangeEvent"; }
+  }
+
+  class IDBRequest extends EventTarget {
+    constructor(source = null, transaction = null) {
+      super();
+      this.result = undefined;
+      this.error = null;
+      this.source = source;
+      this.transaction = transaction;
+      this.readyState = "pending";
+      this.onsuccess = null;
+      this.onerror = null;
+      this.__finished = false;
+    }
+    __success(value) {
+      if (this.__finished) return;
+      this.__finished = true;
+      this.result = value;
+      this.error = null;
+      this.readyState = "done";
+      idbDispatch(this, new Event("success"));
+    }
+    __error(error) {
+      if (this.__finished) return;
+      this.__finished = true;
+      this.result = undefined;
+      this.error = error instanceof DOMException ? error : idbError("UnknownError", String(error));
+      this.readyState = "done";
+      const event = new Event("error", { cancelable: true });
+      idbDispatch(this, event);
+      if (!event.defaultPrevented && this.transaction) this.transaction.abort(this.error);
+    }
+    get [Symbol.toStringTag]() { return "IDBRequest"; }
+  }
+
+  class IDBOpenDBRequest extends IDBRequest {
+    constructor() {
+      super(null, null);
+      this.onblocked = null;
+      this.onupgradeneeded = null;
+    }
+    get [Symbol.toStringTag]() { return "IDBOpenDBRequest"; }
+  }
+
+  class IDBKeyRange {
+    constructor(lower, upper, lowerOpen = false, upperOpen = false) {
+      this.lower = lower === undefined ? undefined : idbNormalizeKey(lower);
+      this.upper = upper === undefined ? undefined : idbNormalizeKey(upper);
+      this.lowerOpen = Boolean(lowerOpen);
+      this.upperOpen = Boolean(upperOpen);
+      if (this.lower !== undefined && this.upper !== undefined && idbCompareKey(this.lower, this.upper) > 0) {
+        throw idbError("DataError", "The lower key is greater than the upper key.");
+      }
+    }
+    includes(value) {
+      const key = idbNormalizeKey(value);
+      if (this.lower !== undefined) {
+        const compared = idbCompareKey(key, this.lower);
+        if (compared < 0 || (this.lowerOpen && compared === 0)) return false;
+      }
+      if (this.upper !== undefined) {
+        const compared = idbCompareKey(key, this.upper);
+        if (compared > 0 || (this.upperOpen && compared === 0)) return false;
+      }
+      return true;
+    }
+    static bound(lower, upper, lowerOpen = false, upperOpen = false) {
+      return new IDBKeyRange(lower, upper, lowerOpen, upperOpen);
+    }
+    static lowerBound(lower, open = false) { return new IDBKeyRange(lower, undefined, open, false); }
+    static upperBound(upper, open = false) { return new IDBKeyRange(undefined, upper, false, open); }
+    static only(value) { return new IDBKeyRange(value, value, false, false); }
+    get [Symbol.toStringTag]() { return "IDBKeyRange"; }
+  }
+
+  class IDBTransaction extends EventTarget {
+    constructor(database, storeNames, mode, token) {
+      if (token !== IDB_CONSTRUCTION_TOKEN) throw new TypeError("Illegal constructor");
+      super();
+      this.db = database;
+      this.objectStoreNames = idbNameList(storeNames);
+      this.mode = String(mode);
+      this.durability = "default";
+      this.error = null;
+      this.__state = "active";
+      this.__pending = 0;
+      this.__completionQueued = false;
+      this.__completionCallbacks = [];
+      this.onabort = null;
+      this.oncomplete = null;
+      this.onerror = null;
+    }
+    objectStore(name) {
+      if (this.__state === "finished") throw idbError("InvalidStateError", "The transaction is finished.");
+      const key = String(name);
+      if (!this.objectStoreNames.contains(key)) throw idbError("NotFoundError", "The object store was not found.");
+      return new IDBObjectStore(this.db.__record.stores.get(key), this);
+    }
+    __request(source, action) {
+      if (this.__state !== "active") throw idbError("TransactionInactiveError", "The transaction is inactive.");
+      const request = new IDBRequest(source, this);
+      this.__pending++;
+      idbQueueTask(() => {
+        if (this.__state === "finished") return;
+        try {
+          request.__success(action());
+        } catch (error) {
+          request.__error(error);
+        } finally {
+          this.__pending--;
+          this.__maybeComplete();
+        }
+      });
+      return request;
+    }
+    __maybeComplete() {
+      if (this.__pending !== 0 || this.__completionQueued || this.__state !== "active") return;
+      this.__completionQueued = true;
+      idbQueueTask(() => {
+        this.__completionQueued = false;
+        if (this.__pending !== 0 || this.__state !== "active") return;
+        this.__state = "finished";
+        idbDispatch(this, new Event("complete"));
+        const callbacks = this.__completionCallbacks.splice(0);
+        for (const callback of callbacks) callback();
+      });
+    }
+    __afterComplete(callback) {
+      if (this.__state === "finished") callback();
+      else this.__completionCallbacks.push(callback);
+      this.__maybeComplete();
+    }
+    abort(reason = idbError("AbortError", "The transaction was aborted.")) {
+      if (this.__state === "finished") return;
+      this.__state = "finished";
+      this.error = reason instanceof DOMException ? reason : idbError("AbortError", String(reason));
+      idbDispatch(this, new Event("abort"));
+      const callbacks = this.__completionCallbacks.splice(0);
+      for (const callback of callbacks) callback();
+    }
+    get [Symbol.toStringTag]() { return "IDBTransaction"; }
+  }
+  IDBTransaction.READ_ONLY = "readonly";
+  IDBTransaction.READ_WRITE = "readwrite";
+  IDBTransaction.VERSION_CHANGE = "versionchange";
+  IDBTransaction.prototype.READ_ONLY = "readonly";
+  IDBTransaction.prototype.READ_WRITE = "readwrite";
+  IDBTransaction.prototype.VERSION_CHANGE = "versionchange";
+
+  function idbStoreKey(store, value, explicitKey, forAdd) {
+    let key = explicitKey;
+    if (store.keyPath !== null) {
+      const embedded = idbExtractKey(value, store.keyPath);
+      if (embedded !== undefined) {
+        if (key !== undefined) throw idbError("DataError", "A key was supplied for an inline key path.");
+        key = embedded;
+      } else if (store.autoIncrement) {
+        key = store.nextKey++;
+        idbAssignKey(value, store.keyPath, key);
+      }
+    }
+    if (key === undefined) {
+      if (!store.autoIncrement) throw idbError("DataError", "A key is required.");
+      key = store.nextKey++;
+    }
+    key = idbNormalizeKey(key);
+    const token = idbKeyToken(key);
+    if (forAdd && store.records.has(token)) throw idbError("ConstraintError", "The key already exists.");
+    return { key, token };
+  }
+
+  function idbQueryKey(query) {
+    if (query === undefined) return null;
+    return query instanceof IDBKeyRange ? query : IDBKeyRange.only(query);
+  }
+
+  function idbSortedRecords(store, query = undefined) {
+    const range = idbQueryKey(query);
+    return Array.from(store.records.values())
+      .filter(entry => range === null || range.includes(entry.key))
+      .sort((left, right) => idbCompareKey(left.key, right.key));
+  }
+
+  function idbKeyPathMatches(value, keyPath, query) {
+    const key = idbExtractKey(value, keyPath);
+    if (key === undefined) return false;
+    try { return query === null || query.includes(key); } catch (_) { return false; }
+  }
+
+  class IDBIndex {
+    constructor(store, definition, token) {
+      if (token !== IDB_CONSTRUCTION_TOKEN) throw new TypeError("Illegal constructor");
+      this.objectStore = store;
+      this.__definition = definition;
+      this.name = definition.name;
+      this.keyPath = definition.keyPath;
+      this.multiEntry = Boolean(definition.multiEntry);
+      this.unique = Boolean(definition.unique);
+    }
+    get(query) {
+      const range = idbQueryKey(query);
+      return this.objectStore.transaction.__request(this, () => {
+        const entry = idbSortedRecords(this.objectStore.__record).find(item =>
+          idbKeyPathMatches(item.value, this.keyPath, range));
+        return entry === undefined ? undefined : structuredClone(entry.value);
+      });
+    }
+    getAll(query = undefined, count = undefined) {
+      const range = idbQueryKey(query);
+      return this.objectStore.transaction.__request(this, () => {
+        const values = idbSortedRecords(this.objectStore.__record)
+          .filter(item => idbKeyPathMatches(item.value, this.keyPath, range))
+          .map(item => structuredClone(item.value));
+        return count === undefined ? values : values.slice(0, Math.max(0, Math.trunc(Number(count))));
+      });
+    }
+    count(query = undefined) {
+      const range = idbQueryKey(query);
+      return this.objectStore.transaction.__request(this, () =>
+        idbSortedRecords(this.objectStore.__record)
+          .filter(item => idbKeyPathMatches(item.value, this.keyPath, range)).length);
+    }
+    get [Symbol.toStringTag]() { return "IDBIndex"; }
+  }
+
+  class IDBObjectStore {
+    constructor(record, transaction) {
+      this.__record = record;
+      this.transaction = transaction;
+      this.name = record.name;
+      this.keyPath = record.keyPath;
+      this.autoIncrement = Boolean(record.autoIncrement);
+    }
+    get indexNames() { return idbNameList(this.__record.indexes.keys()); }
+    add(value, key = undefined) { return this.__write(value, key, true); }
+    put(value, key = undefined) { return this.__write(value, key, false); }
+    __write(value, explicitKey, forAdd) {
+      const store = this.__record;
+      return this.transaction.__request(this, () => {
+        const cloned = structuredClone(value);
+        const shaped = idbStoreKey(store, cloned, explicitKey, forAdd);
+        store.records.set(shaped.token, { key: shaped.key, value: cloned });
+        return shaped.key;
+      });
+    }
+    get(query) {
+      const store = this.__record;
+      const range = idbQueryKey(query);
+      return this.transaction.__request(this, () => {
+        if (range === null) throw idbError("DataError", "A key is required.");
+        const entry = idbSortedRecords(store).find(item => range.includes(item.key));
+        return entry === undefined ? undefined : structuredClone(entry.value);
+      });
+    }
+    getKey(query) {
+      const range = idbQueryKey(query);
+      return this.transaction.__request(this, () => {
+        if (range === null) throw idbError("DataError", "A key is required.");
+        const entry = idbSortedRecords(this.__record).find(item => range.includes(item.key));
+        return entry === undefined ? undefined : entry.key;
+      });
+    }
+    getAll(query = undefined, count = undefined) {
+      const values = () => idbSortedRecords(this.__record, query).map(item => structuredClone(item.value));
+      return this.transaction.__request(this, () => {
+        const result = values();
+        return count === undefined ? result : result.slice(0, Math.max(0, Math.trunc(Number(count))));
+      });
+    }
+    count(query = undefined) {
+      return this.transaction.__request(this, () => idbSortedRecords(this.__record, query).length);
+    }
+    delete(query) {
+      const range = idbQueryKey(query);
+      return this.transaction.__request(this, () => {
+        if (range === null) throw idbError("DataError", "A key is required.");
+        const matches = idbSortedRecords(this.__record).filter(item => range.includes(item.key));
+        for (const entry of matches) this.__record.records.delete(idbKeyToken(entry.key));
+        return undefined;
+      });
+    }
+    clear() {
+      return this.transaction.__request(this, () => {
+        this.__record.records.clear();
+        return undefined;
+      });
+    }
+    createIndex(name, keyPath, options = {}) {
+      if (this.transaction.mode !== "versionchange") {
+        throw idbError("InvalidStateError", "Indexes can only be created during a version change.");
+      }
+      const key = String(name);
+      if (this.__record.indexes.has(key)) throw idbError("ConstraintError", "The index already exists.");
+      if (Array.isArray(keyPath)) throw idbError("NotSupportedError", "Array key paths are not supported.");
+      const definition = { name: key, keyPath: String(keyPath), unique: Boolean(options.unique), multiEntry: Boolean(options.multiEntry) };
+      this.__record.indexes.set(key, definition);
+      return new IDBIndex(this, definition, IDB_CONSTRUCTION_TOKEN);
+    }
+    deleteIndex(name) {
+      if (this.transaction.mode !== "versionchange") {
+        throw idbError("InvalidStateError", "Indexes can only be deleted during a version change.");
+      }
+      if (!this.__record.indexes.delete(String(name))) throw idbError("NotFoundError", "The index was not found.");
+    }
+    index(name) {
+      const definition = this.__record.indexes.get(String(name));
+      if (!definition) throw idbError("NotFoundError", "The index was not found.");
+      return new IDBIndex(this, definition, IDB_CONSTRUCTION_TOKEN);
+    }
+    get [Symbol.toStringTag]() { return "IDBObjectStore"; }
+  }
+
+  class IDBDatabase extends EventTarget {
+    constructor(record, token) {
+      if (token !== IDB_CONSTRUCTION_TOKEN) throw new TypeError("Illegal constructor");
+      super();
+      this.__record = record;
+      this.name = record.name;
+      this.version = record.version;
+      this.onabort = null;
+      this.onerror = null;
+      this.onclose = null;
+      this.onversionchange = null;
+      this.__closed = false;
+      record.connections.add(this);
+    }
+    get objectStoreNames() { return idbNameList(this.__record.stores.keys()); }
+    createObjectStore(name, options = {}) {
+      if (this.__upgradeTransaction === undefined || this.__upgradeTransaction.__state === "finished") {
+        throw idbError("InvalidStateError", "Object stores can only be created during a version change.");
+      }
+      const key = String(name);
+      if (this.__record.stores.has(key)) throw idbError("ConstraintError", "The object store already exists.");
+      let keyPath = null;
+      if (options.keyPath !== undefined && options.keyPath !== null) {
+        if (Array.isArray(options.keyPath)) throw idbError("NotSupportedError", "Array key paths are not supported.");
+        keyPath = String(options.keyPath);
+      }
+      const record = { name: key, keyPath, autoIncrement: Boolean(options.autoIncrement), nextKey: 1, records: new Map(), indexes: new Map() };
+      this.__record.stores.set(key, record);
+      return new IDBObjectStore(record, this.__upgradeTransaction);
+    }
+    deleteObjectStore(name) {
+      if (this.__upgradeTransaction === undefined || this.__upgradeTransaction.__state === "finished") {
+        throw idbError("InvalidStateError", "Object stores can only be deleted during a version change.");
+      }
+      if (!this.__record.stores.delete(String(name))) throw idbError("NotFoundError", "The object store was not found.");
+    }
+    transaction(storeNames, mode = "readonly", options = undefined) {
+      if (this.__closed) throw idbError("InvalidStateError", "The database connection is closed.");
+      const names = typeof storeNames === "string" || storeNames instanceof String ? [String(storeNames)] : Array.from(storeNames || [], String);
+      if (names.length === 0) throw idbError("InvalidAccessError", "At least one object store is required.");
+      const selected = Array.from(new Set(names));
+      for (const name of selected) if (!this.__record.stores.has(name)) throw idbError("NotFoundError", "The object store was not found.");
+      const selectedMode = String(mode);
+      if (!["readonly", "readwrite"].includes(selectedMode)) throw idbError("TypeError", "Invalid transaction mode.");
+      const transaction = new IDBTransaction(this, selected, selectedMode, IDB_CONSTRUCTION_TOKEN);
+      void options;
+      transaction.__maybeComplete();
+      return transaction;
+    }
+    close() {
+      if (this.__closed) return;
+      this.__closed = true;
+      this.__record.connections.delete(this);
+      idbDispatch(this, new Event("close"));
+    }
+    get [Symbol.toStringTag]() { return "IDBDatabase"; }
+  }
+
+  function idbOpenDatabase(name, version, request) {
+    const key = idbOriginKey(name);
+    let record = indexedDatabaseRecords.get(key);
+    const requestedVersion = version === undefined ? undefined : Number(version);
+    if (requestedVersion !== undefined && (!Number.isFinite(requestedVersion) || requestedVersion <= 0 || Math.floor(requestedVersion) !== requestedVersion)) {
+      throw idbError("TypeError", "The database version must be a positive integer.");
+    }
+    if (!record) {
+      record = { key, name: String(name), version: requestedVersion === undefined ? 1 : requestedVersion, stores: new Map(), connections: new Set() };
+      indexedDatabaseRecords.set(key, record);
+      const database = new IDBDatabase(record, IDB_CONSTRUCTION_TOKEN);
+      const transaction = new IDBTransaction(database, [], "versionchange", IDB_CONSTRUCTION_TOKEN);
+      database.__upgradeTransaction = transaction;
+      request.result = database;
+      request.transaction = transaction;
+      idbDispatch(request, new IDBVersionChangeEvent("upgradeneeded", { oldVersion: 0, newVersion: record.version }));
+      transaction.__afterComplete(() => {
+        delete database.__upgradeTransaction;
+        request.transaction = null;
+        request.__success(database);
+      });
+      transaction.__maybeComplete();
+      return;
+    }
+    if (requestedVersion !== undefined && requestedVersion < record.version) {
+      request.__error(idbError("VersionError", "The requested version is lower than the existing version."));
+      return;
+    }
+    if (requestedVersion !== undefined && requestedVersion > record.version) {
+      const oldVersion = record.version;
+      record.version = requestedVersion;
+      const database = new IDBDatabase(record, IDB_CONSTRUCTION_TOKEN);
+      const transaction = new IDBTransaction(database, [], "versionchange", IDB_CONSTRUCTION_TOKEN);
+      database.__upgradeTransaction = transaction;
+      request.result = database;
+      request.transaction = transaction;
+      for (const connection of Array.from(record.connections)) {
+        if (connection !== database) idbDispatch(connection, new IDBVersionChangeEvent("versionchange", { oldVersion, newVersion: requestedVersion }));
+      }
+      idbDispatch(request, new IDBVersionChangeEvent("upgradeneeded", { oldVersion, newVersion: requestedVersion }));
+      transaction.__afterComplete(() => {
+        delete database.__upgradeTransaction;
+        request.transaction = null;
+        request.__success(database);
+      });
+      transaction.__maybeComplete();
+      return;
+    }
+    request.__success(new IDBDatabase(record, IDB_CONSTRUCTION_TOKEN));
+  }
+
+  class IDBFactory {
+    open(name, version = undefined) {
+      const request = new IDBOpenDBRequest();
+      const databaseName = String(name);
+      if (databaseName.length === 0) {
+        request.__error(idbError("TypeError", "The database name must not be empty."));
+        return request;
+      }
+      idbQueueTask(() => {
+        try { idbOpenDatabase(databaseName, version, request); }
+        catch (error) { request.__error(error); }
+      });
+      return request;
+    }
+    deleteDatabase(name) {
+      const request = new IDBOpenDBRequest();
+      const key = idbOriginKey(String(name));
+      idbQueueTask(() => {
+        const record = indexedDatabaseRecords.get(key);
+        if (record) {
+          for (const connection of Array.from(record.connections)) {
+            idbDispatch(connection, new IDBVersionChangeEvent("versionchange", { oldVersion: record.version, newVersion: null }));
+            connection.close();
+          }
+          indexedDatabaseRecords.delete(key);
+        }
+        request.__success(undefined);
+      });
+      return request;
+    }
+    databases() {
+      return Promise.resolve(Array.from(indexedDatabaseRecords.values())
+        .filter(record => record.key.startsWith((globalThis.location && globalThis.location.origin || "null") + "\u0000"))
+        .map(record => ({ name: record.name, version: record.version })));
+    }
+    get [Symbol.toStringTag]() { return "IDBFactory"; }
+  }
+
+  globalThis.IDBVersionChangeEvent = IDBVersionChangeEvent;
+  globalThis.IDBRequest = IDBRequest;
+  globalThis.IDBOpenDBRequest = IDBOpenDBRequest;
+  globalThis.IDBKeyRange = IDBKeyRange;
+  globalThis.IDBTransaction = IDBTransaction;
+  globalThis.IDBDatabase = IDBDatabase;
+  globalThis.IDBObjectStore = IDBObjectStore;
+  globalThis.IDBIndex = IDBIndex;
+  globalThis.IDBFactory = IDBFactory;
+  globalThis.indexedDB = new IDBFactory();
 
   function observerRect(x, y, width, height) {
     x = Number.isFinite(Number(x)) ? Number(x) : 0;
