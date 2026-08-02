@@ -22718,6 +22718,35 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn html_namespace_slot_assignment_is_ascii_case_insensitive() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const html = "http://www.w3.org/1999/xhtml";
+                  const host = document.createElement("div");
+                  const child = document.createElement("span");
+                  host.appendChild(child);
+                  document.body.appendChild(host);
+
+                  const root = host.attachShadow({ mode: "open" });
+                  const slot = document.createElementNS(html, "SLOT");
+                  root.appendChild(slot);
+
+                  return slot instanceof HTMLSlotElement &&
+                    slot.tagName === "SLOT" &&
+                    slot.localName === "SLOT" &&
+                    slot.assignedNodes().length === 1 &&
+                    slot.assignedNodes()[0] === child &&
+                    child.assignedSlot === slot;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn assigned_slot_hides_closed_roots_and_slotchange_is_microtask_coalesced() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
