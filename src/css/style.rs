@@ -1081,21 +1081,20 @@ enum DeclarationValidation {
 
 fn is_supported_pointer_events_keyword(value: &str) -> bool {
     let lower = value.trim().to_ascii_lowercase();
-    is_css_wide_keyword(&lower)
-        || matches!(
-            lower.as_str(),
-            "auto"
-                | "none"
-                | "visiblepainted"
-                | "visiblefill"
-                | "visiblestroke"
-                | "visible"
-                | "painted"
-                | "fill"
-                | "stroke"
-                | "bounding-box"
-                | "all"
-        )
+    matches!(
+        lower.as_str(),
+        "auto"
+            | "none"
+            | "visiblepainted"
+            | "visiblefill"
+            | "visiblestroke"
+            | "visible"
+            | "painted"
+            | "fill"
+            | "stroke"
+            | "bounding-box"
+            | "all"
+    )
 }
 
 /// Validates a resolved declaration value against the property's grammar.
@@ -1403,7 +1402,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return match value {
             Value::Keyword(keyword) => {
                 let lower = keyword.to_ascii_lowercase();
-                if is_supported_pointer_events_keyword(&lower) {
+                if is_css_wide_keyword(&lower) || is_supported_pointer_events_keyword(&lower) {
                     DeclarationValidation::Valid(ComputedValue::Keyword(lower))
                 } else {
                     DeclarationValidation::Invalid
@@ -4598,6 +4597,36 @@ fn divide_calc_quantities(left: CalcQuantity, right: CalcQuantity) -> Option<Cal
     })
 }
 
+fn is_svg_element_for_presentational_hints(node: &NodeHandle) -> bool {
+    if node.namespace_uri().as_deref() == Some("http://www.w3.org/2000/svg") {
+        return true;
+    }
+    let Some(tag) = node.tag_name().map(|name| name.to_ascii_lowercase()) else {
+        return false;
+    };
+    if !matches!(
+        tag.as_str(),
+        "svg" | "g" | "rect" | "circle" | "ellipse" | "line"
+            | "polyline" | "polygon" | "path" | "text" | "tspan" | "textpath" | "use"
+    ) {
+        return false;
+    }
+    let mut current = Some(node.clone());
+    while let Some(candidate) = current {
+        let tag = candidate
+            .tag_name()
+            .map(|name| name.to_ascii_lowercase());
+        if tag.as_deref() == Some("foreignobject") {
+            return false;
+        }
+        if tag.as_deref() == Some("svg") {
+            return true;
+        }
+        current = candidate.parent_node();
+    }
+    false
+}
+
 fn apply_presentational_hints(
     node: &NodeHandle,
     properties: &mut BTreeMap<String, ComputedValue>,
@@ -4613,14 +4642,7 @@ fn apply_presentational_hints(
     // declarations. Expose pointer-events through computed style so hit
     // testing can distinguish a local attribute from an inherited value and
     // still honor explicit CSS overrides, including `auto`.
-    let is_svg_element = node.namespace_uri().as_deref() == Some("http://www.w3.org/2000/svg")
-        || node.tag_name().as_deref().is_some_and(|name| {
-            matches!(
-                name.to_ascii_lowercase().as_str(),
-                "svg" | "g" | "rect" | "circle" | "ellipse" | "line"
-                    | "polyline" | "polygon" | "path" | "text" | "tspan" | "textpath" | "use"
-            )
-        });
+    let is_svg_element = is_svg_element_for_presentational_hints(node);
     if is_svg_element
         && !properties.contains_key("pointer-events")
         && let Some(value) = attributes
