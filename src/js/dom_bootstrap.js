@@ -23,6 +23,24 @@
   const nativeCryptoRandom = globalThis.__omoikane_crypto_random;
   const nativeCryptoDigest = globalThis.__omoikane_crypto_digest;
   const nativeCryptoHmac = globalThis.__omoikane_crypto_hmac;
+  const nativeNodeIsHtmlElement = globalThis.__omoikane_node_is_html_element;
+  // Node equality is a platform operation. Capture every host hook it needs
+  // before page code can replace the public bootstrap globals.
+  const nativeNodeType = globalThis.__omoikane_node_type;
+  const nativeNodeName = globalThis.__omoikane_node_name;
+  const nativeNodeLocalName = globalThis.__omoikane_node_local_name;
+  const nativeNodeNamespaceURI = globalThis.__omoikane_node_namespace_uri;
+  const nativeNodePrefix = globalThis.__omoikane_node_prefix;
+  const nativeParentNode = globalThis.__omoikane_parent_node;
+  const nativeShadowHost = globalThis.__omoikane_shadow_host;
+  const nativeDoctypePublicId = globalThis.__omoikane_doctype_public_id;
+  const nativeDoctypeSystemId = globalThis.__omoikane_doctype_system_id;
+  const nativeChildNodeIds = globalThis.__omoikane_child_node_ids;
+  const nativeGetTextContent = globalThis.__omoikane_get_text_content;
+  const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
+  const nativeCreateElementNS = globalThis.__omoikane_create_element_ns;
+  const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
+  const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
   delete globalThis.__omoikane_clipboard_permission;
@@ -37,11 +55,64 @@
   delete globalThis.__omoikane_crypto_random;
   delete globalThis.__omoikane_crypto_digest;
   delete globalThis.__omoikane_crypto_hmac;
+  delete globalThis.__omoikane_node_is_html_element;
+  delete globalThis.__omoikane_attribute_records;
+  delete globalThis.__omoikane_create_element_ns;
+  delete globalThis.__omoikane_set_attribute_ns;
+  delete globalThis.__omoikane_remove_attribute_ns;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
   const cache = new Map();
+  // Platform-object identity and insert-adjacent conversions must not depend on
+  // page-mutable expandos, constructors, or prototypes. `cache` already owns
+  // canonical wrappers strongly, so keep all added private state in ordinary
+  // collections with primitive values and native ids. This avoids adding Boa
+  // weak-table or object-valued GC edges.
+  const canonicalNodeIds = new Map();
+  const wrapperNodeIds = canonicalNodeIds;
+  const canonicalCdataNodes = new Map();
+  const canonicalCharacterDataOverrides = new Map();
+  const wrapperLocalNames = new Map();
+  const ownerDocumentIds = new Map();
+  const canonicalElementIds = new Set();
+  const canonicalHtmlElementIds = new Set();
+  const canonicalHtmlSlotIds = new Set();
+  const mapHas = Function.prototype.call.bind(Map.prototype.has);
+  const mapGet = Function.prototype.call.bind(Map.prototype.get);
+  const mapSet = Function.prototype.call.bind(Map.prototype.set);
+  const getWrapperNodeId = mapGet;
+  const setWrapperNodeId = mapSet;
+  const getWrapperLocalName = mapGet;
+  const setWrapperLocalName = mapSet;
+  const getOwnerDocumentId = mapGet;
+  const setOwnerDocumentId = mapSet;
+  const addCanonicalElementId = Function.prototype.call.bind(Set.prototype.add);
+  const hasCanonicalElementId = Function.prototype.call.bind(Set.prototype.has);
+  const intrinsicString = globalThis.String;
+  const stringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
+  const stringFromCharCode = String.fromCharCode;
+  const hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+  const IntrinsicTypeError = globalThis.TypeError;
+
+  function canonicalWrapperId(node) {
+    if ((typeof node !== "object" && typeof node !== "function") || node === null) {
+      return undefined;
+    }
+    return getWrapperNodeId(wrapperNodeIds, node);
+  }
+
+  function addCanonicalWrapperId(ids, node) {
+    const id = canonicalWrapperId(node);
+    if (id !== undefined) addCanonicalElementId(ids, id);
+  }
+
+  function hasCanonicalWrapperId(ids, node) {
+    const id = canonicalWrapperId(node);
+    return id !== undefined && hasCanonicalElementId(ids, id);
+  }
+
   const validatesSpecialStyleProperties = new Set([
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
@@ -147,10 +218,19 @@
   }
 
   function signalFallbackSlotChanges(node) {
-    for (let current = node; current; current = current.parentNode) {
-      if (current instanceof HTMLSlotElement &&
-          current.getRootNode() instanceof ShadowRoot &&
-          current.assignedNodes().length === 0) {
+    for (let current = node; current; current = internalParentNode(current)) {
+      const id = internalNodeId(current);
+      if (id === undefined || __omoikane_node_type(id) !== 1 ||
+          !hasCanonicalWrapperId(canonicalHtmlSlotIds, current)) {
+        continue;
+      }
+      let root = current;
+      let parent;
+      while ((parent = internalParentNode(root))) root = parent;
+      const rootId = internalNodeId(root);
+      if (rootId !== undefined && __omoikane_node_type(rootId) === 11 &&
+          __omoikane_shadow_host(rootId) !== null &&
+          (__omoikane_assigned_nodes(id, false) || []).length === 0) {
         queueSlotChange(current);
       }
     }
@@ -163,7 +243,10 @@
       slotAssignmentRefreshQueued = false;
       for (let index = 0; index < knownSlots.length; index += 1) {
         const node = knownSlots[index];
-        const ids = __omoikane_assigned_nodes(node.__id, false) || [];
+        if (!hasCanonicalWrapperId(canonicalHtmlSlotIds, node)) {
+          continue;
+        }
+        const ids = __omoikane_assigned_nodes(internalNodeId(node), false) || [];
         const signature = ids.join(",");
         const previous = slotAssignmentSignatures.get(node);
         slotAssignmentSignatures.set(node, signature);
@@ -173,65 +256,323 @@
     });
   }
 
+  // Share one ASCII fold between native wrapper classification and the legacy
+  // insert-adjacent position parser. Captured intrinsics keep both paths
+  // independent of page changes to String and its prototype.
+  function asciiLowercase(value) {
+    let result = "";
+    for (let index = 0; index < value.length; index += 1) {
+      const code = stringCharCodeAt(value, index);
+      result += code >= 65 && code <= 90
+        ? stringFromCharCode(code + 32)
+        : value[index];
+    }
+    return result;
+  }
+
+  function canonicalElementNamespace(id) {
+    const namespace = nativeNodeNamespaceURI(id);
+    // Legacy parser/createElement nodes carry an HTML bit but predate explicit
+    // namespace storage. Equality still observes their HTML namespace.
+    return namespace === null && nativeNodeIsHtmlElement(id)
+      ? HTML_NAMESPACE
+      : namespace;
+  }
+
+  function nativeInterfaceTypeForNodeId(id, nodeType) {
+    if (nodeType === 9) return Document;
+    if (nodeType === 11) {
+      return nativeShadowHost(id) === null ? DocumentFragment : ShadowRoot;
+    }
+    if (nodeType === 7) return ProcessingInstruction;
+    if (nodeType === 3) return Text;
+    if (nodeType === 8) return Comment;
+    if (nodeType === 10) return DocumentType;
+    if (nodeType !== 1) return Node;
+
+    const namespace = nativeNodeNamespaceURI(id);
+    const htmlElement = namespace === HTML_NAMESPACE || nativeNodeIsHtmlElement(id);
+    const constructors = namespace === SVG_NAMESPACE
+      ? SVG_ELEMENT_CTORS
+      : htmlElement ? ELEMENT_CTORS : {};
+    const localName = nativeNodeLocalName(id) || nativeNodeName(id) || "";
+    const normalizedLocalName = asciiLowercase(localName);
+    const ctor = hasOwnProperty(constructors, normalizedLocalName)
+      ? constructors[normalizedLocalName]
+      : undefined;
+    return ctor || (namespace === SVG_NAMESPACE
+      ? SVGElement
+      : htmlElement ? HTMLElement : Element);
+  }
+
   function wrapNode(id) {
     if (id === null || id === undefined) {
       return null;
     }
-    if (cache.has(id)) {
-      return cache.get(id);
+    if (mapHas(cache, id)) {
+      return mapGet(cache, id);
     }
-    const nodeType = __omoikane_node_type(id);
+    const nodeType = nativeNodeType(id);
+    const interfaceType = nativeInterfaceTypeForNodeId(id, nodeType);
     let node;
-    if (id === __omoikane_document_id || nodeType === 9) {
-      // The top-level document and every sub-browsing-context document (an
-      // iframe's contentDocument) are wrapped as Document so their DOM methods
-      // are scoped to their own tree.
-      node = new Document(id);
-    } else if (nodeType === 11) {
-      node = __omoikane_shadow_host(id) === null
-        ? new DocumentFragment(id)
-        : new ShadowRoot(id, SHADOW_ROOT_CONSTRUCTION);
-    } else if (nodeType === 7) {
-      node = new ProcessingInstruction(id);
-    } else if (nodeType === 3) {
-      node = new Text(id);
-    } else if (nodeType === 8) {
-      node = new Comment(id);
-    } else if (nodeType === 1) {
-      const namespace = __omoikane_node_namespace_uri(id);
-      const htmlElement = namespace == null || namespace === HTML_NAMESPACE;
-      const constructors = namespace === SVG_NAMESPACE
-        ? SVG_ELEMENT_CTORS
-        : htmlElement ? ELEMENT_CTORS : {};
-      const ctor = constructors[(__omoikane_node_local_name(id) || __omoikane_node_name(id) || "").toLowerCase()];
-      node = ctor ? new ctor(id)
-        : namespace === SVG_NAMESPACE ? new SVGElement(id)
-        : htmlElement ? new HTMLElement(id) : new Element(id);
-    } else if (nodeType === 10) {
-      node = new DocumentType(id);
+    if (interfaceType === ShadowRoot) {
+      node = new ShadowRoot(id, SHADOW_ROOT_CONSTRUCTION);
     } else {
-      node = new Node(id);
+      node = new interfaceType(id);
     }
-    cache.set(id, node);
-    if (node instanceof HTMLSlotElement) knownSlots.push(node);
+    setWrapperNodeId(wrapperNodeIds, node, id);
+    if (nodeType === 1) {
+      const localName = nativeNodeLocalName(id);
+      setWrapperLocalName(wrapperLocalNames, node, localName);
+      addCanonicalWrapperId(canonicalElementIds, node);
+      if (nativeNodeNamespaceURI(id) === HTML_NAMESPACE ||
+          nativeNodeIsHtmlElement(id)) {
+        addCanonicalWrapperId(canonicalHtmlElementIds, node);
+      }
+      if (interfaceType === HTMLSlotElement) {
+        addCanonicalWrapperId(canonicalHtmlSlotIds, node);
+        knownSlots.push(node);
+      }
+    }
+    mapSet(cache, id, node);
     return node;
   }
 
-  // Stamps `node` and (for a deep subtree) every descendant with `doc` as its
-  // owning document, mirroring how `Document.create*` stamps `__ownerDoc`. Used
-  // by `cloneNode`, whose native clone carries no wrapper metadata: without this
-  // a detached clone of a sub-document node would fall through the
-  // `ownerDocument` getter to the top-level document. Wrappers are cached by id
-  // (see `wrapNode`), so the stamp persists across later `childNodes` reads.
+  function internalNodeId(node) {
+    if (!node) return undefined;
+    const id = getWrapperNodeId(wrapperNodeIds, node);
+    // Keep legacy Node operations working for wrappers constructed directly;
+    // canonical wrappers always take the private-map branch above.
+    return id === undefined ? node.__id : id;
+  }
+
+  function internalNodeType(node) {
+    const id = internalNodeId(node);
+    return id === undefined ? undefined : __omoikane_node_type(id);
+  }
+
+  function internalNodeLocalName(node) {
+    const localName = getWrapperLocalName(wrapperLocalNames, node);
+    if (localName !== undefined) return localName;
+    const id = internalNodeId(node);
+    return id === undefined ? undefined : __omoikane_node_local_name(id);
+  }
+
+  function internalParentNode(node) {
+    const id = internalNodeId(node);
+    return id === undefined ? null : wrapNode(__omoikane_parent_node(id));
+  }
+
+  function internalHostIncludingParent(node) {
+    const parent = internalParentNode(node);
+    if (parent) return parent;
+    const id = internalNodeId(node);
+    return id === undefined ? null : wrapNode(__omoikane_shadow_host(id));
+  }
+
+  function internalPreviousSibling(node) {
+    const id = internalNodeId(node);
+    return id === undefined ? null : wrapNode(__omoikane_previous_sibling(id));
+  }
+
+  function internalNextSibling(node) {
+    const id = internalNodeId(node);
+    return id === undefined ? null : wrapNode(__omoikane_next_sibling(id));
+  }
+
+  function internalChildNodes(node) {
+    const id = internalNodeId(node);
+    if (id === undefined) return [];
+    const ids = __omoikane_child_node_ids(id) || [];
+    const children = [];
+    for (let index = 0; index < ids.length; index++) {
+      children.push(wrapNode(ids[index]));
+    }
+    return children;
+  }
+
+  function internalIsConnected(node) {
+    const id = internalNodeId(node);
+    if (id === undefined) return false;
+    const ownerId = __omoikane_owner_document(id);
+    return __omoikane_node_type(id) === 9 ||
+      (ownerId !== null && ownerId !== undefined);
+  }
+
+  function internalOwnerDocument(node) {
+    const id = internalNodeId(node);
+    if (id === undefined) return globalThis.document;
+    if (__omoikane_node_type(id) === 9) return null;
+    const rootId = __omoikane_owner_document(id);
+    if (rootId !== null && rootId !== undefined) return wrapNode(rootId);
+    const fallbackId = getOwnerDocumentId(ownerDocumentIds, node);
+    return fallbackId === undefined ? globalThis.document : wrapNode(fallbackId);
+  }
+
+  function canonicalNodeId(node) {
+    if ((typeof node !== "object" && typeof node !== "function") || node === null) {
+      return undefined;
+    }
+    return mapGet(canonicalNodeIds, node);
+  }
+
+  function markCanonicalCdata(node) {
+    if (canonicalNodeId(node) !== undefined) {
+      mapSet(canonicalCdataNodes, node, true);
+    }
+  }
+
+  function requireNodeReceiver(node) {
+    if (canonicalNodeId(node) === undefined) {
+      throw new IntrinsicTypeError("Node method called on an incompatible receiver");
+    }
+    return node;
+  }
+
+  function convertNullableNode(value) {
+    if (value === null || value === undefined) return null;
+    if (canonicalNodeId(value) === undefined) {
+      throw new IntrinsicTypeError("Argument is not a Node");
+    }
+    return value;
+  }
+
+  function cachedCanonicalNode(id) {
+    if (!mapHas(cache, id)) return undefined;
+    return mapGet(cache, id);
+  }
+
+  function namespacedAttributeRecord(id, namespace, localName) {
+    const records = nativeAttributeRecords(id) || [];
+    for (let index = 0; index < records.length; index += 1) {
+      if (records[index][1] === namespace && records[index][2] === localName) {
+        return records[index];
+      }
+    }
+    return null;
+  }
+
+  function canonicalCharacterData(id, node) {
+    return node && mapHas(canonicalCharacterDataOverrides, node)
+      ? mapGet(canonicalCharacterDataOverrides, node)
+      : (nativeGetTextContent(id) || "");
+  }
+
+  function canonicalInterfaceType(id, nodeType, node) {
+    return node && mapHas(canonicalCdataNodes, node)
+      ? CDATASection
+      : nativeInterfaceTypeForNodeId(id, nodeType);
+  }
+
+  function equalElementAttributes(left, right) {
+    if (left.length !== right.length) return false;
+    const matched = [];
+    for (let index = 0; index < right.length; index += 1) matched[index] = false;
+    for (let leftIndex = 0; leftIndex < left.length; leftIndex++) {
+      const expected = left[leftIndex];
+      let found = false;
+      for (let rightIndex = 0; rightIndex < right.length; rightIndex++) {
+        if (matched[rightIndex]) continue;
+        const candidate = right[rightIndex];
+        // Attribute prefixes and qualified names do not participate in node
+        // equality; namespace, local name, and value do.
+        if (candidate[1] === expected[1] &&
+            candidate[2] === expected[2] &&
+            candidate[3] === expected[3]) {
+          matched[rightIndex] = true;
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+    }
+    return true;
+  }
+
+  function equalCanonicalNodeIds(leftId, rightId, leftNode, rightNode) {
+    if (leftId === rightId) return true;
+    const nodeType = nativeNodeType(leftId);
+    if (nodeType !== nativeNodeType(rightId)) return false;
+    const leftInterface = canonicalInterfaceType(leftId, nodeType, leftNode);
+    const rightInterface = canonicalInterfaceType(rightId, nodeType, rightNode);
+    if (leftInterface !== rightInterface) return false;
+
+    if (nodeType === 10) {
+      if (nativeNodeName(leftId) !== nativeNodeName(rightId) ||
+          nativeDoctypePublicId(leftId) !== nativeDoctypePublicId(rightId) ||
+          nativeDoctypeSystemId(leftId) !== nativeDoctypeSystemId(rightId)) {
+        return false;
+      }
+    } else if (nodeType === 1) {
+      if (canonicalElementNamespace(leftId) !== canonicalElementNamespace(rightId) ||
+          nativeNodePrefix(leftId) !== nativeNodePrefix(rightId) ||
+          nativeNodeLocalName(leftId) !== nativeNodeLocalName(rightId) ||
+          !equalElementAttributes(
+            nativeAttributeRecords(leftId) || [],
+            nativeAttributeRecords(rightId) || []
+          )) {
+        return false;
+      }
+    } else if (nodeType === 7) {
+      if (nativeNodeName(leftId) !== nativeNodeName(rightId) ||
+          canonicalCharacterData(leftId, leftNode) !==
+            canonicalCharacterData(rightId, rightNode)) {
+        return false;
+      }
+    } else if ((nodeType === 3 || nodeType === 8) &&
+               canonicalCharacterData(leftId, leftNode) !==
+                 canonicalCharacterData(rightId, rightNode)) {
+      return false;
+    }
+
+    const leftChildren = nativeChildNodeIds(leftId) || [];
+    const rightChildren = nativeChildNodeIds(rightId) || [];
+    if (leftChildren.length !== rightChildren.length) return false;
+    for (let index = 0; index < leftChildren.length; index++) {
+      const leftChildId = leftChildren[index];
+      const rightChildId = rightChildren[index];
+      if (!equalCanonicalNodeIds(
+        leftChildId,
+        rightChildId,
+        cachedCanonicalNode(leftChildId),
+        cachedCanonicalNode(rightChildId)
+      )) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function equalCanonicalNodes(left, right) {
+    const leftId = canonicalNodeId(left);
+    const rightId = canonicalNodeId(right);
+    return leftId !== undefined && rightId !== undefined &&
+      equalCanonicalNodeIds(leftId, rightId, left, right);
+  }
+
+  // Stamp `node` and its shadow-including subtree with `doc`. Native ids keep
+  // adoption independent of page changes to wrapper prototypes, and following
+  // shadow roots ensures their detached ownerDocument remains the adopted one.
   function stampOwnerDoc(node, doc) {
-    if (!node) {
-      return;
+    if (!node) return;
+    const id = internalNodeId(node);
+    if (id === undefined) return;
+    const docId = internalNodeId(doc);
+    if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
+    if (__omoikane_node_type(id) === 1) {
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, node) &&
+          internalNodeLocalName(node) === "template") {
+        stampOwnerDoc(
+          wrapNode(__omoikane_template_content(id)),
+          templateContentsOwnerDocument(doc)
+        );
+      }
+      const shadowId = __omoikane_shadow_root(id);
+      if (shadowId !== null && shadowId !== undefined) {
+        stampOwnerDoc(wrapNode(shadowId), doc);
+      }
     }
-    node.__ownerDoc = doc;
-    if (node.nodeType === 1 && String(node.localName).toLowerCase() === "template") {
-      stampOwnerDoc(node.content, templateContentsOwnerDocument(doc));
-    }
-    const children = node.childNodes;
+    const children = internalChildNodes(node);
     for (let i = 0; i < children.length; i++) {
       stampOwnerDoc(children[i], doc);
     }
@@ -1044,7 +1385,9 @@
 
   function nodeDocument(node) {
     if (!node) return globalThis.document;
-    return node.nodeType === 9 ? node : (node.ownerDocument || globalThis.document);
+    return internalNodeType(node) === 9
+      ? node
+      : (internalOwnerDocument(node) || globalThis.document);
   }
 
   function nodeRoot(node) {
@@ -1054,7 +1397,9 @@
   }
 
   function isInclusiveDescendant(node, ancestor) {
-    for (let n = node; n; n = n.parentNode) if (n === ancestor) return true;
+    for (let n = node; n; n = internalParentNode(n)) {
+      if (n === ancestor) return true;
+    }
     return false;
   }
 
@@ -1072,12 +1417,92 @@
   }
 
   function notifyImplicitRemoval(node) {
-    if (!node || !node.parentNode) return;
-    const parent = node.parentNode;
-    const previousSibling = node.previousSibling;
-    const nextSibling = node.nextSibling;
+    if (!node) return;
+    const parent = internalParentNode(node);
+    if (!parent) return;
+    const previousSibling = internalPreviousSibling(node);
+    const nextSibling = internalNextSibling(node);
     preRemove(parent, node);
     queueMutation(parent, "childList", { removedNodes: [node], previousSibling, nextSibling });
+  }
+
+  // The DOM insertion algorithm is an internal operation. Resolve tree state
+  // from native ids so changing a genuine wrapper's JavaScript prototype does
+  // not make insertAdjacentElement/Text lose its platform-object identity.
+  function insertNodeBeforeInternal(parent, newNode, refNode) {
+    const parentId = internalNodeId(parent);
+    const newId = internalNodeId(newNode);
+    if (parentId === undefined || newId === undefined) {
+      throw new IntrinsicTypeError("insertBefore requires Node arguments");
+    }
+    let refId = null;
+    if (refNode !== null) {
+      refId = canonicalNodeId(refNode);
+      if (refId === undefined) {
+        throw new IntrinsicTypeError("The reference node must be a Node");
+      }
+      if (nativeParentNode(refId) !== parentId) {
+        throw new DOMException(
+          "The reference node is not a child of this node.",
+          "NotFoundError"
+        );
+      }
+    }
+    if (__omoikane_node_type(newId) !== 11) {
+      for (let ancestor = parent; ancestor; ancestor = internalHostIncludingParent(ancestor)) {
+        if (internalNodeId(ancestor) === newId) {
+          throw new DOMException(
+            "The new child element contains the parent.",
+            "HierarchyRequestError"
+          );
+        }
+      }
+    }
+
+    const childIds = __omoikane_child_node_ids(parentId) || [];
+    const previousSibling = refNode
+      ? internalPreviousSibling(refNode)
+      : (childIds.length ? wrapNode(childIds[childIds.length - 1]) : null);
+
+    if (__omoikane_node_type(newId) === 11) {
+      const children = internalChildNodes(newNode);
+      const connectedBeforeMove = [];
+      for (let index = 0; index < children.length; index++) {
+        connectedBeforeMove.push(internalIsConnected(children[index]));
+      }
+      for (const child of children) {
+        notifyImplicitRemoval(child);
+        __omoikane_insert_before(parentId, internalNodeId(child), refId);
+      }
+      for (let index = 0; index < children.length; index++) {
+        if (connectedBeforeMove[index]) disconnectCustomElementTree(children[index]);
+      }
+      upgradeInsertedCustomElements(parent, children);
+      if (children.length) {
+        queueMutation(parent, "childList", {
+          addedNodes: children,
+          previousSibling,
+          nextSibling: refNode,
+        });
+      }
+      refreshSlotAssignments();
+      signalFallbackSlotChanges(parent);
+      return newNode;
+    }
+
+    const connectedBeforeMove = internalIsConnected(newNode);
+    notifyImplicitRemoval(newNode);
+    __omoikane_insert_before(parentId, newId, refId);
+    if (connectedBeforeMove) disconnectCustomElementTree(newNode);
+    upgradeInsertedCustomElements(parent, [newNode]);
+    queueMutation(parent, "childList", {
+      addedNodes: [newNode],
+      previousSibling,
+      nextSibling: refNode,
+    });
+    refreshSlotAssignments();
+    signalFallbackSlotChanges(parent);
+    return newNode;
   }
 
   // Split a CSS declaration block only at top-level semicolons. Data URLs,
@@ -1687,6 +2112,13 @@
       // their preceding siblings, matching sequential pre-remove semantics.
       for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_text_content(this.__id, text);
+      const canonicalId = canonicalNodeId(this);
+      const canonicalType = canonicalId === undefined ? undefined : nativeNodeType(canonicalId);
+      if (canonicalType === 3 || canonicalType === 7 || canonicalType === 8) {
+        // Keep the private WTF-16 override coherent even when callers invoke
+        // this base-class descriptor setter directly on CharacterData.
+        mapSet(canonicalCharacterDataOverrides, this, text);
+      }
       const addedNodes = this.childNodes.slice();
       if (wasConnected) {
         for (const child of removedNodes) disconnectCustomElementTree(child);
@@ -1765,39 +2197,14 @@
     }
 
     insertBefore(newNode, refNode) {
-      if (refNode !== null && refNode.parentNode !== this) {
-        throw new DOMException("The reference node is not a child of this node.", "NotFoundError");
+      if (arguments.length < 2) {
+        throw new IntrinsicTypeError("insertBefore requires 2 arguments");
       }
-      if (newNode && newNode.nodeType !== 11) {
-        this.__ensureNotAncestor(newNode);
-      }
-      if (newNode && newNode.nodeType === 11) {
-        const children = newNode.childNodes.slice();
-        const connectedBeforeMove = children.map(node => node.isConnected);
-        const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
-        for (const child of children) {
-          notifyImplicitRemoval(child);
-          __omoikane_insert_before(this.__id, child.__id, refNode ? refNode.__id : null);
-        }
-        for (let i = 0; i < children.length; i++) {
-          if (connectedBeforeMove[i]) disconnectCustomElementTree(children[i]);
-        }
-        upgradeInsertedCustomElements(this, children);
-        if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling, nextSibling: refNode });
-        refreshSlotAssignments();
-        signalFallbackSlotChanges(this);
-        return newNode;
-      }
-      const previousSibling = refNode ? refNode.previousSibling : this.lastChild;
-      const connectedBeforeMove = !!(newNode && newNode.isConnected);
-      notifyImplicitRemoval(newNode);
-      __omoikane_insert_before(this.__id, newNode.__id, refNode ? refNode.__id : null);
-      if (connectedBeforeMove) disconnectCustomElementTree(newNode);
-      upgradeInsertedCustomElements(this, [newNode]);
-      queueMutation(this, "childList", { addedNodes: [newNode], previousSibling, nextSibling: refNode });
-      refreshSlotAssignments();
-      signalFallbackSlotChanges(this);
-      return newNode;
+      return insertNodeBeforeInternal(
+        this,
+        newNode,
+        refNode === undefined ? null : refNode
+      );
     }
 
     querySelectorAll(selector) {
@@ -1821,21 +2228,7 @@
     }
 
     get ownerDocument() {
-      // A document node has no owner document.
-      if (this.nodeType === 9) {
-        return null;
-      }
-      // Prefer the document at the root of this node's tree: an attached node
-      // belongs to whichever document it currently lives in — the top-level
-      // document or an iframe sub-document — so parent and child contexts stay
-      // separated. A detached node has no document root; fall back to the
-      // document that created it (stamped by the Document.create* methods via
-      // __own), or the top-level document when nothing else is known.
-      const rootId = __omoikane_owner_document(this.__id);
-      if (rootId !== null && rootId !== undefined) {
-        return wrapNode(rootId);
-      }
-      return this.__ownerDoc || globalThis.document;
+      return internalOwnerDocument(this);
     }
 
     get nodeType() {
@@ -1887,6 +2280,7 @@
         if (source instanceof CDATASection) {
           Object.setPrototypeOf(target, CDATASection.prototype);
           Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
+          markCanonicalCdata(target);
         }
         if (source instanceof CharacterData) target.textContent = source.textContent;
         if (!deep) return;
@@ -1901,6 +2295,24 @@
       };
       if (clone) preserveCharacterData(this, clone);
       return clone;
+    }
+
+    isEqualNode(otherNode) {
+      const receiver = requireNodeReceiver(this);
+      if (arguments.length < 1) {
+        throw new IntrinsicTypeError("isEqualNode requires 1 argument");
+      }
+      const other = convertNullableNode(otherNode);
+      return other !== null && equalCanonicalNodes(receiver, other);
+    }
+
+    isSameNode(otherNode) {
+      const receiver = requireNodeReceiver(this);
+      if (arguments.length < 1) {
+        throw new IntrinsicTypeError("isSameNode requires 1 argument");
+      }
+      const other = convertNullableNode(otherNode);
+      return other !== null && canonicalNodeId(receiver) === canonicalNodeId(other);
     }
 
     hasAttribute(name) {
@@ -1953,16 +2365,14 @@
         this.setAttribute(name, value);
         return;
       }
-      if (!this.__namespacedAttributes) this.__namespacedAttributes = new Map();
-      const key = String(ns) + "|" + localName;
-      const previous = this.__namespacedAttributes.get(key);
-      const oldValue = previous ? previous.value : null;
-      if (previous && previous.name !== name) {
-        __omoikane_remove_attribute(this.__id, previous.name);
+      const id = canonicalNodeId(requireNodeReceiver(this));
+      const previous = namespacedAttributeRecord(id, ns, localName);
+      const oldValue = previous ? previous[3] : null;
+      if (previous && previous[0] !== name) {
+        nativeRemoveAttributeNS(id, previous[0]);
       }
       const newValue = String(value);
-      this.__namespacedAttributes.set(key, { name, localName, namespaceURI: ns, value: newValue });
-      __omoikane_set_attribute(this.__id, name, newValue);
+      nativeSetAttributeNS(id, ns, name, localName, newValue);
       queueMutation(this, "attributes", { attributeName: localName, attributeNamespace: ns, oldValue });
       notifyCustomElementAttributeChanged(this, localName, oldValue, newValue, ns);
     }
@@ -1970,8 +2380,9 @@
     getAttributeNS(namespace, localName) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       if (ns === null) return this.getAttribute(localName);
-      const entry = this.__namespacedAttributes && this.__namespacedAttributes.get(String(ns) + "|" + String(localName));
-      return entry ? entry.value : null;
+      const id = canonicalNodeId(requireNodeReceiver(this));
+      const entry = namespacedAttributeRecord(id, ns, String(localName));
+      return entry ? entry[3] : null;
     }
 
     removeAttributeNS(namespace, localName) {
@@ -1980,13 +2391,12 @@
         this.removeAttribute(localName);
         return;
       }
-      const key = String(ns) + "|" + String(localName);
-      const entry = this.__namespacedAttributes && this.__namespacedAttributes.get(key);
+      const id = canonicalNodeId(requireNodeReceiver(this));
+      const entry = namespacedAttributeRecord(id, ns, String(localName));
       if (!entry) return;
-      this.__namespacedAttributes.delete(key);
-      __omoikane_remove_attribute(this.__id, entry.name);
-      queueMutation(this, "attributes", { attributeName: entry.localName, attributeNamespace: ns, oldValue: entry.value });
-      notifyCustomElementAttributeChanged(this, entry.localName, entry.value, null, ns);
+      nativeRemoveAttributeNS(id, entry[0]);
+      queueMutation(this, "attributes", { attributeName: entry[2], attributeNamespace: ns, oldValue: entry[3] });
+      notifyCustomElementAttributeChanged(this, entry[2], entry[3], null, ns);
     }
 
     get tagName() {
@@ -2536,8 +2946,111 @@
     "font-face-uri", "font-face-format", "font-face-name", "missing-glyph",
   ]);
 
+  function requireCanonicalElement(value, message) {
+    if ((typeof value !== "object" && typeof value !== "function") ||
+        value === null ||
+        !hasCanonicalWrapperId(canonicalElementIds, value)) {
+      throw new IntrinsicTypeError(message);
+    }
+    return value;
+  }
+
+  // Web IDL DOMString conversion uses ECMAScript ToString, which rejects a
+  // Symbol. Calling the public String function would instead stringify one.
+  function toDOMString(value) {
+    if (typeof value === "symbol") {
+      throw new IntrinsicTypeError("Cannot convert a Symbol value to a string");
+    }
+    return intrinsicString(value);
+  }
+
+  function elementNodeDocument(element) {
+    return internalOwnerDocument(element) || globalThis.document;
+  }
+
+  function ensureInsertAdjacentDocumentValidity(parent, node) {
+    const parentId = internalNodeId(parent);
+    const nodeId = internalNodeId(node);
+    if (__omoikane_node_type(parentId) !== 9) return;
+    const nodeType = __omoikane_node_type(nodeId);
+    const childIds = __omoikane_child_node_ids(parentId) || [];
+    let anotherElement = false;
+    for (let index = 0; index < childIds.length; index++) {
+      const id = childIds[index];
+      if (id !== nodeId && __omoikane_node_type(id) === 1) {
+        anotherElement = true;
+        break;
+      }
+    }
+    if (nodeType === 3 || anotherElement) {
+      throw new DOMException(
+        "The operation would yield an incorrect node tree.",
+        "HierarchyRequestError"
+      );
+    }
+  }
+
+  function insertAdjacent(element, where, node) {
+    const position = asciiLowercase(where);
+    switch (position) {
+      case "beforebegin": {
+        const parent = internalParentNode(element);
+        if (parent === null) return null;
+        ensureInsertAdjacentDocumentValidity(parent, node);
+        return insertNodeBeforeInternal(parent, node, element);
+      }
+      case "afterbegin": {
+        const childIds = nativeChildNodeIds(internalNodeId(element)) || [];
+        const firstChild = childIds.length > 0 ? wrapNode(childIds[0]) : null;
+        return insertNodeBeforeInternal(element, node, firstChild);
+      }
+      case "beforeend":
+        return insertNodeBeforeInternal(element, node, null);
+      case "afterend": {
+        const parent = internalParentNode(element);
+        if (parent === null) return null;
+        ensureInsertAdjacentDocumentValidity(parent, node);
+        return insertNodeBeforeInternal(parent, node, internalNextSibling(element));
+      }
+      default:
+        throw new DOMException("The provided position is not valid.", "SyntaxError");
+    }
+  }
+
   class Element extends Node {
     remove() { removeChildNode.call(this); }
+
+    insertAdjacentElement(where, element) {
+      requireCanonicalElement(
+        this,
+        "insertAdjacentElement called on an incompatible receiver"
+      );
+      if (arguments.length < 2) {
+        throw new IntrinsicTypeError("insertAdjacentElement requires 2 arguments");
+      }
+      where = toDOMString(where);
+      requireCanonicalElement(element, "insertAdjacentElement requires an Element");
+      const owner = elementNodeDocument(this);
+      const inserted = insertAdjacent(this, where, element);
+      if (inserted !== null) stampOwnerDoc(element, owner);
+      return inserted;
+    }
+
+    insertAdjacentText(where, data) {
+      requireCanonicalElement(
+        this,
+        "insertAdjacentText called on an incompatible receiver"
+      );
+      if (arguments.length < 2) {
+        throw new IntrinsicTypeError("insertAdjacentText requires 2 arguments");
+      }
+      where = toDOMString(where);
+      data = toDOMString(data);
+      const owner = elementNodeDocument(this);
+      const text = wrapNode(__omoikane_create_text_node(data));
+      stampOwnerDoc(text, owner);
+      insertAdjacent(this, where, text);
+    }
 
     setPointerCapture(pointerId) {
       setPointerCaptureTarget(this, normalizePointerId(pointerId));
@@ -2821,15 +3334,14 @@
   class CharacterData extends Node {
     remove() { removeChildNode.call(this); }
     get textContent() {
-      if (Object.prototype.hasOwnProperty.call(this, "__characterData")) return this.__characterData;
+      if (mapHas(canonicalCharacterDataOverrides, this)) {
+        return mapGet(canonicalCharacterDataOverrides, this);
+      }
       return super.textContent;
     }
 
     set textContent(value) {
       const text = value == null ? "" : String(value);
-      // Preserve the authoritative WTF-16 value on the JS wrapper because
-      // the native Rust DOM cannot represent unpaired UTF-16 surrogates.
-      this.__characterData = text;
       super.textContent = text;
     }
 
@@ -3711,7 +4223,8 @@
     // its tree root wins (see the ownerDocument getter), matching DOM adoption.
     __own(node) {
       if (node) {
-        node.__ownerDoc = this;
+        const docId = internalNodeId(this);
+        if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
       }
       return node;
     }
@@ -3751,26 +4264,7 @@
         : String(namespace);
       const qname = String(qualifiedName);
       const info = validateAndExtractNS(ns, qname);
-      const node = this.__own(wrapNode(__omoikane_create_element(qname)));
-      // Namespaced elements preserve their exact qualified name (no ASCII
-      // upper-casing) and expose namespace metadata; shadow the prototype
-      // getters with per-instance data properties.
-      const define = (key, value) =>
-        Object.defineProperty(node, key, { value, configurable: true, enumerable: false });
-      define("namespaceURI", info.namespace);
-      define("prefix", info.prefix);
-      define("localName", info.localName);
-      define("tagName", qname);
-      define("nodeName", qname);
-      if (info.namespace === SVG_NAMESPACE) {
-        const ctor = SVG_ELEMENT_CTORS[info.localName.toLowerCase()] || SVGElement;
-        Object.setPrototypeOf(node, ctor.prototype);
-      } else if (info.namespace === HTML_NAMESPACE) {
-        const ctor = ELEMENT_CTORS[info.localName.toLowerCase()] || HTMLElement;
-        Object.setPrototypeOf(node, ctor.prototype);
-      } else {
-        Object.setPrototypeOf(node, Element.prototype);
-      }
+      const node = this.__own(wrapNode(nativeCreateElementNS(info.namespace, qname)));
       if (info.namespace === HTML_NAMESPACE) {
         const registry = customElementRegistryByDocument.get(this);
         if (registry) considerCustomElement(registry, node);
@@ -3877,6 +4371,7 @@
       const node = this.createTextNode(text);
       Object.setPrototypeOf(node, CDATASection.prototype);
       Object.defineProperty(node, "__cdataSection", { value: true, configurable: true });
+      markCanonicalCdata(node);
       return node;
     }
 
@@ -5830,6 +6325,73 @@
         throw new DOMException("The index is out of range.", "IndexSizeError");
       }
       this.removeChild(cells[index]);
+    }
+  }
+
+  function parseTableCellSpanAttribute(raw, max) {
+    if (raw === null) return null;
+    const match = /^[\t\n\f\r ]*\+?([0-9]+)/.exec(String(raw));
+    if (!match) return null;
+    const digits = match[1].replace(/^0+(?=\d)/, "");
+    const limit = String(max);
+    if (digits.length > limit.length) return max;
+    if (digits.length === limit.length && digits > limit) return max;
+    return Number.parseInt(digits, 10);
+  }
+
+  function coerceTableCellSpanSetterValue(value) {
+    if (typeof value === "bigint") throw new TypeError("Value is not a finite number");
+    return Number(value) >> 0;
+  }
+
+  // HTMLTableCellElement covers the cell-specific IDL surface shared by
+  // <td> and <th>. The numeric span attributes reflect HTML parsing rules:
+  // getters accept a leading "+" and digit prefix from the content attribute
+  // and clamp oversized values to the HTML limits, while setters first apply
+  // the platform's signed 32-bit integer conversion and serialize negative
+  // results back to the default span value before the getter re-applies the
+  // HTML defaults/caps when the attribute is read.
+  class HTMLTableCellElement extends HTMLElement {
+    get cellIndex() {
+      const parent = this.parentNode;
+      if (!parent || parent.tagName !== "TR") return -1;
+      return parent.cells.findIndex(cell => cell.__id === this.__id);
+    }
+    get colSpan() {
+      const value = parseTableCellSpanAttribute(this.getAttribute("colspan"), 1000);
+      if (value === null) return 1;
+      return Number.isFinite(value) && value >= 1 ? Math.min(value, 1000) : 1;
+    }
+    set colSpan(value) {
+      const normalized = coerceTableCellSpanSetterValue(value);
+      this.setAttribute("colspan", String(normalized < 0 ? 1 : normalized));
+    }
+    get rowSpan() {
+      const value = parseTableCellSpanAttribute(this.getAttribute("rowspan"), 65534);
+      if (value === null) return 1;
+      return Number.isFinite(value) && value >= 0 ? Math.min(value, 65534) : 1;
+    }
+    set rowSpan(value) {
+      const normalized = coerceTableCellSpanSetterValue(value);
+      this.setAttribute("rowspan", String(normalized < 0 ? 1 : normalized));
+    }
+    get headers() {
+      return this.getAttribute("headers") || "";
+    }
+    set headers(value) {
+      this.setAttribute("headers", String(value));
+    }
+    get scope() {
+      return this.getAttribute("scope") || "";
+    }
+    set scope(value) {
+      this.setAttribute("scope", String(value));
+    }
+    get abbr() {
+      return this.getAttribute("abbr") || "";
+    }
+    set abbr(value) {
+      this.setAttribute("abbr", String(value));
     }
   }
 
@@ -8549,6 +9111,8 @@
     tbody: HTMLTableSectionElement,
     tfoot: HTMLTableSectionElement,
     tr: HTMLTableRowElement,
+    td: HTMLTableCellElement,
+    th: HTMLTableCellElement,
     form: HTMLFormElement,
     input: HTMLInputElement,
     textarea: HTMLTextAreaElement,
@@ -8645,13 +9209,16 @@
 
   function customElementTreeWalk(root, callback) {
     if (!root) return;
-    if (root.nodeType === 1) {
+    const id = internalNodeId(root);
+    if (id === undefined) return;
+    if (__omoikane_node_type(id) === 1) {
       callback(root);
-      if (root.__shadowRootInternal) {
-        customElementTreeWalk(root.__shadowRootInternal, callback);
+      const shadowId = __omoikane_shadow_root(id);
+      if (shadowId !== null && shadowId !== undefined) {
+        customElementTreeWalk(wrapNode(shadowId), callback);
       }
     }
-    const children = root.childNodes;
+    const children = internalChildNodes(root);
     for (let i = 0; i < children.length; i++) {
       customElementTreeWalk(children[i], callback);
     }
@@ -8678,19 +9245,20 @@
   }
 
   function upgradeCustomElement(element, definition) {
-    if (!element || element.__customElementState === "custom" ||
+    const id = internalNodeId(element);
+    if (!element || id === undefined || element.__customElementState === "custom" ||
         element.__customElementState === "precustomized" ||
         element.__customElementState === "failed" ||
-        element.namespaceURI !== HTML_NAMESPACE && element.namespaceURI !== null ||
-        String(element.localName) !== definition.name) {
+        !hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
+        internalNodeLocalName(element) !== definition.name) {
       return;
     }
 
-    const wasConnected = element.isConnected;
-    const initialAttributes = (__omoikane_attribute_names(element.__id) || [])
+    const wasConnected = internalIsConnected(element);
+    const initialAttributes = (__omoikane_attribute_names(id) || [])
       .map(name => ({
         name,
-        value: __omoikane_get_attribute(element.__id, name),
+        value: __omoikane_get_attribute(id, name),
       }));
     Object.setPrototypeOf(element, definition.prototype);
     element.__customElementDefinition = definition;
@@ -8725,7 +9293,7 @@
         // The upgrade reaction is based on the element's connectivity when the
         // upgrade started. If its constructor detached it, allow a later real
         // insertion to deliver a new connected callback.
-        if (!element.isConnected) element.__customElementConnected = false;
+        if (!internalIsConnected(element)) element.__customElementConnected = false;
       }
     } catch (error) {
       element.__customElementState = "failed";
@@ -8737,21 +9305,14 @@
 
   function upgradeCustomElementTree(registry, root) {
     if (!root) return;
-    const owner = root.nodeType === 9 ? root : root.ownerDocument;
+    const owner = internalNodeType(root) === 9 ? root : internalOwnerDocument(root);
     if (owner !== registry.__document) return;
-    if (root.nodeType === 1) {
+    customElementTreeWalk(root, element => {
       const definition = registry.__definitions.get(
-        String(root.localName),
+        internalNodeLocalName(element),
       );
-      if (definition) upgradeCustomElement(root, definition);
-      if (root.__shadowRootInternal) {
-        upgradeCustomElementTree(registry, root.__shadowRootInternal);
-      }
-    }
-    const children = root.childNodes;
-    for (let i = 0; i < children.length; i++) {
-      upgradeCustomElementTree(registry, children[i]);
-    }
+      if (definition) upgradeCustomElement(element, definition);
+    });
   }
 
   function considerCustomElement(registry, element) {
@@ -8763,8 +9324,8 @@
   }
 
   function upgradeInsertedCustomElements(parent, nodes) {
-    if (!parent || !parent.isConnected) return;
-    const owner = parent.nodeType === 9 ? parent : parent.ownerDocument;
+    if (!parent || !internalIsConnected(parent)) return;
+    const owner = internalNodeType(parent) === 9 ? parent : internalOwnerDocument(parent);
     const registry = owner && customElementRegistryByDocument.get(owner);
     if (!registry) return;
     for (const node of nodes) {
@@ -8773,7 +9334,9 @@
           connectCustomElement(element);
           return;
         }
-        const definition = registry.__definitions.get(String(element.localName));
+        const definition = registry.__definitions.get(
+          internalNodeLocalName(element)
+        );
         if (definition) upgradeCustomElement(element, definition);
       });
     }
@@ -9418,6 +9981,7 @@
   globalThis.HTMLTableElement = HTMLTableElement;
   globalThis.HTMLTableSectionElement = HTMLTableSectionElement;
   globalThis.HTMLTableRowElement = HTMLTableRowElement;
+  globalThis.HTMLTableCellElement = HTMLTableCellElement;
   globalThis.HTMLFormElement = HTMLFormElement;
   globalThis.HTMLInputElement = HTMLInputElement;
   globalThis.HTMLTextAreaElement = HTMLTextAreaElement;

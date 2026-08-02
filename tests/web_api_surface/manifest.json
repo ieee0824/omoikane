@@ -33,6 +33,22 @@
       "baseline_supported": false
     },
     {
+      "id": "dom.insert-adjacent",
+      "area": "dom",
+      "description": "Element insert-adjacent methods support all four positions and text insertion",
+      "setup": "globalThis.__adjacentHost = document.createElement('div'); globalThis.__adjacentTarget = document.createElement('section'); globalThis.__adjacentTail = document.createElement('i'); __adjacentHost.appendChild(__adjacentTarget); __adjacentHost.appendChild(__adjacentTail); document.body.appendChild(__adjacentHost); globalThis.__adjacentBefore = document.createElement('b'); globalThis.__adjacentAfter = document.createElement('em'); __adjacentTarget.insertAdjacentElement('BeFoReBeGiN', __adjacentBefore); __adjacentTarget.insertAdjacentElement('AFTEREND', __adjacentAfter); __adjacentTarget.insertAdjacentText('afterbegin', 'front'); __adjacentTarget.insertAdjacentText('beforeend', 'back')",
+      "probe": "typeof Element.prototype.insertAdjacentElement === 'function' && typeof Element.prototype.insertAdjacentText === 'function' && __adjacentHost.firstChild === __adjacentBefore && __adjacentBefore.nextSibling === __adjacentTarget && __adjacentTarget.nextSibling === __adjacentAfter && __adjacentAfter.nextSibling === __adjacentTail && __adjacentTarget.textContent === 'frontback'",
+      "baseline_supported": false
+    },
+    {
+      "id": "dom.node-equality",
+      "area": "dom",
+      "description": "Node identity and structural equality follow the DOM algorithms",
+      "setup": "globalThis.__nodeEqualityProbe = document.createElement('section'); __nodeEqualityProbe.setAttribute('data-kind', 'probe'); __nodeEqualityProbe.appendChild(document.createTextNode('value')); globalThis.__nodeEqualityClone = __nodeEqualityProbe.cloneNode(true)",
+      "probe": "typeof Node.prototype.isSameNode === 'function' && typeof Node.prototype.isEqualNode === 'function' && Node.prototype.isSameNode.length === 1 && Node.prototype.isEqualNode.length === 1 && __nodeEqualityProbe.isSameNode(__nodeEqualityProbe) && !__nodeEqualityProbe.isSameNode(__nodeEqualityClone) && __nodeEqualityProbe.isEqualNode(__nodeEqualityClone) && !__nodeEqualityProbe.isEqualNode(null)",
+      "baseline_supported": false
+    },
+    {
       "id": "css.compositing-properties",
       "area": "css",
       "description": "3D and compositing CSS properties validate through CSS.supports and computed style",
@@ -185,6 +201,14 @@
       "description": "Form controls are exposed through form.elements",
       "setup": "globalThis.__form = document.createElement('form'); globalThis.__input = document.createElement('input'); __input.name = 'field'; __form.appendChild(__input); document.body.appendChild(__form)",
       "probe": "__form.elements.length === 1 && __form.elements.field === __input",
+      "baseline_supported": true
+    },
+    {
+      "id": "html.table-cell-interface",
+      "area": "html",
+      "description": "Table cells expose the HTMLTableCellElement interface and span/reflection semantics",
+      "setup": "globalThis.__table = document.createElement('table'); globalThis.__tableRow = __table.insertRow(); globalThis.__tableCell = __tableRow.insertCell(); __tableCell.colSpan = 2; __tableCell.rowSpan = 0; __tableCell.headers = 'head-id'; __tableCell.scope = 'col'; __tableCell.abbr = 'Amount'; document.body.appendChild(__table)",
+      "probe": "typeof HTMLTableCellElement === 'function' && __tableCell instanceof HTMLTableCellElement && __tableCell.cellIndex === 0 && __tableCell.colSpan === 2 && __tableCell.rowSpan === 0 && __tableCell.headers === 'head-id' && __tableCell.scope === 'col' && __tableCell.abbr === 'Amount' && __tableRow.cells.length === 1 && (() => { __tableCell.setAttribute('colspan', '10foo'); const parsedColSpan = __tableCell.colSpan === 10; __tableCell.setAttribute('rowspan', '+2'); const parsedRowSpan = __tableCell.rowSpan === 2; __tableCell.setAttribute('colspan', '9'.repeat(500)); const hugeColSpan = __tableCell.colSpan === 1000; __tableCell.setAttribute('rowspan', '9'.repeat(500)); const hugeRowSpan = __tableCell.rowSpan === 65534; __tableCell.colSpan = '10foo'; const normalizedColSpan = __tableCell.colSpan === 1 && __tableCell.getAttribute('colspan') === '0'; __tableCell.rowSpan = '10foo'; const normalizedRowSpan = __tableCell.rowSpan === 0 && __tableCell.getAttribute('rowspan') === '0'; __tableCell.colSpan = -1; const negativeColSpan = __tableCell.colSpan === 1 && __tableCell.getAttribute('colspan') === '1'; __tableCell.rowSpan = -1; const negativeRowSpan = __tableCell.rowSpan === 1 && __tableCell.getAttribute('rowspan') === '1'; __tableCell.colSpan = 2147483648; const signedOverflowColSpan = __tableCell.colSpan === 1 && __tableCell.getAttribute('colspan') === '1'; __tableCell.rowSpan = 2147483648; const signedOverflowRowSpan = __tableCell.rowSpan === 1 && __tableCell.getAttribute('rowspan') === '1'; __tableCell.colSpan = 4294967296; const wrappedColSpan = __tableCell.colSpan === 1 && __tableCell.getAttribute('colspan') === '0'; __tableCell.rowSpan = -0.5; const wrappedRowSpan = __tableCell.rowSpan === 0 && __tableCell.getAttribute('rowspan') === '0'; return parsedColSpan && parsedRowSpan && hugeColSpan && hugeRowSpan && normalizedColSpan && normalizedRowSpan && negativeColSpan && negativeRowSpan && signedOverflowColSpan && signedOverflowRowSpan && wrappedColSpan && wrappedRowSpan; })()",
       "baseline_supported": true
     },
     {
