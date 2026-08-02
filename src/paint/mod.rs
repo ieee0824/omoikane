@@ -1698,8 +1698,7 @@ fn hit_test_box(
         let local_y = local_point.1 - svg_box.y;
         let mut computed_pointer_events = |node: &NodeHandle| {
             match resolver.computed_property(node, "pointer-events") {
-                Some(ComputedValue::Keyword(value))
-                    if !value.eq_ignore_ascii_case("auto") => Some(value.clone()),
+                Some(ComputedValue::Keyword(value)) => Some(value),
                 _ => None,
             }
         };

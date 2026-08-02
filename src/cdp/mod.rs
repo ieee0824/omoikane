@@ -4758,6 +4758,7 @@ mod tests {
                       <g id="inherited" stroke-width="10">
                         <line id="wide" x1="10" y1="70" x2="90" y2="70" fill="none" stroke="green" pointer-events="stroke"></line>
                       </g>
+                      <circle id="bounds" cx="70" cy="70" r="10" fill="none" pointer-events="bounding-box"></circle>
                     </svg>
                     <script>
                       globalThis.targets=[];
@@ -4769,7 +4770,7 @@ mod tests {
             )
             .unwrap();
 
-        for (x, y) in [(10, 10), (155, 35), (190, 35), (140, 66)] {
+        for (x, y) in [(10, 10), (155, 35), (190, 35), (140, 66), (190, 60)] {
             session
                 .dispatch(
                     "Input.dispatchMouseEvent",
@@ -4794,7 +4795,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state["result"]["value"],
-            r#"{"targets":["back","shape","stroke","wide"],"none":"none"}"#
+            r#"{"targets":["back","shape","stroke","wide","bounds"],"none":"none"}"#
         );
     }
 

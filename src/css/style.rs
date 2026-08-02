@@ -4605,6 +4605,24 @@ fn apply_presentational_hints(
 
     let attributes = node.attributes().unwrap_or_default();
 
+    // SVG presentation attributes participate in the CSS cascade below author
+    // declarations. Expose pointer-events through computed style so hit
+    // testing can distinguish a local attribute from an inherited value and
+    // still honor explicit CSS overrides, including `auto`.
+    if node.namespace_uri().as_deref() == Some("http://www.w3.org/2000/svg")
+        && !properties.contains_key("pointer-events")
+        && let Some(value) = attributes
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("pointer-events"))
+            .map(|(_, value)| value.trim())
+            .filter(|value| !value.is_empty())
+    {
+        properties.insert(
+            "pointer-events".to_string(),
+            ComputedValue::Keyword(value.to_string()),
+        );
+    }
+
     if !properties.contains_key("background-color")
         && let Some(background) = attributes
             .get("bgcolor")
