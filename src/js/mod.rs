@@ -5234,6 +5234,7 @@ impl Drop for JsRuntime {
         // WorkerRuntime keeps an owner/worker Rc cycle until the owner map is
         // cleared. Do that before the RootProvider and host state fields drop,
         // so a later collection cannot trace a stale worker realm.
+        let _guard = activate_host_state(Rc::clone(&self.host_state));
         self.terminate_workers();
     }
 }
@@ -13382,7 +13383,11 @@ mod tests {
         }
 
         boa_gc::force_collect();
-        let _next_runtime = JsRuntime::new().unwrap();
+        let mut next_runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            next_runtime.eval("1 + 1").unwrap().as_number(),
+            Some(2.0)
+        );
     }
 
     fn poll_until_dialog<F>(
