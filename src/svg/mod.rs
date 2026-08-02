@@ -402,7 +402,7 @@ fn svg_hit_geometry(
             let points = parse_svg_points(attribute_ref(attrs, "points"))
                 .into_iter()
                 .map(|(x, y)| (x * scale_x, y * scale_y))
-                .collect();
+                .collect::<Vec<_>>();
             polygon_hit_geometry(&points, tag == "polygon", point, stroke_width)
         }
         "path" => {
