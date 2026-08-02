@@ -2449,6 +2449,8 @@ impl JsRuntime {
         Self::with_document_sandbox_and_url(document, sandbox, "http://localhost/")
     }
 
+    pub(crate) fn sandbox_timeout(&self) -> Duration { self.sandbox.timeout }
+
     fn with_document_sandbox_and_url(
         document: NodeHandle,
         sandbox: SandboxConfig,

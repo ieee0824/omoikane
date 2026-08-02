@@ -766,6 +766,8 @@ impl CdpSession {
         Ok(session)
     }
 
+    fn runtime_timeout(&self) -> Duration { self.runtime.sandbox_timeout() }
+
     /// Dispatches a CDP domain method and returns the result payload.
     pub fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, JsonRpcError> {
         match method {
@@ -2043,6 +2045,7 @@ struct PendingSessionEvaluation {
     cancelled: Rc<Cell<bool>>,
     page_url: String,
     opened: Option<JavaScriptDialog>,
+    timeout_deadline: Instant,
     future: SessionEvaluation,
 }
 
@@ -2051,6 +2054,7 @@ struct PendingPageNavigation {
     controller: JavaScriptDialogController,
     page_url: String,
     opened: Option<JavaScriptDialog>,
+    timeout_deadline: Instant,
     task: Pin<Box<OwnedPageTask>>,
     commit: PendingDocumentCommit,
     response: Value,
@@ -2066,6 +2070,11 @@ struct BrowserSessionState {
     pending: Option<PendingSessionEvaluation>,
     pending_page: Option<PendingPageNavigation>,
     actions: Vec<BrowserSessionAction>,
+}
+
+fn deadline_after(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout).unwrap_or(now)
 }
 
 fn page_task_script_error_lines(
@@ -2137,6 +2146,7 @@ impl BrowserSessionState {
         // older suspension.
         let controller = session.runtime.javascript_dialog_controller();
         let page_url = session.current_url.clone();
+        let timeout_deadline = deadline_after(session.runtime_timeout());
         let cancelled = Rc::new(Cell::new(false));
         let evaluation_cancelled = Rc::clone(&cancelled);
         let future = Box::pin(async move {
@@ -2163,6 +2173,7 @@ impl BrowserSessionState {
             cancelled,
             page_url,
             opened: None,
+            timeout_deadline,
             future,
         });
         self.poll_evaluation();
@@ -2188,6 +2199,7 @@ impl BrowserSessionState {
             code: -32000,
             message: "Browser session is unavailable".to_string(),
         })?;
+        let timeout_deadline = deadline_after(session.runtime_timeout());
         let prepared = if method == "Page.reload" {
             session.prepare_page_reload()?
         } else {
@@ -2210,6 +2222,7 @@ impl BrowserSessionState {
             controller,
             page_url,
             opened: None,
+            timeout_deadline,
             task: Box::pin(task),
             commit,
             response,
@@ -2298,6 +2311,19 @@ impl BrowserSessionState {
                 self.pending = Some(pending);
             }
         }
+    }
+
+    fn next_pending_timeout_deadline(&self) -> Option<Instant> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.timeout_deadline)
+            .into_iter()
+            .chain(
+                self.pending_page
+                    .as_ref()
+                    .map(|pending| pending.timeout_deadline),
+            )
+            .min()
     }
 
     fn handle_dialog(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
@@ -2502,7 +2528,17 @@ impl BrowserSession {
         client_id: u64,
     ) -> Result<Vec<WebSocketFrame>, CdpError> {
         self.flush_actions()?;
-        self.server.drain_outgoing(client_id)
+        let mut outgoing = self.server.drain_outgoing(client_id)?;
+        if !outgoing.is_empty() || self.server.pending_response_count() == 0 {
+            return Ok(outgoing);
+        }
+        let deadline = { self.state.borrow().next_pending_timeout_deadline() };
+        if let Some(deadline) = deadline {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            self.flush_actions()?;
+            outgoing.extend(self.server.drain_outgoing(client_id)?);
+        }
+        Ok(outgoing)
     }
 
     pub fn pending_response_count(&self) -> usize {
@@ -3074,13 +3110,7 @@ mod tests {
         );
         let mut payloads = browser_payloads(&mut session, client.client_id);
         assert_eq!(payloads[0]["method"], "Page.javascriptDialogOpening");
-        for _ in 0..8 {
-            if session.pending_response_count() == 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-            payloads.extend(browser_payloads(&mut session, client.client_id));
-        }
+        payloads.extend(browser_payloads(&mut session, client.client_id));
         assert_eq!(session.pending_response_count(), 0, "{payloads:#?}");
         assert!(payloads.iter().any(|value| {
             value["method"] == "Page.javascriptDialogClosed"
@@ -3533,6 +3563,7 @@ mod tests {
                 controller,
                 page_url: "about:blank".to_string(),
                 opened: None,
+                timeout_deadline: deadline_after(Duration::from_millis(2)),
                 task: Box::pin(task),
                 commit: PendingDocumentCommit {
                     url: "about:blank".to_string(),
