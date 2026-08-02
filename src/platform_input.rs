@@ -206,7 +206,7 @@ impl PlatformInput {
             PlatformImeEvent::Preedit { text, selection } => {
                 let collapsed = text.encode_utf16().count();
                 let (selection_start, selection_end) = selection.unwrap_or((collapsed, collapsed));
-                session.dispatch(
+                let result = session.dispatch(
                     "Input.imeSetComposition",
                     json!({
                         "text": text,
@@ -214,7 +214,8 @@ impl PlatformInput {
                         "selectionEnd": selection_end,
                     }),
                 )?;
-                self.composition_text = Some(text);
+                self.composition_text =
+                    result["handled"].as_bool().unwrap_or(false).then_some(text);
             }
             PlatformImeEvent::Commit(text) => {
                 session.dispatch("Input.insertText", json!({ "text": text }))?;
@@ -637,5 +638,37 @@ mod tests {
 
         assert_eq!(evaluate(&mut session, "field.value"), json!("é"));
         assert_eq!(evaluate(&mut session, "ends.join(',')"), json!(""));
+    }
+
+    #[test]
+    fn rejected_ime_preedit_does_not_suppress_later_keyboard_editing() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(&mut session, "<input id='field'>");
+        let mut input = PlatformInput::new();
+
+        input
+            .ime_event(
+                &mut session,
+                PlatformImeEvent::Preedit {
+                    text: "ignored".into(),
+                    selection: None,
+                },
+            )
+            .unwrap();
+        evaluate(&mut session, "field.focus()");
+        input
+            .key_event(
+                &mut session,
+                PlatformKeyEvent {
+                    pressed: true,
+                    key: "x".into(),
+                    code: "KeyX".into(),
+                    text: Some("x".into()),
+                    repeat: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(evaluate(&mut session, "field.value"), json!("x"));
     }
 }

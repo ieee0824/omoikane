@@ -1560,16 +1560,13 @@ impl CdpSession {
     fn input_ime_set_composition(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let text = require_string(params, "text")?;
         let length = text.encode_utf16().count() as u64;
-        let selection_start = params
-            .get("selectionStart")
-            .and_then(Value::as_u64)
-            .unwrap_or(length)
-            .min(length);
-        let selection_end = params
-            .get("selectionEnd")
-            .and_then(Value::as_u64)
-            .unwrap_or(selection_start)
-            .min(length);
+        let selection_start = require_u64(params, "selectionStart")?;
+        let selection_end = require_u64(params, "selectionEnd")?;
+        if selection_start > length || selection_end > length {
+            return Err(invalid_params(
+                "Composition selection must be within the text".to_string(),
+            ));
+        }
         let handled = self.eval_input_bool(&format!(
             "__omoikane_set_composition({}, {selection_start}, {selection_end})",
             serde_json::to_string(&text).expect("a string is JSON serializable"),
