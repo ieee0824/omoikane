@@ -1107,8 +1107,13 @@
     return parts;
   }
 
+  const domTokenListConstructionToken = Symbol("DOMTokenList construction");
+
   class DOMTokenList {
-    constructor(node, attribute, supportedTokens = null) {
+    constructor(token, node, attribute, supportedTokens = null) {
+      if (token !== domTokenListConstructionToken) {
+        throw new TypeError("Illegal constructor");
+      }
       this.__node = node;
       this.__attribute = attribute;
       this.__supportedTokens = supportedTokens;
@@ -5013,7 +5018,12 @@
   class HTMLIFrameElement extends HTMLElement {
     get sandbox() {
       if (!this.__sandboxTokenList) {
-        this.__sandboxTokenList = new DOMTokenList(this, "sandbox", iframeSandboxTokens);
+        this.__sandboxTokenList = new DOMTokenList(
+          domTokenListConstructionToken,
+          this,
+          "sandbox",
+          iframeSandboxTokens,
+        );
       }
       return this.__sandboxTokenList;
     }
