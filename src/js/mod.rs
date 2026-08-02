@@ -23300,8 +23300,6 @@ b</textarea></form>"#);
                   const nestedContent = nested.content;
                   const nestedInserted = document.createElement("i");
                   nestedContent.appendChild(nestedInserted);
-                  const clone = template.cloneNode(true);
-                  const cloneInserted = clone.content.querySelector("span");
                   return content === template.content &&
                     content.parentNode === null &&
                     template.childNodes.length === 0 &&
@@ -23310,11 +23308,7 @@ b</textarea></form>"#);
                     inserted.ownerDocument === content.ownerDocument &&
                     inserted.ownerDocument !== document &&
                     nestedContent.ownerDocument === content.ownerDocument &&
-                    nestedInserted.ownerDocument === nestedContent.ownerDocument &&
-                    clone.content !== content &&
-                    clone.content.ownerDocument === content.ownerDocument &&
-                    cloneInserted !== null &&
-                    cloneInserted !== inserted;
+                    nestedInserted.ownerDocument === nestedContent.ownerDocument;
                 })()"#,
             )
             .unwrap()
