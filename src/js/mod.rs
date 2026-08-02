@@ -828,6 +828,8 @@ struct HostState {
     /// fresh runtime starts with an empty (allow-all) policy and navigation
     /// replaces the entry before any page script executes.
     document_csp: HashMap<usize, CspPolicy>,
+    /// Iframe sandbox flags captured per active nested Document.
+    document_sandbox: HashMap<usize, IframeSandboxPolicy>,
     csp_violations: Vec<CspViolation>,
     csp_violation_keys: HashSet<(usize, String, String)>,
     module_loader: Option<Weak<HttpModuleLoader>>,
@@ -1077,6 +1079,47 @@ struct IframeDocument {
     loaded_src: String,
 }
 
+/// Sandbox policy captured when an iframe navigation creates its Document.
+/// Attribute changes affect the next navigation rather than mutating the
+/// security boundary of an already-active document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IframeSandboxPolicy {
+    active: bool,
+    allow_scripts: bool,
+    allow_same_origin: bool,
+}
+
+impl Default for IframeSandboxPolicy {
+    fn default() -> Self {
+        Self {
+            active: false,
+            allow_scripts: true,
+            allow_same_origin: true,
+        }
+    }
+}
+
+impl IframeSandboxPolicy {
+    fn from_iframe(iframe: &NodeHandle) -> Self {
+        let Some(value) = iframe.get_attribute("sandbox") else {
+            return Self::default();
+        };
+        let tokens: HashSet<String> = value
+            .split_ascii_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        Self {
+            active: true,
+            allow_scripts: tokens.contains("allow-scripts"),
+            allow_same_origin: tokens.contains("allow-same-origin"),
+        }
+    }
+
+    fn exposes_document_to_parent(self) -> bool {
+        !self.active || self.allow_same_origin
+    }
+}
+
 /// A cached [`StyleResolver`] for one document (the top-level document or an
 /// iframe sub-document), plus a dirty flag driving lazy rebuilds.
 ///
@@ -1216,6 +1259,7 @@ impl HostState {
             storage_session_id,
             document_origins,
             document_csp: HashMap::from([(document.identity(), CspPolicy::default())]),
+            document_sandbox: HashMap::new(),
             csp_violations: Vec::new(),
             csp_violation_keys: HashSet::new(),
             module_loader: None,
@@ -1361,6 +1405,7 @@ impl HostState {
             self.document_styles.remove(&previous.document.identity());
             self.document_origins.remove(&previous.document.identity());
             self.document_csp.remove(&previous.document.identity());
+            self.document_sandbox.remove(&previous.document.identity());
             self.csp_violations
                 .retain(|violation| violation.document_id != previous.document.identity());
             self.csp_violation_keys
@@ -1372,7 +1417,10 @@ impl HostState {
         }
 
         let (document, csp_headers, child_url) = self.load_iframe_document(&src);
-        let origin = if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
+        let sandbox = IframeSandboxPolicy::from_iframe(iframe);
+        let origin = if sandbox.active && !sandbox.allow_same_origin {
+            None
+        } else if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
             let owner_document = owner_document_for_node(iframe);
             self.document_origins
                 .get(&owner_document.as_ref().map_or(self.document.identity(), NodeHandle::identity))
@@ -1386,6 +1434,7 @@ impl HostState {
         };
         self.register_tree(&document);
         self.document_origins.insert(document.identity(), origin);
+        self.document_sandbox.insert(document.identity(), sandbox);
         let inherits_owner_csp = src.is_empty() || src.eq_ignore_ascii_case("about:blank");
         // `data:` documents have an opaque origin.  They must not inherit the
         // embedding document's URL as the CSP base, otherwise `'self'` in a
@@ -1549,6 +1598,19 @@ impl HostState {
         document_root_for_node(node)
             .map(|document| self.csp_policy_for_document(&document))
             .unwrap_or_default()
+    }
+
+    fn sandbox_policy_for_document(&self, document: &NodeHandle) -> IframeSandboxPolicy {
+        self.document_sandbox
+            .get(&document.identity())
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn sandbox_allows_scripts_for_node(&self, node: &NodeHandle) -> bool {
+        document_root_for_node(node)
+            .map(|document| self.sandbox_policy_for_document(&document).allow_scripts)
+            .unwrap_or(true)
     }
 
     fn record_csp_violation(
@@ -3575,6 +3637,13 @@ impl JsRuntime {
         if !self
             .host_state
             .borrow()
+            .sandbox_allows_scripts_for_node(&script_node)
+        {
+            return Ok(());
+        }
+        if !self
+            .host_state
+            .borrow()
             .csp_policy_for_node(&script_node)
             .allows_reference(ResourceType::Script, &src)
         {
@@ -4498,6 +4567,7 @@ impl JsRuntime {
                                 state.document_styles.remove(&previous.document.identity());
                                 state.document_origins.remove(&previous.document.identity());
                                 state.document_csp.remove(&previous.document.identity());
+                                state.document_sandbox.remove(&previous.document.identity());
                                 state.csp_violations.retain(|violation| {
                                     violation.document_id != previous.document.identity()
                                 });
@@ -4538,12 +4608,19 @@ impl JsRuntime {
                     // Like top-level document scripts, one failing XHTML
                     // script must not prevent later scripts or the iframe load
                     // event from running.
-                    let allowed = self
-                        .host_state
-                        .borrow()
-                        .csp_policy_for_node(&script)
-                        .allows_inline(ResourceType::Script);
-                    if !allowed {
+                    let (sandbox_allowed, csp_allowed) = {
+                        let state = self.host_state.borrow();
+                        (
+                            state.sandbox_allows_scripts_for_node(&script),
+                            state
+                                .csp_policy_for_node(&script)
+                                .allows_inline(ResourceType::Script),
+                        )
+                    };
+                    if !sandbox_allowed {
+                        continue;
+                    }
+                    if !csp_allowed {
                         self.host_state.borrow_mut().record_csp_violation_for_node(
                             &script,
                             ResourceType::Script,
@@ -4563,6 +4640,15 @@ impl JsRuntime {
                     if kind == ScriptKind::NotExecutable {
                         if log_scripts {
                             eprintln!("[omoikane][script] skipped dynamic {src}");
+                        }
+                        dispatch_load = false;
+                    } else if !self
+                        .host_state
+                        .borrow()
+                        .sandbox_allows_scripts_for_node(&script_node)
+                    {
+                        if log_scripts {
+                            eprintln!("[omoikane][script] blocked dynamic {src} by iframe sandbox");
                         }
                         dispatch_load = false;
                     } else if !self
@@ -12051,11 +12137,19 @@ fn document_write_native(
         }
         let mut script_ids = Vec::new();
         for script in script_nodes.iter().filter(|n| is_inline_classic_script(n)) {
-            let allowed = state
-                .borrow()
-                .csp_policy_for_node(script)
-                .allows_inline(ResourceType::Script);
-            if allowed {
+            let (sandbox_allowed, csp_allowed) = {
+                let state = state.borrow();
+                (
+                    state.sandbox_allows_scripts_for_node(script),
+                    state
+                        .csp_policy_for_node(script)
+                        .allows_inline(ResourceType::Script),
+                )
+            };
+            if !sandbox_allowed {
+                continue;
+            }
+            if csp_allowed {
                 script_ids.push(JsValue::from(script.identity() as f64));
             } else {
                 state.borrow_mut().record_csp_violation_for_node(
@@ -12073,7 +12167,8 @@ fn document_write_native(
 
 /// `__omoikane_iframe_content_document(iframeId)` — returns the node id of the
 /// sub-browsing-context document owned by an `<iframe>` element, loading it on
-/// first access. Returns `null` if the node id does not resolve.
+/// first access. Returns `null` if the node id does not resolve or the active
+/// sandbox policy gives the document an opaque origin.
 fn iframe_content_document_native(
     _: &JsValue,
     args: &[JsValue],
@@ -12085,7 +12180,15 @@ fn iframe_content_document_native(
         match iframe {
             Some(iframe) => {
                 let document = state.borrow_mut().iframe_content_document(&iframe);
-                Ok(JsValue::from(document.identity() as f64))
+                let exposed = state
+                    .borrow()
+                    .sandbox_policy_for_document(&document)
+                    .exposes_document_to_parent();
+                if exposed {
+                    Ok(JsValue::from(document.identity() as f64))
+                } else {
+                    Ok(JsValue::null())
+                }
             }
             None => Ok(JsValue::null()),
         }
@@ -30537,6 +30640,112 @@ b</textarea></form>"#);
                 .to_std_string_escaped(),
             "undefined"
         );
+    }
+
+    #[test]
+    fn iframe_sandbox_dom_token_list_is_live_and_reflected() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="frame"></iframe></body></html>"#,
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(() => {
+                    const frame = document.getElementById('frame');
+                    const tokens = frame.sandbox;
+                    tokens.add('allow-scripts', 'allow-same-origin');
+                    tokens.toggle('allow-forms', true);
+                    tokens.replace('allow-forms', 'allow-modals');
+                    return [
+                        tokens === frame.sandbox,
+                        tokens instanceof DOMTokenList,
+                        frame.getAttribute('sandbox'),
+                        tokens.length,
+                        Array.from(tokens).join(','),
+                        tokens.supports('ALLOW-SCRIPTS'),
+                        tokens.supports('future-token')
+                    ].join('|');
+                })()"#,
+            ),
+            "true|true|allow-scripts allow-same-origin allow-modals|3|allow-scripts,allow-same-origin,allow-modals|true|false"
+        );
+    }
+
+    #[test]
+    fn iframe_sandbox_enforces_script_and_origin_boundaries() {
+        let blocked_port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.blockedSandboxRan=true</script></body></html>"#,
+        );
+        let scripts_port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.sandboxScriptRan=true</script></body></html>"#,
+        );
+        let same_origin_port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.sameOriginSandboxRuns=(parent.sameOriginSandboxRuns||0)+1</script></body></html>"#,
+        );
+        let mut runtime = runtime_from_html(&format!(
+            r#"<html><body>
+                <iframe id="blocked" sandbox src="http://127.0.0.1:{blocked_port}/blocked.xhtml"></iframe>
+                <iframe id="scripts" sandbox="allow-scripts" src="http://127.0.0.1:{scripts_port}/scripts.xhtml"></iframe>
+                <iframe id="same" sandbox="allow-scripts allow-same-origin" src="http://127.0.0.1:{same_origin_port}/same.xhtml"></iframe>
+            </body></html>"#,
+        ));
+        runtime
+            .eval(
+                "globalThis.blocked = document.getElementById('blocked'); \
+                 globalThis.scripts = document.getElementById('scripts'); \
+                 globalThis.same = document.getElementById('same')",
+            )
+            .unwrap();
+
+        pump_zero_delay_tasks(&mut runtime);
+        assert!(runtime
+            .eval(
+                "typeof blockedSandboxRan === 'undefined' && sandboxScriptRan === true && \
+                 sameOriginSandboxRuns === 1",
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval(
+                "blocked.contentDocument === null && scripts.contentDocument === null && \
+                 same.contentDocument !== null && blocked.contentWindow.closed === false",
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        {
+            let state = runtime.host_state.borrow();
+            for id in ["blocked", "scripts"] {
+                let iframe = state.document.query_selector(&format!("#{id}")).unwrap();
+                let document = &state.iframe_documents[&iframe.identity()].document;
+                assert_eq!(state.document_origins.get(&document.identity()), Some(&None));
+            }
+            let iframe = state.document.query_selector("#same").unwrap();
+            let document = &state.iframe_documents[&iframe.identity()].document;
+            assert!(state.document_origins[&document.identity()].is_some());
+        }
+
+        runtime
+            .eval(
+                "same.sandbox.remove('allow-same-origin'); \
+                 globalThis.sameBeforeReload = same.contentDocument !== null; \
+                 same.src = same.src + '?reload'",
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert!(runtime
+            .eval(
+                "sameBeforeReload === true && same.contentDocument === null && \
+                 sameOriginSandboxRuns === 2",
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

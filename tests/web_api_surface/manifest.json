@@ -41,6 +41,14 @@
       "baseline_supported": false
     },
     {
+      "id": "security.iframe-sandbox",
+      "area": "security",
+      "description": "iframe sandbox exposes a DOMTokenList and isolates documents without allow-same-origin",
+      "setup": "globalThis.__sandboxProbe = document.createElement('iframe'); __sandboxProbe.sandbox.add('allow-scripts'); document.body.appendChild(__sandboxProbe)",
+      "probe": "__sandboxProbe.sandbox instanceof DOMTokenList && __sandboxProbe.sandbox.contains('allow-scripts') && __sandboxProbe.sandbox.supports('allow-same-origin') && __sandboxProbe.contentDocument === null && __sandboxProbe.contentWindow.closed === false",
+      "baseline_supported": false
+    },
+    {
       "id": "css.selector-list-pseudos",
       "area": "css",
       "description": ":is(), :where(), and selector-list :not() share Selectors Level 4 matching",

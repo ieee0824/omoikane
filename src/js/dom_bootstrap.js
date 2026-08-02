@@ -1107,6 +1107,110 @@
     return parts;
   }
 
+  class DOMTokenList {
+    constructor(node, attribute, supportedTokens = null) {
+      this.__node = node;
+      this.__attribute = attribute;
+      this.__supportedTokens = supportedTokens;
+    }
+
+    __validate(token) {
+      token = String(token);
+      if (token === "") throw new DOMException("The token must not be empty.", "SyntaxError");
+      if (/[\t\n\f\r ]/.test(token)) {
+        throw new DOMException("The token contains whitespace.", "InvalidCharacterError");
+      }
+      return token;
+    }
+
+    __tokens() {
+      return (this.__node.getAttribute(this.__attribute) || "")
+        .split(/[\t\n\f\r ]+/)
+        .filter(Boolean);
+    }
+
+    __replace(tokens) {
+      this.__node.setAttribute(this.__attribute, tokens.join(" "));
+    }
+
+    add(...tokens) {
+      tokens = tokens.map(token => this.__validate(token));
+      if (!tokens.length) return;
+      const current = this.__tokens();
+      for (const token of tokens) if (!current.includes(token)) current.push(token);
+      this.__replace(current);
+    }
+
+    remove(...tokens) {
+      tokens = tokens.map(token => this.__validate(token));
+      if (!tokens.length) return;
+      const removed = new Set(tokens);
+      this.__replace(this.__tokens().filter(token => !removed.has(token)));
+    }
+
+    toggle(token, force) {
+      token = this.__validate(token);
+      const current = this.__tokens();
+      const present = current.includes(token);
+      const forceProvided = arguments.length >= 2 && force !== undefined;
+      if (forceProvided && Boolean(force) === present) return present;
+      if (!forceProvided) {
+        if (present) current.splice(current.indexOf(token), 1);
+        else current.push(token);
+      } else {
+        if (force) current.push(token);
+        else current.splice(current.indexOf(token), 1);
+      }
+      this.__replace(current);
+      return current.includes(token);
+    }
+
+    replace(oldToken, newToken) {
+      oldToken = this.__validate(oldToken);
+      newToken = this.__validate(newToken);
+      const current = this.__tokens();
+      const index = current.indexOf(oldToken);
+      if (index < 0) return false;
+      if (oldToken !== newToken) {
+        const existing = current.indexOf(newToken);
+        if (existing >= 0) current.splice(existing, 1);
+        current[current.indexOf(oldToken)] = newToken;
+      }
+      this.__replace(current);
+      return true;
+    }
+
+    contains(token) {
+      return this.__tokens().includes(this.__validate(token));
+    }
+
+    supports(token) {
+      token = this.__validate(token);
+      if (!this.__supportedTokens) {
+        throw new TypeError("This DOMTokenList has no supported tokens.");
+      }
+      return this.__supportedTokens.has(token.toLowerCase());
+    }
+
+    item(index) {
+      return this.__tokens()[Number(index)] || null;
+    }
+
+    get length() { return this.__tokens().length; }
+    get value() { return this.__node.getAttribute(this.__attribute) || ""; }
+    set value(value) { this.__node.setAttribute(this.__attribute, String(value)); }
+    keys() { return this.__tokens().keys(); }
+    values() { return this.__tokens().values(); }
+    entries() { return this.__tokens().entries(); }
+    forEach(callback, thisArg) {
+      this.__tokens().forEach((value, index) => callback.call(thisArg, value, index, this));
+    }
+    [Symbol.iterator]() { return this.values(); }
+    toString() { return this.value; }
+    get [Symbol.toStringTag]() { return "DOMTokenList"; }
+  }
+  globalThis.DOMTokenList = DOMTokenList;
+
   class Node {
     constructor(id) {
       this.__id = id;
@@ -1320,52 +1424,8 @@
     set className(value) { this.setAttribute("class", value); }
 
     get classList() {
-      const node = this;
-      const validate = classes => classes.map(value => {
-        const token = String(value);
-        if (token === "") throw new DOMException("The token must not be empty.", "SyntaxError");
-        if (/\s/.test(token)) throw new DOMException("The token contains whitespace.", "InvalidCharacterError");
-        return token;
-      });
-      return {
-        add(...classes) {
-          classes = validate(classes);
-          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
-          for (const cls of classes) current.add(cls);
-          node.className = [...current].join(" ");
-        },
-        remove(...classes) {
-          classes = validate(classes);
-          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
-          for (const cls of classes) current.delete(cls);
-          node.className = [...current].join(" ");
-        },
-        toggle(cls, force) {
-          [cls] = validate([cls]);
-          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
-          const has = current.has(cls);
-          if (force === undefined) {
-            has ? current.delete(cls) : current.add(cls);
-          } else if (!!force === has) {
-            return has;
-          } else if (force) {
-            current.add(cls);
-          } else {
-            current.delete(cls);
-          }
-          node.className = [...current].join(" ");
-          return current.has(cls);
-        },
-        contains(cls) {
-          return (node.className || "").split(/\s+/).filter(Boolean).includes(cls);
-        },
-        get length() {
-          return (node.className || "").split(/\s+/).filter(Boolean).length;
-        },
-        item(index) {
-          return (node.className || "").split(/\s+/).filter(Boolean)[index] || null;
-        },
-      };
+      if (!this.__classList) this.__classList = new DOMTokenList(this, "class");
+      return this.__classList;
     }
 
     get style() {
@@ -4883,6 +4943,15 @@
     });
   }
 
+  const iframeSandboxTokens = new Set([
+    "allow-downloads", "allow-forms", "allow-modals", "allow-orientation-lock",
+    "allow-pointer-lock", "allow-popups", "allow-popups-to-escape-sandbox",
+    "allow-presentation", "allow-same-origin", "allow-scripts",
+    "allow-storage-access-by-user-activation", "allow-top-navigation",
+    "allow-top-navigation-by-user-activation",
+    "allow-top-navigation-to-custom-protocols",
+  ]);
+
   // An <iframe> owns a nested browsing context whose document is reachable via
   // contentDocument (and, as a facade, contentWindow.document). The document is
   // created lazily by the host on first access: an empty/absent src yields an
@@ -4890,6 +4959,17 @@
   // types become a real DOM tree). Reading contentDocument again after changing
   // src reloads it.
   class HTMLIFrameElement extends HTMLElement {
+    get sandbox() {
+      if (!this.__sandboxTokenList) {
+        this.__sandboxTokenList = new DOMTokenList(this, "sandbox", iframeSandboxTokens);
+      }
+      return this.__sandboxTokenList;
+    }
+
+    set sandbox(value) {
+      this.setAttribute("sandbox", String(value));
+    }
+
     get contentDocument() {
       // Removing an iframe destroys its active nested browsing context. Keep
       // the stable WindowProxy object around, but expose no live Document until
@@ -4920,16 +5000,28 @@
             return iframe.contentDocument;
           },
           get closed() {
-            return iframe.contentDocument === null;
+            return !iframe.isConnected;
           },
           get customElements() {
-            return registryForDocument(iframe.contentDocument);
+            const document = iframe.contentDocument;
+            if (!document) {
+              throw new DOMException("Blocked access to a sandboxed frame.", "SecurityError");
+            }
+            return registryForDocument(document);
           },
           get localStorage() {
-            return storageForDocument("local", iframe.contentDocument, this);
+            const document = iframe.contentDocument;
+            if (!document) {
+              throw new DOMException("Blocked access to a sandboxed frame.", "SecurityError");
+            }
+            return storageForDocument("local", document, this);
           },
           get sessionStorage() {
-            return storageForDocument("session", iframe.contentDocument, this);
+            const document = iframe.contentDocument;
+            if (!document) {
+              throw new DOMException("Blocked access to a sandboxed frame.", "SecurityError");
+            }
+            return storageForDocument("session", document, this);
           },
           frameElement: iframe,
           getComputedStyle: globalThis.getComputedStyle,
