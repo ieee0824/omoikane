@@ -767,6 +767,10 @@ struct HostState {
     /// Dedicated workers owned by this global. The map lives on the page
     /// global; worker globals instead hold `worker_owner` and `worker_id`.
     workers: HashMap<u64, Rc<RefCell<WorkerRuntime>>>,
+    /// Owner-side worker objects are kept separately from `workers` so the
+    /// host root tracer never has to borrow a `WorkerRuntime` through its
+    /// `RefCell` while a worker operation is in flight.
+    worker_owner_objects: HashMap<u64, JsValue>,
     next_worker_id: u64,
     worker_owner: Option<Rc<RefCell<HostState>>>,
     worker_id: Option<u64>,
@@ -799,11 +803,8 @@ unsafe impl Trace for HostState {
         if let Some(owner) = &self.worker_owner_object {
             unsafe { owner.trace(tracer) };
         }
-        for worker in self.workers.values() {
-            let worker = worker.borrow();
-            if let Some(owner) = &worker.owner_object {
-                unsafe { owner.trace(tracer) };
-            }
+        for owner in self.worker_owner_objects.values() {
+            unsafe { owner.trace(tracer) };
         }
         if let Some(dialog) = &self.pending_javascript_dialog {
             unsafe { dialog.suspension.trace(tracer) };
@@ -1002,6 +1003,7 @@ impl HostState {
             csp_violation_keys: HashSet::new(),
             module_loader: None,
             workers: HashMap::new(),
+            worker_owner_objects: HashMap::new(),
             next_worker_id: 1,
             worker_owner: None,
             worker_id: None,
@@ -2040,6 +2042,10 @@ impl JsRuntime {
             worker.outgoing.clear();
             worker.runtime.host_state.borrow_mut().worker_terminated = true;
         }
+        self.host_state
+            .borrow_mut()
+            .worker_owner_objects
+            .clear();
     }
 
     fn advance_worker_clocks(&mut self, elapsed_ms: u64) {
@@ -2066,6 +2072,10 @@ impl JsRuntime {
             let (owner_state, result, errors, terminated) = {
                 let mut worker = entry.borrow_mut();
                 if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
+                    self.host_state
+                        .borrow_mut()
+                        .worker_owner_objects
+                        .remove(&worker_id);
                     continue;
                 }
                 let result = worker.runtime.run_until_idle();
@@ -2078,6 +2088,11 @@ impl JsRuntime {
                     .borrow_mut()
                     .workers
                     .insert(worker_id, Rc::clone(&entry));
+            } else {
+                self.host_state
+                    .borrow_mut()
+                    .worker_owner_objects
+                    .remove(&worker_id);
             }
             // A worker task failure is reported to the owner as an error event,
             // but must not abort the owner's event-loop pump. `run_timer_payload`
@@ -3515,6 +3530,10 @@ impl JsRuntime {
         let Some(entry) = entry else { return Ok(()); };
         let mut worker = entry.borrow_mut();
         if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
+            self.host_state
+                .borrow_mut()
+                .worker_owner_objects
+                .remove(&worker_id);
             return Ok(());
         }
         let owner_state = Rc::clone(&worker.owner_state);
@@ -3556,6 +3575,11 @@ impl JsRuntime {
                 .borrow_mut()
                 .workers
                 .insert(worker_id, entry);
+        } else {
+            self.host_state
+                .borrow_mut()
+                .worker_owner_objects
+                .remove(&worker_id);
         }
         Ok(())
     }
@@ -7610,6 +7634,10 @@ fn bind_worker_owner_native(
     with_host_state(|state| {
         let entry = state.borrow().workers.get(&id).cloned();
         let Some(entry) = entry else { return Ok(JsValue::undefined()); };
+        state
+            .borrow_mut()
+            .worker_owner_objects
+            .insert(id, owner_object.clone());
         let mut worker = entry.borrow_mut();
         worker.owner_object = Some(owner_object.clone());
         {
@@ -7634,7 +7662,9 @@ fn bind_worker_owner_native(
                 .enqueue_worker_error(id, Some(owner_object.clone()), message);
         }
         if worker.terminated {
-            state.borrow_mut().workers.remove(&id);
+            let mut state = state.borrow_mut();
+            state.workers.remove(&id);
+            state.worker_owner_objects.remove(&id);
         }
         Ok(JsValue::undefined())
     })
@@ -7675,6 +7705,7 @@ fn terminate_worker_native(
         // already queued tasks retain only the id and become harmless no-ops
         // when the owner map lookup below fails.
         let entry = state.borrow_mut().workers.remove(&id);
+        state.borrow_mut().worker_owner_objects.remove(&id);
         if let Some(entry) = entry {
             let mut worker = entry.borrow_mut();
             worker.terminated = true;
@@ -7738,7 +7769,12 @@ fn worker_close_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<
         if let (Some(owner), Some(worker_id)) = (owner.clone(), worker_id)
             && owner_bound
         {
-            if let Some(entry) = owner.borrow_mut().workers.remove(&worker_id) {
+            let entry = {
+                let mut owner_state = owner.borrow_mut();
+                owner_state.worker_owner_objects.remove(&worker_id);
+                owner_state.workers.remove(&worker_id)
+            };
+            if let Some(entry) = entry {
                 let mut worker = entry.borrow_mut();
                 worker.terminated = true;
                 worker.outgoing.clear();
