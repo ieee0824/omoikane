@@ -6,6 +6,7 @@ use std::fmt;
 use crate::dom::NodeHandle;
 
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlParseError { message: String }
@@ -106,7 +107,21 @@ impl<'a> Parser<'a> {
         let namespace = namespaces.get(prefix).cloned();
         if !prefix.is_empty() && namespace.is_none() { return self.err("undeclared namespace prefix"); }
         let node = NodeHandle::xml_element(&name, namespace);
-        for (attr, value) in attributes { node.set_xml_attribute(attr, value); }
+        for (attr, value) in attributes {
+            let (attr_prefix, local_name) = attr.split_once(':')
+                .map(|(prefix, local)| (Some(prefix), local))
+                .unwrap_or((None, attr.as_str()));
+            let attribute_namespace = if attr == "xmlns" || attr_prefix == Some("xmlns") {
+                Some(XMLNS_NS.to_string())
+            } else if let Some(prefix) = attr_prefix {
+                Some(namespaces.get(prefix).cloned()
+                    .ok_or_else(|| XmlParseError::new("undeclared attribute namespace prefix"))?)
+            } else {
+                None
+            };
+            let local_name = local_name.to_string();
+            node.set_xml_attribute_ns(attr, attribute_namespace, local_name, value);
+        }
         self.parent().append_child(node.clone());
         if !empty { self.stack.push(OpenElement { name, node, namespaces }); }
         Ok(())
@@ -241,6 +256,14 @@ mod tests {
         let doc = parse(br#"<?xml version='1.0'?><Root xmlns='urn:d' xmlns:p='urn:p' A='&lt;&amp;&#65;&#x42;'><!--ok--><p:Child><![CDATA[<raw>]]></p:Child></Root>"#).unwrap();
         let root = root(&doc); assert_eq!(root.tag_name().as_deref(), Some("Root")); assert_eq!(root.namespace_uri().as_deref(), Some("urn:d")); assert_eq!(root.attributes().unwrap().get("A").map(String::as_str), Some("<&AB"));
         let child = root.child_nodes().into_iter().find(|n| n.node_type() == NodeType::Element).unwrap(); assert_eq!(child.tag_name().as_deref(), Some("p:Child")); assert_eq!(child.namespace_uri().as_deref(), Some("urn:p")); assert_eq!(child.local_name().as_deref(), Some("Child"));
+    }
+    #[test] fn resolves_attribute_namespaces_and_local_names() {
+        let doc = parse(br#"<outer xmlns:a='urn:attribute'><inner a:Mixed='value'/></outer>"#).unwrap();
+        let inner = root(&doc).child_nodes().into_iter()
+            .find(|node| node.node_type() == NodeType::Element).unwrap();
+        assert_eq!(inner.attribute_records().unwrap(), vec![(
+            "a:Mixed".into(), Some("urn:attribute".into()), "Mixed".into(), "value".into(),
+        )]);
     }
     #[test] fn accepts_doctype_comment_pi_and_defined_entities() { assert!(parse(br#"<?x ok?><!DOCTYPE R SYSTEM 'urn:x'><!--c--><R>&gt;&quot;&apos;</R>"#).is_ok()); }
     #[test] fn rejects_processing_instruction_data_without_whitespace() {

@@ -5229,6 +5229,16 @@ impl JsRuntime {
     }
 }
 
+impl Drop for JsRuntime {
+    fn drop(&mut self) {
+        // WorkerRuntime keeps an owner/worker Rc cycle until the owner map is
+        // cleared. Do that before the RootProvider and host state fields drop,
+        // so a later collection cannot trace a stale worker realm.
+        let _guard = activate_host_state(Rc::clone(&self.host_state));
+        self.terminate_workers();
+    }
+}
+
 fn script_source_context(source: &str) -> String {
     let preview: String = source
         .chars()
@@ -5899,6 +5909,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(create_element_native),
         ),
         (
+            js_string!("__omoikane_create_element_ns"),
+            2,
+            NativeFunction::from_copy_closure(create_element_ns_native),
+        ),
+        (
             js_string!("__omoikane_is_valid_xml_name"),
             1,
             NativeFunction::from_copy_closure(is_valid_xml_name_native),
@@ -5954,9 +5969,19 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(attribute_names_native),
         ),
         (
+            js_string!("__omoikane_attribute_records"),
+            1,
+            NativeFunction::from_copy_closure(attribute_records_native),
+        ),
+        (
             js_string!("__omoikane_set_attribute"),
             3,
             NativeFunction::from_copy_closure(set_attribute_native),
+        ),
+        (
+            js_string!("__omoikane_set_attribute_ns"),
+            5,
+            NativeFunction::from_copy_closure(set_attribute_ns_native),
         ),
         (
             js_string!("__omoikane_get_checked"),
@@ -6254,6 +6279,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(node_type_native),
         ),
         (
+            js_string!("__omoikane_node_is_html_element"),
+            1,
+            NativeFunction::from_copy_closure(node_is_html_element_native),
+        ),
+        (
             js_string!("__omoikane_clone_node"),
             2,
             NativeFunction::from_copy_closure(clone_node_native),
@@ -6262,6 +6292,11 @@ fn register_host_bindings(
             js_string!("__omoikane_remove_attribute"),
             2,
             NativeFunction::from_copy_closure(remove_attribute_native),
+        ),
+        (
+            js_string!("__omoikane_remove_attribute_ns"),
+            2,
+            NativeFunction::from_copy_closure(remove_attribute_ns_native),
         ),
         (
             js_string!("__omoikane_create_text_node"),
@@ -8282,6 +8317,32 @@ fn create_element_native(
     })
 }
 
+fn create_element_ns_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
+    let namespace = match args.first() {
+        Some(value) if !value.is_null() && !value.is_undefined() => {
+            Some(value.to_string(context)?.to_std_string_escaped())
+        }
+        _ => None,
+    };
+    let qualified_name = args.get(1).cloned().unwrap_or_default()
+        .to_string(context)?.to_std_string_escaped();
+    with_host_state(|state| {
+        let node = if namespace.as_deref() == Some(HTML_NAMESPACE) {
+            NodeHandle::html_element_ns(qualified_name, HTML_NAMESPACE)
+        } else {
+            NodeHandle::xml_element(qualified_name, namespace)
+        };
+        let id = node.identity();
+        state.borrow_mut().register_tree(&node);
+        Ok(JsValue::from(id as f64))
+    })
+}
+
 fn is_valid_xml_name_start_char(cp: u32) -> bool {
     cp == 0x3a
         || (0x41..=0x5a).contains(&cp)
@@ -8560,6 +8621,31 @@ fn attribute_names_native(
             boa_engine::object::builtins::JsArray::from_iter(names, context),
         ))
     })
+}
+
+fn attribute_records_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let records = with_host_state(|state| {
+        Ok(state.borrow().get_node(node_id)
+            .and_then(|node| node.attribute_records()).unwrap_or_default())
+    })?;
+    let mut rows = Vec::with_capacity(records.len());
+    for (qualified_name, namespace_uri, local_name, value) in records {
+        let namespace = namespace_uri
+            .map(|namespace| js_string!(namespace.as_str()).into())
+            .unwrap_or_else(JsValue::null);
+        rows.push(JsValue::from(boa_engine::object::builtins::JsArray::from_iter([
+            js_string!(qualified_name.as_str()).into(),
+            namespace,
+            js_string!(local_name.as_str()).into(),
+            js_string!(value.as_str()).into(),
+        ], context)));
+    }
+    Ok(JsValue::from(boa_engine::object::builtins::JsArray::from_iter(rows, context)))
 }
 
 fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -8944,6 +9030,33 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
                 .borrow_mut()
                 .schedule_resource_load_on_attribute_change(&node, resource_attr);
         }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn set_attribute_ns_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let namespace = match args.get(1) {
+        Some(value) if !value.is_null() && !value.is_undefined() => {
+            Some(value.to_string(context)?.to_std_string_escaped())
+        }
+        _ => None,
+    };
+    let qualified_name = args.get(2).cloned().unwrap_or_default()
+        .to_string(context)?.to_std_string_escaped();
+    let local_name = args.get(3).cloned().unwrap_or_default()
+        .to_string(context)?.to_std_string_escaped();
+    let value = args.get(4).cloned().unwrap_or_default()
+        .to_string(context)?.to_std_string_escaped();
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.set_xml_attribute_ns(qualified_name, namespace, local_name, value);
+        state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
@@ -11364,14 +11477,39 @@ fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     })
 }
 
+fn node_is_html_element_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        Ok(JsValue::from(node.is_html_element()))
+    })
+}
+
 fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
     let clone = match node.node_type() {
         crate::dom::NodeType::Element => {
             let tag = node.tag_name().unwrap_or_default();
-            let el = NodeHandle::element(&tag);
-            if let Some(attrs) = node.attributes() {
-                for (name, value) in &attrs {
-                    el.set_attribute(name, value);
+            let el = if node.is_html_element() {
+                match node.namespace_uri() {
+                    Some(namespace) => NodeHandle::html_element_ns(&tag, namespace),
+                    None => NodeHandle::element(&tag),
+                }
+            } else {
+                NodeHandle::xml_element(&tag, node.namespace_uri())
+            };
+            if let Some(attributes) = node.attribute_records() {
+                for (qualified_name, namespace, local_name, value) in attributes {
+                    if node.is_html_element() && namespace.is_none() {
+                        el.set_attribute(qualified_name, value);
+                    } else {
+                        el.set_xml_attribute_ns(qualified_name, namespace, local_name, value);
+                    }
                 }
             }
             el
@@ -11459,6 +11597,23 @@ fn remove_attribute_native(
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
         }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn remove_attribute_ns_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    let qualified_name = args.get(1).cloned().unwrap_or_default()
+        .to_string(context)?.to_std_string_escaped();
+    with_host_state(|state| {
+        let node = state.borrow().get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.remove_xml_attribute(&qualified_name);
+        state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
@@ -13358,6 +13513,26 @@ mod tests {
         runtime.terminate_workers();
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(0.0));
+    }
+
+    #[test]
+    fn dropping_runtime_clears_worker_cycle_before_collection() {
+        {
+            let mut runtime = JsRuntime::new().unwrap();
+            runtime
+                .eval(
+                    r#"const source = encodeURIComponent('onmessage = () => {};');
+                       new Worker('data:text/javascript,' + source);"#,
+                )
+                .unwrap();
+        }
+
+        boa_gc::force_collect();
+        let mut next_runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            next_runtime.eval("1 + 1").unwrap().as_number(),
+            Some(2.0)
+        );
     }
 
     fn poll_until_dialog<F>(
@@ -21909,6 +22084,241 @@ b</textarea></form>"#);
             .to_number(&mut runtime.context)
             .unwrap();
         assert_eq!(doc_type, 9.0, "document nodeType should be 9");
+    }
+
+    #[test]
+    fn node_identity_methods_follow_web_idl_and_private_identity() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let actual = eval_str(&mut runtime, r#"(() => {
+          const same = Node.prototype.isSameNode;
+          const equal = Node.prototype.isEqualNode;
+          const left = document.createElement("section");
+          const right = document.createElement("section");
+          left.appendChild(document.createTextNode("child"));
+          right.appendChild(document.createTextNode("child"));
+          const error = callback => {
+            try { callback(); return "none"; } catch (reason) { return reason.name; }
+          };
+          const forged = Object.create(Node.prototype);
+          forged.__id = left.__id;
+          const checks = [
+            typeof globalThis.__omoikane_node_is_html_element,
+            equal.length, same.length,
+            error(() => equal.call(left)), error(() => same.call(left)),
+            equal.call(left, undefined), equal.call(left, null),
+            same.call(left, undefined), same.call(left, null),
+            error(() => equal.call(left, {})), error(() => same.call(left, 1)),
+            error(() => equal.call({}, left)), error(() => same.call({}, left)),
+            error(() => same.call(forged, left))
+          ];
+          const leftId = left.__id;
+          left.__id = right.__id;
+          right.__id = leftId;
+          Object.setPrototypeOf(left, null);
+          Object.setPrototypeOf(right, null);
+          checks.push(same.call(left, left), same.call(left, right), equal.call(left, right));
+          return checks.join("|");
+        })()"#);
+        assert_eq!(actual,
+            "undefined|1|1|TypeError|TypeError|false|false|false|false|TypeError|TypeError|TypeError|TypeError|TypeError|true|false|true");
+    }
+
+    #[test]
+    fn is_equal_node_compares_element_data_attributes_and_children() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let actual = eval_str(&mut runtime, r#"(() => {
+          const make = ({ ens = "urn:element", eqn = "p:root", ans = "urn:attribute",
+                          aqn = "a:kind", value = "value", reverseAttrs = false,
+                          reverseChildren = false } = {}) => {
+            const element = document.createElementNS(ens, eqn);
+            const attrs = [
+              () => element.setAttribute("first", "1"),
+              () => element.setAttributeNS(ans, aqn, value),
+              () => element.setAttribute("second", "2")
+            ];
+            (reverseAttrs ? attrs.reverse() : attrs).forEach(set => set());
+            const children = [document.createTextNode("text"),
+              document.createComment("comment"),
+              document.createProcessingInstruction("target", "data")];
+            (reverseChildren ? children.reverse() : children).forEach(child => element.appendChild(child));
+            return element;
+          };
+          const left = make();
+          return [
+            left.isEqualNode(make({ reverseAttrs: true, aqn: "other:kind" })),
+            left.isEqualNode(make({ ens: "urn:other" })),
+            left.isEqualNode(make({ eqn: "other:root" })),
+            left.isEqualNode(make({ eqn: "p:other" })),
+            left.isEqualNode(make({ ans: "urn:other" })),
+            left.isEqualNode(make({ aqn: "a:other" })),
+            left.isEqualNode(make({ value: "other" })),
+            left.isEqualNode(make({ reverseChildren: true }))
+          ].join("|");
+        })()"#);
+        assert_eq!(actual, "true|false|false|false|false|false|false|false");
+    }
+
+    #[test]
+    fn is_equal_node_handles_supported_interfaces_and_detached_documents() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime.eval(r#"(() => {
+          const doctype = (name = "html", publicId = "public", systemId = "system") =>
+            document.implementation.createDocumentType(name, publicId, systemId);
+          const firstDocument = document.implementation.createDocument("urn:doc", "d:root");
+          const secondDocument = document.implementation.createDocument("urn:doc", "d:root");
+          const firstDetached = firstDocument.createElementNS("urn:item", "i:item");
+          const secondDetached = secondDocument.createElementNS("urn:item", "i:item");
+          firstDetached.appendChild(firstDocument.createTextNode("value"));
+          secondDetached.appendChild(secondDocument.createTextNode("value"));
+          const firstFragment = document.createDocumentFragment();
+          const secondFragment = document.createDocumentFragment();
+          firstFragment.appendChild(document.createComment("child"));
+          secondFragment.appendChild(document.createComment("child"));
+          const xml = document.implementation.createDocument("", "");
+          const cdata = xml.createCDATASection("data");
+          const shadow = document.createElement("div").attachShadow({ mode: "open" });
+          const parsed = new DOMParser().parseFromString("<same/>", "text/xml").documentElement;
+          return document.createTextNode("data").isEqualNode(document.createTextNode("data")) &&
+            !document.createTextNode("data").isEqualNode(document.createTextNode("other")) &&
+            document.createComment("data").isEqualNode(document.createComment("data")) &&
+            !document.createComment("data").isEqualNode(document.createTextNode("data")) &&
+            document.createProcessingInstruction("target", "data").isEqualNode(
+              document.createProcessingInstruction("target", "data")) &&
+            !document.createProcessingInstruction("target", "data").isEqualNode(
+              document.createProcessingInstruction("other", "data")) &&
+            doctype().isEqualNode(doctype()) && !doctype().isEqualNode(doctype("other")) &&
+            !doctype().isEqualNode(doctype("html", "other")) &&
+            !doctype().isEqualNode(doctype("html", "public", "other")) &&
+            firstFragment.isEqualNode(secondFragment) && firstDocument.isEqualNode(secondDocument) &&
+            firstDetached.ownerDocument !== secondDetached.ownerDocument &&
+            firstDetached.isEqualNode(secondDetached) &&
+            cdata.isEqualNode(xml.createCDATASection("data")) &&
+            !cdata.isEqualNode(xml.createTextNode("data")) &&
+            !shadow.isEqualNode(document.createDocumentFragment()) &&
+            parsed.isEqualNode(new DOMParser().parseFromString("<same/>", "text/xml").documentElement) &&
+            document.createElement("same").isEqualNode(document.createElementNS(
+              "http://www.w3.org/1999/xhtml", "same")) &&
+            !document.createElement("same").isEqualNode(document.createElementNS(null, "same"));
+        })()"#).unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn node_equality_preserves_namespaces_through_parser_clone_and_import() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime.eval(r#"(() => {
+          const htmlNamespace = "http://www.w3.org/1999/xhtml";
+          const namespaced = document.createElementNS("urn:element", "p:Root");
+          namespaced.setAttributeNS("urn:attribute", "a:Mixed", "value");
+          namespaced.appendChild(document.createTextNode("child"));
+          const nullNamespace = document.createElementNS(null, "Mixed");
+          const upperHtml = document.createElementNS(htmlNamespace, "DIV");
+          const svg = new DOMParser().parseFromString(
+            "<svg xmlns='http://www.w3.org/2000/svg'><rect viewBox='0 0 1 1'/></svg>",
+            "image/svg+xml").documentElement;
+          const parsed = source => new DOMParser().parseFromString(source, "text/xml")
+            .documentElement.firstElementChild;
+          const first = parsed("<outer xmlns:a='urn:same'><r a:x='value'/></outer>");
+          const same = parsed("<outer xmlns:b='urn:same'><r b:x='value'/></outer>");
+          const different = parsed("<outer xmlns:a='urn:other'><r a:x='value'/></outer>");
+          const html = document.createElement("div");
+          html.setAttributeNS("urn:attribute", "a:Mixed", "value");
+          const overwritten = document.createElementNS("urn:element", "p:Root");
+          overwritten.setAttributeNS("urn:attribute", "a:Mixed", "initial");
+          overwritten.setAttribute("a:Mixed", "value");
+          const overwrittenEquivalent = document.createElementNS("urn:element", "p:Root");
+          overwrittenEquivalent.setAttributeNS("urn:attribute", "a:Mixed", "value");
+          const clone = namespaced.cloneNode(true);
+          const imported = document.implementation.createHTMLDocument("target")
+            .importNode(namespaced, true);
+          return [namespaced, nullNamespace, upperHtml, svg, html]
+              .every(node => node.isEqualNode(node.cloneNode(true))) &&
+            namespaced.isEqualNode(imported) && first.isEqualNode(same) &&
+            !first.isEqualNode(different) && first.isEqualNode(first.cloneNode()) &&
+            first.getAttributeNS("urn:same", "x") === "value" &&
+            first.cloneNode().getAttributeNS("urn:same", "x") === "value" &&
+            clone.namespaceURI === "urn:element" && clone.prefix === "p" &&
+            clone.localName === "Root" &&
+            clone.getAttributeNS("urn:attribute", "Mixed") === "value" &&
+            html.cloneNode().getAttributeNS("urn:attribute", "Mixed") === "value" &&
+            overwritten.getAttributeNS("urn:attribute", "Mixed") === "value" &&
+            overwritten.isEqualNode(overwrittenEquivalent) &&
+            upperHtml.cloneNode().tagName === "DIV";
+        })()"#).unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn node_equality_ignores_public_state_and_poisoned_intrinsics() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime.eval(r#"(() => {
+          const leftElement = document.createElementNS("urn:left", "p:item");
+          const sameElement = document.createElementNS("urn:left", "p:item");
+          const otherElement = document.createElementNS("urn:other", "p:item");
+          Object.defineProperties(sameElement, {
+            namespaceURI: { value: "poison" }, prefix: { value: "poison" },
+            localName: { value: "poison" }
+          });
+          Object.defineProperties(otherElement, {
+            namespaceURI: { value: "urn:left" }, prefix: { value: "p" },
+            localName: { value: "item" }
+          });
+          const text = document.createTextNode("data");
+          const sameText = document.createTextNode("data");
+          const otherText = document.createTextNode("other");
+          sameText.__characterData = "poison";
+          otherText.__characterData = "data";
+          const baseUpdatedText = document.createTextNode("before");
+          baseUpdatedText.data = "middle";
+          Object.getOwnPropertyDescriptor(Node.prototype, "textContent")
+            .set.call(baseUpdatedText, "after");
+          const attr = document.createElement("div");
+          const sameAttr = document.createElement("div");
+          const otherAttr = document.createElement("div");
+          attr.setAttributeNS("urn:attribute", "a:x", "value");
+          sameAttr.setAttributeNS("urn:attribute", "b:x", "value");
+          otherAttr.setAttributeNS("urn:attribute", "a:x", "other");
+          sameAttr.__namespacedAttributes = otherAttr.__namespacedAttributes = new Map();
+          const privateStateOkay = leftElement.isEqualNode(sameElement) &&
+            !leftElement.isEqualNode(otherElement) && text.isEqualNode(sameText) &&
+            !text.isEqualNode(otherText) &&
+            baseUpdatedText.isEqualNode(document.createTextNode("after")) &&
+            attr.isEqualNode(sameAttr) &&
+            !attr.isEqualNode(otherAttr);
+
+          const source = "<html xmlns='http://www.w3.org/1999/xhtml'><body><slot><span data-x='v'>text</span></slot></body></html>";
+          const left = new DOMParser().parseFromString(source, "text/xml").documentElement;
+          const right = new DOMParser().parseFromString(source, "text/xml").documentElement;
+          const equal = Node.prototype.isEqualNode;
+          const targets = [[Map.prototype, "has"], [Map.prototype, "get"],
+            [Map.prototype, "set"], [Map.prototype, "delete"], [Map.prototype, "values"],
+            [WeakMap.prototype, "get"], [Object.prototype, "hasOwnProperty"],
+            [String.prototype, "toLowerCase"], [String.prototype, "charCodeAt"],
+            [String, "fromCharCode"]];
+          const originals = targets.map(([object, key]) => object[key]);
+          const slotHasInstance = Object.getOwnPropertyDescriptor(HTMLSlotElement, Symbol.hasInstance);
+          const hookNames = ["__omoikane_node_type", "__omoikane_node_name",
+            "__omoikane_node_local_name", "__omoikane_node_namespace_uri",
+            "__omoikane_node_prefix", "__omoikane_node_is_html_element",
+            "__omoikane_doctype_public_id", "__omoikane_doctype_system_id",
+            "__omoikane_child_node_ids", "__omoikane_get_text_content",
+            "__omoikane_attribute_records", "__omoikane_shadow_host"];
+          const hookValues = hookNames.map(name => globalThis[name]);
+          const poison = () => { throw new Error("poisoned intrinsic used"); };
+          try {
+            for (const [object, key] of targets) object[key] = poison;
+            Object.defineProperty(HTMLSlotElement, Symbol.hasInstance,
+              { configurable: true, value: poison });
+            for (const name of hookNames) globalThis[name] = poison;
+            return privateStateOkay && equal.call(left, right);
+          } finally {
+            for (let index = 0; index < targets.length; index += 1)
+              targets[index][0][targets[index][1]] = originals[index];
+            if (slotHasInstance)
+              Object.defineProperty(HTMLSlotElement, Symbol.hasInstance, slotHasInstance);
+            else delete HTMLSlotElement[Symbol.hasInstance];
+            for (let index = 0; index < hookNames.length; index += 1)
+              globalThis[hookNames[index]] = hookValues[index];
+          }
+        })()"#).unwrap().as_boolean().unwrap());
     }
 
     #[test]
