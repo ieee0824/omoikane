@@ -5576,6 +5576,30 @@ mod tests {
     }
 
     #[test]
+    fn accessibility_snapshot_hook_is_immutable_to_page_scripts() {
+        let mut session = CdpSession::new().unwrap();
+        let result = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "(() => {\
+                      const name = '__omoikane_accessibility_snapshot';\
+                      const original = globalThis[name];\
+                      const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);\
+                      return [descriptor.writable, descriptor.configurable,\
+                        Reflect.set(globalThis, name, () => '{}'),\
+                        Reflect.deleteProperty(globalThis, name),\
+                        globalThis[name] === original].join('|');\
+                    })()",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(result["result"]["value"], "false|false|false|false|true");
+    }
+
+    #[test]
     fn accessibility_uses_live_form_disclosure_and_closed_shadow_state() {
         let mut session = CdpSession::new().unwrap();
         session

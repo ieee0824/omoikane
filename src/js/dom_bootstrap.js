@@ -219,28 +219,33 @@
 
   // Native accessibility snapshots pass every relevant node identity so this
   // also reaches closed shadow trees, which page-visible traversal cannot.
-  globalThis.__omoikane_accessibility_snapshot = function(selectIds, detailsIds) {
-    const selectedOptions = [];
-    for (const id of selectIds) {
-      const select = wrapNode(id);
-      if (!select || select.tagName !== "SELECT") continue;
-      const options = Array.from(select.options);
-      let selected = options.filter(option => option.selected);
-      if (!select.hasAttribute("multiple") && selected.length === 0) {
-        const fallback = options.find(option => !option.__isDisabledControl());
-        selected = fallback ? [fallback] : [];
-      } else if (!select.hasAttribute("multiple") && selected.length > 1) {
-        selected = [selected[selected.length - 1]];
+  Object.defineProperty(globalThis, "__omoikane_accessibility_snapshot", {
+    value: function(selectIds, detailsIds) {
+      const selectedOptions = [];
+      for (const id of selectIds) {
+        const select = wrapNode(id);
+        if (!select || select.tagName !== "SELECT") continue;
+        const options = Array.from(select.options);
+        let selected = options.filter(option => option.selected);
+        if (!select.hasAttribute("multiple") && selected.length === 0) {
+          const fallback = options.find(option => !option.__isDisabledControl());
+          selected = fallback ? [fallback] : [];
+        } else if (!select.hasAttribute("multiple") && selected.length > 1) {
+          selected = [selected[selected.length - 1]];
+        }
+        selectedOptions.push(...selected.map(option => option.__id));
       }
-      selectedOptions.push(...selected.map(option => option.__id));
-    }
-    const openDetails = detailsIds.filter(id => {
-      const details = wrapNode(id);
-      return details && details.tagName === "DETAILS" &&
-        details.open === true;
-    });
-    return JSON.stringify({ selectedOptions, openDetails });
-  };
+      const openDetails = detailsIds.filter(id => {
+        const details = wrapNode(id);
+        return details && details.tagName === "DETAILS" &&
+          details.open === true;
+      });
+      return JSON.stringify({ selectedOptions, openDetails });
+    },
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
 
   // Stamps `node` and (for a deep subtree) every descendant with `doc` as its
   // owning document, mirroring how `Document.create*` stamps `__ownerDoc`. Used
