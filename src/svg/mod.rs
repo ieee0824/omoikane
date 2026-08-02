@@ -303,13 +303,17 @@ fn hit_test_svg_use(
     // The `<use>` instance controls the hit-test mode for the referenced
     // geometry.  A referenced node normally computes to the initial `auto`,
     // which must not erase an explicit mode such as `fill`/`none` on the
-    // instance itself.  Preserve a non-default mode from the resource when it
-    // is explicitly styled, then fall back to the instance's inherited mode.
-    let pointer_events = computed_pointer_events(&target)
-        .or_else(|| property_value(&target_attrs, "pointer-events"))
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| value != "auto")
-        .unwrap_or_else(|| inherited.pointer_events.clone());
+    // instance itself.  If the instance is `auto`, honor a non-default mode
+    // explicitly authored on the referenced resource.
+    let pointer_events = if !inherited.pointer_events.eq_ignore_ascii_case("auto") {
+        inherited.pointer_events.clone()
+    } else {
+        computed_pointer_events(&target)
+            .or_else(|| property_value(&target_attrs, "pointer-events"))
+            .map(|value| value.to_ascii_lowercase())
+            .filter(|value| value != "auto")
+            .unwrap_or_else(|| inherited.pointer_events.clone())
+    };
     let visible = inherited.visible
         && !matches!(
             property_value(&target_attrs, "visibility").as_deref(),
