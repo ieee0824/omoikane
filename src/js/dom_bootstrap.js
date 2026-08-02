@@ -1799,6 +1799,25 @@
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
     }
 
+    toggleAttribute(name, force) {
+      const attr = String(name);
+      const present = this.hasAttribute(attr);
+      if (arguments.length < 2) {
+        if (present) {
+          this.removeAttribute(attr);
+          return false;
+        }
+        this.setAttribute(attr, "");
+        return true;
+      }
+      if (Boolean(force)) {
+        if (!present) this.setAttribute(attr, "");
+        return true;
+      }
+      if (present) this.removeAttribute(attr);
+      return false;
+    }
+
     setAttributeNS(namespace, qualifiedName, value) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       const name = String(qualifiedName);
@@ -2438,7 +2457,7 @@
   distributePrototypeMembers(Node.prototype, [Element.prototype], [
     "namespaceURI", "prefix", "localName", "tagName",
     "id", "className", "classList",
-    "getAttribute", "setAttribute", "hasAttribute", "removeAttribute",
+    "getAttribute", "setAttribute", "hasAttribute", "removeAttribute", "toggleAttribute",
     "setAttributeNS", "getAttributeNS", "removeAttributeNS", "attributes",
     "matches", "closest",
     "__layoutMetrics", "getBoundingClientRect", "getClientRects",
@@ -4850,6 +4869,10 @@
   // src reloads it.
   class HTMLIFrameElement extends HTMLElement {
     get contentDocument() {
+      // Removing an iframe destroys its active nested browsing context. Keep
+      // the stable WindowProxy object around, but expose no live Document until
+      // the element is connected again and a fresh navigation is committed.
+      if (!this.isConnected) return null;
       return wrapNode(__omoikane_iframe_content_document(this.__id));
     }
 
@@ -4873,6 +4896,9 @@
           __listeners: new Map(),
           get document() {
             return iframe.contentDocument;
+          },
+          get closed() {
+            return iframe.contentDocument === null;
           },
           get customElements() {
             return registryForDocument(iframe.contentDocument);

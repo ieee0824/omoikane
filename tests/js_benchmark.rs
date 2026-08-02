@@ -52,7 +52,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
-use omoikane::js::JsRuntime;
+use omoikane::dom::NodeHandle;
+use omoikane::js::{JsRuntime, SandboxConfig};
 use serde::{Deserialize, Serialize};
 
 const SHAPES_PATH: &str = "tests/js_benchmark/shapes.js";
@@ -204,7 +205,18 @@ struct BenchmarkRun {
 
 fn run_benchmarks() -> BenchmarkRun {
     let source = fs::read_to_string(SHAPES_PATH).expect("read benchmark shapes");
-    let mut runtime = JsRuntime::new().expect("create benchmark runtime");
+    // The benchmark intentionally executes tens of millions of loop
+    // iterations across its four passes. Keep the production default strict,
+    // but give this measurement harness an explicit budget large enough for
+    // the workload it is designed to run.
+    let mut runtime = JsRuntime::with_document_and_sandbox(
+        NodeHandle::document(),
+        SandboxConfig {
+            max_loop_iterations: 100_000_000,
+            ..SandboxConfig::default()
+        },
+    )
+    .expect("create benchmark runtime");
     runtime.eval(&source).expect("load benchmark shapes");
     // Validated rather than cast: `as u32` would turn 4.5 into 4 and NaN into 0,
     // and a zero pass count would surface as a baffling "timed 0 passes"
