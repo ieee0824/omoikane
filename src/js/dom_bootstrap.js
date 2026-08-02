@@ -1107,8 +1107,13 @@
     return parts;
   }
 
+  const domTokenListConstructionToken = Symbol("DOMTokenList construction");
+
   class DOMTokenList {
-    constructor(node, attribute, supportedTokens = null) {
+    constructor(token, node, attribute, supportedTokens = null) {
+      if (token !== domTokenListConstructionToken) {
+        throw new TypeError("Illegal constructor");
+      }
       this.__node = node;
       this.__attribute = attribute;
       this.__supportedTokens = supportedTokens;
@@ -1217,11 +1222,7 @@
     toString() { return this.value; }
     get [Symbol.toStringTag]() { return "DOMTokenList"; }
   }
-  const exposedDOMTokenList = function DOMTokenList() {
-    throw new TypeError("Illegal constructor");
-  };
-  exposedDOMTokenList.prototype = DOMTokenList.prototype;
-  globalThis.DOMTokenList = exposedDOMTokenList;
+  globalThis.DOMTokenList = DOMTokenList;
 
   class Node {
     constructor(id) {
@@ -5017,14 +5018,19 @@
   class HTMLIFrameElement extends HTMLElement {
     get sandbox() {
       if (!this.__sandboxTokenList) {
-        this.__sandboxTokenList = new DOMTokenList(this, "sandbox", iframeSandboxTokens);
+        this.__sandboxTokenList = new DOMTokenList(
+          domTokenListConstructionToken,
+          this,
+          "sandbox",
+          iframeSandboxTokens,
+        );
       }
       return this.__sandboxTokenList;
     }
 
-    // The pinned Boa revision miscompiles this large bootstrap on x86_64 when
-    // the accessor pair is reduced to a getter. Keep the setter shape, but make
-    // assignment a no-op so the reflected DOMTokenList remains readonly.
+    // Boa 5da9b8f miscompiles the large bootstrap when this accessor pair is
+    // reduced to a getter. Keep the setter shape, but make assignment a no-op
+    // so the reflected DOMTokenList remains readonly.
     set sandbox(_value) {}
 
     get contentDocument() {
