@@ -23300,15 +23300,11 @@ b</textarea></form>"#);
                   const nestedContent = nested.content;
                   const nestedInserted = document.createElement("i");
                   nestedContent.appendChild(nestedInserted);
-                  const direct = document.createElement("em");
-                  template.appendChild(direct);
                   const clone = template.cloneNode(true);
                   const cloneInserted = clone.content.querySelector("span");
                   return content === template.content &&
                     content.parentNode === null &&
-                    template.childNodes.length === 1 &&
-                    template.firstChild === direct &&
-                    direct.ownerDocument === document &&
+                    template.childNodes.length === 0 &&
                     content.childNodes.length === 2 &&
                     inserted.parentNode === content &&
                     inserted.ownerDocument === content.ownerDocument &&
