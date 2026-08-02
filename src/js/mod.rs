@@ -1938,6 +1938,7 @@ impl HostState {
         self.layout_generation = self.layout_generation.saturating_add(1);
         self.layout_root = layout;
         let mut clamped_targets = Vec::new();
+        let mut paint_invalidated = false;
         if let Some(layout_root) = self.layout_root.as_ref() {
             for (node_id, previous) in std::mem::take(&mut self.scroll_offsets_before_layout) {
                 let Some(node) = self.nodes.get(&node_id) else {
@@ -1953,10 +1954,13 @@ impl HostState {
                 if previous != next {
                     node.set_scroll_offset(next.0, next.1);
                     self.scroll_generation = self.scroll_generation.saturating_add(1);
-                    self.invalidate_paint_cache();
+                    paint_invalidated = true;
                     clamped_targets.push(node_id);
                 }
             }
+        }
+        if paint_invalidated {
+            self.invalidate_paint_cache();
         }
         for node_id in clamped_targets {
             self.queue_scroll_target(node_id);
