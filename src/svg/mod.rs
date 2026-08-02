@@ -249,6 +249,9 @@ fn hit_test_svg_children(
         ) {
             return Some(target);
         }
+        if pointer_events.eq_ignore_ascii_case("none") {
+            continue;
+        }
         let geometry = svg_hit_geometry(
             &tag,
             &attrs,
@@ -347,6 +350,9 @@ fn hit_test_svg_use(
     .is_some()
     {
         return true;
+    }
+    if style.pointer_events.eq_ignore_ascii_case("none") {
+        return false;
     }
     let geometry = svg_hit_geometry(
         &target_tag,

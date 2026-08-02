@@ -1734,7 +1734,9 @@ fn hit_test_box(
     for line in layout.lines.iter().rev() {
         for fragment in line.fragments.iter().rev() {
             if rect_contains_point(fragment.rect, local_point.0, local_point.1) {
-                if fragment.node.tag_name().as_deref() == Some("svg") {
+                if fragment.node.identity() != layout.node.identity()
+                    && fragment.node.tag_name().as_deref() == Some("svg")
+                {
                     let svg_box = match &fragment.content {
                         InlineFragmentContent::Image(_, fragment_style) => {
                             let border = EdgeSizesForPaint::from_style(fragment_style);
