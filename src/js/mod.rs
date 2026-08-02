@@ -30918,6 +30918,45 @@ b</textarea></form>"#);
         );
     }
 
+    /// Detaching an iframe destroys its active nested browsing context while
+    /// keeping the WindowProxy identity stable. Reconnecting starts a fresh
+    /// document, and the proxy becomes live again.
+    #[test]
+    fn detached_iframe_closes_nested_context_until_reconnected() {
+        use crate::html::TreeBuilder;
+        let doc =
+            TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            runtime
+                .eval(
+                    "var f = document.getElementById('f'); \
+                     var first = f.contentDocument; \
+                     var win = f.contentWindow; \
+                     document.body.removeChild(f); \
+                     [f.contentDocument === null, win.document === null, win.closed].join('|')",
+                )
+                .unwrap()
+                .as_string()
+                .map(|value| value.to_std_string_escaped())
+                .as_deref(),
+            Some("true|true|true")
+        );
+
+        runtime.eval("document.body.appendChild(f)").unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime
+                .eval("[f.contentWindow === win, f.contentDocument !== first, win.document === f.contentDocument, win.closed].join('|')")
+                .unwrap()
+                .as_string()
+                .map(|value| value.to_std_string_escaped())
+                .as_deref(),
+            Some("true|true|true|false")
+        );
+    }
+
     /// A sub-document's `defaultView` is its iframe's `contentWindow` (stable and
     /// round-tripping through `.document`), while the main document's
     /// `defaultView` remains the global window.
