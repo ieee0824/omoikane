@@ -1025,7 +1025,10 @@ fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
     if url_like.is_empty() {
         return None;
     }
-    if url_like.starts_with("data:") {
+    if url_like
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+    {
         return decode_data_uri_image(url_like);
     }
     // `get` rather than a range index: a source such as "日本語です" would make
@@ -1049,8 +1052,11 @@ pub(crate) fn canonical_image_asset_reference(url_like: &str) -> Option<String> 
     if url_like.is_empty() {
         return None;
     }
-    if url_like.starts_with("data:") {
-        return Some(url_like.to_string());
+    if url_like
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+    {
+        return Some(format!("data:{}", &url_like[5..]));
     }
     if url_like
         .get(..5)

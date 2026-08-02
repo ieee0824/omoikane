@@ -376,9 +376,10 @@ pub(crate) fn decode_jpeg(bytes: &[u8]) -> Result<Image, PaintError> {
 
 /// Parses a `data:` URI into either text or binary content.
 pub fn parse_data_uri(uri: &str) -> Result<DataUri, PaintError> {
-    let payload = uri
-        .strip_prefix("data:")
-        .ok_or(PaintError::InvalidDataUri)?;
+    let payload = match uri.get(..5) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("data:") => &uri[5..],
+        _ => return Err(PaintError::InvalidDataUri),
+    };
     let (metadata, data) = payload.split_once(',').ok_or(PaintError::InvalidDataUri)?;
     let mut mime_type = "text/plain".to_string();
     let mut is_base64 = false;

@@ -1779,6 +1779,13 @@ fn parses_text_and_png_data_uris() {
             data: "hello world".to_string(),
         }
     );
+    assert_eq!(
+        parse_data_uri("DATA:,uppercase%20scheme").unwrap(),
+        DataUri::Text {
+            mime_type: "text/plain".to_string(),
+            data: "uppercase scheme".to_string(),
+        },
+    );
 
     let mut canvas = Canvas::new(1, 1);
     canvas.fill_rect(

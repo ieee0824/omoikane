@@ -2859,7 +2859,7 @@ mod tests {
     fn renders_svg_image_href_with_opacity_and_intrinsic_aspect_ratio() {
         let html = r#"<svg width="12" height="6">
           <image x="2" y="1" width="8" height="4" opacity="0.5"
-            href="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMiIgaGVpZ2h0PSIxIj48cmVjdCB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJyZWQiLz48cmVjdCB4PSIxIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJibHVlIi8+PC9zdmc+"/>
+            href="DATA:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMiIgaGVpZ2h0PSIxIj48cmVjdCB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJyZWQiLz48cmVjdCB4PSIxIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJibHVlIi8+PC9zdmc+"/>
         </svg>"#;
         let doc = TreeBuilder::parse(html).document();
         let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
@@ -2922,6 +2922,10 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(relative, absolute);
+            assert_eq!(
+                crate::layout::canonical_image_asset_reference("DATA:image/png,bytes"),
+                crate::layout::canonical_image_asset_reference("data:image/png,bytes"),
+            );
 
             let _active = ActiveSvgImageReference::acquire(&relative).unwrap();
             assert!(decode_svg_image_reference("https://example.test/assets/self.svg").is_none());
