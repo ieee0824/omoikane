@@ -805,6 +805,9 @@ unsafe impl Trace for HostState {
                 unsafe { owner.trace(tracer) };
             }
         }
+        if let Some(dialog) = &self.pending_javascript_dialog {
+            unsafe { dialog.suspension.trace(tracer) };
+        }
         for channel in self.broadcast_channels.values() {
             unsafe { channel.trace(tracer) };
         }
@@ -10087,6 +10090,7 @@ mod tests {
         );
         assert_eq!(controller.pending(), Some(dialog.clone()));
 
+        boa_gc::force_collect();
         controller.handle(dialog.id, true, None).unwrap();
         assert_eq!(
             controller.handle(dialog.id, true, None),
