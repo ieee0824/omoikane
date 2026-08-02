@@ -5845,7 +5845,9 @@
     }
     get colSpan() {
       const raw = this.getAttribute("colspan");
-      const value = raw === null ? 1 : Number.parseInt(raw, 10);
+      const value = raw === null || !/^[0-9]+$/.test(raw)
+        ? 1
+        : Number.parseInt(raw, 10);
       return Number.isFinite(value) && value >= 1 ? Math.min(value, 1000) : 1;
     }
     set colSpan(value) {
@@ -5857,7 +5859,9 @@
     }
     get rowSpan() {
       const raw = this.getAttribute("rowspan");
-      const value = raw === null ? 1 : Number.parseInt(raw, 10);
+      const value = raw === null || !/^[0-9]+$/.test(raw)
+        ? 1
+        : Number.parseInt(raw, 10);
       return Number.isFinite(value) && value >= 0 ? Math.min(value, 65534) : 1;
     }
     set rowSpan(value) {
