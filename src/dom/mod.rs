@@ -634,7 +634,7 @@ impl NodeHandle {
     fn is_html_slot(&self) -> bool {
         self.is_html_element()
             && self
-                .tag_name()
+                .local_name()
                 .is_some_and(|name| name.eq_ignore_ascii_case("slot"))
     }
 

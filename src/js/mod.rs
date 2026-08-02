@@ -22720,9 +22720,9 @@ b</textarea></form>"#);
     #[test]
     fn html_namespace_slot_assignment_is_ascii_case_insensitive() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert_js_ok(
+            &mut runtime,
+            r#"(() => {
                   const html = "http://www.w3.org/1999/xhtml";
                   const host = document.createElement("div");
                   const child = document.createElement("span");
@@ -22733,17 +22733,28 @@ b</textarea></form>"#);
                   const slot = document.createElementNS(html, "SLOT");
                   root.appendChild(slot);
 
-                  return slot instanceof HTMLSlotElement &&
-                    slot.tagName === "SLOT" &&
-                    slot.localName === "SLOT" &&
-                    slot.assignedNodes().length === 1 &&
-                    slot.assignedNodes()[0] === child &&
-                    child.assignedSlot === slot;
+                  const prefixedHost = document.createElement("div");
+                  const prefixedChild = document.createElement("span");
+                  prefixedHost.appendChild(prefixedChild);
+                  document.body.appendChild(prefixedHost);
+                  const prefixedRoot = prefixedHost.attachShadow({ mode: "open" });
+                  const prefixedSlot = document.createElementNS(html, "x:SLOT");
+                  prefixedRoot.appendChild(prefixedSlot);
+
+                  if (!(slot instanceof HTMLSlotElement)) return 1;
+                  if (slot.tagName !== "SLOT" || slot.localName !== "SLOT") return 2;
+                  if (slot.assignedNodes().length !== 1 ||
+                      slot.assignedNodes()[0] !== child || child.assignedSlot !== slot) return 3;
+                  if (!(prefixedSlot instanceof HTMLSlotElement)) return 4;
+                  if (prefixedSlot.tagName !== "X:SLOT") return 5;
+                  if (prefixedSlot.prefix !== "x") return 6;
+                  if (prefixedSlot.localName !== "SLOT") return 7;
+                  if (prefixedSlot.assignedNodes().length !== 1 ||
+                      prefixedSlot.assignedNodes()[0] !== prefixedChild ||
+                      prefixedChild.assignedSlot !== prefixedSlot) return 8;
+                  return 0;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        );
     }
 
     #[test]
