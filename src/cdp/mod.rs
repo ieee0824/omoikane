@@ -1626,11 +1626,12 @@ impl CdpSession {
         nodes: Vec<&AccessibilityNode>,
         force_computed_ignored: bool,
     ) -> Vec<Value> {
+        let parent_ids = ax_parent_ids(&tree.root);
         nodes
             .into_iter()
             .map(|node| {
-                let parent_id = ax_parent_id(&tree.root, &node.node_id);
-                self.serialize_ax_node(node, parent_id.as_deref(), force_computed_ignored)
+                let parent_id = parent_ids.get(&node.node_id).map(String::as_str);
+                self.serialize_ax_node(node, parent_id, force_computed_ignored)
             })
             .collect()
     }
@@ -1641,13 +1642,17 @@ impl CdpSession {
         full_tree: &AccessibilityTree,
         selected: &HashSet<String>,
     ) -> Vec<Value> {
+        let query_parent_ids = ax_parent_ids(&query_tree.root);
+        let full_parent_ids = ax_parent_ids(&full_tree.root);
         query_tree
             .nodes_preorder()
             .into_iter()
             .filter(|node| selected.contains(&node.node_id))
             .map(|node| {
-                let parent_id = ax_parent_id(&query_tree.root, &node.node_id)
-                    .or_else(|| ax_parent_id(&full_tree.root, &node.node_id))
+                let parent_id = query_parent_ids
+                    .get(&node.node_id)
+                    .or_else(|| full_parent_ids.get(&node.node_id))
+                    .cloned()
                     .or_else(|| {
                         nearest_ax_ancestor_path(full_tree, &node.dom_node)
                             .and_then(|path| path.last().map(|parent| parent.node_id.clone()))
@@ -2568,6 +2573,19 @@ fn ax_parent_id(node: &AccessibilityNode, target_id: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn ax_parent_ids(root: &AccessibilityNode) -> HashMap<String, String> {
+    fn collect(node: &AccessibilityNode, parent_ids: &mut HashMap<String, String>) {
+        for child in &node.children {
+            parent_ids.insert(child.node_id.clone(), node.node_id.clone());
+            collect(child, parent_ids);
+        }
+    }
+
+    let mut parent_ids = HashMap::new();
+    collect(root, &mut parent_ids);
+    parent_ids
 }
 
 fn ax_composed_parent(node: &NodeHandle) -> Option<NodeHandle> {

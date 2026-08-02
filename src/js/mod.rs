@@ -2537,15 +2537,17 @@ impl JsRuntime {
 
         let mut current = Some(node.clone());
         while let Some(element) = current {
-            let style = state
+            let Some(resolver) = state
                 .document_styles
                 .get_mut(&document_id)
                 .and_then(|entry| entry.resolver.as_mut())
-                .map(|resolver| resolver.computed_style(&element));
-            let Some(style) = style else {
+            else {
                 return AccessibilityRenderState::NotRendered;
             };
-            if matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none"))
+            if matches!(
+                resolver.computed_property(&element, "display"),
+                Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
+            )
             {
                 return AccessibilityRenderState::NotRendered;
             }
@@ -2560,24 +2562,21 @@ impl JsRuntime {
             });
         }
 
-        let style = state
+        let Some(resolver) = state
             .document_styles
             .get_mut(&document_id)
             .and_then(|entry| entry.resolver.as_mut())
-            .map(|resolver| resolver.computed_style(node));
-        match style {
-            Some(style)
-                if matches!(
-                    style.get("visibility"),
-                    Some(ComputedValue::Keyword(value))
-                        if value.eq_ignore_ascii_case("hidden")
-                            || value.eq_ignore_ascii_case("collapse")
-                ) =>
+        else {
+            return AccessibilityRenderState::NotRendered;
+        };
+        match resolver.computed_property(node, "visibility") {
+            Some(ComputedValue::Keyword(value))
+                if value.eq_ignore_ascii_case("hidden")
+                    || value.eq_ignore_ascii_case("collapse") =>
             {
                 AccessibilityRenderState::NotVisible
             }
-            Some(_) => AccessibilityRenderState::Rendered,
-            None => AccessibilityRenderState::NotRendered,
+            _ => AccessibilityRenderState::Rendered,
         }
     }
 
