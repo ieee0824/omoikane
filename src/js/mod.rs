@@ -2210,9 +2210,6 @@ impl JsRuntime {
             .module_loader(module_loader.clone())
             .host_hooks(Rc::new(BrowserHostHooks))
             .build()?;
-        context
-            .runtime_limits_mut()
-            .set_loop_iteration_limit(sandbox.max_loop_iterations);
 
         register_host_bindings(&mut context, &host_state)?;
 
@@ -2223,6 +2220,14 @@ impl JsRuntime {
             sandbox,
         };
         runtime.eval(DOM_BOOTSTRAP)?;
+        // DOM bootstrap is runtime initialization rather than page code. Apply
+        // the caller's budget only after it has completed so a deliberately
+        // small limit (for example in a test or a short-lived page task) cannot
+        // abort construction before the runtime is usable.
+        runtime
+            .context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(runtime.sandbox.max_loop_iterations);
         // Parsed resource elements are already connected before the JS wrapper
         // exists. Queue their loads only after bootstrap so dispatch can wrap
         // the target element when the macrotask runs.
