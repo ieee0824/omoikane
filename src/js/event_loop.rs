@@ -121,11 +121,17 @@ unsafe impl Trace for EventLoop {
 }
 
 unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
-    if let TimerPayload::Callback { callback, args } = payload {
-        unsafe { callback.trace(tracer) };
-        for arg in args {
-            unsafe { arg.trace(tracer) };
+    match payload {
+        TimerPayload::Callback { callback, args } => {
+            unsafe { callback.trace(tracer) };
+            for arg in args {
+                unsafe { arg.trace(tracer) };
+            }
         }
+        TimerPayload::Realm { payload, .. } => unsafe { trace_timer_payload(payload, tracer) },
+        TimerPayload::Source(_)
+        | TimerPayload::ResourceLoad { .. }
+        | TimerPayload::GeolocationTimeout { .. } => {}
     }
 }
 
