@@ -8841,11 +8841,14 @@ fn bind_timer_payload_to_current_realm(
                 .then_some(entry.document.identity())
         })
     });
-    document_id.map_or(payload, |document_id| TimerPayload::Realm {
-        payload: Box::new(payload),
-        realm,
-        document_id,
-    })
+    match document_id {
+        Some(document_id) => TimerPayload::Realm {
+            payload: Box::new(payload),
+            realm,
+            document_id,
+        },
+        None => payload,
+    }
 }
 
 fn request_animation_frame_native(
