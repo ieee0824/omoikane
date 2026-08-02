@@ -173,7 +173,9 @@ fn wall_clock_timeout_error() -> JsError {
 fn is_wall_clock_timeout(error: &JsError) -> bool {
     error
         .as_native()
-        .is_some_and(|error| error.message() == WALL_CLOCK_TIMEOUT_MESSAGE)
+        .is_some_and(|error| {
+            error.is_runtime_limit() && error.message() == WALL_CLOCK_TIMEOUT_MESSAGE
+        })
 }
 
 /// Wraps a Boa async evaluation with a cooperative wall-clock deadline.
@@ -3566,7 +3568,12 @@ impl JsRuntime {
             match task {
                 Task::Timer(TimerPayload::Source(source)) => {
                     let result = self.eval_async(&source).await;
-                    self.record_error_from("timer", result);
+                    if let Err(error) = result {
+                        if is_wall_clock_timeout(&error) {
+                            return Err(error);
+                        }
+                        self.record_error_from::<()>("timer", Err(error));
+                    }
                 }
                 Task::Timer(TimerPayload::Callback { callback, args }) => {
                     if let Some(callable) = callback.as_callable() {
@@ -18399,6 +18406,47 @@ b</textarea></form>"#);
         let error = result.expect_err("an infinite async script must time out");
         assert!(is_wall_clock_timeout(&error), "unexpected error: {error}");
         drop(evaluation);
+        assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+    }
+
+    #[test]
+    fn user_thrown_timeout_message_is_not_classified_as_wall_clock_timeout() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+        let mut evaluation = Box::pin(runtime.eval_async(
+            "throw new TypeError('JavaScript evaluation exceeded wall-clock timeout')",
+        ));
+        let error = loop {
+            match evaluation.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => break result.expect_err("the script must throw"),
+                Poll::Pending => {}
+            }
+        };
+        assert!(!is_wall_clock_timeout(&error));
+    }
+
+    #[test]
+    fn async_string_timer_timeout_propagates_and_recovers_runtime() {
+        let sandbox = SandboxConfig {
+            timeout: Duration::from_millis(2),
+            max_loop_iterations: u64::MAX,
+        };
+        let doc = crate::dom::NodeHandle::document();
+        let mut runtime = JsRuntime::with_document_and_sandbox(doc, sandbox).unwrap();
+        runtime.set_timeout("for (;;) {}", 0);
+        runtime.host_state.borrow_mut().event_loop.advance(0);
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+        let mut pump = Box::pin(runtime.run_until_idle_async());
+        let error = loop {
+            match pump.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => break result.expect_err("string timer must time out"),
+                Poll::Pending => {}
+            }
+        };
+        drop(pump);
+        assert!(is_wall_clock_timeout(&error));
         assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
     }
 

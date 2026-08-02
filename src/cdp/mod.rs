@@ -1845,7 +1845,7 @@ impl CdpSession {
         {
             return Err("stale page startup task completion".to_string());
         }
-        match completed.result {
+        match &completed.result {
             Err(PageTaskError::Cancelled) => {
                 return Err("page startup task was cancelled".to_string());
             }
