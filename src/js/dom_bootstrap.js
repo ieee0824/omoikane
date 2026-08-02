@@ -1107,6 +1107,123 @@
     return parts;
   }
 
+  const domTokenListConstructionToken = Symbol("DOMTokenList construction");
+
+  class DOMTokenList {
+    constructor(token, node, attribute, supportedTokens = null) {
+      if (token !== domTokenListConstructionToken) {
+        throw new TypeError("Illegal constructor");
+      }
+      this.__node = node;
+      this.__attribute = attribute;
+      this.__supportedTokens = supportedTokens;
+    }
+
+    __validate(token) {
+      token = String(token);
+      if (token === "") throw new DOMException("The token must not be empty.", "SyntaxError");
+      if (/[\t\n\f\r ]/.test(token)) {
+        throw new DOMException("The token contains whitespace.", "InvalidCharacterError");
+      }
+      return this.__supportedTokens ? token.toLowerCase() : token;
+    }
+
+    __tokens() {
+      const tokens = [];
+      for (const token of (this.__node.getAttribute(this.__attribute) || "")
+        .split(/[\t\n\f\r ]+/)) {
+        const normalized = this.__supportedTokens ? token.toLowerCase() : token;
+        if (normalized && !tokens.includes(normalized)) tokens.push(normalized);
+      }
+      return tokens;
+    }
+
+    __replace(tokens) {
+      // A no-op mutation must not manufacture a boolean attribute. This is
+      // security-sensitive for iframe.sandbox: an absent attribute means no
+      // sandbox, while sandbox="" enables every restriction.
+      if (!tokens.length && !this.__node.hasAttribute(this.__attribute)) return;
+      this.__node.setAttribute(this.__attribute, tokens.join(" "));
+    }
+
+    add(...tokens) {
+      tokens = tokens.map(token => this.__validate(token));
+      if (!tokens.length) return;
+      const current = this.__tokens();
+      for (const token of tokens) if (!current.includes(token)) current.push(token);
+      this.__replace(current);
+    }
+
+    remove(...tokens) {
+      tokens = tokens.map(token => this.__validate(token));
+      if (!tokens.length) return;
+      const removed = new Set(tokens);
+      this.__replace(this.__tokens().filter(token => !removed.has(token)));
+    }
+
+    toggle(token, force) {
+      token = this.__validate(token);
+      const current = this.__tokens();
+      const present = current.includes(token);
+      const forceProvided = arguments.length >= 2;
+      if (forceProvided && Boolean(force) === present) return present;
+      if (!forceProvided) {
+        if (present) current.splice(current.indexOf(token), 1);
+        else current.push(token);
+      } else {
+        if (force) current.push(token);
+        else current.splice(current.indexOf(token), 1);
+      }
+      this.__replace(current);
+      return current.includes(token);
+    }
+
+    replace(oldToken, newToken) {
+      oldToken = this.__validate(oldToken);
+      newToken = this.__validate(newToken);
+      const current = this.__tokens();
+      const index = current.indexOf(oldToken);
+      if (index < 0) return false;
+      if (oldToken !== newToken) {
+        const existing = current.indexOf(newToken);
+        if (existing >= 0) current.splice(existing, 1);
+        current[current.indexOf(oldToken)] = newToken;
+      }
+      this.__replace(current);
+      return true;
+    }
+
+    contains(token) {
+      return this.__tokens().includes(this.__validate(token));
+    }
+
+    supports(token) {
+      token = this.__validate(token);
+      if (!this.__supportedTokens) {
+        throw new TypeError("This DOMTokenList has no supported tokens.");
+      }
+      return this.__supportedTokens.has(token.toLowerCase());
+    }
+
+    item(index) {
+      return this.__tokens()[Number(index)] || null;
+    }
+
+    get length() { return this.__tokens().length; }
+    get value() { return this.__node.getAttribute(this.__attribute) || ""; }
+    set value(value) { this.__node.setAttribute(this.__attribute, String(value)); }
+    keys() { return this.__tokens().keys(); }
+    values() { return this.__tokens().values(); }
+    entries() { return this.__tokens().entries(); }
+    forEach(callback, thisArg) {
+      this.__tokens().forEach((value, index) => callback.call(thisArg, value, index, this));
+    }
+    [Symbol.iterator]() { return this.values(); }
+    toString() { return this.value; }
+    get [Symbol.toStringTag]() { return "DOMTokenList"; }
+  }
+  globalThis.DOMTokenList = DOMTokenList;
+
   class Node {
     constructor(id) {
       this.__id = id;
@@ -4883,6 +5000,15 @@
     });
   }
 
+  const iframeSandboxTokens = new Set([
+    "allow-downloads", "allow-forms", "allow-modals", "allow-orientation-lock",
+    "allow-pointer-lock", "allow-popups", "allow-popups-to-escape-sandbox",
+    "allow-presentation", "allow-same-origin", "allow-scripts",
+    "allow-storage-access-by-user-activation", "allow-top-navigation",
+    "allow-top-navigation-by-user-activation",
+    "allow-top-navigation-to-custom-protocols",
+  ]);
+
   // An <iframe> owns a nested browsing context whose document is reachable via
   // contentDocument (and, as a facade, contentWindow.document). The document is
   // created lazily by the host on first access: an empty/absent src yields an
@@ -4890,10 +5016,31 @@
   // types become a real DOM tree). Reading contentDocument again after changing
   // src reloads it.
   class HTMLIFrameElement extends HTMLElement {
+    get sandbox() {
+      if (!this.__sandboxTokenList) {
+        this.__sandboxTokenList = new DOMTokenList(
+          domTokenListConstructionToken,
+          this,
+          "sandbox",
+          iframeSandboxTokens,
+        );
+      }
+      return this.__sandboxTokenList;
+    }
+
+    // Boa 5da9b8f miscompiles the large bootstrap when this accessor pair is
+    // reduced to a getter. Keep the setter shape, but reject assignment with
+    // TypeError so the reflected DOMTokenList remains readonly.
+    set sandbox(_value) {
+      throw new TypeError("HTMLIFrameElement.sandbox is readonly");
+    }
+
     get contentDocument() {
       // Removing an iframe destroys its active nested browsing context. Keep
       // the stable WindowProxy object around, but expose no live Document until
       // the element is connected again and a fresh navigation is committed.
+      // A connected document with an opaque sandbox origin is likewise hidden
+      // from its parent browsing context.
       if (!this.isConnected) return null;
       return wrapNode(__omoikane_iframe_content_document(this.__id));
     }
@@ -4917,19 +5064,39 @@
         this.__contentWindowFacade = {
           __listeners: new Map(),
           get document() {
-            return iframe.contentDocument;
+            if (!iframe.isConnected) return null;
+            const document = iframe.contentDocument;
+            if (!document) {
+              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
+            }
+            return document;
           },
           get closed() {
-            return iframe.contentDocument === null;
+            return !iframe.isConnected;
           },
           get customElements() {
-            return registryForDocument(iframe.contentDocument);
+            if (!iframe.isConnected) return null;
+            const document = iframe.contentDocument;
+            if (!document) {
+              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
+            }
+            return registryForDocument(document);
           },
           get localStorage() {
-            return storageForDocument("local", iframe.contentDocument, this);
+            if (!iframe.isConnected) return null;
+            const document = iframe.contentDocument;
+            if (!document) {
+              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
+            }
+            return storageForDocument("local", document, this);
           },
           get sessionStorage() {
-            return storageForDocument("session", iframe.contentDocument, this);
+            if (!iframe.isConnected) return null;
+            const document = iframe.contentDocument;
+            if (!document) {
+              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
+            }
+            return storageForDocument("session", document, this);
           },
           frameElement: iframe,
           getComputedStyle: globalThis.getComputedStyle,
@@ -11359,7 +11526,13 @@
     const origin = storageOrigin(sourceDocument);
     for (const targetWindow of liveBrowsingWindows()) {
       if (targetWindow === sourceWindow) continue;
-      const targetDocument = targetWindow.document;
+      let targetDocument;
+      try {
+        targetDocument = targetWindow.document;
+      } catch (error) {
+        if (error && error.name === "SecurityError") continue;
+        throw error;
+      }
       if (!targetDocument || __omoikane_storage_origin(targetDocument.__id) !== origin) continue;
       const storageArea = storageForDocument(kind, targetDocument, targetWindow);
       targetWindow.dispatchEvent(new StorageEvent("storage", {
