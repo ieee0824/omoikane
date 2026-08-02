@@ -1160,7 +1160,7 @@
       token = this.__validate(token);
       const current = this.__tokens();
       const present = current.includes(token);
-      const forceProvided = arguments.length >= 2 && force !== undefined;
+      const forceProvided = arguments.length >= 2;
       if (forceProvided && Boolean(force) === present) return present;
       if (!forceProvided) {
         if (present) current.splice(current.indexOf(token), 1);

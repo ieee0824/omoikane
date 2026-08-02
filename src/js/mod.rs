@@ -30674,6 +30674,9 @@ b</textarea></form>"#);
                     tokens.replace('allow-forms', 'allow-modals');
                     const reflected = frame.getAttribute('sandbox');
                     const iterated = Array.from(tokens).join(',');
+                    tokens.add('allow-downloads');
+                    const undefinedForcesFalse =
+                        !tokens.toggle('allow-downloads', undefined);
                     frame.setAttribute('sandbox', 'allow-scripts allow-scripts allow-same-origin');
                     const duplicateToggle = !tokens.toggle('allow-scripts') &&
                         frame.getAttribute('sandbox') === 'allow-same-origin';
@@ -30686,12 +30689,13 @@ b</textarea></form>"#);
                         iterated,
                         tokens.supports('ALLOW-SCRIPTS'),
                         tokens.supports('future-token'),
+                        undefinedForcesFalse,
                         duplicateToggle,
                         !absent.hasAttribute('sandbox')
                     ].join('|');
                 })()"#,
             ),
-            "true|true|allow-scripts allow-same-origin allow-modals|allow-scripts,allow-same-origin,allow-modals|true|false|true|true"
+            "true|true|allow-scripts allow-same-origin allow-modals|allow-scripts,allow-same-origin,allow-modals|true|false|true|true|true"
         );
     }
 
