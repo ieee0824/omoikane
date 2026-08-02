@@ -5075,6 +5075,7 @@
             return !iframe.isConnected;
           },
           get customElements() {
+            if (!iframe.isConnected) return null;
             const document = iframe.contentDocument;
             if (!document) {
               throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
@@ -5082,6 +5083,7 @@
             return registryForDocument(document);
           },
           get localStorage() {
+            if (!iframe.isConnected) return null;
             const document = iframe.contentDocument;
             if (!document) {
               throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
@@ -5089,6 +5091,7 @@
             return storageForDocument("local", document, this);
           },
           get sessionStorage() {
+            if (!iframe.isConnected) return null;
             const document = iframe.contentDocument;
             if (!document) {
               throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");

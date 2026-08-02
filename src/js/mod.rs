@@ -31584,13 +31584,15 @@ b</textarea></form>"#);
                      var first = f.contentDocument; \
                      var win = f.contentWindow; \
                      document.body.removeChild(f); \
-                     [f.contentDocument === null, win.document === null, win.closed].join('|')",
+                     [f.contentDocument === null, win.document === null, win.closed, \
+                      win.customElements === null, win.localStorage === null, \
+                      win.sessionStorage === null].join('|')",
                 )
                 .unwrap()
                 .as_string()
                 .map(|value| value.to_std_string_escaped())
                 .as_deref(),
-            Some("true|true|true")
+            Some("true|true|true|true|true|true")
         );
 
         runtime.eval("document.body.appendChild(f)").unwrap();
