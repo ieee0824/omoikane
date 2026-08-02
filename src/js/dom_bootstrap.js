@@ -2536,8 +2536,60 @@
     "font-face-uri", "font-face-format", "font-face-name", "missing-glyph",
   ]);
 
+  // DOM's legacy insert-adjacent APIs compare `where` using an ASCII
+  // case-insensitive match. Restrict folding to A-Z so non-ASCII case mappings
+  // cannot accidentally turn an otherwise invalid position into a valid one.
+  function insertAdjacent(element, where, node) {
+    const position = where.replace(/[A-Z]/g, letter => letter.toLowerCase());
+    switch (position) {
+      case "beforebegin": {
+        const parent = element.parentNode;
+        return parent === null ? null : parent.insertBefore(node, element);
+      }
+      case "afterbegin":
+        return element.insertBefore(node, element.firstChild);
+      case "beforeend":
+        return element.insertBefore(node, null);
+      case "afterend": {
+        const parent = element.parentNode;
+        return parent === null ? null : parent.insertBefore(node, element.nextSibling);
+      }
+      default:
+        throw new DOMException("The provided position is not valid.", "SyntaxError");
+    }
+  }
+
   class Element extends Node {
     remove() { removeChildNode.call(this); }
+
+    insertAdjacentElement(where, element) {
+      if (!(this instanceof Element)) {
+        throw new TypeError("insertAdjacentElement called on an incompatible receiver");
+      }
+      if (arguments.length < 2) {
+        throw new TypeError("insertAdjacentElement requires 2 arguments");
+      }
+      where = String(where);
+      if (!(element instanceof Element)) {
+        throw new TypeError("insertAdjacentElement requires an Element");
+      }
+      return insertAdjacent(this, where, element);
+    }
+
+    insertAdjacentText(where, data) {
+      if (!(this instanceof Element)) {
+        throw new TypeError("insertAdjacentText called on an incompatible receiver");
+      }
+      if (arguments.length < 2) {
+        throw new TypeError("insertAdjacentText requires 2 arguments");
+      }
+      where = String(where);
+      data = String(data);
+      const owner = nodeDocument(this);
+      const text = wrapNode(__omoikane_create_text_node(data));
+      stampOwnerDoc(text, owner);
+      insertAdjacent(this, where, text);
+    }
 
     setPointerCapture(pointerId) {
       setPointerCaptureTarget(this, normalizePointerId(pointerId));

@@ -19986,6 +19986,168 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn insert_adjacent_element_follows_dom_positions_and_moves_existing_nodes() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const host = document.createElement("div");
+                const target = document.createElement("section");
+                target.id = "target";
+                const tail = document.createElement("i");
+                tail.id = "tail";
+                host.appendChild(target);
+                host.appendChild(tail);
+                document.body.appendChild(host);
+
+                const before = document.createElement("b");
+                before.id = "before";
+                const after = document.createElement("em");
+                after.id = "after";
+                const front = document.createElement("span");
+                front.id = "front";
+                const back = document.createElement("strong");
+                back.id = "back";
+
+                const returns = [
+                    target.insertAdjacentElement("BeFoReBeGiN", before) === before,
+                    target.insertAdjacentElement("AFTEREND", after) === after,
+                    target.insertAdjacentElement("afterbegin", front) === front,
+                    target.insertAdjacentElement("beforeend", back) === back
+                ];
+                const initialOuterOrder = Array.from(host.children, node => node.id).join(",");
+                const initialInnerOrder = Array.from(target.children, node => node.id).join(",");
+
+                // Moving an earlier sibling after the target exercises the
+                // pre-insert index adjustment required for same-parent moves.
+                const reordered = target.insertAdjacentElement("AfTeReNd", before);
+                const reorderedOuter = Array.from(host.children, node => node.id).join(",");
+
+                const source = document.createElement("aside");
+                const moving = document.createElement("mark");
+                source.appendChild(moving);
+                document.body.appendChild(source);
+                const sourceObserver = new MutationObserver(() => {});
+                const targetObserver = new MutationObserver(() => {});
+                sourceObserver.observe(source, { childList: true });
+                targetObserver.observe(target, { childList: true });
+                const moved = target.insertAdjacentElement("beforeend", moving);
+                const sourceRecords = sourceObserver.takeRecords();
+                const targetRecords = targetObserver.takeRecords();
+
+                const detached = document.createElement("div");
+                const detachedBefore = document.createElement("u");
+                const detachedAfter = document.createElement("u");
+                const detachedInner = document.createElement("u");
+                const detachedBeforeResult = detached.insertAdjacentElement("beforebegin", detachedBefore);
+                const detachedAfterResult = detached.insertAdjacentElement("afterend", detachedAfter);
+                const detachedInnerResult = detached.insertAdjacentElement("afterbegin", detachedInner);
+
+                const invalidCandidate = document.createElement("small");
+                let invalidPosition;
+                let invalidElement;
+                let missingArgument;
+                let invalidReceiver;
+                try { target.insertAdjacentElement("middle", invalidCandidate); }
+                catch (error) { invalidPosition = error.name; }
+                try { target.insertAdjacentElement("beforeend", document.createTextNode("x")); }
+                catch (error) { invalidElement = error.name; }
+                try { target.insertAdjacentElement("beforeend"); }
+                catch (error) { missingArgument = error.name; }
+                try { Element.prototype.insertAdjacentElement.call({}, "beforeend", invalidCandidate); }
+                catch (error) { invalidReceiver = error.name; }
+
+                return [
+                    returns.every(Boolean),
+                    initialOuterOrder === "before,target,after,tail",
+                    initialInnerOrder === "front,back",
+                    reordered === before,
+                    reorderedOuter === "target,before,after,tail",
+                    moved === moving,
+                    source.childNodes.length === 0,
+                    moving.parentNode === target,
+                    sourceRecords.length === 1 && sourceRecords[0].removedNodes[0] === moving,
+                    targetRecords.length === 1 && targetRecords[0].addedNodes[0] === moving,
+                    detachedBeforeResult === null && detachedBefore.parentNode === null,
+                    detachedAfterResult === null && detachedAfter.parentNode === null,
+                    detachedInnerResult === detachedInner && detached.firstChild === detachedInner,
+                    invalidPosition === "SyntaxError" && invalidCandidate.parentNode === null,
+                    invalidElement === "TypeError",
+                    missingArgument === "TypeError",
+                    invalidReceiver === "TypeError",
+                    Object.prototype.hasOwnProperty.call(Element.prototype, "insertAdjacentElement"),
+                    !("insertAdjacentElement" in document)
+                ].every(Boolean);
+            })()"#,
+        );
+        assert_eq!(actual, "true");
+    }
+
+    #[test]
+    fn insert_adjacent_text_uses_the_node_document_and_existing_mutation_path() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const host = document.createElement("div");
+                const target = document.createElement("section");
+                host.appendChild(target);
+                document.body.appendChild(host);
+                const observer = new MutationObserver(() => {});
+                observer.observe(host, { childList: true, subtree: true });
+
+                const results = [
+                    target.insertAdjacentText("AfTeRbEgIn", { toString() { return "front"; } }),
+                    target.insertAdjacentText("beforeend", 7),
+                    target.insertAdjacentText("BEFOREBEGIN", "before"),
+                    target.insertAdjacentText("afterend", "after")
+                ];
+                const records = observer.takeRecords();
+
+                let converted = false;
+                let invalidPosition;
+                let missingArgument;
+                let invalidReceiver;
+                try {
+                    target.insertAdjacentText("middle", {
+                        toString() { converted = true; return "unused"; }
+                    });
+                } catch (error) { invalidPosition = error.name; }
+                try { target.insertAdjacentText("beforeend"); }
+                catch (error) { missingArgument = error.name; }
+                try { Element.prototype.insertAdjacentText.call({}, "beforeend", "x"); }
+                catch (error) { invalidReceiver = error.name; }
+
+                const detached = document.createElement("div");
+                const detachedResult = detached.insertAdjacentText("afterend", "orphan");
+
+                const otherDocument = document.implementation.createHTMLDocument("other");
+                const otherTarget = otherDocument.createElement("p");
+                otherDocument.body.appendChild(otherTarget);
+                otherTarget.insertAdjacentText("beforeend", "owned");
+
+                return [
+                    results.every(value => value === undefined),
+                    host.textContent === "beforefront7after",
+                    target.childNodes.length === 2,
+                    target.firstChild.nodeType === 3 && target.firstChild.data === "front",
+                    target.lastChild.nodeType === 3 && target.lastChild.data === "7",
+                    records.length === 4,
+                    records.every(record => record.addedNodes.length === 1 && record.addedNodes[0].nodeType === 3),
+                    converted && invalidPosition === "SyntaxError",
+                    missingArgument === "TypeError",
+                    invalidReceiver === "TypeError",
+                    detachedResult === undefined && detached.childNodes.length === 0,
+                    otherTarget.firstChild.ownerDocument === otherDocument,
+                    Object.prototype.hasOwnProperty.call(Element.prototype, "insertAdjacentText"),
+                    !("insertAdjacentText" in document)
+                ].every(Boolean);
+            })()"#,
+        );
+        assert_eq!(actual, "true");
+    }
+
+    #[test]
     fn dom_mixins_and_html_members_have_spec_scoped_prototypes() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let actual = eval_str(
