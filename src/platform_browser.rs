@@ -88,9 +88,11 @@ pub enum BrowserError {
     NoActiveTab,
     InvalidDownload(DownloadId),
     DownloadAlreadyFinished(DownloadId),
+    IdExhausted(&'static str),
     Navigation(JsonRpcError),
     Frame(FrameError),
     Network(String),
+    DownloadFailed { id: DownloadId, error: String },
 }
 
 impl fmt::Display for BrowserError {
@@ -102,9 +104,13 @@ impl fmt::Display for BrowserError {
             Self::DownloadAlreadyFinished(id) => {
                 write!(f, "download {} is already finished", id.get())
             }
+            Self::IdExhausted(kind) => write!(f, "{kind} id space exhausted"),
             Self::Navigation(error) => write!(f, "navigation failed: {}", error.message),
             Self::Frame(error) => write!(f, "frame failed: {error}"),
             Self::Network(error) => write!(f, "download failed: {error}"),
+            Self::DownloadFailed { id, error } => {
+                write!(f, "download {} failed: {error}", id.get())
+            }
         }
     }
 }
@@ -162,7 +168,10 @@ impl PlatformBrowser {
     /// about:blank.
     pub fn open_tab(&mut self, url: Option<&str>) -> Result<TabId, BrowserError> {
         let id = TabId(self.next_tab_id);
-        self.next_tab_id = self.next_tab_id.saturating_add(1);
+        self.next_tab_id = self
+            .next_tab_id
+            .checked_add(1)
+            .ok_or(BrowserError::IdExhausted("tab"))?;
         let mut session = CdpSession::new().map_err(|message| {
             BrowserError::Network(format!("failed to create tab runtime: {message}"))
         })?;
@@ -283,12 +292,15 @@ impl PlatformBrowser {
     pub fn traverse_history(&mut self, delta: i32) -> Result<&TabInfo, BrowserError> {
         let id = self.active_tab.ok_or(BrowserError::NoActiveTab)?;
         let tab = self.tabs.get_mut(&id).expect("active tab exists");
-        let expression = if delta < 0 { "history.back()" } else { "history.forward()" };
-        for _ in 0..delta.unsigned_abs() {
-            tab.session
-                .dispatch("Runtime.evaluate", json!({ "expression": expression }))
-                .map_err(BrowserError::Navigation)?;
+        if delta == 0 {
+            return Ok(&tab.info);
         }
+        tab.session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": format!("history.go({delta})") }),
+            )
+            .map_err(BrowserError::Navigation)?;
         refresh_tab_info(tab);
         self.events.push_back(BrowserEvent::TabNavigated(tab.info.clone()));
         Ok(&tab.info)
@@ -314,7 +326,10 @@ impl PlatformBrowser {
         let tab_id = self.active_tab.ok_or(BrowserError::NoActiveTab)?;
         let tab = self.tabs.get_mut(&tab_id).expect("active tab exists");
         let id = DownloadId(self.next_download_id);
-        self.next_download_id = self.next_download_id.saturating_add(1);
+        self.next_download_id = self
+            .next_download_id
+            .checked_add(1)
+            .ok_or(BrowserError::IdExhausted("download"))?;
         let filename = suggested_filename
             .map(sanitize_filename)
             .filter(|name| !name.is_empty())
@@ -340,7 +355,7 @@ impl PlatformBrowser {
                 info.state = DownloadState::Failed(message.clone());
                 self.downloads.insert(id, info);
                 self.events.push_back(BrowserEvent::DownloadFailed { id, error: message.clone() });
-                return Err(BrowserError::Network(message));
+                return Err(BrowserError::DownloadFailed { id, error: message });
             }
         };
         info.mime_type = response.header("content-type").map(ToOwned::to_owned);
