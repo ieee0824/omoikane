@@ -6039,25 +6039,28 @@
     }
   }
 
-  function parseTableCellSpanAttribute(raw) {
+  function parseTableCellSpanAttribute(raw, max) {
     if (raw === null) return null;
     const match = /^[\t\n\f\r ]*\+?([0-9]+)/.exec(String(raw));
-    return match ? Number.parseInt(match[1], 10) : null;
+    if (!match) return null;
+    const digits = match[1].replace(/^0+(?=\d)/, "");
+    const limit = String(max);
+    if (digits.length > limit.length) return max;
+    if (digits.length === limit.length && digits > limit) return max;
+    return Number.parseInt(digits, 10);
   }
 
   function normalizeTableCellSpanSetter(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return 0;
-    if (numeric < 0) return 1;
-    return Math.trunc(numeric);
+    if (typeof value === "bigint") throw new TypeError("Value is not a finite number");
+    return Number(value) >>> 0;
   }
 
   // HTMLTableCellElement covers the cell-specific IDL surface shared by
   // <td> and <th>. The numeric span attributes reflect HTML parsing rules:
-  // getters accept a leading "+" and digit prefix from the content attribute,
-  // while setters serialize non-finite values as 0, negative values as 1, and
-  // positive values as their truncated integer before the property getter
-  // applies the HTML caps/defaults.
+  // getters accept a leading "+" and digit prefix from the content attribute
+  // and clamp oversized values to the HTML limits, while setters first apply
+  // Web IDL unsigned-long conversion and then rely on the getter's HTML
+  // defaults/caps when the serialized attribute is read back.
   class HTMLTableCellElement extends HTMLElement {
     get cellIndex() {
       const parent = this.parentNode;
@@ -6065,7 +6068,7 @@
       return parent.cells.findIndex(cell => cell.__id === this.__id);
     }
     get colSpan() {
-      const value = parseTableCellSpanAttribute(this.getAttribute("colspan"));
+      const value = parseTableCellSpanAttribute(this.getAttribute("colspan"), 1000);
       if (value === null) return 1;
       return Number.isFinite(value) && value >= 1 ? Math.min(value, 1000) : 1;
     }
@@ -6073,7 +6076,7 @@
       this.setAttribute("colspan", String(normalizeTableCellSpanSetter(value)));
     }
     get rowSpan() {
-      const value = parseTableCellSpanAttribute(this.getAttribute("rowspan"));
+      const value = parseTableCellSpanAttribute(this.getAttribute("rowspan"), 65534);
       if (value === null) return 1;
       return Number.isFinite(value) && value >= 0 ? Math.min(value, 65534) : 1;
     }
