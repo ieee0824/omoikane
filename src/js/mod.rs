@@ -2774,6 +2774,22 @@ impl JsRuntime {
         }
     }
 
+    /// Looks up a child Realm without creating one. Resource events attached
+    /// through an existing caller Realm must stay in that caller when the
+    /// target Document has never executed child page code (notably an iframe
+    /// moved into an inert sub-document).
+    fn existing_realm_for_document(&self, document_id: usize) -> Option<Realm> {
+        if document_id == self.document().identity() {
+            return None;
+        }
+        self.host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .find(|entry| entry.document.identity() == document_id)
+            .and_then(|entry| entry.realm.clone())
+    }
+
     /// Executes a classic script in the Realm that owns its Document. This is
     /// used by dynamically inserted `<script src>` elements in child frames;
     /// evaluating the source through the top Context would install globals and
@@ -2851,7 +2867,7 @@ impl JsRuntime {
     /// load/error listeners attached by a child from being looked up through
     /// the parent's wrapper cache.
     fn eval_in_document_realm(&mut self, document_id: usize, source: &str) -> JsResult<()> {
-        let realm = self.realm_for_document(document_id)?;
+        let realm = self.existing_realm_for_document(document_id);
         let Some(realm) = realm else {
             // A child Document that has not run page code yet has no child
             // Realm. Its DOM wrappers can still be owned by the caller Realm
