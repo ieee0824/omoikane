@@ -2479,54 +2479,59 @@ impl JsRuntime {
         self.host_state.borrow().get_node(identity)
     }
 
-    /// Captures JS-owned form and disclosure state that is not mirrored into
-    /// native DOM attributes.
+    /// Captures live form and disclosure state for accessibility consumers.
+    ///
+    /// Option selectedness is mirrored into the native DOM by a bootstrap-only
+    /// binding, and `<details open>` is a reflected content attribute. Keeping
+    /// this traversal native avoids exposing closed-shadow node identities or
+    /// wrappers to page JavaScript.
     pub(crate) fn accessibility_snapshot_state(&mut self) -> AccessibilitySnapshotState {
-        fn collect(node: &NodeHandle, selects: &mut Vec<usize>, details: &mut Vec<usize>) {
-            match node.tag_name().as_deref() {
-                Some("select") => selects.push(node.identity()),
-                Some("details") => details.push(node.identity()),
-                _ => {}
-            }
-            if let Some(root) = node.shadow_root() {
-                collect(&root, selects, details);
-            }
+        fn collect_options(node: &NodeHandle, options: &mut Vec<NodeHandle>) {
             for child in node.child_nodes() {
-                collect(&child, selects, details);
+                if child.tag_name().as_deref() == Some("option") {
+                    options.push(child);
+                } else {
+                    collect_options(&child, options);
+                }
             }
         }
 
-        let mut select_ids = Vec::new();
-        let mut details_ids = Vec::new();
-        collect(&self.document(), &mut select_ids, &mut details_ids);
-        let select_ids = serde_json::to_string(&select_ids).unwrap_or_else(|_| "[]".to_string());
-        let details_ids = serde_json::to_string(&details_ids).unwrap_or_else(|_| "[]".to_string());
-        let result = self.eval(&format!(
-            "__omoikane_accessibility_snapshot({select_ids}, {details_ids})"
-        ));
-        let Some(encoded) = result
-            .ok()
-            .and_then(|value| value.as_string())
-            .map(|value| value.to_std_string_escaped())
-        else {
-            return AccessibilitySnapshotState::default();
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&encoded) else {
-            return AccessibilitySnapshotState::default();
-        };
-        let identities = |key: &str| {
-            value[key]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_u64)
-                .filter_map(|identity| usize::try_from(identity).ok())
-                .collect::<HashSet<_>>()
-        };
-        AccessibilitySnapshotState {
-            selected_option_identities: identities("selectedOptions"),
-            open_details_identities: identities("openDetails"),
+        fn collect(node: &NodeHandle, snapshot: &mut AccessibilitySnapshotState) {
+            if node.tag_name().as_deref() == Some("select") {
+                let mut options = Vec::new();
+                collect_options(node, &mut options);
+                let mut selected = options
+                    .iter()
+                    .filter(|option| option.selected())
+                    .collect::<Vec<_>>();
+                if node.get_attribute("multiple").is_none() && selected.is_empty() {
+                    selected = options
+                        .iter()
+                        .find(|option| !is_actually_disabled(option))
+                        .into_iter()
+                        .collect();
+                } else if node.get_attribute("multiple").is_none() && selected.len() > 1 {
+                    selected = selected.split_off(selected.len() - 1);
+                }
+                snapshot
+                    .selected_option_identities
+                    .extend(selected.into_iter().map(|option| option.identity()));
+            } else if node.tag_name().as_deref() == Some("details")
+                && node.get_attribute("open").is_some()
+            {
+                snapshot.open_details_identities.insert(node.identity());
+            }
+            if let Some(root) = node.shadow_root() {
+                collect(&root, snapshot);
+            }
+            for child in node.child_nodes() {
+                collect(&child, snapshot);
+            }
         }
+
+        let mut snapshot = AccessibilitySnapshotState::default();
+        collect(&self.document(), &mut snapshot);
+        snapshot
     }
 
     /// Resolves whether an element participates in the rendered accessibility
@@ -6127,6 +6132,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_checked_native),
         ),
         (
+            js_string!("__omoikane_get_option_selected"),
+            1,
+            NativeFunction::from_copy_closure(get_option_selected_native),
+        ),
+        (
+            js_string!("__omoikane_set_option_selected"),
+            2,
+            NativeFunction::from_copy_closure(set_option_selected_native),
+        ),
+        (
             js_string!("__omoikane_set_text_control_state"),
             5,
             NativeFunction::from_copy_closure(set_text_control_state_native),
@@ -9127,6 +9142,38 @@ fn set_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.set_checked(checked);
         state.borrow_mut().invalidate_style_cache_for_node(&node);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn get_option_selected_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let selected = state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| node.selected());
+        Ok(JsValue::from(selected))
+    })
+}
+
+fn set_option_selected_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let selected = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.set_selected(selected);
         Ok(JsValue::undefined())
     })
 }

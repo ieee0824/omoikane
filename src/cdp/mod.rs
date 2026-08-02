@@ -5597,27 +5597,24 @@ mod tests {
     }
 
     #[test]
-    fn accessibility_snapshot_hook_is_immutable_to_page_scripts() {
+    fn accessibility_snapshot_internals_are_not_page_visible() {
         let mut session = CdpSession::new().unwrap();
         let result = session
             .dispatch(
                 "Runtime.evaluate",
                 json!({
                     "expression": "(() => {\
-                      const name = '__omoikane_accessibility_snapshot';\
-                      const original = globalThis[name];\
-                      const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);\
-                      return [descriptor.writable, descriptor.configurable,\
-                        Reflect.set(globalThis, name, () => '{}'),\
-                        Reflect.deleteProperty(globalThis, name),\
-                        globalThis[name] === original].join('|');\
+                      const names = ['__omoikane_accessibility_snapshot',\
+                        '__omoikane_get_option_selected',\
+                        '__omoikane_set_option_selected'];\
+                      return names.map(name => typeof globalThis[name]).join('|');\
                     })()",
                     "returnByValue": true,
                 }),
             )
             .unwrap();
 
-        assert_eq!(result["result"]["value"], "false|false|false|false|true");
+        assert_eq!(result["result"]["value"], "undefined|undefined|undefined");
     }
 
     #[test]
@@ -5648,10 +5645,16 @@ mod tests {
                       const details = document.createElement('details'); const summary = document.createElement('summary');\
                       summary.textContent = 'Shadow details'; details.appendChild(summary);\
                       const body = document.createElement('p'); body.textContent = 'Shadow body'; details.appendChild(body);\
-                      details.open = true; root.appendChild(details);"
+                      details.open = true; root.appendChild(details);\
+                      globalThis.accessibilitySelectedGetterCalls = 0;\
+                      Object.defineProperty(HTMLOptionElement.prototype, 'selected', {\
+                        configurable: true, get() { accessibilitySelectedGetterCalls++; return false; }\
+                      });\
+                      globalThis.__omoikane_accessibility_snapshot = () => '{\"selectedOptions\":[],\"openDetails\":[]}';"
                 }),
             )
             .unwrap();
+        boa_gc::force_collect();
         let full = session
             .dispatch("Accessibility.getFullAXTree", json!({}))
             .unwrap();
@@ -5683,6 +5686,16 @@ mod tests {
                 .iter()
                 .any(|node| node["name"]["value"] == "Shadow body")
         );
+        let getter_calls = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "accessibilitySelectedGetterCalls",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(getter_calls["result"]["value"], 0);
     }
 
     #[test]
