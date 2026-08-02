@@ -4650,7 +4650,10 @@ fn apply_presentational_hints(
             .find(|(name, _)| name.eq_ignore_ascii_case("pointer-events"))
             .map(|(_, value)| value.trim())
             .filter(|value| !value.is_empty())
-            .filter(|value| is_supported_pointer_events_keyword(value))
+            .filter(|value| {
+                let lower = value.to_ascii_lowercase();
+                is_css_wide_keyword(&lower) || is_supported_pointer_events_keyword(&lower)
+            })
     {
         properties.insert(
             "pointer-events".to_string(),

@@ -1766,8 +1766,9 @@ fn hit_test_box(
                     }
                 }
                 let target = event_target_element(&fragment.node)?;
-                let target_style = resolver.computed_style(&target);
-                if accepts_pointer_events(&target_style) {
+                if accepts_pointer_events_value(
+                    resolver.computed_property(&target, "pointer-events"),
+                ) {
                     return Some(target);
                 }
             }
@@ -1789,7 +1790,11 @@ fn hit_test_box(
 }
 
 fn accepts_pointer_events(style: &ComputedStyle) -> bool {
-    match style.get("pointer-events") {
+    accepts_pointer_events_value(style.get("pointer-events").cloned())
+}
+
+fn accepts_pointer_events_value(value: Option<ComputedValue>) -> bool {
+    match value {
         Some(ComputedValue::Keyword(value)) => !value.eq_ignore_ascii_case("none"),
         _ => true,
     }
