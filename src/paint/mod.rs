@@ -1734,6 +1734,35 @@ fn hit_test_box(
     for line in layout.lines.iter().rev() {
         for fragment in line.fragments.iter().rev() {
             if rect_contains_point(fragment.rect, local_point.0, local_point.1) {
+                if fragment.node.tag_name().as_deref() == Some("svg") {
+                    let svg_box = match &fragment.content {
+                        InlineFragmentContent::Image(_, fragment_style) => {
+                            let border = EdgeSizesForPaint::from_style(fragment_style);
+                            inline_fragment_content_rect(fragment.rect, fragment_style, border)
+                        }
+                        _ => fragment.rect,
+                    };
+                    if rect_contains_point(svg_box, local_point.0, local_point.1) {
+                        let local_x = local_point.0 - svg_box.x;
+                        let local_y = local_point.1 - svg_box.y;
+                        let mut computed_pointer_events = |node: &NodeHandle| {
+                            match resolver.computed_property(node, "pointer-events") {
+                                Some(ComputedValue::Keyword(value)) => Some(value),
+                                _ => None,
+                            }
+                        };
+                        if let Some(target) = crate::svg::hit_test_svg(
+                            &fragment.node,
+                            local_x,
+                            local_y,
+                            svg_box.width,
+                            svg_box.height,
+                            &mut computed_pointer_events,
+                        ) {
+                            return Some(target);
+                        }
+                    }
+                }
                 let target = event_target_element(&fragment.node)?;
                 let target_style = resolver.computed_style(&target);
                 if accepts_pointer_events(&target_style) {
