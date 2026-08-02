@@ -5049,6 +5049,7 @@
         this.__contentWindowFacade = {
           __listeners: new Map(),
           get document() {
+            if (!iframe.isConnected) return null;
             const document = iframe.contentDocument;
             if (!document) {
               throw new DOMException("Blocked access to an unavailable frame.", "SecurityError");
