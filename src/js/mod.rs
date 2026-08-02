@@ -2584,7 +2584,7 @@ impl JsRuntime {
             return Ok(realm);
         }
 
-        let (document_url, same_origin) = {
+        let (document_url, same_origin, owner_document_id) = {
             let state = self.host_state.borrow();
             let entry = state
                 .iframe_documents
@@ -2599,12 +2599,17 @@ impl JsRuntime {
                 .copied()
                 .unwrap_or_default();
             let child_origin = state.document_origins.get(&document_id).cloned().flatten();
-            let owner_origin = owner_document_for_node(
+            let owner_document = owner_document_for_node(
                 &state
                     .get_node(iframe_id)
                     .ok_or_else(|| JsNativeError::reference().with_message("iframe is detached"))?,
             )
-            .and_then(|owner| state.document_origins.get(&owner.identity()).cloned().flatten());
+            .ok_or_else(|| JsNativeError::reference().with_message("iframe owner is detached"))?;
+            let owner_origin = state
+                .document_origins
+                .get(&owner_document.identity())
+                .cloned()
+                .flatten();
             // A non-sandboxed iframe is not automatically same-origin: the
             // effective child origin must match the embedding Document's
             // origin.  `about:blank` inherits that origin when it is loaded,
@@ -2613,10 +2618,35 @@ impl JsRuntime {
             let same_origin = (!sandbox.active || sandbox.allow_same_origin)
                 && child_origin.is_some()
                 && child_origin == owner_origin;
-            (entry.document_url.clone(), same_origin)
+            (entry.document_url.clone(), same_origin, owner_document.identity())
         };
 
         let top_global: JsValue = self.context.global_object().into();
+        // A nested same-origin frame's `parent` is the owning browsing
+        // context's global, not always the top-level global. Capture that
+        // Realm's global before entering the new child Realm. The owning
+        // Realm already exists whenever a nested frame is created by its
+        // parent script; if it does not, retain the top-level fallback so a
+        // detached/host-created frame still has a usable parent object.
+        let parent_global = if same_origin && owner_document_id != self.document().identity() {
+            let owner_realm = self
+                .host_state
+                .borrow()
+                .iframe_documents
+                .values()
+                .find(|entry| entry.document.identity() == owner_document_id)
+                .and_then(|entry| entry.realm.clone());
+            if let Some(owner_realm) = owner_realm {
+                let old_realm = self.context.enter_realm(owner_realm);
+                let global: JsValue = self.context.global_object().into();
+                self.context.enter_realm(old_realm);
+                global
+            } else {
+                top_global.clone()
+            }
+        } else {
+            top_global.clone()
+        };
         let realm = self.with_active_host(|context| context.create_realm())?;
         let old_realm = self.context.enter_realm(realm.clone());
         let previous_resolver = self
@@ -2653,14 +2683,19 @@ impl JsRuntime {
             self.with_active_host(|context| context.run_jobs())?;
 
             let parent = if same_origin {
-                top_global.clone()
+                parent_global
             } else {
                 self.context
                     .eval(Source::from_bytes("Object.create(null)"))?
             };
+            let top = if same_origin {
+                top_global.clone()
+            } else {
+                parent.clone()
+            };
             let global = self.context.global_object();
             global.set(js_string!("parent"), parent.clone(), true, &mut self.context)?;
-            global.set(js_string!("top"), parent, true, &mut self.context)?;
+            global.set(js_string!("top"), top, true, &mut self.context)?;
             Ok::<(), JsError>(())
         })();
         self.context.enter_realm(old_realm);
@@ -2713,22 +2748,110 @@ impl JsRuntime {
         })
     }
 
+    /// Returns the live child Realm for `document_id`, creating it when a
+    /// resource task reaches a child Document before its first inline script.
+    /// The top-level Document deliberately returns `None` because its current
+    /// Context Realm is already the correct execution environment.
+    fn realm_for_document(&mut self, document_id: usize) -> JsResult<Option<Realm>> {
+        if document_id == self.document().identity() {
+            return Ok(None);
+        }
+        let iframe_id = self
+            .host_state
+            .borrow()
+            .iframe_documents
+            .iter()
+            .find(|(_, entry)| entry.document.identity() == document_id)
+            .map(|(iframe_id, _)| *iframe_id);
+        let Some(iframe_id) = iframe_id else {
+            return Ok(None);
+        };
+        let realm = self.ensure_iframe_realm(iframe_id, document_id)?;
+        if self.iframe_realm_is_live(document_id, &realm) {
+            Ok(Some(realm))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Executes a classic script in the Realm that owns its Document. This is
+    /// used by dynamically inserted `<script src>` elements in child frames;
+    /// evaluating the source through the top Context would install globals and
+    /// callbacks on the wrong browsing context.
+    fn eval_script_in_document_realm(
+        &mut self,
+        document_id: usize,
+        script_id: usize,
+        source: &str,
+    ) -> JsResult<()> {
+        let realm = self.realm_for_document(document_id)?;
+        if document_id != self.document().identity() && realm.is_none() {
+            return Err(JsNativeError::reference()
+                .with_message("script document Realm is no longer live")
+                .into());
+        }
+        let old_realm = realm.map(|realm| self.context.enter_realm(realm));
+        let script_node = self.host_state.borrow().get_node(script_id);
+        self.host_state.borrow_mut().write_insertion_ref = script_node;
+        let result = (|| {
+            self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
+            self.eval(source)?;
+            self.run_jobs()
+        })();
+        let _ = self.eval("__omoikane_set_current_script(null)");
+        self.host_state.borrow_mut().write_insertion_ref = None;
+        if let Some(old_realm) = old_realm {
+            self.context.enter_realm(old_realm);
+        }
+        result.map(|_| ())
+    }
+
+    /// Evaluates a module while the owning Document Realm is active. Module
+    /// loader bookkeeping remains keyed by the native Document identity, so
+    /// imports and CSP violations stay scoped to the child generation.
+    fn eval_module_in_document_realm_timed(
+        &mut self,
+        document_id: usize,
+        script_id: usize,
+        source: &str,
+        url: &str,
+        document: NodeHandle,
+    ) -> (
+        Result<JsValue, String>,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
+        let realm = match self.realm_for_document(document_id) {
+            Ok(realm) => realm,
+            Err(error) => return (Err(error.to_string()), std::time::Duration::ZERO, std::time::Duration::ZERO),
+        };
+        if document_id != self.document().identity() && realm.is_none() {
+            return (
+                Err("script document Realm is no longer live".to_string()),
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+            );
+        }
+        let old_realm = realm.map(|realm| self.context.enter_realm(realm));
+        let script_node = self.host_state.borrow().get_node(script_id);
+        self.host_state.borrow_mut().write_insertion_ref = script_node;
+        let _ = self.eval(&format!("__omoikane_set_current_script({script_id})"));
+        let result = self.eval_module_timed(source, url, document);
+        let _ = self.eval("__omoikane_set_current_script(null)");
+        self.host_state.borrow_mut().write_insertion_ref = None;
+        if let Some(old_realm) = old_realm {
+            self.context.enter_realm(old_realm);
+        }
+        result
+    }
+
     /// Evaluates a host-generated dispatch script in the Realm that owns a
     /// Document. The top-level Document uses the currently active Realm;
     /// iframe Documents use their cached child Realm. This keeps resource and
     /// load/error listeners attached by a child from being looked up through
     /// the parent's wrapper cache.
     fn eval_in_document_realm(&mut self, document_id: usize, source: &str) -> JsResult<()> {
-        let realm = if document_id == self.document().identity() {
-            None
-        } else {
-            self.host_state
-                .borrow()
-                .iframe_documents
-                .values()
-                .find(|entry| entry.document.identity() == document_id)
-                .and_then(|entry| entry.realm.clone())
-        };
+        let realm = self.realm_for_document(document_id)?;
         let Some(realm) = realm else {
             if document_id == self.document().identity() {
                 self.eval(source)?;
@@ -5199,14 +5322,17 @@ impl JsRuntime {
                 Ok(())
             }
             TimerPayload::ResourceLoad { node_id } => {
-                let (should_dispatch, xhtml_scripts, dynamic_script) = {
+                let (should_dispatch, xhtml_scripts, dynamic_script, resource_document_id) = {
                     let mut state = self.host_state.borrow_mut();
                     state.pending_resource_loads.remove(&node_id);
                     let Some(node) = state.get_node(node_id) else {
                         return Ok(());
                     };
+                    let resource_document_id = document_root_for_node(&node)
+                        .map(|document| document.identity())
+                        .unwrap_or_else(|| state.document.identity());
                     if document_root_for_node(&node).is_none() {
-                        (false, Vec::new(), None)
+                        (false, Vec::new(), None, resource_document_id)
                     } else {
                         let mut xhtml_scripts: Vec<NodeHandle> = Vec::new();
                         // A dynamically inserted external script is classified by
@@ -5276,9 +5402,14 @@ impl JsRuntime {
                             // allocated and cannot reuse the same address.
                             drop(previous);
                         }
-                        (true, xhtml_scripts, dynamic_script)
+                        (true, xhtml_scripts, dynamic_script, resource_document_id)
                     }
                 };
+                let dispatch_document_id = dynamic_script
+                    .as_ref()
+                    .and_then(|(script, _, _, _)| document_root_for_node(script))
+                    .map(|document| document.identity())
+                    .unwrap_or(resource_document_id);
                 let xhtml_context = xhtml_scripts
                     .first()
                     .and_then(document_root_for_node)
@@ -5345,16 +5476,17 @@ impl JsRuntime {
                         }
                         let timing_name =
                             resource_reference_timing_name(&src, base_url.as_ref());
-                        let dispatched = self.eval(&dispatch_resource_timing_script(
-                            "error",
-                            node_id,
-                            &timing_name,
-                            false,
-                            0.0,
-                        ));
+                        let dispatched = self.eval_in_document_realm(
+                            dispatch_document_id,
+                            &dispatch_resource_timing_script(
+                                "error",
+                                node_id,
+                                &timing_name,
+                                false,
+                                0.0,
+                            ),
+                        );
                         self.record_error_from(&src, dispatched);
-                        let jobs = self.run_jobs();
-                        self.record_error_from(&src, jobs);
                         dispatch_load = false;
                     } else if !self
                         .host_state
@@ -5400,12 +5532,13 @@ impl JsRuntime {
                                     "[dynamic script: {src}] failed to fetch"
                                 ));
                                 dispatch_load = false;
-                                let dispatched = self.eval(&dispatch_resource_timing_script(
-                                    "error", node_id, &timing_name, false, elapsed_ms,
-                                ));
+                                let dispatched = self.eval_in_document_realm(
+                                    dispatch_document_id,
+                                    &dispatch_resource_timing_script(
+                                        "error", node_id, &timing_name, false, elapsed_ms,
+                                    ),
+                                );
                                 self.record_error_from(&src, dispatched);
-                                let jobs = self.run_jobs();
-                                self.record_error_from(&src, jobs);
                             }
                             Some((effective_url, _source))
                                 if !self
@@ -5425,12 +5558,13 @@ impl JsRuntime {
                                     effective_url.clone(),
                                 );
                                 dispatch_load = false;
-                                let dispatched = self.eval(&dispatch_resource_timing_script(
-                                    "error", node_id, &effective_url, redirected, elapsed_ms,
-                                ));
+                                let dispatched = self.eval_in_document_realm(
+                                    dispatch_document_id,
+                                    &dispatch_resource_timing_script(
+                                        "error", node_id, &effective_url, redirected, elapsed_ms,
+                                    ),
+                                );
                                 self.record_error_from(&src, dispatched);
-                                let jobs = self.run_jobs();
-                                self.record_error_from(&src, jobs);
                             }
                             Some((effective_url, source)) => {
                                 let redirected = resource_reference_was_redirected(
@@ -5439,12 +5573,11 @@ impl JsRuntime {
                                     base_url.as_ref(),
                                 );
                                 dispatch_timing = Some((effective_url, redirected, elapsed_ms));
-                                let marked = self
-                                    .eval(&format!("__omoikane_set_current_script({node_id})"));
-                                self.record_error_from(&src, marked);
                                 let result = match kind {
                                     ScriptKind::Module => self
-                                        .eval_module_timed(
+                                        .eval_module_in_document_realm_timed(
+                                            dispatch_document_id,
+                                            script_node.identity(),
                                             &source,
                                             &module_script_url(&src, base_url.as_ref(), false),
                                             document_root_for_node(&script_node)
@@ -5452,19 +5585,20 @@ impl JsRuntime {
                                         )
                                         .0,
                                     _ => self
-                                        .eval(&source)
-                                        .map_err(|error| error.to_string())
-                                        .map(|_| JsValue::undefined()),
+                                        .eval_script_in_document_realm(
+                                            dispatch_document_id,
+                                            script_node.identity(),
+                                            &source,
+                                        )
+                                        .map(|_| JsValue::undefined())
+                                        .map_err(|error| error.to_string()),
                                 };
-                                let _ = self.eval("__omoikane_set_current_script(null)");
                                 if let Err(error) = result {
                                     let context = script_source_context(&source);
                                     self.record_task_error(format!(
                                         "[dynamic script: {src}; {context}] {error}"
                                     ));
                                 }
-                                let jobs = self.run_jobs();
-                                self.record_error_from(&src, jobs);
                                 if log_scripts {
                                     eprintln!("[omoikane][script] completed dynamic {src}");
                                 }
@@ -5475,12 +5609,13 @@ impl JsRuntime {
                 if dispatch_load {
                     let (timing_name, redirected, elapsed_ms) = dispatch_timing
                         .unwrap_or_else(|| (String::new(), false, 0.0));
-                    let dispatched = self.eval(&dispatch_resource_timing_script(
-                        "load", node_id, &timing_name, redirected, elapsed_ms,
-                    ));
+                    let dispatched = self.eval_in_document_realm(
+                        dispatch_document_id,
+                        &dispatch_resource_timing_script(
+                            "load", node_id, &timing_name, redirected, elapsed_ms,
+                        ),
+                    );
                     self.record_error_from("resource load", dispatched);
-                    let jobs = self.run_jobs();
-                    self.record_error_from("resource load", jobs);
                 }
                 Ok(())
             }
@@ -32750,6 +32885,12 @@ b</textarea></form>"#);
             .into_iter()
             .find(|node| node.node_type() == NodeType::Element)
             .expect("child document must have a document element");
+        eprintln!(
+            "[iframe child realm test] document={} root={} attrs={:?}",
+            child_document.identity(),
+            child_root.identity(),
+            child_root.attribute_records()
+        );
         for attribute in ["data-child-script", "data-child-job", "data-child-timer"] {
             assert_eq!(
                 child_root
