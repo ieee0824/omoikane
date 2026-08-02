@@ -793,6 +793,8 @@ struct HostState {
     adjusted_layout_builds: u64,
     #[cfg(test)]
     style_resolver_generation: u64,
+    #[cfg(test)]
+    document_script_executions: HashMap<usize, u64>,
     /// Insertion reference for `document.write`.
     ///
     /// Models the HTML tokenizer's "insertion point". While a `<script>` runs,
@@ -1249,6 +1251,8 @@ impl HostState {
             adjusted_layout_builds: 0,
             #[cfg(test)]
             style_resolver_generation: 0,
+            #[cfg(test)]
+            document_script_executions: HashMap::new(),
             write_insertion_ref: None,
             iframe_documents: HashMap::new(),
             pending_resource_loads: HashSet::new(),
@@ -1406,6 +1410,9 @@ impl HostState {
             self.document_origins.remove(&previous.document.identity());
             self.document_csp.remove(&previous.document.identity());
             self.document_sandbox.remove(&previous.document.identity());
+            #[cfg(test)]
+            self.document_script_executions
+                .remove(&previous.document.identity());
             self.csp_violations
                 .retain(|violation| violation.document_id != previous.document.identity());
             self.csp_violation_keys
@@ -1587,6 +1594,9 @@ impl HostState {
     fn prune_document_sandbox(&mut self) {
         let nodes = &self.nodes;
         self.document_sandbox
+            .retain(|document_id, _| nodes.contains_key(document_id));
+        #[cfg(test)]
+        self.document_script_executions
             .retain(|document_id, _| nodes.contains_key(document_id));
     }
 
@@ -4579,6 +4589,10 @@ impl JsRuntime {
                                 state.document_origins.remove(&previous.document.identity());
                                 state.document_csp.remove(&previous.document.identity());
                                 state.document_sandbox.remove(&previous.document.identity());
+                                #[cfg(test)]
+                                state
+                                    .document_script_executions
+                                    .remove(&previous.document.identity());
                                 state.csp_violations.retain(|violation| {
                                     violation.document_id != previous.document.identity()
                                 });
@@ -4640,10 +4654,16 @@ impl JsRuntime {
                         );
                         continue;
                     }
-                    let script_id = script.identity();
-                    let _ = self.eval(&format!("__omoikane_set_current_script({script_id})"));
+                    #[cfg(test)]
+                    if let Some(document) = document_root_for_node(&script) {
+                        *self
+                            .host_state
+                            .borrow_mut()
+                            .document_script_executions
+                            .entry(document.identity())
+                            .or_default() += 1;
+                    }
                     let _ = self.eval(&collect_text_content(&script));
-                    let _ = self.eval("__omoikane_set_current_script(null)");
                     let _ = self.run_jobs();
                 }
                 // A script whose type Omoikane does not execute is not fetched and
@@ -30714,15 +30734,15 @@ b</textarea></form>"#);
     fn iframe_sandbox_enforces_script_and_origin_boundaries() {
         let blocked_port = spawn_static_http_server(
             "application/xhtml+xml",
-            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>document.currentScript.ownerDocument.documentElement.setAttribute('data-script-ran','true')</script></body></html>"#,
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>void 0</script></body></html>"#,
         );
         let scripts_port = spawn_static_http_server(
             "application/xhtml+xml",
-            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>document.currentScript.ownerDocument.documentElement.setAttribute('data-script-ran','true')</script></body></html>"#,
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>void 0</script></body></html>"#,
         );
         let same_origin_port = spawn_static_http_server(
             "application/xhtml+xml",
-            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>document.currentScript.ownerDocument.documentElement.setAttribute('data-script-ran','true')</script></body></html>"#,
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>void 0</script></body></html>"#,
         );
         let mut runtime = runtime_from_html(&format!(
             r#"<html><body>
@@ -30758,24 +30778,20 @@ b</textarea></form>"#);
                 let document = &state.iframe_documents[&iframe.identity()].document;
                 assert_eq!(state.document_origins.get(&document.identity()), Some(&None));
                 assert_eq!(
-                    document
-                        .query_selector("html")
-                        .unwrap()
-                        .get_attribute("data-script-ran")
-                        .as_deref(),
-                    script_ran.then_some("true")
+                    state
+                        .document_script_executions
+                        .get(&document.identity())
+                        .copied()
+                        .unwrap_or_default(),
+                    u64::from(script_ran)
                 );
             }
             let iframe = state.document.query_selector("#same").unwrap();
             let document = &state.iframe_documents[&iframe.identity()].document;
             assert!(state.document_origins[&document.identity()].is_some());
             assert_eq!(
-                document
-                    .query_selector("html")
-                    .unwrap()
-                    .get_attribute("data-script-ran")
-                    .as_deref(),
-                Some("true")
+                state.document_script_executions.get(&document.identity()),
+                Some(&1)
             );
             document.identity()
         };
@@ -30799,12 +30815,8 @@ b</textarea></form>"#);
         assert_ne!(document.identity(), same_document_before_reload);
         assert_eq!(state.document_origins.get(&document.identity()), Some(&None));
         assert_eq!(
-            document
-                .query_selector("html")
-                .unwrap()
-                .get_attribute("data-script-ran")
-                .as_deref(),
-            Some("true")
+            state.document_script_executions.get(&document.identity()),
+            Some(&1)
         );
     }
 

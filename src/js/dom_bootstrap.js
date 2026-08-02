@@ -9476,17 +9476,9 @@
     visit(globalThis.document);
   };
   globalThis.customElements = registryForDocument(globalThis.document);
-  let currentScriptDocument = null;
   globalThis.__omoikane_set_current_script = function(id) {
-    if (currentScriptDocument && currentScriptDocument !== globalThis.document) {
-      currentScriptDocument.__currentScript = null;
-    }
-    const script = id === null || id === undefined ? null : wrapNode(id);
-    globalThis.document.__currentScript = script;
-    currentScriptDocument = script && script.ownerDocument;
-    if (currentScriptDocument && currentScriptDocument !== globalThis.document) {
-      currentScriptDocument.__currentScript = script;
-    }
+    globalThis.document.__currentScript =
+      id === null || id === undefined ? null : wrapNode(id);
   };
   if (globalThis.window === undefined) {
     globalThis.window = globalThis;
