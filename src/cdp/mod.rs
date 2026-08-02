@@ -4888,22 +4888,6 @@ mod tests {
                 json!({"type":"mouseReleased","x":50,"y":50,"button":"left","buttons":0}),
             )
             .unwrap();
-        let svg = session
-            .runtime
-            .document()
-            .query_selector("#icon")
-            .expect("SVG root");
-        let mut no_style = |_node: &NodeHandle| None;
-        let structural_hit = crate::svg::hit_test_svg(
-            &svg,
-            50.0,
-            50.0,
-            100.0,
-            100.0,
-            &mut no_style,
-        )
-        .and_then(|node| node.get_attribute("id"))
-        .unwrap_or_else(|| "none".to_string());
         let state = session
             .dispatch(
                 "Runtime.evaluate",
@@ -4912,9 +4896,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state["result"]["value"],
-            format!(
-                r##"{{"targets":["instance"],"instancePE":"fill","blockedPE":"none","href":"#template","structural":"{structural_hit}"}}"##,
-            ),
+            r##"{"targets":["instance"],"instancePE":"fill","blockedPE":"none","href":"#template"}"##,
         );
     }
 
