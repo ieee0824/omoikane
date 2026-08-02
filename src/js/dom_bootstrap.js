@@ -7871,6 +7871,9 @@
 
     const emitText = (text, context) => {
       const value = String(text || "");
+      const fontSize = svgTextFontSize(context.element);
+      const glyphWidth = fontSize * 0.6;
+      const letterSpacing = svgTextLetterSpacing(context.element);
       for (let offset = 0; offset < value.length; offset += 1) {
         const active = contexts;
         let x = cursor.x;
@@ -7892,9 +7895,6 @@
         y += dy;
         cursor.x = x;
         cursor.y = y;
-        const fontSize = svgTextFontSize(context.element);
-        const glyphWidth = fontSize * 0.6;
-        const letterSpacing = svgTextLetterSpacing(context.element);
         const start = svgTextTransformPoint({ x, y }, context.matrix);
         const end = svgTextTransformPoint({ x: x + glyphWidth, y }, context.matrix);
         const topLeft = svgTextTransformPoint({ x, y: y - fontSize * 0.8 }, context.matrix);
