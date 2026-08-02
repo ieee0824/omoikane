@@ -1980,7 +1980,12 @@ impl ElementMatchKeys {
             id: node.get_attribute("id"),
             classes: node
                 .get_attribute("class")
-                .map(|value| value.split_whitespace().map(str::to_string).collect())
+                .map(|value| {
+                    value
+                        .split_ascii_whitespace()
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default(),
             tag_name: node.tag_name()?,
         })
