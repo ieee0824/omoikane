@@ -691,7 +691,24 @@ struct PendingJavaScriptDialog {
 struct AdjustedLayoutCache {
     layout_generation: u64,
     scroll_generation: u64,
+    style_generation: u64,
+    paint_generation: u64,
     root: LayoutBox,
+}
+
+/// Monotonic generations shared by the top-level document's style, layout, and
+/// paint cache layers.
+///
+/// A style generation advances when computed values are invalidated by DOM
+/// changes or transition sampling; a layout generation advances when the
+/// layout tree is rebuilt; and a paint generation advances when scroll-adjusted
+/// geometry is invalidated. Consumers can compare a snapshot with a later one
+/// without retaining engine internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderGenerations {
+    pub style: u64,
+    pub layout: u64,
+    pub paint: u64,
 }
 
 impl TimerPayload {
@@ -767,7 +784,9 @@ struct HostState {
     /// participate in layout (layout metrics for sub-document nodes report
     /// zero); only computed styles are document-scoped here.
     layout_root: Option<LayoutBox>,
+    style_generation: u64,
     layout_generation: u64,
+    paint_generation: u64,
     scroll_generation: u64,
     adjusted_layout_cache: Option<AdjustedLayoutCache>,
     #[cfg(test)]
@@ -1178,7 +1197,9 @@ impl HostState {
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
             layout_root: None,
+            style_generation: 0,
             layout_generation: 0,
+            paint_generation: 0,
             scroll_generation: 0,
             adjusted_layout_cache: None,
             #[cfg(test)]
@@ -1606,8 +1627,10 @@ impl HostState {
         let document_id = document.identity();
         self.document_styles.entry(document_id).or_default().dirty = true;
         if document_id == self.document.identity() {
+            self.style_generation = self.style_generation.saturating_add(1);
             self.capture_scroll_offsets_before_layout();
             self.layout_root = None;
+            self.invalidate_paint_cache();
         }
     }
 
@@ -1622,9 +1645,18 @@ impl HostState {
             }
         }
         if document_id == self.document.identity() {
+            self.style_generation = self.style_generation.saturating_add(1);
             self.capture_scroll_offsets_before_layout();
             self.layout_root = None;
+            self.invalidate_paint_cache();
         }
+    }
+
+    /// Invalidates the scroll-adjusted paint geometry while retaining the
+    /// layout tree when the invalidation does not require reflow.
+    fn invalidate_paint_cache(&mut self) {
+        self.paint_generation = self.paint_generation.saturating_add(1);
+        self.adjusted_layout_cache = None;
     }
 
     /// Invalidates computed/selector results for a node mutation while keeping
@@ -1648,6 +1680,7 @@ impl HostState {
         {
             self.capture_scroll_offsets_before_layout();
             self.layout_root = None;
+            self.invalidate_paint_cache();
         }
     }
 
@@ -1678,11 +1711,13 @@ impl HostState {
     /// change, because every resolver shares the same viewport for `vw`/`vh`
     /// resolution.
     fn mark_all_document_styles_dirty(&mut self) {
+        self.style_generation = self.style_generation.saturating_add(1);
         for entry in self.document_styles.values_mut() {
             entry.dirty = true;
         }
         self.capture_scroll_offsets_before_layout();
         self.layout_root = None;
+        self.invalidate_paint_cache();
     }
 
     fn capture_scroll_offsets_before_layout(&mut self) {
@@ -1734,8 +1769,13 @@ impl HostState {
                     (changed, resolver.running_transitions_require_layout())
                 })
                 .unwrap_or((false, false));
-            if time_changed && requires_layout && document_id == self.document.identity() {
-                self.layout_root = None;
+            if time_changed && document_id == self.document.identity() {
+                self.style_generation = self.style_generation.saturating_add(1);
+                if requires_layout {
+                    self.capture_scroll_offsets_before_layout();
+                    self.layout_root = None;
+                }
+                self.invalidate_paint_cache();
             }
             return;
         }
@@ -1898,6 +1938,7 @@ impl HostState {
         self.layout_generation = self.layout_generation.saturating_add(1);
         self.layout_root = layout;
         let mut clamped_targets = Vec::new();
+        let mut paint_invalidated = false;
         if let Some(layout_root) = self.layout_root.as_ref() {
             for (node_id, previous) in std::mem::take(&mut self.scroll_offsets_before_layout) {
                 let Some(node) = self.nodes.get(&node_id) else {
@@ -1913,22 +1954,36 @@ impl HostState {
                 if previous != next {
                     node.set_scroll_offset(next.0, next.1);
                     self.scroll_generation = self.scroll_generation.saturating_add(1);
+                    paint_invalidated = true;
                     clamped_targets.push(node_id);
                 }
             }
+        }
+        if paint_invalidated {
+            self.invalidate_paint_cache();
         }
         for node_id in clamped_targets {
             self.queue_scroll_target(node_id);
         }
     }
 
-    /// Builds the paint-time geometry once per layout/scroll state and reuses
-    /// it across CSSOM geometry queries and hit tests.
+    /// Builds paint-time geometry once per tracked style/layout/paint/scroll
+    /// state and reuses it across CSSOM geometry queries and hit tests.
     fn ensure_adjusted_layout(&mut self) {
         self.ensure_layout();
-        let current = (self.layout_generation, self.scroll_generation);
+        let current = (
+            self.layout_generation,
+            self.scroll_generation,
+            self.style_generation,
+            self.paint_generation,
+        );
         if self.adjusted_layout_cache.as_ref().is_some_and(|cache| {
-            (cache.layout_generation, cache.scroll_generation) == current
+            (
+                cache.layout_generation,
+                cache.scroll_generation,
+                cache.style_generation,
+                cache.paint_generation,
+            ) == current
         }) {
             return;
         }
@@ -1949,6 +2004,8 @@ impl HostState {
         self.adjusted_layout_cache = Some(AdjustedLayoutCache {
             layout_generation: current.0,
             scroll_generation: current.1,
+            style_generation: current.2,
+            paint_generation: current.3,
             root,
         });
         #[cfg(test)]
@@ -1979,6 +2036,7 @@ impl HostState {
         }
         self.window_scroll = next;
         self.scroll_generation = self.scroll_generation.saturating_add(1);
+        self.invalidate_paint_cache();
         let document_id = self.document.identity();
         self.queue_scroll_target(document_id);
         true
@@ -2024,6 +2082,7 @@ impl HostState {
         let changed = previous != next;
         if changed {
             self.scroll_generation = self.scroll_generation.saturating_add(1);
+            self.invalidate_paint_cache();
             self.queue_scroll_target(node.identity());
         }
         changed
@@ -2418,9 +2477,21 @@ impl JsRuntime {
         self.host_state.borrow().event_loop.rendering_time_ms() as u64
     }
 
+    /// Returns monotonic snapshots for the style, layout, and paint cache
+    /// layers. A caller that retains derived output can compare this value
+    /// before reusing it without reaching into the runtime's host state.
+    pub fn render_generations(&self) -> RenderGenerations {
+        let state = self.host_state.borrow();
+        RenderGenerations {
+            style: state.style_generation,
+            layout: state.layout_generation,
+            paint: state.paint_generation,
+        }
+    }
+
     /// Returns the topmost event-target element at viewport coordinates.
     /// The adjusted layout is shared with CSSOM geometry queries and rebuilt
-    /// only when layout or scroll state changes.
+    /// only when a tracked style, layout, paint, or scroll generation changes.
     pub(crate) fn hit_test(&mut self, x: f32, y: f32) -> Option<NodeHandle> {
         if !x.is_finite() || !y.is_finite() {
             return None;
@@ -33656,6 +33727,67 @@ b</textarea></form>"#);
             runtime.host_state.borrow().adjusted_layout_builds,
             3,
             "layout/style changes must invalidate adjusted geometry"
+        );
+    }
+
+    #[test]
+    fn render_generations_separate_style_layout_and_paint_invalidation() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><div id="target" style="width: 10px; height: 10px"></div></body></html>"#,
+        );
+        let initial = runtime.render_generations();
+
+        runtime
+            .eval("globalThis.target = document.getElementById('target')")
+            .unwrap();
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        let laid_out = runtime.render_generations();
+        assert!(laid_out.layout > initial.layout, "layout generation must advance on first reflow");
+        assert_eq!(laid_out.style, initial.style);
+        assert_eq!(laid_out.paint, initial.paint);
+
+        let _ = runtime.eval("target.getBoundingClientRect()").unwrap();
+        let painted = runtime.render_generations();
+        assert_eq!(painted.paint, laid_out.paint, "building a clean paint cache is reusable");
+
+        runtime.eval("target.style.opacity = '0.5'").unwrap();
+        let invalidated = runtime.render_generations();
+        assert!(invalidated.style > painted.style, "style invalidation must advance its generation");
+        assert!(invalidated.paint > painted.paint, "style invalidation must invalidate adjusted paint geometry");
+        assert_eq!(invalidated.layout, painted.layout, "layout waits for the next geometry query");
+
+        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        let rebuilt = runtime.render_generations();
+        assert!(rebuilt.layout > invalidated.layout, "layout generation advances only when reflow runs");
+        assert_eq!(rebuilt.style, invalidated.style);
+        let _ = runtime.eval("target.getBoundingClientRect()").unwrap();
+        assert_eq!(runtime.render_generations().paint, invalidated.paint);
+    }
+
+    #[test]
+    fn render_generations_ignore_iframe_only_style_invalidation() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="frame"></iframe><div style="width: 10px"></div></body></html>"#,
+        );
+        runtime
+            .eval(
+                "globalThis.frame = document.getElementById('frame'); \
+                 void frame.contentDocument; document.body.getBoundingClientRect()",
+            )
+            .unwrap();
+        let main_generations = runtime.render_generations();
+
+        runtime
+            .eval(
+                "frame.contentDocument.body.style.color = 'red'; \
+                 getComputedStyle(frame.contentDocument.body).color",
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.render_generations(),
+            main_generations,
+            "iframe-only style changes must not invalidate the top-level render cache"
         );
     }
 
