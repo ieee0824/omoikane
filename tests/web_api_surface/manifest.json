@@ -34,7 +34,7 @@
     },
     {
       "id": "css.compositing-properties",
-      "area": "layout",
+      "area": "css",
       "description": "3D and compositing CSS properties validate through CSS.supports and computed style",
       "setup": "globalThis.__compositingProbe = document.createElement('div'); __compositingProbe.style.cssText = 'transform-style: preserve-3d; backface-visibility: hidden; mix-blend-mode: multiply; isolation: isolate'; document.body.appendChild(__compositingProbe)",
       "probe": "CSS.supports('transform-style', 'preserve-3d') && CSS.supports('backface-visibility', 'hidden') && CSS.supports('mix-blend-mode', 'multiply') && CSS.supports('isolation', 'isolate') && getComputedStyle(__compositingProbe).transformStyle === 'preserve-3d' && getComputedStyle(__compositingProbe).backfaceVisibility === 'hidden' && getComputedStyle(__compositingProbe).mixBlendMode === 'multiply' && getComputedStyle(__compositingProbe).isolation === 'isolate'",
