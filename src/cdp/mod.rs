@@ -783,6 +783,8 @@ impl CdpSession {
             "Target.disposeBrowserContext" => self.target_dispose_browser_context(&params),
             "Input.dispatchKeyEvent" => self.input_dispatch_key_event(&params),
             "Input.dispatchMouseEvent" => self.input_dispatch_mouse_event(&params),
+            "Input.imeSetComposition" => self.input_ime_set_composition(&params),
+            "Input.insertText" => self.input_insert_text(&params),
             _ => Err(JsonRpcError {
                 code: -32601,
                 message: format!("Method not found: {method}"),
@@ -1412,6 +1414,7 @@ impl CdpSession {
                 text.chars().next().map(|character| character as u32).unwrap_or(0)
             } else { 0 },
             "repeat": params.get("autoRepeat").and_then(Value::as_bool).unwrap_or(false),
+            "isComposing": params.get("isComposing").and_then(Value::as_bool).unwrap_or(false),
             "altKey": modifiers & 1 != 0,
             "ctrlKey": modifiers & 2 != 0,
             "metaKey": modifiers & 4 != 0,
@@ -1552,6 +1555,35 @@ impl CdpSession {
             "clickDefaultPrevented": click_default_prevented,
             "targetNodeId": target_node_id,
         }))
+    }
+
+    fn input_ime_set_composition(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let text = require_string(params, "text")?;
+        let length = text.encode_utf16().count() as u64;
+        let selection_start = params
+            .get("selectionStart")
+            .and_then(Value::as_u64)
+            .unwrap_or(length)
+            .min(length);
+        let selection_end = params
+            .get("selectionEnd")
+            .and_then(Value::as_u64)
+            .unwrap_or(selection_start)
+            .min(length);
+        let handled = self.eval_input_bool(&format!(
+            "__omoikane_set_composition({}, {selection_start}, {selection_end})",
+            serde_json::to_string(&text).expect("a string is JSON serializable"),
+        ))?;
+        Ok(json!({ "handled": handled }))
+    }
+
+    fn input_insert_text(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let text = require_string(params, "text")?;
+        let handled = self.eval_input_bool(&format!(
+            "__omoikane_commit_text_input({})",
+            serde_json::to_string(&text).expect("a string is JSON serializable"),
+        ))?;
+        Ok(json!({ "handled": handled }))
     }
 
     fn eval_input_bool(&mut self, script: &str) -> Result<bool, JsonRpcError> {
@@ -2395,6 +2427,8 @@ impl BrowserSession {
             "Target.disposeBrowserContext",
             "Input.dispatchKeyEvent",
             "Input.dispatchMouseEvent",
+            "Input.imeSetComposition",
+            "Input.insertText",
         ] {
             let method_state = Rc::clone(&state);
             server.register_method(method, move |params| {

@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 use omoikane::cdp::CdpSession;
 use omoikane::frame::render_browser_frame;
 use omoikane::platform_input::{
-    InputModifiers, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
+    InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
 };
 use serde_json::json;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -126,12 +126,36 @@ impl BrowserApp {
                     },
                 )
             }
+            WindowEvent::Ime(event) => self
+                .input
+                .ime_event(&mut self.session, platform_ime_event(event.clone())),
             _ => return,
         };
         if let Err(error) = result {
             eprintln!("input event failed: {error}");
         }
     }
+}
+
+fn platform_ime_event(event: Ime) -> PlatformImeEvent {
+    match event {
+        Ime::Enabled => PlatformImeEvent::Enabled,
+        Ime::Preedit(text, selection) => PlatformImeEvent::Preedit {
+            selection: selection
+                .map(|(start, end)| (utf16_offset(&text, start), utf16_offset(&text, end))),
+            text,
+        },
+        Ime::Commit(text) => PlatformImeEvent::Commit(text),
+        Ime::Disabled => PlatformImeEvent::Disabled,
+    }
+}
+
+fn utf16_offset(text: &str, byte_offset: usize) -> usize {
+    let mut boundary = byte_offset.min(text.len());
+    while !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    text[..boundary].encode_utf16().count()
 }
 
 fn platform_mouse_button(button: MouseButton) -> Option<PlatformMouseButton> {
@@ -219,6 +243,7 @@ impl ApplicationHandler for BrowserApp {
                 return;
             }
         };
+        window.set_ime_allowed(true);
         let context = match Context::new(window.clone()) {
             Ok(context) => context,
             Err(error) => {
@@ -333,6 +358,21 @@ mod tests {
                 2.0
             ),
             (1.25, -3.5)
+        );
+    }
+
+    #[test]
+    fn translates_ime_preedit_byte_ranges_to_dom_utf16_offsets() {
+        assert_eq!(utf16_offset("a😀い", 0), 0);
+        assert_eq!(utf16_offset("a😀い", 1), 1);
+        assert_eq!(utf16_offset("a😀い", 5), 3);
+        assert_eq!(utf16_offset("a😀い", usize::MAX), 4);
+        assert_eq!(
+            platform_ime_event(Ime::Preedit("a😀い".into(), Some((1, 5)))),
+            PlatformImeEvent::Preedit {
+                text: "a😀い".into(),
+                selection: Some((1, 3)),
+            }
         );
     }
 

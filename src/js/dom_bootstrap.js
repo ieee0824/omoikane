@@ -587,6 +587,7 @@
       this.keyCode = init.keyCode ?? 0;
       this.charCode = init.charCode ?? 0;
       this.repeat = init.repeat ?? false;
+      this.isComposing = Boolean(init.isComposing);
       this.altKey = init.altKey ?? false;
       this.ctrlKey = init.ctrlKey ?? false;
       this.shiftKey = init.shiftKey ?? false;
@@ -602,6 +603,14 @@
       this.data = init.data === undefined ? null : init.data;
       this.inputType = String(init.inputType ?? "");
       this.isComposing = Boolean(init.isComposing);
+    }
+  }
+
+  class CompositionEvent extends UIEvent {
+    constructor(type, init = {}) {
+      init = init ?? {};
+      super(type, init);
+      this.data = String(init.data ?? "");
     }
   }
 
@@ -5962,16 +5971,16 @@
     syncTextControlNativeState(control, false);
   }
 
-  function dispatchTextControlInput(control, inputType, data, nextValue, caret) {
+  function dispatchTextControlInput(control, inputType, data, nextValue, caret, isComposing = false) {
     const beforeInput = new InputEvent("beforeinput", {
-      bubbles: true, cancelable: true, composed: true, inputType, data,
+      bubbles: true, cancelable: true, composed: true, inputType, data, isComposing,
     });
     if (!control.dispatchEvent(beforeInput)) return false;
     control.value = nextValue;
     setTextControlSelection(control, caret, caret, "none");
     control.__textEditChanged = true;
     control.dispatchEvent(new InputEvent("input", {
-      bubbles: true, composed: true, inputType, data,
+      bubbles: true, composed: true, inputType, data, isComposing,
     }));
     return true;
   }
@@ -5996,6 +6005,7 @@
 
   function performTextControlKeyDefault(control, init) {
     if (!isTextControl(control) || control.readOnly || control.__isDisabledControl()) return;
+    if (init.isComposing) return;
     ensureTextControlSelection(control);
     const value = control.value;
     const start = control.selectionStart;
@@ -8766,7 +8776,8 @@
   const EVENT_HANDLER_TYPES = [
     "click", "dblclick", "mousedown", "mouseup", "mouseover", "mousemove",
     "mouseout", "mouseenter", "mouseleave", "submit", "reset", "change",
-    "input", "focus", "blur", "keydown", "keyup", "keypress", "select",
+    "beforeinput", "input", "focus", "blur", "keydown", "keyup", "keypress", "select",
+    "compositionstart", "compositionupdate", "compositionend",
     "contextmenu", "wheel", "drag", "dragstart", "dragend", "dragenter",
     "dragleave", "dragover", "drop", "error", "abort", "slotchange", "scroll",
     "cancel", "close",
@@ -9299,6 +9310,7 @@
   globalThis.FocusEvent = FocusEvent;
   globalThis.UIEvent = UIEvent;
   globalThis.InputEvent = InputEvent;
+  globalThis.CompositionEvent = CompositionEvent;
   globalThis.PointerEvent = MouseEvent;
   globalThis.TouchEvent = Event;
   globalThis.AnimationEvent = Event;
@@ -9684,6 +9696,116 @@
       }
     }
     return notCanceled;
+  };
+  let __activeComposition = null;
+  function focusedTextControl() {
+    const focusedDocument = focusChainDocuments()[0] || document;
+    const target = focusedElementOf(focusedDocument);
+    return isTextControl(target) && !target.readOnly && !target.__isDisabledControl()
+      ? target : null;
+  }
+  function finishActiveComposition() {
+    if (!__activeComposition) return;
+    const state = __activeComposition;
+    __activeComposition = null;
+    state.control.dispatchEvent(new CompositionEvent("compositionend", {
+      bubbles: true, composed: true, data: state.text,
+    }));
+  }
+  function replaceCompositionText(state, text) {
+    const control = state.control;
+    let replacement = String(text);
+    if (control.maxLength >= 0) {
+      const outsideLength = control.value.length - (state.end - state.start);
+      replacement = replacement.slice(0, Math.max(control.maxLength - outsideLength, 0));
+    }
+    control.dispatchEvent(new CompositionEvent("compositionupdate", {
+      bubbles: true, composed: true, data: replacement,
+    }));
+    const changed = dispatchTextControlInput(
+      control,
+      "insertCompositionText",
+      replacement,
+      control.value.slice(0, state.start) + replacement + control.value.slice(state.end),
+      state.start + replacement.length,
+      true,
+    );
+    if (changed) {
+      state.end = state.start + replacement.length;
+      state.text = replacement;
+    }
+    return changed;
+  }
+  globalThis.__omoikane_set_composition = function(text, selectionStart, selectionEnd) {
+    const control = focusedTextControl();
+    if (!control) {
+      finishActiveComposition();
+      return false;
+    }
+    if (!__activeComposition || __activeComposition.control !== control) {
+      finishActiveComposition();
+      ensureTextControlSelection(control);
+      __activeComposition = {
+        control,
+        start: control.selectionStart,
+        end: control.selectionEnd,
+        text: "",
+      };
+      control.dispatchEvent(new CompositionEvent("compositionstart", {
+        bubbles: true, composed: true, data: "",
+      }));
+    }
+    const changed = replaceCompositionText(__activeComposition, text);
+    if (changed) {
+      const length = __activeComposition.text.length;
+      const start = Math.min(Math.max(Number(selectionStart) || 0, 0), length);
+      const end = Math.min(Math.max(Number(selectionEnd) || 0, start), length);
+      setTextControlSelection(
+        control,
+        __activeComposition.start + start,
+        __activeComposition.start + end,
+        "none",
+      );
+    }
+    return true;
+  };
+  globalThis.__omoikane_commit_text_input = function(text) {
+    const control = focusedTextControl();
+    if (!control) {
+      finishActiveComposition();
+      return false;
+    }
+    if (__activeComposition && __activeComposition.control !== control) {
+      finishActiveComposition();
+    }
+    const committed = String(text);
+    if (__activeComposition && __activeComposition.control === control) {
+      if (__activeComposition.text !== committed) replaceCompositionText(__activeComposition, committed);
+      const data = __activeComposition.text;
+      setTextControlSelection(control, __activeComposition.end, __activeComposition.end, "none");
+      __activeComposition = null;
+      control.dispatchEvent(new CompositionEvent("compositionend", {
+        bubbles: true, composed: true, data,
+      }));
+      return true;
+    }
+    ensureTextControlSelection(control);
+    let inserted = committed;
+    if (control.maxLength >= 0) {
+      const available = Math.max(
+        control.maxLength - (control.value.length - (control.selectionEnd - control.selectionStart)),
+        0,
+      );
+      inserted = inserted.slice(0, available);
+    }
+    if (!inserted) return committed.length === 0;
+    return dispatchTextControlInput(
+      control,
+      "insertText",
+      inserted,
+      control.value.slice(0, control.selectionStart) + inserted + control.value.slice(control.selectionEnd),
+      control.selectionStart + inserted.length,
+    );
   };
   const __documentCookies = new Map();
   Object.defineProperty(Document.prototype, "cookie", {

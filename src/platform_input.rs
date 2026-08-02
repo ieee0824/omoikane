@@ -64,12 +64,25 @@ pub struct PlatformKeyEvent {
     pub repeat: bool,
 }
 
+/// Platform-neutral input method event fields used by native frontends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlatformImeEvent {
+    Enabled,
+    Preedit {
+        text: String,
+        selection: Option<(usize, usize)>,
+    },
+    Commit(String),
+    Disabled,
+}
+
 /// Stateful input bridge for a single native browser surface.
 #[derive(Debug, Default)]
 pub struct PlatformInput {
     cursor: (f64, f64),
     modifiers: InputModifiers,
     buttons: u8,
+    composition_text: Option<String>,
 }
 
 impl PlatformInput {
@@ -159,7 +172,7 @@ impl PlatformInput {
         session: &mut CdpSession,
         event: PlatformKeyEvent,
     ) -> Result<(), JsonRpcError> {
-        let text = if event.pressed {
+        let text = if event.pressed && self.composition_text.is_none() {
             event.text.as_deref().unwrap_or("")
         } else {
             ""
@@ -171,10 +184,52 @@ impl PlatformInput {
                 "key": event.key,
                 "code": event.code,
                 "text": text,
+                "isComposing": self.composition_text.is_some(),
                 "autoRepeat": event.repeat,
                 "modifiers": self.modifiers.cdp_bits(),
             }),
         )?;
+        Ok(())
+    }
+
+    /// Dispatches an input method transition to the focused text control.
+    ///
+    /// Selection offsets are UTF-16 code-unit offsets within the preedit text,
+    /// matching CDP and DOM text-control selection indices.
+    pub fn ime_event(
+        &mut self,
+        session: &mut CdpSession,
+        event: PlatformImeEvent,
+    ) -> Result<(), JsonRpcError> {
+        match event {
+            PlatformImeEvent::Enabled => {}
+            PlatformImeEvent::Preedit { text, selection } => {
+                let collapsed = text.encode_utf16().count();
+                let (selection_start, selection_end) = selection.unwrap_or((collapsed, collapsed));
+                session.dispatch(
+                    "Input.imeSetComposition",
+                    json!({
+                        "text": text,
+                        "selectionStart": selection_start,
+                        "selectionEnd": selection_end,
+                    }),
+                )?;
+                self.composition_text = Some(text);
+            }
+            PlatformImeEvent::Commit(text) => {
+                session.dispatch("Input.insertText", json!({ "text": text }))?;
+                self.composition_text = None;
+            }
+            PlatformImeEvent::Disabled => {
+                if self.composition_text.take().is_some() {
+                    session.dispatch(
+                        "Input.imeSetComposition",
+                        json!({ "text": "", "selectionStart": 0, "selectionEnd": 0 }),
+                    )?;
+                    session.dispatch("Input.insertText", json!({ "text": "" }))?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -497,5 +552,90 @@ mod tests {
         input.wheel(&mut session, 0.0, 80.0).unwrap();
 
         assert_eq!(evaluate(&mut session, "scrollY"), json!(80));
+    }
+
+    #[test]
+    fn ime_preedit_updates_and_commits_the_focused_text_control() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<input id='field' value='A'><script>globalThis.imeLog=[];field.focus();field.setSelectionRange(1,1);\
+             for(const type of ['compositionstart','compositionupdate','compositionend','beforeinput','input'])\
+             field.addEventListener(type,e=>imeLog.push([type,e.data,e.inputType||'',e.isComposing||false].join(':')))</script>",
+        );
+        let mut input = PlatformInput::new();
+
+        input
+            .ime_event(
+                &mut session,
+                PlatformImeEvent::Preedit {
+                    text: "に".into(),
+                    selection: Some((0, 1)),
+                },
+            )
+            .unwrap();
+        input
+            .key_event(
+                &mut session,
+                PlatformKeyEvent {
+                    pressed: true,
+                    key: "x".into(),
+                    code: "KeyX".into(),
+                    text: Some("x".into()),
+                    repeat: false,
+                },
+            )
+            .unwrap();
+        input
+            .ime_event(
+                &mut session,
+                PlatformImeEvent::Preedit {
+                    text: "日本".into(),
+                    selection: Some((1, 2)),
+                },
+            )
+            .unwrap();
+        input
+            .ime_event(&mut session, PlatformImeEvent::Commit("日本".into()))
+            .unwrap();
+
+        assert_eq!(evaluate(&mut session, "field.value"), json!("A日本"));
+        assert_eq!(evaluate(&mut session, "field.selectionStart"), json!(3));
+        assert_eq!(evaluate(&mut session, "field.selectionEnd"), json!(3));
+        assert_eq!(
+            evaluate(&mut session, "imeLog.join('|')"),
+            json!(
+                "compositionstart:::false|compositionupdate:に::false|beforeinput:に:insertCompositionText:true|input:に:insertCompositionText:true|compositionupdate:日本::false|beforeinput:日本:insertCompositionText:true|input:日本:insertCompositionText:true|compositionend:日本::false"
+            )
+        );
+    }
+
+    #[test]
+    fn ime_commit_without_preedit_inserts_text_and_disabled_clears_preedit() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<input id='field'><script>globalThis.ends=[];field.focus();field.oncompositionend=e=>ends.push(e.data)</script>",
+        );
+        let mut input = PlatformInput::new();
+
+        input
+            .ime_event(&mut session, PlatformImeEvent::Commit("é".into()))
+            .unwrap();
+        input
+            .ime_event(
+                &mut session,
+                PlatformImeEvent::Preedit {
+                    text: "語".into(),
+                    selection: None,
+                },
+            )
+            .unwrap();
+        input
+            .ime_event(&mut session, PlatformImeEvent::Disabled)
+            .unwrap();
+
+        assert_eq!(evaluate(&mut session, "field.value"), json!("é"));
+        assert_eq!(evaluate(&mut session, "ends.join(',')"), json!(""));
     }
 }
