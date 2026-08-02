@@ -169,8 +169,8 @@
       "id": "dom.template-content",
       "area": "web-components",
       "description": "HTMLTemplateElement exposes a DocumentFragment content tree",
-      "probe": "typeof HTMLTemplateElement === 'function' && document.createElement('template').content instanceof DocumentFragment",
-      "baseline_supported": false
+      "probe": "(() => { const template = document.createElement('template'); const content = template.content; const child = document.createElement('span'); content.appendChild(child); const parsed = document.createElement('template'); parsed.innerHTML = '<b data-template-probe>value</b>'; const clone = parsed.cloneNode(true); const parsedChild = parsed.content.firstElementChild; const cloneChild = clone.content.firstElementChild; return typeof HTMLTemplateElement === 'function' && content === template.content && content instanceof DocumentFragment && template.childNodes.length === 0 && content.parentNode === null && child.parentNode === content && child.ownerDocument === content.ownerDocument && child.ownerDocument !== document && parsedChild !== null && parsedChild.getAttribute('data-template-probe') === '' && clone.content !== parsed.content && cloneChild !== null && cloneChild.textContent === 'value'; })()",
+      "baseline_supported": true
     },
     {
       "id": "dom.selection",

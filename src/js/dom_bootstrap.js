@@ -76,6 +76,13 @@
   const canonicalCharacterDataOverrides = new Map();
   const wrapperLocalNames = new Map();
   const ownerDocumentIds = new Map();
+  // Keep the inert-document relationship keyed by native ids rather than
+  // page-visible expandos.  A template contents owner document is shared by
+  // every template from one document, and an inert document is its own
+  // appropriate owner document (so nested templates do not create another
+  // inert document).
+  const templateContentsOwnerDocumentIds = new Map();
+  const templateContentsDocumentIds = new Set();
   const canonicalElementIds = new Set();
   const canonicalHtmlElementIds = new Set();
   const canonicalHtmlSlotIds = new Set();
@@ -88,6 +95,8 @@
   const setWrapperLocalName = mapSet;
   const getOwnerDocumentId = mapGet;
   const setOwnerDocumentId = mapSet;
+  const hasSetValue = Function.prototype.call.bind(Set.prototype.has);
+  const addSetValue = Function.prototype.call.bind(Set.prototype.add);
   const addCanonicalElementId = Function.prototype.call.bind(Set.prototype.add);
   const hasCanonicalElementId = Function.prototype.call.bind(Set.prototype.has);
   const intrinsicString = globalThis.String;
@@ -582,12 +591,26 @@
   // template elements. Keep it stable and shared by all templates created by
   // that document, matching the HTML template contents owner-document model.
   function templateContentsOwnerDocument(doc) {
-    if (!doc.__templateContentsOwnerDocument) {
-      const owner = wrapNode(__omoikane_create_document());
-      owner.__documentURL = "about:blank";
-      doc.__templateContentsOwnerDocument = owner;
+    const documentId = internalNodeId(doc);
+    // Documents created as inert template owners use themselves as the
+    // appropriate template contents owner document. This is important for a
+    // template nested inside an existing template's content tree.
+    if (documentId !== undefined &&
+        hasSetValue(templateContentsDocumentIds, documentId)) {
+      return doc;
     }
-    return doc.__templateContentsOwnerDocument;
+    if (documentId !== undefined &&
+        mapHas(templateContentsOwnerDocumentIds, documentId)) {
+      return wrapNode(mapGet(templateContentsOwnerDocumentIds, documentId));
+    }
+    const owner = wrapNode(__omoikane_create_document());
+    owner.__documentURL = "about:blank";
+    const ownerId = internalNodeId(owner);
+    if (documentId !== undefined && ownerId !== undefined) {
+      mapSet(templateContentsOwnerDocumentIds, documentId, ownerId);
+    }
+    if (ownerId !== undefined) addSetValue(templateContentsDocumentIds, ownerId);
+    return owner;
   }
 
   function invokeListeners(node, event, capture, phase) {
@@ -1390,6 +1413,15 @@
       : (internalOwnerDocument(node) || globalThis.document);
   }
 
+  // Native tree insertion reparents nodes but cannot see the JavaScript-side
+  // template contents owner-document bookkeeping. Stamp the inserted subtree
+  // after every DOM insertion so nodes moved into `template.content` adopt its
+  // inert owner document just like parser-created content does.
+  function stampInsertedOwnerDocument(parent, nodes) {
+    const owner = nodeDocument(parent);
+    for (const node of nodes) stampOwnerDoc(node, owner);
+  }
+
   function nodeRoot(node) {
     let root = node;
     while (root && root.parentNode) root = root.parentNode;
@@ -1474,6 +1506,7 @@
         notifyImplicitRemoval(child);
         __omoikane_insert_before(parentId, internalNodeId(child), refId);
       }
+      stampInsertedOwnerDocument(parent, children);
       for (let index = 0; index < children.length; index++) {
         if (connectedBeforeMove[index]) disconnectCustomElementTree(children[index]);
       }
@@ -1493,6 +1526,7 @@
     const connectedBeforeMove = internalIsConnected(newNode);
     notifyImplicitRemoval(newNode);
     __omoikane_insert_before(parentId, newId, refId);
+    stampInsertedOwnerDocument(parent, [newNode]);
     if (connectedBeforeMove) disconnectCustomElementTree(newNode);
     upgradeInsertedCustomElements(parent, [newNode]);
     queueMutation(parent, "childList", {
@@ -1700,6 +1734,7 @@
           notifyImplicitRemoval(c);
           __omoikane_append_child(this.__id, c.__id);
         }
+        stampInsertedOwnerDocument(this, children);
         for (let i = 0; i < children.length; i++) {
           if (connectedBeforeMove[i]) disconnectCustomElementTree(children[i]);
         }
@@ -1713,6 +1748,7 @@
       const connectedBeforeMove = !!(child && child.isConnected);
       notifyImplicitRemoval(child);
       __omoikane_append_child(this.__id, child.__id);
+      stampInsertedOwnerDocument(this, [child]);
       if (connectedBeforeMove) disconnectCustomElementTree(child);
       upgradeInsertedCustomElements(this, [child]);
       queueMutation(this, "childList", { addedNodes: [child], previousSibling });
@@ -2120,6 +2156,7 @@
         mapSet(canonicalCharacterDataOverrides, this, text);
       }
       const addedNodes = this.childNodes.slice();
+      stampInsertedOwnerDocument(this, addedNodes);
       if (wasConnected) {
         for (const child of removedNodes) disconnectCustomElementTree(child);
       }
@@ -2141,6 +2178,7 @@
       for (const child of removedNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_inner_html(this.__id, html);
       const addedNodes = this.childNodes.slice();
+      stampInsertedOwnerDocument(this, addedNodes);
       if (wasConnected) {
         for (const child of removedNodes) disconnectCustomElementTree(child);
       }

@@ -23286,6 +23286,45 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn template_content_script_insertions_adopt_inert_owner_document() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const template = document.createElement("template");
+                  const content = template.content;
+                  const inserted = document.createElement("span");
+                  const nested = document.createElement("template");
+                  content.appendChild(inserted);
+                  content.appendChild(nested);
+                  const nestedContent = nested.content;
+                  const nestedInserted = document.createElement("i");
+                  nestedContent.appendChild(nestedInserted);
+                  const direct = document.createElement("em");
+                  template.appendChild(direct);
+                  const clone = template.cloneNode(true);
+                  return content === template.content &&
+                    content.parentNode === null &&
+                    template.childNodes.length === 1 &&
+                    template.firstChild === direct &&
+                    direct.ownerDocument === document &&
+                    content.childNodes.length === 2 &&
+                    inserted.parentNode === content &&
+                    inserted.ownerDocument === content.ownerDocument &&
+                    inserted.ownerDocument !== document &&
+                    nestedContent.ownerDocument === content.ownerDocument &&
+                    nestedInserted.ownerDocument === nestedContent.ownerDocument &&
+                    clone.content !== content &&
+                    clone.content.ownerDocument === content.ownerDocument &&
+                    clone.content.firstElementChild !== inserted;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn open_shadow_root_preserves_tree_boundaries_and_composed_connectivity() {
         let mut runtime = runtime_from_html(
             r#"<div id="host"><span id="light">light</span></div>"#,
