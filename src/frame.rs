@@ -1,9 +1,84 @@
 //! Continuous browser-frame rendering for native and embedded frontends.
 
+use std::time::{Duration, Instant};
+
 use crate::cdp::{CdpSession, JsonRpcError};
 use crate::http::Url;
 use crate::layout::Rect;
 use crate::paint::{Color, PaintError, render_document_snapshot_with_url};
+
+/// Coordinates a platform window's redraw requests with browser rendering
+/// opportunities.
+///
+/// Window event loops may enter their idle callback repeatedly while input or
+/// other OS events are being delivered. This scheduler coalesces those wakeups
+/// into one pending redraw, keeps the next frame deadline explicit, and skips
+/// missed intervals instead of trying to render a burst of stale frames.
+#[derive(Debug, Clone)]
+pub struct PlatformFrameScheduler {
+    origin: Instant,
+    interval: Duration,
+    next_deadline: Instant,
+    redraw_pending: bool,
+}
+
+impl PlatformFrameScheduler {
+    /// Creates a scheduler whose first rendering opportunity is immediately due.
+    ///
+    /// A zero interval is clamped to one nanosecond so every presented frame has
+    /// a future deadline.
+    pub fn new(origin: Instant, interval: Duration) -> Self {
+        Self {
+            origin,
+            interval: interval.max(Duration::from_nanos(1)),
+            next_deadline: origin,
+            redraw_pending: false,
+        }
+    }
+
+    /// Returns the next instant at which the platform event loop should wake.
+    pub fn deadline(&self) -> Instant {
+        self.next_deadline
+    }
+
+    /// Returns whether a platform redraw has already been requested and has not
+    /// yet delivered a rendering opportunity.
+    pub fn redraw_pending(&self) -> bool {
+        self.redraw_pending
+    }
+
+    /// Pulls the next deadline forward for an external invalidation such as
+    /// input or resize. An already pending platform redraw remains coalesced.
+    pub fn request_rendering_opportunity(&mut self, now: Instant) {
+        if now < self.next_deadline {
+            self.next_deadline = now;
+        }
+    }
+
+    /// Marks one platform redraw as pending when the current deadline is due.
+    ///
+    /// The caller should invoke `Window::request_redraw()` only when this method
+    /// returns `true`.
+    pub fn queue_redraw_if_due(&mut self, now: Instant) -> bool {
+        if self.redraw_pending || now < self.next_deadline {
+            return false;
+        }
+        self.redraw_pending = true;
+        true
+    }
+
+    /// Begins delivery of a frame and returns its animation timestamp.
+    ///
+    /// The next deadline is based on the actual delivery time. This avoids
+    /// catch-up bursts after the window was blocked, occluded, or suspended.
+    pub fn begin_frame(&mut self, now: Instant) -> u64 {
+        self.redraw_pending = false;
+        self.next_deadline = now + self.interval;
+        now.saturating_duration_since(self.origin)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64
+    }
+}
 
 /// An opaque, row-major RGBA browser frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,9 +164,44 @@ pub fn render_browser_frame(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn platform_scheduler_coalesces_redraws_and_advances_after_presentation() {
+        let origin = Instant::now();
+        let mut scheduler = PlatformFrameScheduler::new(origin, Duration::from_millis(16));
+
+        assert_eq!(scheduler.deadline(), origin);
+        assert!(scheduler.queue_redraw_if_due(origin));
+        assert!(!scheduler.queue_redraw_if_due(origin + Duration::from_millis(1)));
+
+        assert_eq!(scheduler.begin_frame(origin + Duration::from_millis(5)), 5);
+        assert_eq!(scheduler.deadline(), origin + Duration::from_millis(21));
+        assert!(!scheduler.queue_redraw_if_due(origin + Duration::from_millis(20)));
+        assert!(scheduler.queue_redraw_if_due(origin + Duration::from_millis(21)));
+    }
+
+    #[test]
+    fn platform_scheduler_wakes_early_for_invalidation_and_skips_missed_frames() {
+        let origin = Instant::now();
+        let mut scheduler = PlatformFrameScheduler::new(origin, Duration::from_millis(16));
+        assert!(scheduler.queue_redraw_if_due(origin));
+        scheduler.begin_frame(origin);
+
+        let invalidated_at = origin + Duration::from_millis(4);
+        scheduler.request_rendering_opportunity(invalidated_at);
+        assert_eq!(scheduler.deadline(), invalidated_at);
+        assert!(scheduler.queue_redraw_if_due(invalidated_at));
+
+        let resumed_at = origin + Duration::from_millis(100);
+        assert_eq!(scheduler.begin_frame(resumed_at), 100);
+        assert_eq!(scheduler.deadline(), origin + Duration::from_millis(116));
+        assert!(!scheduler.queue_redraw_if_due(resumed_at));
+    }
 
     fn navigate(session: &mut CdpSession, html: &str) {
         let encoded = html
