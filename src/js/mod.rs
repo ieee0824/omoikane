@@ -3614,7 +3614,12 @@ impl JsRuntime {
                 }
                 Task::PostedMessage { port, data } => {
                     let result = self.run_posted_message_async(port, data).await;
-                    self.record_error_from("posted message", result);
+                    if let Err(error) = result {
+                        if is_wall_clock_timeout(&error) {
+                            return Err(error);
+                        }
+                        self.record_error_from::<()>("posted message", Err(error));
+                    }
                 }
                 Task::BroadcastChannelMessage {
                     channel_id,
@@ -3855,7 +3860,12 @@ impl JsRuntime {
             let dispatch =
                 dispatch_resource_timing_script("error", node_id, &timing_name, false, 0.0);
             let result = self.eval_async(&dispatch).await;
-            self.record_error_from(&src, result);
+            if let Err(error) = result {
+                if is_wall_clock_timeout(&error) {
+                    return Err(error);
+                }
+                self.record_error_from::<()>(&src, Err(error));
+            }
             return Ok(());
         }
         if !self
@@ -3885,7 +3895,12 @@ impl JsRuntime {
             let result = self
                 .eval_async(&dispatch)
                 .await;
-            self.record_error_from(&src, result);
+            if let Err(error) = result {
+                if is_wall_clock_timeout(&error) {
+                    return Err(error);
+                }
+                self.record_error_from::<()>(&src, Err(error));
+            }
             return Ok(());
         };
         let redirected = resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
@@ -3906,14 +3921,24 @@ impl JsRuntime {
             let result = self
                 .eval_async(&dispatch)
                 .await;
-            self.record_error_from(&src, result);
+            if let Err(error) = result {
+                if is_wall_clock_timeout(&error) {
+                    return Err(error);
+                }
+                self.record_error_from::<()>(&src, Err(error));
+            }
             return Ok(());
         }
 
         let marked = self
             .eval_async(&format!("__omoikane_set_current_script({node_id})"))
             .await;
-        self.record_error_from(&src, marked);
+        if let Err(error) = marked {
+            if is_wall_clock_timeout(&error) {
+                return Err(error);
+            }
+            self.record_error_from::<()>(&src, Err(error));
+        }
         let result = match kind {
             ScriptKind::Module => {
                 let module_document = document_root_for_node(&script_node)
@@ -3929,6 +3954,9 @@ impl JsRuntime {
         };
         let _ = self.eval("__omoikane_set_current_script(null)");
         if let Err(error) = result {
+            if is_wall_clock_timeout(&error) {
+                return Err(error);
+            }
             let context = script_source_context(&source);
             self.record_task_error(format!("[dynamic script: {src}; {context}] {error}"));
         }
@@ -3937,7 +3965,12 @@ impl JsRuntime {
                 "load", node_id, &effective_url, redirected, elapsed_ms,
             ))
             .await;
-        self.record_error_from("resource load", dispatched);
+        if let Err(error) = dispatched {
+            if is_wall_clock_timeout(&error) {
+                return Err(error);
+            }
+            self.record_error_from::<()>("resource load", Err(error));
+        }
         self.sync_module_csp_violations();
         Ok(())
     }
@@ -18676,6 +18709,75 @@ b</textarea></form>"#);
         drop(pump);
         assert!(is_wall_clock_timeout(&error));
         assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+    }
+
+    #[test]
+    fn posted_message_timeout_aborts_owned_page_task_and_recovers_runtime() {
+        let sandbox = SandboxConfig {
+            timeout: Duration::from_millis(2),
+            max_loop_iterations: u64::MAX,
+        };
+        let doc = crate::dom::NodeHandle::document();
+        let runtime = JsRuntime::with_document_and_sandbox(doc, sandbox).unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            25,
+            vec![PageTaskSource::Classic {
+                source: r#"(() => {
+                    const channel = new MessageChannel();
+                    channel.port2.onmessage = () => { for (;;) {} };
+                    channel.port1.postMessage('timeout');
+                })()"#
+                .to_string(),
+                label: "posted-message-timeout".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+        let mut completed = loop {
+            match task.as_mut().poll(&mut cx) {
+                Poll::Ready(completed) => break completed,
+                Poll::Pending => {}
+            }
+        };
+        assert_eq!(completed.result, Err(PageTaskError::TimedOut));
+        assert_eq!(completed.runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+    }
+
+    #[test]
+    fn dynamic_script_timeout_aborts_owned_page_task_and_recovers_runtime() {
+        let sandbox = SandboxConfig {
+            timeout: Duration::from_millis(2),
+            max_loop_iterations: u64::MAX,
+        };
+        let runtime = JsRuntime::with_document_and_sandbox(
+            crate::html::TreeBuilder::parse("<html><head></head><body></body></html>").document(),
+            sandbox,
+        )
+        .unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            26,
+            vec![PageTaskSource::Classic {
+                source: r#"(() => {
+                    const script = document.createElement('script');
+                    script.src = 'data:text/javascript,for%20(;;)%20%7B%7D';
+                    document.head.appendChild(script);
+                })()"#
+                .to_string(),
+                label: "dynamic-script-timeout".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let waker: &'static Waker = Waker::noop();
+        let mut cx = FutureContext::from_waker(waker);
+        let mut completed = loop {
+            match task.as_mut().poll(&mut cx) {
+                Poll::Ready(completed) => break completed,
+                Poll::Pending => {}
+            }
+        };
+        assert_eq!(completed.result, Err(PageTaskError::TimedOut));
+        assert_eq!(completed.runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
     }
 
     #[test]

@@ -2528,6 +2528,16 @@ impl BrowserSession {
         client_id: u64,
     ) -> Result<Vec<WebSocketFrame>, CdpError> {
         self.flush_actions()?;
+        self.server.drain_outgoing(client_id)
+    }
+
+    /// Waits for queued output or the next pending timeout deadline, then drains
+    /// the current outbound frames for a client.
+    pub fn wait_for_outgoing(
+        &mut self,
+        client_id: u64,
+    ) -> Result<Vec<WebSocketFrame>, CdpError> {
+        self.flush_actions()?;
         let mut outgoing = self.server.drain_outgoing(client_id)?;
         if !outgoing.is_empty() || self.server.pending_response_count() == 0 {
             return Ok(outgoing);
@@ -3001,6 +3011,15 @@ mod tests {
             .collect()
     }
 
+    fn browser_payloads_waiting(session: &mut BrowserSession, client_id: u64) -> Vec<Value> {
+        session
+            .wait_for_outgoing(client_id)
+            .unwrap()
+            .iter()
+            .map(|frame| serde_json::from_str(&decode_text(frame)).unwrap())
+            .collect()
+    }
+
     #[test]
     fn browser_session_forwards_existing_dom_commands() {
         let mut session = BrowserSession::new().unwrap();
@@ -3110,7 +3129,8 @@ mod tests {
         );
         let mut payloads = browser_payloads(&mut session, client.client_id);
         assert_eq!(payloads[0]["method"], "Page.javascriptDialogOpening");
-        payloads.extend(browser_payloads(&mut session, client.client_id));
+        assert!(browser_payloads(&mut session, client.client_id).is_empty());
+        payloads.extend(browser_payloads_waiting(&mut session, client.client_id));
         assert_eq!(session.pending_response_count(), 0, "{payloads:#?}");
         assert!(payloads.iter().any(|value| {
             value["method"] == "Page.javascriptDialogClosed"
@@ -3604,6 +3624,29 @@ mod tests {
             BrowserSessionAction::Complete(_, Err(error))
                 if error.message.contains("wall-clock timeout")
         )));
+    }
+
+    #[test]
+    fn drain_outgoing_returns_immediately_while_dialog_is_pending() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"alert('still-open')","returnByValue":true}}"#,
+        );
+        let opening = browser_payloads(&mut session, client.client_id);
+        assert_eq!(opening.len(), 1);
+        assert_eq!(opening[0]["method"], "Page.javascriptDialogOpening");
+
+        let start = Instant::now();
+        let queued = session.drain_outgoing(client.client_id).unwrap();
+        assert!(queued.is_empty());
+        assert!(
+            start.elapsed() < Duration::from_millis(250),
+            "drain_outgoing must not block while only a deferred response is pending"
+        );
+        assert_eq!(session.pending_response_count(), 1);
     }
 
     #[test]
