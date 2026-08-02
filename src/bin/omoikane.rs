@@ -78,25 +78,25 @@ impl BrowserApp {
         Ok(())
     }
 
-    fn dispatch_input(&mut self, event: &WindowEvent) {
+    fn dispatch_input(&mut self, event: WindowEvent) {
         let scale_factor = self
             .window
             .as_ref()
             .map_or(1.0, |window| window.scale_factor());
         let result = match event {
             WindowEvent::CursorMoved { position, .. } => {
-                let (x, y) = physical_position_css_pixels(*position, scale_factor);
+                let (x, y) = physical_position_css_pixels(position, scale_factor);
                 self.input.cursor_moved(&mut self.session, x, y)
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let Some(button) = platform_mouse_button(*button) else {
+                let Some(button) = platform_mouse_button(button) else {
                     return;
                 };
                 self.input
-                    .mouse_button(&mut self.session, button, *state == ElementState::Pressed)
+                    .mouse_button(&mut self.session, button, state == ElementState::Pressed)
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let (delta_x, delta_y) = wheel_delta_css_pixels(*delta, scale_factor);
+                let (delta_x, delta_y) = wheel_delta_css_pixels(delta, scale_factor);
                 self.input.wheel(&mut self.session, delta_x, delta_y)
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -128,7 +128,7 @@ impl BrowserApp {
             }
             WindowEvent::Ime(event) => self
                 .input
-                .ime_event(&mut self.session, platform_ime_event(event.clone())),
+                .ime_event(&mut self.session, platform_ime_event(event)),
             _ => return,
         };
         if let Err(error) = result {
@@ -291,7 +291,7 @@ impl ApplicationHandler for BrowserApp {
                     eprintln!("frame failed: {error}");
                 }
             }
-            event => self.dispatch_input(&event),
+            event => self.dispatch_input(event),
         }
     }
 
