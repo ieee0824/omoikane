@@ -4891,10 +4891,13 @@ mod tests {
         let state = session
             .dispatch(
                 "Runtime.evaluate",
-                json!({"expression":"JSON.stringify(targets)","returnByValue":true}),
+                json!({"expression":"JSON.stringify({targets,instancePE:getComputedStyle(document.getElementById('instance')).pointerEvents,blockedPE:getComputedStyle(document.getElementById('blocked')).pointerEvents,href:document.getElementById('instance').getAttribute('href')})","returnByValue":true}),
             )
             .unwrap();
-        assert_eq!(state["result"]["value"], r#"["instance"]"#);
+        assert_eq!(
+            state["result"]["value"],
+            r##"{"targets":["instance"],"instancePE":"fill","blockedPE":"none","href":"#template"}"##,
+        );
     }
 
     #[test]
