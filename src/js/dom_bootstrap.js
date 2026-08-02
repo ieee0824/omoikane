@@ -237,8 +237,7 @@
     const openDetails = detailsIds.filter(id => {
       const details = wrapNode(id);
       return details && details.tagName === "DETAILS" &&
-        (details.open === true ||
-          (details.open === undefined && details.hasAttribute("open")));
+        details.open === true;
     });
     return JSON.stringify({ selectedOptions, openDetails });
   };
