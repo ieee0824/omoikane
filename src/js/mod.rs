@@ -2667,6 +2667,12 @@ impl JsRuntime {
         self.host_state
             .borrow_mut()
             .canonical_node_identity_resolver = previous_resolver;
+        #[cfg(test)]
+        if let Err(error) = &setup {
+            eprintln!(
+                "[iframe child realm] bootstrap for iframe {iframe_id} document {document_id} failed: {error}"
+            );
+        }
         setup?;
 
         let mut state = self.host_state.borrow_mut();
@@ -2697,6 +2703,10 @@ impl JsRuntime {
             self.eval(source)?;
             self.run_jobs()
         })();
+        #[cfg(test)]
+        if let Err(error) = &result {
+            eprintln!("[iframe child realm] script {script_id} failed: {error}");
+        }
         let _ = self.eval("__omoikane_set_current_script(null)");
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.context.enter_realm(old_realm);
