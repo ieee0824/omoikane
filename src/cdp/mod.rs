@@ -5261,12 +5261,22 @@ mod tests {
         let non_node_object_id = session
             .dispatch(
                 "Runtime.evaluate",
-                json!({ "expression": "({ value: 1 })", "returnByValue": false }),
+                json!({
+                    "expression": "({ __id: document.querySelector('#target').__id })",
+                    "returnByValue": false,
+                }),
             )
             .unwrap()["result"]["objectId"]
             .as_str()
             .unwrap()
             .to_string();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "globalThis.Node = function ReplacedNode() {}" }),
+            )
+            .unwrap();
+        boa_gc::force_collect();
 
         let partial = session
             .dispatch(
@@ -5605,22 +5615,40 @@ mod tests {
                 json!({
                     "expression": "(() => {\
                       const names = ['__omoikane_accessibility_snapshot',\
+                        '__omoikane_register_canonical_node_identity',\
                         '__omoikane_get_option_selected',\
                         '__omoikane_set_option_selected'];\
+                      const originalMapHas = Map.prototype.has;\
+                      const originalMapSet = Map.prototype.set;\
+                      let leakedCache = null;\
+                      Map.prototype.has = function(key) {\
+                        leakedCache = this; return originalMapHas.call(this, key);\
+                      };\
+                      Map.prototype.set = function(key, value) {\
+                        leakedCache = this; return originalMapSet.call(this, key, value);\
+                      };\
                       const option = document.createElement('option');\
                       const accessors = Object.getOwnPropertyDescriptor(\
                         HTMLOptionElement.prototype, 'selected');\
                       const forged = { __id: option.__id };\
                       const originalMapGet = Map.prototype.get;\
                       Map.prototype.get = function() { return forged; };\
+                      document.body.appendChild(option);\
+                      const cacheHitPreserved = document.querySelector('option') === option;\
+                      if (leakedCache) {\
+                        originalMapSet.call(leakedCache, option.__id, forged);\
+                      }\
                       let getterRejected = false; let setterRejected = false;\
                       try { accessors.get.call(forged); }\
                       catch (error) { getterRejected = error instanceof TypeError; }\
                       try { accessors.set.call(forged, true); }\
                       catch (error) { setterRejected = error instanceof TypeError; }\
+                      Map.prototype.has = originalMapHas;\
                       Map.prototype.get = originalMapGet;\
+                      Map.prototype.set = originalMapSet;\
                       return names.map(name => typeof globalThis[name]).join('|') + '|' +\
-                        getterRejected + '|' + setterRejected + '|' + option.selected;\
+                        (leakedCache === null) + '|' + cacheHitPreserved + '|' + getterRejected + '|' +\
+                        setterRejected + '|' + option.selected;\
                     })()",
                     "returnByValue": true,
                 }),
@@ -5629,7 +5657,7 @@ mod tests {
 
         assert_eq!(
             result["result"]["value"],
-            "undefined|undefined|undefined|true|true|false"
+            "undefined|undefined|undefined|undefined|true|true|true|true|false"
         );
     }
 

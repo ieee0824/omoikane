@@ -3,9 +3,11 @@
   // unfiltered slot lookup private to the event dispatcher so page scripts
   // cannot use it to inspect closed shadow trees.
   const internalAssignedSlot = globalThis.__omoikane_internal_assigned_slot;
+  let registerCanonicalNodeIdentity = globalThis.__omoikane_register_canonical_node_identity;
   const nativeGetOptionSelected = globalThis.__omoikane_get_option_selected;
   const nativeSetOptionSelected = globalThis.__omoikane_set_option_selected;
   delete globalThis.__omoikane_internal_assigned_slot;
+  delete globalThis.__omoikane_register_canonical_node_identity;
   delete globalThis.__omoikane_get_option_selected;
   delete globalThis.__omoikane_set_option_selected;
   // Keep the host clipboard bindings private to this bootstrap closure. Page
@@ -46,10 +48,13 @@
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
   const cache = new Map();
-  // Capture the intrinsic before page code can replace Map.prototype methods.
-  // Private native bindings use this to ensure an exposed prototype accessor
-  // was invoked on the canonical wrapper, not a forged `{ __id }` receiver.
+  // Capture the intrinsics before page code can replace Map.prototype methods.
+  // Besides preserving wrapper identity, this keeps the private cache from
+  // leaking through a poisoned method receiver.
+  const hasCachedNode = Function.prototype.call.bind(Map.prototype.has);
   const cachedNodeForId = Function.prototype.call.bind(Map.prototype.get);
+  const cacheNode = Function.prototype.call.bind(Map.prototype.set);
+  const ownPropertyDescriptor = Object.getOwnPropertyDescriptor;
   const validatesSpecialStyleProperties = new Set([
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
@@ -185,8 +190,8 @@
     if (id === null || id === undefined) {
       return null;
     }
-    if (cache.has(id)) {
-      return cache.get(id);
+    if (hasCachedNode(cache, id)) {
+      return cachedNodeForId(cache, id);
     }
     const nodeType = __omoikane_node_type(id);
     let node;
@@ -220,7 +225,7 @@
     } else {
       node = new Node(id);
     }
-    cache.set(id, node);
+    cacheNode(cache, id, node);
     if (node instanceof HTMLSlotElement) knownSlots.push(node);
     return node;
   }
@@ -229,12 +234,16 @@
     if ((typeof receiver !== "object" && typeof receiver !== "function") || receiver === null) {
       throw new TypeError("Illegal invocation");
     }
-    const id = receiver.__id;
+    const descriptor = ownPropertyDescriptor(receiver, "__id");
+    const valueDescriptor = descriptor && ownPropertyDescriptor(descriptor, "value");
+    const id = valueDescriptor ? valueDescriptor.value : undefined;
     if (cachedNodeForId(cache, id) !== receiver) {
       throw new TypeError("Illegal invocation");
     }
     return id;
   }
+  registerCanonicalNodeIdentity(canonicalNodeIdentity);
+  registerCanonicalNodeIdentity = null;
 
   // Stamps `node` and (for a deep subtree) every descendant with `doc` as its
   // owning document, mirroring how `Document.create*` stamps `__ownerDoc`. Used

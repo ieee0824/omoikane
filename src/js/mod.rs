@@ -733,6 +733,9 @@ struct HostState {
     event_loop: EventLoop,
     document: NodeHandle,
     nodes: HashMap<usize, NodeHandle>,
+    /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
+    /// returns their native node identity.
+    canonical_node_identity_resolver: Option<JsValue>,
     console_logs: Vec<String>,
     /// Errors raised by page script while an event-loop task ran.
     ///
@@ -893,6 +896,9 @@ impl Finalize for HostState {}
 unsafe impl Trace for HostState {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.event_loop.trace(tracer) };
+        if let Some(resolver) = &self.canonical_node_identity_resolver {
+            unsafe { resolver.trace(tracer) };
+        }
         if let Some(owner) = &self.worker_owner_object {
             unsafe { owner.trace(tracer) };
         }
@@ -1253,6 +1259,7 @@ impl HostState {
             event_loop: EventLoop::default(),
             document: document.clone(),
             nodes: HashMap::new(),
+            canonical_node_identity_resolver: None,
             console_logs: Vec::new(),
             task_errors: Vec::new(),
             suppressed_task_errors: 0,
@@ -2442,11 +2449,12 @@ impl JsRuntime {
     /// fallback from an actual focused control, so it reads the bootstrap's
     /// per-document focus slot directly.
     fn accessibility_node_identity(value: f64) -> Option<usize> {
-        let upper_bound = 2.0_f64.powi(usize::BITS as i32);
+        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let maximum = MAX_SAFE_INTEGER.min(usize::MAX as f64);
         if value.is_finite()
             && value >= 0.0
             && value.fract() == 0.0
-            && value < upper_bound
+            && value <= maximum
         {
             Some(value as usize)
         } else {
@@ -2468,11 +2476,22 @@ impl JsRuntime {
     /// Resolves a Runtime remote object when it is a live DOM Node wrapper.
     pub(crate) fn node_for_remote_object_id(&mut self, object_id: &str) -> Option<NodeHandle> {
         let object_id = serde_json::to_string(object_id).ok()?;
+        let value = self.eval(&format!("globalThis[{object_id}]")).ok()?;
+        let resolver = self
+            .host_state
+            .borrow()
+            .canonical_node_identity_resolver
+            .clone()?;
         let identity = self
-            .eval(&format!(
-                "(() => {{ const value = globalThis[{object_id}]; return \
-                 value instanceof Node ? value.__id : null; }})()"
-            ))
+            .with_active_host(|context| {
+                let callable = resolver.as_callable().ok_or_else(|| {
+                    JsError::from(
+                        JsNativeError::typ()
+                            .with_message("canonical node identity resolver is not callable"),
+                    )
+                })?;
+                callable.call(&JsValue::undefined(), &[value], context)
+            })
             .ok()?
             .as_number()
             .and_then(Self::accessibility_node_identity)?;
@@ -5942,6 +5961,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(open_javascript_dialog_native),
         ),
         (
+            js_string!("__omoikane_register_canonical_node_identity"),
+            1,
+            NativeFunction::from_copy_closure(register_canonical_node_identity_native),
+        ),
+        (
             js_string!("__omoikane_performance_now"),
             0,
             NativeFunction::from_copy_closure(performance_now_native),
@@ -6710,6 +6734,27 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
             JsError::from(JsNativeError::error().with_message("host state is not active"))
         })?;
         f(&state)
+    })
+}
+
+fn register_canonical_node_identity_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let resolver = args.first().cloned().ok_or_else(|| {
+        JsError::from(
+            JsNativeError::typ().with_message("canonical node identity resolver is required"),
+        )
+    })?;
+    if resolver.as_callable().is_none() {
+        return Err(JsNativeError::typ()
+            .with_message("canonical node identity resolver must be callable")
+            .into());
+    }
+    with_host_state(|state| {
+        state.borrow_mut().canonical_node_identity_resolver = Some(resolver);
+        Ok(JsValue::undefined())
     })
 }
 
@@ -12631,13 +12676,19 @@ mod tests {
 
     #[test]
     fn accessibility_node_identities_require_in_range_integers() {
+        let maximum = 9_007_199_254_740_991.0_f64.min(usize::MAX as f64);
         assert_eq!(JsRuntime::accessibility_node_identity(42.0), Some(42));
+        assert_eq!(
+            JsRuntime::accessibility_node_identity(maximum),
+            Some(maximum as usize)
+        );
         for invalid in [
             -1.0,
             1.5,
             f64::NAN,
             f64::INFINITY,
             f64::NEG_INFINITY,
+            maximum + 1.0,
             2.0_f64.powi(usize::BITS as i32),
         ] {
             assert_eq!(JsRuntime::accessibility_node_identity(invalid), None);
