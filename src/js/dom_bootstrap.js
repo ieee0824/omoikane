@@ -5057,21 +5057,21 @@
           get customElements() {
             const document = iframe.contentDocument;
             if (!document) {
-              throw new DOMException("Blocked access to a sandboxed frame.", "SecurityError");
+              throw new DOMException("Blocked access to an unavailable frame.", "SecurityError");
             }
             return registryForDocument(document);
           },
           get localStorage() {
             const document = iframe.contentDocument;
             if (!document) {
-              throw new DOMException("Blocked access to a sandboxed frame.", "SecurityError");
+              throw new DOMException("Blocked access to an unavailable frame.", "SecurityError");
             }
             return storageForDocument("local", document, this);
           },
           get sessionStorage() {
             const document = iframe.contentDocument;
             if (!document) {
-              throw new DOMException("Blocked access to a sandboxed frame.", "SecurityError");
+              throw new DOMException("Blocked access to an unavailable frame.", "SecurityError");
             }
             return storageForDocument("session", document, this);
           },
