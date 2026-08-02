@@ -5029,8 +5029,8 @@
     }
 
     // Boa 5da9b8f miscompiles the large bootstrap when this accessor pair is
-    // reduced to a getter. Keep the setter shape, but make assignment a no-op
-    // so the reflected DOMTokenList remains readonly.
+    // reduced to a getter. Keep the setter shape, but reject assignment with
+    // TypeError so the reflected DOMTokenList remains readonly.
     set sandbox(_value) {
       throw new TypeError("HTMLIFrameElement.sandbox is readonly");
     }
