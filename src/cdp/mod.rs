@@ -1382,7 +1382,7 @@ impl CdpSession {
     }
 
     fn accessibility_get_partial_tree(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
-        let target = self.accessibility_dom_node(params, false)?;
+        let target = accessibility_tree_target(self.accessibility_dom_node(params, false)?);
         let tree = self.accessibility_tree();
         let fetch_relatives = params
             .get("fetchRelatives")
@@ -1454,7 +1454,7 @@ impl CdpSession {
         params: &Value,
     ) -> Result<Value, JsonRpcError> {
         self.require_accessibility_enabled()?;
-        let target = self.accessibility_dom_node(params, false)?;
+        let target = accessibility_tree_target(self.accessibility_dom_node(params, false)?);
         let tree = self.accessibility_tree();
         let Some(path) = tree.path_to_dom_identity(target.identity()) else {
             let reason = self
@@ -1515,14 +1515,9 @@ impl CdpSession {
     }
 
     fn accessibility_query_tree(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
-        let target = self.accessibility_dom_node(params, false)?;
+        let target = accessibility_tree_target(self.accessibility_dom_node(params, false)?);
         let accessible_name = optional_string(params, "accessibleName")?;
         let role = optional_string(params, "role")?.map(|role| role.to_ascii_lowercase());
-        let target = if target.node_type() == NodeType::DocumentFragment {
-            target.shadow_host().unwrap_or(target)
-        } else {
-            target
-        };
         let full_tree = self.accessibility_tree();
         let Some(root) = full_tree.find_by_dom_identity(target.identity()).cloned() else {
             return Ok(json!({ "nodes": [] }));
@@ -2576,6 +2571,14 @@ fn ax_parent_ids(root: &AccessibilityNode) -> HashMap<String, String> {
     let mut parent_ids = HashMap::new();
     collect(root, &mut parent_ids);
     parent_ids
+}
+
+fn accessibility_tree_target(node: NodeHandle) -> NodeHandle {
+    if node.node_type() == NodeType::DocumentFragment {
+        node.shadow_host().unwrap_or(node)
+    } else {
+        node
+    }
 }
 
 fn ax_composed_parent(node: &NodeHandle) -> Option<NodeHandle> {
@@ -5451,10 +5454,23 @@ mod tests {
                 .as_u64()
                 .unwrap()
         };
+        let host_dom_id = query_dom(&mut session, "#host");
         let target_dom_id = query_dom(&mut session, "#unassigned");
         let empty_dom_id = query_dom(&mut session, "#empty");
         let owner_dom_id = query_dom(&mut session, "#owner");
         let second_owner_dom_id = query_dom(&mut session, "#second-owner");
+        let shadow_root_object_id = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.querySelector('#host').shadowRoot",
+                    "returnByValue": false,
+                }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let full = session
             .dispatch("Accessibility.getFullAXTree", json!({}))
@@ -5468,6 +5484,21 @@ mod tests {
         assert_eq!(empty["role"]["value"], "none");
         assert!(empty.get("name").is_none());
         assert!(empty.get("properties").is_none());
+
+        let host_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": host_dom_id, "fetchRelatives": false }),
+            )
+            .unwrap();
+        let shadow_root_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "objectId": shadow_root_object_id, "fetchRelatives": false }),
+            )
+            .unwrap();
+        assert_eq!(shadow_root_partial["nodes"], host_partial["nodes"]);
+        assert_ne!(shadow_root_partial["nodes"][0]["nodeId"], "0");
 
         let partial = session
             .dispatch(
@@ -5488,6 +5519,20 @@ mod tests {
         assert!(parent_children.len() > 1);
 
         session.dispatch("Accessibility.enable", json!({})).unwrap();
+        let host_ancestors = session
+            .dispatch(
+                "Accessibility.getAXNodeAndAncestors",
+                json!({ "nodeId": host_dom_id }),
+            )
+            .unwrap();
+        let shadow_root_ancestors = session
+            .dispatch(
+                "Accessibility.getAXNodeAndAncestors",
+                json!({ "objectId": shadow_root_object_id }),
+            )
+            .unwrap();
+        assert_eq!(shadow_root_ancestors["nodes"], host_ancestors["nodes"]);
+
         let ancestors = session
             .dispatch(
                 "Accessibility.getAXNodeAndAncestors",

@@ -537,8 +537,7 @@ where
                 | "title"
                 | "source"
         );
-        let render_state = (self.render_state)(node);
-        let hidden_cause = ancestor_hidden.or({
+        let hidden_cause = ancestor_hidden.or_else(|| {
             if aria_hidden {
                 Some(HiddenCause::AriaElement)
             } else if inert {
@@ -546,7 +545,7 @@ where
             } else if html_hidden || structurally_hidden {
                 Some(HiddenCause::NotRendered)
             } else {
-                match render_state {
+                match (self.render_state)(node) {
                     AccessibilityRenderState::Rendered => None,
                     AccessibilityRenderState::NotRendered => Some(HiddenCause::NotRendered),
                     AccessibilityRenderState::NotVisible => Some(HiddenCause::NotVisible),
@@ -2097,6 +2096,32 @@ mod tests {
         assert!(hidden_nav.ignored);
         assert!(hidden_nav.children.is_empty());
         assert!(!nodes.iter().any(|node| node.name == "Private"));
+    }
+
+    #[test]
+    fn inspected_nodes_in_hidden_subtrees_skip_redundant_render_resolution() {
+        let document = HtmlTreeBuilder::parse(
+            "<html><body hidden><div id='target' role='button' aria-label='Target'></div></body></html>",
+        )
+        .document();
+        let target = document.query_selector("#target").unwrap();
+        let render_calls = std::cell::Cell::new(0);
+        let inspected = AccessibilityTree::build_inspected_node(
+            &document,
+            &target,
+            1,
+            None,
+            &AccessibilitySnapshotState::default(),
+            |_| {
+                render_calls.set(render_calls.get() + 1);
+                AccessibilityRenderState::Rendered
+            },
+        )
+        .unwrap();
+
+        assert!(inspected.ignored);
+        assert_eq!(inspected.ignored_reasons, ["notRendered"]);
+        assert_eq!(render_calls.get(), 0);
     }
 
     #[test]
