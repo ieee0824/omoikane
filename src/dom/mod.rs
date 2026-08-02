@@ -632,7 +632,11 @@ impl NodeHandle {
     }
 
     fn is_html_slot(&self) -> bool {
-        self.is_html_element() && self.tag_name().as_deref() == Some("slot")
+        matches!(
+            &self.0.borrow().data,
+            NodeData::Element(element)
+                if element.is_html() && element.local_name().eq_ignore_ascii_case("slot")
+        )
     }
 
     fn is_slottable(&self) -> bool {
