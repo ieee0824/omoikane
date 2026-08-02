@@ -491,7 +491,7 @@ fn svg_hit_geometry(
         0.0
     };
     match tag {
-        "rect" | "image" => {
+        "rect" => {
             let (x, y) = to_viewport(
                 parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0),
                 parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0),
@@ -515,6 +515,29 @@ fn svg_hit_geometry(
                 stroke,
                 bounding_box: point_in_rect(point, Rect { x, y, width, height }),
             }
+        }
+        "image" => {
+            let has_href = attribute_ref(attrs, "href")
+                .or_else(|| attribute_ref(attrs, "xlink:href"))
+                .is_some_and(|href| !href.trim().is_empty());
+            if !has_href {
+                return SvgHitGeometry::default();
+            }
+            let (x, y) = to_viewport(
+                parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0),
+                parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0),
+            );
+            let width = parse_svg_size(attribute_ref(attrs, "width"))
+                .unwrap_or(0.0)
+                .max(0.0)
+                * scale_x;
+            let height = parse_svg_size(attribute_ref(attrs, "height"))
+                .unwrap_or(0.0)
+                .max(0.0)
+                * scale_y;
+            let bounds = Rect { x, y, width, height };
+            let inside = width > 0.0 && height > 0.0 && point_in_rect(point, bounds);
+            SvgHitGeometry { fill: inside, stroke: false, bounding_box: inside }
         }
         "circle" => {
             let (cx, cy) = to_viewport(
@@ -1636,14 +1659,6 @@ fn render_svg_element(
             }
         }
         "image" => {
-            let Some(href) = attribute_value(&attrs, "href")
-                .or_else(|| attribute_value(&attrs, "xlink:href"))
-            else {
-                return;
-            };
-            let Some(image) = decode_svg_image_reference(&href) else {
-                return;
-            };
             let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0) * sx + tx;
             let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0) * sy + ty;
             let Some(width) = parse_svg_size(attribute_ref(&attrs, "width")) else {
@@ -1654,6 +1669,18 @@ fn render_svg_element(
             };
             let width = width * sx;
             let height = height * sy;
+            if width <= 0.0 || height <= 0.0 {
+                return;
+            }
+            let Some(href) = attribute_value(&attrs, "href")
+                .or_else(|| attribute_value(&attrs, "xlink:href"))
+                .filter(|href| !href.trim().is_empty())
+            else {
+                return;
+            };
+            let Some(image) = decode_svg_image_reference(&href) else {
+                return;
+            };
             let viewport = Rect { x, y, width, height };
             let destination = svg_image_destination(
                 viewport,
@@ -2892,10 +2919,17 @@ mod tests {
         let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
         assert!(image.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0));
 
-        let attrs = BTreeMap::new();
+        let mut attrs = BTreeMap::new();
+        attrs.insert("width".to_string(), "2".to_string());
+        attrs.insert("height".to_string(), "1".to_string());
         assert_eq!(
             svg_hit_geometry("image", &attrs, (0.0, 0.0), 0.0, 1.0, 1.0, (0.0, 0.0)),
             SvgHitGeometry::default(),
+        );
+        attrs.insert("href".to_string(), "pixel.png".to_string());
+        assert_eq!(
+            svg_hit_geometry("image", &attrs, (1.0, 0.5), 8.0, 1.0, 1.0, (0.0, 0.0)),
+            SvgHitGeometry { fill: true, stroke: false, bounding_box: true },
         );
     }
 

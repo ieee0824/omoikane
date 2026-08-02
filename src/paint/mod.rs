@@ -882,7 +882,11 @@ impl Canvas {
         clip: Option<Rect>,
         opacity: f32,
     ) {
-        let opacity = opacity.clamp(0.0, 1.0);
+        let opacity = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         if opacity <= 0.0 {
             return;
         }
@@ -960,7 +964,9 @@ impl Canvas {
                         a: image.pixels[source_index + 3],
                     }
                 };
-                color.a = (f32::from(color.a) * opacity).round() as u8;
+                if opacity < 1.0 {
+                    color.a = (f32::from(color.a) * opacity).round() as u8;
+                }
                 let dest_index = ((dest_y as u32 * self.width + dest_x as u32) * 4) as usize;
                 blend_pixel(&mut self.pixels[dest_index..dest_index + 4], color);
             }
