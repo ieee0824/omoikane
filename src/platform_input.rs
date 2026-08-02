@@ -206,6 +206,8 @@ impl PlatformInput {
             PlatformImeEvent::Preedit { text, selection } => {
                 let collapsed = text.encode_utf16().count();
                 let (selection_start, selection_end) = selection.unwrap_or((collapsed, collapsed));
+                let selection_start = selection_start.min(collapsed);
+                let selection_end = selection_end.min(collapsed).max(selection_start);
                 let result = session.dispatch(
                     "Input.imeSetComposition",
                     json!({
@@ -571,10 +573,12 @@ mod tests {
                 &mut session,
                 PlatformImeEvent::Preedit {
                     text: "に".into(),
-                    selection: Some((0, 1)),
+                    selection: Some((usize::MAX, 0)),
                 },
             )
             .unwrap();
+        assert_eq!(evaluate(&mut session, "field.selectionStart"), json!(2));
+        assert_eq!(evaluate(&mut session, "field.selectionEnd"), json!(2));
         input
             .key_event(
                 &mut session,
