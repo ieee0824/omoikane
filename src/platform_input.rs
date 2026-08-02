@@ -209,7 +209,7 @@ impl PlatformInput {
                 let result = session.dispatch(
                     "Input.imeSetComposition",
                     json!({
-                        "text": text,
+                        "text": &text,
                         "selectionStart": selection_start,
                         "selectionEnd": selection_end,
                     }),
@@ -637,7 +637,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(evaluate(&mut session, "field.value"), json!("é"));
-        assert_eq!(evaluate(&mut session, "ends.join(',')"), json!(""));
+        assert_eq!(
+            evaluate(&mut session, "JSON.stringify(ends)"),
+            json!(r#"[""]"#)
+        );
     }
 
     #[test]
