@@ -11508,7 +11508,13 @@
     const origin = storageOrigin(sourceDocument);
     for (const targetWindow of liveBrowsingWindows()) {
       if (targetWindow === sourceWindow) continue;
-      const targetDocument = targetWindow.document;
+      let targetDocument;
+      try {
+        targetDocument = targetWindow.document;
+      } catch (error) {
+        if (error && error.name === "SecurityError") continue;
+        throw error;
+      }
       if (!targetDocument || __omoikane_storage_origin(targetDocument.__id) !== origin) continue;
       const storageArea = storageForDocument(kind, targetDocument, targetWindow);
       targetWindow.dispatchEvent(new StorageEvent("storage", {
