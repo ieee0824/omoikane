@@ -1411,6 +1411,7 @@ impl HostState {
             self.csp_violation_keys
                 .retain(|(document_id, _, _)| *document_id != previous.document.identity());
             self.unregister_tree(&previous.document);
+            self.prune_document_sandbox();
             if let Some(loader) = self.module_loader.as_ref().and_then(Weak::upgrade) {
                 loader.clear_csp_context_for_document(previous.document.identity());
             }
@@ -1581,6 +1582,12 @@ impl HostState {
         for child in node.child_nodes() {
             self.unregister_tree(&child);
         }
+    }
+
+    fn prune_document_sandbox(&mut self) {
+        let nodes = &self.nodes;
+        self.document_sandbox
+            .retain(|document_id, _| nodes.contains_key(document_id));
     }
 
     fn get_node(&self, id: usize) -> Option<NodeHandle> {
@@ -4579,6 +4586,7 @@ impl JsRuntime {
                                     *document_id != previous.document.identity()
                                 });
                                 state.unregister_tree(&previous.document);
+                                state.prune_document_sandbox();
                                 self.module_loader
                                     .clear_csp_context_for_document(previous.document.identity());
                             }
