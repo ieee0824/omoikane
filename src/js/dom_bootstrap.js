@@ -1431,8 +1431,52 @@
     set className(value) { this.setAttribute("class", value); }
 
     get classList() {
-      if (!this.__classList) this.__classList = new DOMTokenList(this, "class");
-      return this.__classList;
+      const node = this;
+      const validate = classes => classes.map(value => {
+        const token = String(value);
+        if (token === "") throw new DOMException("The token must not be empty.", "SyntaxError");
+        if (/\s/.test(token)) throw new DOMException("The token contains whitespace.", "InvalidCharacterError");
+        return token;
+      });
+      return {
+        add(...classes) {
+          classes = validate(classes);
+          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
+          for (const cls of classes) current.add(cls);
+          node.className = [...current].join(" ");
+        },
+        remove(...classes) {
+          classes = validate(classes);
+          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
+          for (const cls of classes) current.delete(cls);
+          node.className = [...current].join(" ");
+        },
+        toggle(cls, force) {
+          [cls] = validate([cls]);
+          const current = new Set((node.className || "").split(/\s+/).filter(Boolean));
+          const has = current.has(cls);
+          if (force === undefined) {
+            has ? current.delete(cls) : current.add(cls);
+          } else if (!!force === has) {
+            return has;
+          } else if (force) {
+            current.add(cls);
+          } else {
+            current.delete(cls);
+          }
+          node.className = [...current].join(" ");
+          return current.has(cls);
+        },
+        contains(cls) {
+          return (node.className || "").split(/\s+/).filter(Boolean).includes(cls);
+        },
+        get length() {
+          return (node.className || "").split(/\s+/).filter(Boolean).length;
+        },
+        item(index) {
+          return (node.className || "").split(/\s+/).filter(Boolean)[index] || null;
+        },
+      };
     }
 
     get style() {
