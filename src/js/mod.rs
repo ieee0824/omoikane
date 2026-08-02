@@ -31665,6 +31665,37 @@ b</textarea></form>"#);
         port
     }
 
+    /// Serves a same-origin XHTML outer frame whose script creates a nested
+    /// same-origin XHTML frame. The nested script writes through `parent` so
+    /// tests can distinguish the owning child Realm from the top-level Realm.
+    fn spawn_nested_xhtml_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0u8; 4096];
+                let size = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..size]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let body = if path.ends_with("/outer.xhtml") {
+                    format!(
+                        "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>var nested=document.createElement('iframe');nested.src='http://127.0.0.1:{port}/nested.xhtml';document.body.appendChild(nested);</script></body></html>"
+                    )
+                } else {
+                    "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.document.documentElement.setAttribute('data-nested-parent','yes')</script></body></html>".to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/xhtml+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
     fn spawn_redirect_script_server() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -32908,6 +32939,94 @@ b</textarea></form>"#);
             eval_string_value(&mut runtime, "topOnly").as_deref(),
             Some("top"),
             "cross-origin parent writes must not reach the top global",
+        );
+    }
+
+    #[test]
+    fn iframe_same_origin_child_realm_binds_frame_element() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>
+                const frame = frameElement;
+                const valid = frame !== null && frame.tagName === 'IFRAME' &&
+                    frame.ownerDocument.__id === parent.document.__id &&
+                    frame.contentDocument === document && frame === frameElement;
+                document.documentElement.setAttribute('data-frame-element', String(valid));
+                frame.setAttribute('data-from-frame-element', 'yes');
+            </script></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/same.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+
+        let (child_root, iframe) = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            let child = state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("same-origin iframe must load")
+                .document
+                .clone();
+            let root = child
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("same-origin child must have a root");
+            (root, iframe)
+        };
+        assert_eq!(
+            child_root.get_attribute("data-frame-element").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            iframe.get_attribute("data-from-frame-element").as_deref(),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn nested_same_origin_child_realm_uses_owning_parent_global() {
+        use crate::html::TreeBuilder;
+        let port = spawn_nested_xhtml_server();
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="outer" src="http://127.0.0.1:{port}/outer.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+
+        let outer_root = {
+            let state = runtime.host_state.borrow();
+            let outer = state.document.query_selector("#outer").unwrap();
+            let outer_document = state
+                .iframe_documents
+                .get(&outer.identity())
+                .expect("outer iframe must load")
+                .document
+                .clone();
+            outer_document
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("outer document must have a root")
+        };
+        assert_eq!(
+            outer_root.get_attribute("data-nested-parent").as_deref(),
+            Some("yes"),
+            "nested child parent must resolve to the outer child global",
         );
     }
 
