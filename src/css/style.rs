@@ -1080,21 +1080,18 @@ enum DeclarationValidation {
 }
 
 fn is_supported_pointer_events_keyword(value: &str) -> bool {
-    let lower = value.trim().to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "auto"
-            | "none"
-            | "visiblepainted"
-            | "visiblefill"
-            | "visiblestroke"
-            | "visible"
-            | "painted"
-            | "fill"
-            | "stroke"
-            | "bounding-box"
-            | "all"
-    )
+    let value = value.trim();
+    value.eq_ignore_ascii_case("auto")
+        || value.eq_ignore_ascii_case("none")
+        || value.eq_ignore_ascii_case("visiblepainted")
+        || value.eq_ignore_ascii_case("visiblefill")
+        || value.eq_ignore_ascii_case("visiblestroke")
+        || value.eq_ignore_ascii_case("visible")
+        || value.eq_ignore_ascii_case("painted")
+        || value.eq_ignore_ascii_case("fill")
+        || value.eq_ignore_ascii_case("stroke")
+        || value.eq_ignore_ascii_case("bounding-box")
+        || value.eq_ignore_ascii_case("all")
 }
 
 /// Validates a resolved declaration value against the property's grammar.
