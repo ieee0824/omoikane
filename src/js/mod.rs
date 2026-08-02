@@ -696,7 +696,8 @@ struct AdjustedLayoutCache {
     root: LayoutBox,
 }
 
-/// Monotonic generations shared by the style, layout, and paint cache layers.
+/// Monotonic generations shared by the top-level document's style, layout, and
+/// paint cache layers.
 ///
 /// A style generation advances when computed values are invalidated by DOM
 /// changes or transition sampling; a layout generation advances when the
@@ -1624,9 +1625,9 @@ impl HostState {
     /// dropped, because layout is only maintained for the main document.
     fn mark_document_style_dirty(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
-        self.style_generation = self.style_generation.saturating_add(1);
         self.document_styles.entry(document_id).or_default().dirty = true;
         if document_id == self.document.identity() {
+            self.style_generation = self.style_generation.saturating_add(1);
             self.capture_scroll_offsets_before_layout();
             self.layout_root = None;
             self.invalidate_paint_cache();
@@ -1637,7 +1638,6 @@ impl HostState {
     /// stylesheet/rule-index portion of an existing resolver.
     fn invalidate_document_style_cache(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
-        self.style_generation = self.style_generation.saturating_add(1);
         if let Some(entry) = self.document_styles.get_mut(&document_id) {
             entry.needs_full_sample = true;
             if let Some(resolver) = entry.resolver.as_mut() {
@@ -1645,6 +1645,7 @@ impl HostState {
             }
         }
         if document_id == self.document.identity() {
+            self.style_generation = self.style_generation.saturating_add(1);
             self.capture_scroll_offsets_before_layout();
             self.layout_root = None;
             self.invalidate_paint_cache();
@@ -1768,15 +1769,13 @@ impl HostState {
                     (changed, resolver.running_transitions_require_layout())
                 })
                 .unwrap_or((false, false));
-            if time_changed {
+            if time_changed && document_id == self.document.identity() {
                 self.style_generation = self.style_generation.saturating_add(1);
-                if document_id == self.document.identity() {
-                    if requires_layout {
-                        self.capture_scroll_offsets_before_layout();
-                        self.layout_root = None;
-                    }
-                    self.invalidate_paint_cache();
+                if requires_layout {
+                    self.capture_scroll_offsets_before_layout();
+                    self.layout_root = None;
                 }
+                self.invalidate_paint_cache();
             }
             return;
         }
@@ -1968,8 +1967,8 @@ impl HostState {
         }
     }
 
-    /// Builds the paint-time geometry once per layout/scroll state and reuses
-    /// it across CSSOM geometry queries and hit tests.
+    /// Builds paint-time geometry once per tracked style/layout/paint/scroll
+    /// state and reuses it across CSSOM geometry queries and hit tests.
     fn ensure_adjusted_layout(&mut self) {
         self.ensure_layout();
         let current = (
@@ -33763,6 +33762,33 @@ b</textarea></form>"#);
         assert_eq!(rebuilt.style, invalidated.style);
         let _ = runtime.eval("target.getBoundingClientRect()").unwrap();
         assert_eq!(runtime.render_generations().paint, invalidated.paint);
+    }
+
+    #[test]
+    fn render_generations_ignore_iframe_only_style_invalidation() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><iframe id="frame"></iframe><div style="width: 10px"></div></body></html>"#,
+        );
+        runtime
+            .eval(
+                "globalThis.frame = document.getElementById('frame'); \
+                 void frame.contentDocument; document.body.getBoundingClientRect()",
+            )
+            .unwrap();
+        let main_generations = runtime.render_generations();
+
+        runtime
+            .eval(
+                "frame.contentDocument.body.style.color = 'red'; \
+                 getComputedStyle(frame.contentDocument.body).color",
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.render_generations(),
+            main_generations,
+            "iframe-only style changes must not invalidate the top-level render cache"
+        );
     }
 
     #[test]
