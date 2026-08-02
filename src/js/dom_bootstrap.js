@@ -2138,7 +2138,12 @@
       if (ownStyle.display === "none" || ownStyle.position === "fixed") return null;
 
       let fallbackBody = null;
-      for (let ancestor = this.parentNode; ancestor; ancestor = ancestor.parentNode) {
+      const composedParent = node => {
+        if (node && node.assignedSlot) return node.assignedSlot;
+        if (node && node.parentNode) return node.parentNode;
+        return node instanceof ShadowRoot ? node.host : null;
+      };
+      for (let ancestor = composedParent(this); ancestor; ancestor = composedParent(ancestor)) {
         if (ancestor.nodeType !== 1) continue;
         const style = globalThis.getComputedStyle(ancestor);
         if (style.display === "none") return null;

@@ -28091,16 +28091,25 @@ b</textarea></form>"#);
                 const fixed = document.getElementById('fixed');
                 const hiddenChild = document.getElementById('hidden-child');
                 const detached = document.createElement('div');
+                const shadowHost = document.createElement('div');
+                shadowHost.style.position = 'relative';
+                document.body.appendChild(shadowHost);
+                const shadowRoot = shadowHost.attachShadow({ mode: 'open' });
+                const slot = document.createElement('slot');
+                shadowRoot.appendChild(slot);
+                const slotted = document.createElement('div');
+                shadowHost.appendChild(slotted);
                 return [
                     child.offsetParent === positioned,
                     fixed.offsetParent === null,
                     hiddenChild.offsetParent === null,
                     detached.offsetParent === null,
+                    slotted.offsetParent === shadowHost,
                     child.offsetTop === 0 && child.offsetLeft === 0
                 ].join('|');
             })()"#,
         );
-        assert_eq!(actual, "true|true|true|true|true");
+        assert_eq!(actual, "true|true|true|true|true|true");
     }
 
     #[test]
