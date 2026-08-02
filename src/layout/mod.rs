@@ -35,7 +35,7 @@ use table::{
     table_border_spacing,
 };
 
-pub(crate) use inline::decode_or_fetch_image_asset;
+pub(crate) use inline::{canonical_image_asset_reference, decode_or_fetch_image_asset};
 pub(crate) use inline::element_inline_image;
 
 // Re-exports used by tests
