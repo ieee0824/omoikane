@@ -2078,13 +2078,24 @@ fn owner_document_for_node(node: &NodeHandle) -> Option<NodeHandle> {
 #[derive(Clone)]
 pub struct SandboxConfig {
     /// Maximum execution time per eval() call (default: 5 seconds).
+    ///
+    /// Boa's synchronous evaluator cannot be interrupted by a wall-clock
+    /// callback, so this remains the embedder-facing time budget while the
+    /// deterministic VM iteration guard below provides the hard stop.
     pub timeout: std::time::Duration,
+    /// Maximum loop iterations executed by one JavaScript evaluation.
+    ///
+    /// The Boa fork exposes this as a runtime limit. It is deliberately
+    /// deterministic and applies to synchronous and asynchronous evaluation,
+    /// preventing an infinite loop from monopolizing a page task.
+    pub max_loop_iterations: u64,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             timeout: std::time::Duration::from_secs(5),
+            max_loop_iterations: 1_000_000,
         }
     }
 }
@@ -2199,6 +2210,9 @@ impl JsRuntime {
             .module_loader(module_loader.clone())
             .host_hooks(Rc::new(BrowserHostHooks))
             .build()?;
+        context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(sandbox.max_loop_iterations);
 
         register_host_bindings(&mut context, &host_state)?;
 
@@ -2592,8 +2606,11 @@ impl JsRuntime {
     /// Evaluates JavaScript source code.
     ///
     /// Script errors are returned as `JsError`.
-    /// Note: `SandboxConfig.timeout` is stored but not yet enforced due to
-    /// boa 0.21 lacking a runtime interrupt API.
+    ///
+    /// The configured deterministic loop-iteration limit is enforced by the
+    /// Boa VM. A synchronous wall-clock interrupt is intentionally not claimed
+    /// here: callers that need cooperative cancellation should use
+    /// [`Self::eval_async`] and drop its future or cancel the owning page task.
     pub fn eval(&mut self, source: &str) -> JsResult<JsValue> {
         let result = self.with_active_host(|context| context.eval(Source::from_bytes(source)));
         // A synchronous evaluator cannot hand control to an embedder while a
@@ -17855,17 +17872,34 @@ b</textarea></form>"#);
     fn sandbox_config_has_default_timeout() {
         let config = SandboxConfig::default();
         assert_eq!(config.timeout, std::time::Duration::from_secs(5));
+        assert_eq!(config.max_loop_iterations, 1_000_000);
     }
 
     #[test]
     fn runtime_with_custom_sandbox() {
         let sandbox = SandboxConfig {
             timeout: std::time::Duration::from_secs(1),
+            max_loop_iterations: 10_000,
         };
         let doc = crate::dom::NodeHandle::document();
         let mut runtime = JsRuntime::with_document_and_sandbox(doc, sandbox).unwrap();
         let result = runtime.eval_safe("1 + 1");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sandbox_loop_limit_interrupts_non_terminating_script() {
+        let sandbox = SandboxConfig {
+            timeout: std::time::Duration::from_secs(1),
+            max_loop_iterations: 128,
+        };
+        let doc = crate::dom::NodeHandle::document();
+        let mut runtime = JsRuntime::with_document_and_sandbox(doc, sandbox).unwrap();
+        let result = runtime.eval_safe("let counter = 0; while (true) counter++;");
+        assert!(
+            result.is_err(),
+            "the deterministic VM loop limit must interrupt an infinite loop"
+        );
     }
 
     #[test]
