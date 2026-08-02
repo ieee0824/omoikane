@@ -31,6 +31,7 @@
   const nativeNodeLocalName = globalThis.__omoikane_node_local_name;
   const nativeNodeNamespaceURI = globalThis.__omoikane_node_namespace_uri;
   const nativeNodePrefix = globalThis.__omoikane_node_prefix;
+  const nativeParentNode = globalThis.__omoikane_parent_node;
   const nativeShadowHost = globalThis.__omoikane_shadow_host;
   const nativeDoctypePublicId = globalThis.__omoikane_doctype_public_id;
   const nativeDoctypeSystemId = globalThis.__omoikane_doctype_system_id;
@@ -1431,11 +1432,18 @@
     if (parentId === undefined || newId === undefined) {
       throw new IntrinsicTypeError("insertBefore requires Node arguments");
     }
-    if (refNode !== null && internalParentNode(refNode) !== parent) {
-      throw new DOMException(
-        "The reference node is not a child of this node.",
-        "NotFoundError"
-      );
+    let refId = null;
+    if (refNode !== null) {
+      refId = canonicalNodeId(refNode);
+      if (refId === undefined) {
+        throw new IntrinsicTypeError("The reference node must be a Node");
+      }
+      if (nativeParentNode(refId) !== parentId) {
+        throw new DOMException(
+          "The reference node is not a child of this node.",
+          "NotFoundError"
+        );
+      }
     }
     if (__omoikane_node_type(newId) !== 11) {
       for (let ancestor = parent; ancestor; ancestor = internalHostIncludingParent(ancestor)) {
@@ -1448,7 +1456,6 @@
       }
     }
 
-    const refId = refNode === null ? null : internalNodeId(refNode);
     const childIds = __omoikane_child_node_ids(parentId) || [];
     const previousSibling = refNode
       ? internalPreviousSibling(refNode)

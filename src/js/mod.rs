@@ -20522,6 +20522,52 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn insert_before_validates_reference_by_native_identity() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const parent = document.createElement("div");
+                const reference = parent.appendChild(document.createElement("i"));
+                const inserted = document.createElement("b");
+                const aliasParent = new Node(parent.__id);
+                const aliasResult = Node.prototype.insertBefore.call(
+                    aliasParent,
+                    inserted,
+                    reference
+                );
+
+                const primitiveCandidate = document.createElement("u");
+                let primitiveError;
+                try { parent.insertBefore(primitiveCandidate, 1); }
+                catch (error) { primitiveError = error.name; }
+
+                const forgedCandidate = document.createElement("em");
+                let forgedError;
+                try {
+                    parent.insertBefore(forgedCandidate, { __id: reference.__id });
+                } catch (error) { forgedError = error.name; }
+
+                const other = document.createElement("section");
+                const foreignReference = other.appendChild(document.createElement("span"));
+                const foreignCandidate = document.createElement("strong");
+                let foreignError;
+                try { parent.insertBefore(foreignCandidate, foreignReference); }
+                catch (error) { foreignError = error.name; }
+
+                return [
+                    aliasResult === inserted,
+                    parent.firstChild === inserted && inserted.nextSibling === reference,
+                    primitiveError === "TypeError" && primitiveCandidate.parentNode === null,
+                    forgedError === "TypeError" && forgedCandidate.parentNode === null,
+                    foreignError === "NotFoundError" && foreignCandidate.parentNode === null
+                ].every(Boolean);
+            })()"#,
+        );
+        assert_eq!(actual, "true");
+    }
+
+    #[test]
     fn fallback_slot_signaling_ignores_non_html_slot_elements() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime
