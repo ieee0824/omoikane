@@ -1775,6 +1775,19 @@ impl HostState {
         self.nodes.get(&id).cloned()
     }
 
+    /// Returns the URL base belonging to the Document that owns `node`.
+    /// Resource references created inside an iframe must resolve against that
+    /// browsing context's committed URL rather than the top-level page base.
+    fn base_url_for_document(&self, document_id: usize) -> Option<crate::http::Url> {
+        if document_id == self.document.identity() {
+            return self.base_url.clone();
+        }
+        self.iframe_documents
+            .values()
+            .find(|entry| entry.document.identity() == document_id)
+            .and_then(|entry| entry.document_url.parse().ok())
+    }
+
     fn csp_policy_for_document(&self, document: &NodeHandle) -> CspPolicy {
         self.document_csp
             .get(&document.identity())
@@ -4375,13 +4388,13 @@ impl JsRuntime {
             let mut state = self.host_state.borrow_mut();
             state.pending_resource_loads.remove(&node_id);
             state.get_node(node_id).and_then(|node| {
-                document_root_for_node(&node)?;
+                let document = document_root_for_node(&node)?;
                 let src = node.get_attribute("src")?;
                 Some((
                     node.clone(),
                     src,
                     ScriptKind::from_type_attribute(node.get_attribute("type").as_deref()),
-                    state.base_url.clone(),
+                    state.base_url_for_document(document.identity()),
                 ))
             })
         }) else {
@@ -5360,11 +5373,19 @@ impl JsRuntime {
                             .tag_name()
                             .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
                         {
+                            let document_id = document_root_for_node(&node)
+                                .map(|document| document.identity())
+                                .unwrap_or_else(|| state.document.identity());
                             node.get_attribute("src").map(|src| {
                                 let kind = ScriptKind::from_type_attribute(
                                     node.get_attribute("type").as_deref(),
                                 );
-                                (node.clone(), src, kind, state.base_url.clone())
+                                (
+                                    node.clone(),
+                                    src,
+                                    kind,
+                                    state.base_url_for_document(document_id),
+                                )
                             })
                         } else {
                             None
@@ -31712,6 +31733,42 @@ b</textarea></form>"#);
         port
     }
 
+    /// Serves an XHTML frame below `/frames/` and its relative external
+    /// script. The top-level page base is `/index.html`, so using the wrong
+    /// Realm/document base would request `/relative.js` and fail.
+    fn spawn_relative_child_script_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0u8; 4096];
+                let size = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..size]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (content_type, body) = if path.ends_with("/frames/child.xhtml") {
+                    (
+                        "application/xhtml+xml",
+                        "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>var s=document.createElement('script');s.src='relative.js';s.addEventListener('load',function(){document.documentElement.setAttribute('data-relative-load','yes')});document.head.appendChild(s)</script></body></html>".to_string(),
+                    )
+                } else if path.ends_with("/frames/relative.js") {
+                    (
+                        "text/javascript",
+                        "document.documentElement.setAttribute('data-relative-script','yes')".to_string(),
+                    )
+                } else {
+                    ("text/plain", String::new())
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
     fn spawn_redirect_script_server() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -33054,6 +33111,47 @@ b</textarea></form>"#);
         );
         assert_eq!(
             child_root.get_attribute("data-external-load").as_deref(),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn iframe_child_dynamic_script_uses_document_url_as_base() {
+        use crate::html::TreeBuilder;
+        let port = spawn_relative_child_script_server();
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/frames/child.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        pump_zero_delay_tasks(&mut runtime);
+
+        let child_root = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            let document = state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("relative child iframe must load")
+                .document
+                .clone();
+            document
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("relative child document must have a root")
+        };
+        assert_eq!(
+            child_root.get_attribute("data-relative-script").as_deref(),
+            Some("yes")
+        );
+        assert_eq!(
+            child_root.get_attribute("data-relative-load").as_deref(),
             Some("yes")
         );
     }
