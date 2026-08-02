@@ -22,7 +22,7 @@ crc32fast = "1.5"
 # compound assignment owns it (#318, #319, #320), the collection threshold the
 # profiling in #315 settled on, suspendable native host calls (#354), and
 # registered roots for native builtin temporaries (ieee0824/boa#55), including
-# the Array.filter destination root (ieee0824/boa#57).
+# the Array.prototype.filter destination root (ieee0824/boa#57).
 boa_engine = { git = "https://github.com/ieee0824/boa", rev = "ccf29f0bfdf8ef248418ea8998fbe6d45606fc3c", features = ["annex-b"] }
 boa_gc = { git = "https://github.com/ieee0824/boa", rev = "ccf29f0bfdf8ef248418ea8998fbe6d45606fc3c" }
 flate2 = "1.1"
