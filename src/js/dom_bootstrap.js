@@ -5049,7 +5049,11 @@
         this.__contentWindowFacade = {
           __listeners: new Map(),
           get document() {
-            return iframe.contentDocument;
+            const document = iframe.contentDocument;
+            if (!document) {
+              throw new DOMException("Blocked access to an unavailable frame.", "SecurityError");
+            }
+            return document;
           },
           get closed() {
             return !iframe.isConnected;
@@ -9471,9 +9475,17 @@
     visit(globalThis.document);
   };
   globalThis.customElements = registryForDocument(globalThis.document);
+  let currentScriptDocument = null;
   globalThis.__omoikane_set_current_script = function(id) {
-    globalThis.document.__currentScript =
-      id === null || id === undefined ? null : wrapNode(id);
+    if (currentScriptDocument && currentScriptDocument !== globalThis.document) {
+      currentScriptDocument.__currentScript = null;
+    }
+    const script = id === null || id === undefined ? null : wrapNode(id);
+    globalThis.document.__currentScript = script;
+    currentScriptDocument = script && script.ownerDocument;
+    if (currentScriptDocument && currentScriptDocument !== globalThis.document) {
+      currentScriptDocument.__currentScript = script;
+    }
   };
   if (globalThis.window === undefined) {
     globalThis.window = globalThis;
