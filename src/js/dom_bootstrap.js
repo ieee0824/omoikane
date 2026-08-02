@@ -46,6 +46,7 @@
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
     "mask-composite", "-webkit-mask-composite",
+    "transform-style", "backface-visibility", "mix-blend-mode", "isolation",
   ]);
   const customElementConstructionStack = [];
   const customElementDefinitionByConstructor = new Map();

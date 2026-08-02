@@ -8428,6 +8428,10 @@ fn normalize_style_value_native(
             | "-webkit-mask-mode"
             | "mask-composite"
             | "-webkit-mask-composite"
+            | "transform-style"
+            | "backface-visibility"
+            | "mix-blend-mode"
+            | "isolation"
     ) {
         crate::css::supports_declaration(&property, &value).then_some(value)
     } else {
@@ -18218,6 +18222,41 @@ b</textarea></form>"#);
             ),
             "luminance, alpha"
         );
+    }
+
+    #[test]
+    fn compositing_style_properties_validate_and_compute() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div);
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const el = document.querySelector('div');
+                const initial = getComputedStyle(el);
+                el.style.transformStyle = 'preserve-3d';
+                el.style.backfaceVisibility = 'hidden';
+                el.style.mixBlendMode = 'multiply';
+                el.style.isolation = 'isolate';
+                el.style.setProperty('transform-style', 'invalid-value');
+                return [
+                    CSS.supports('transform-style', 'preserve-3d'),
+                    CSS.supports('transform-style', 'invalid-value') === false,
+                    CSS.supports('backface-visibility', 'hidden'),
+                    CSS.supports('mix-blend-mode', 'multiply'),
+                    CSS.supports('isolation', 'isolate'),
+                    initial.transformStyle,
+                    initial.backfaceVisibility,
+                    getComputedStyle(el).transformStyle,
+                    getComputedStyle(el).backfaceVisibility,
+                    getComputedStyle(el).mixBlendMode,
+                    getComputedStyle(el).isolation
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(actual, "true|true|true|true|true|flat|visible|preserve-3d|hidden|multiply|isolate");
     }
 
     #[test]
