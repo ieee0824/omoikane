@@ -23,6 +23,7 @@ use boa_engine::object::{
     builtins::{JsArrayBuffer, JsPromise, JsUint8Array},
 };
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
+use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
@@ -786,6 +787,24 @@ struct HostState {
     /// the synchronous style resolver include their parsed text without
     /// manufacturing DOM `<style>` nodes.
     adopted_stylesheets: HashMap<usize, Vec<String>>,
+}
+
+impl Finalize for HostState {}
+
+// Values retained by the host event loop are not visible from Boa's VM root
+// provider. Keep them alive for as long as this runtime's host state owns them.
+unsafe impl Trace for HostState {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        unsafe { self.event_loop.trace(tracer) };
+        if let Some(owner) = &self.worker_owner_object {
+            unsafe { owner.trace(tracer) };
+        }
+        for channel in self.broadcast_channels.values() {
+            unsafe { channel.trace(tracer) };
+        }
+    }
+
+    fn run_finalizer(&self) {}
 }
 
 #[derive(Debug, Clone)]
@@ -1850,6 +1869,9 @@ impl Default for SandboxConfig {
 }
 
 pub struct JsRuntime {
+    // The provider must be dropped before `host_state` so it never traces a
+    // freed host allocation during teardown.
+    _host_roots_provider: RootProvider,
     context: Context,
     host_state: Rc<RefCell<HostState>>,
     module_loader: Rc<HttpModuleLoader>,
@@ -1955,19 +1977,23 @@ impl JsRuntime {
         )));
         let module_loader = Rc::new(HttpModuleLoader::default());
         host_state.borrow_mut().module_loader = Some(Rc::downgrade(&module_loader));
-        let mut context = Context::builder()
+        let context = Context::builder()
             .module_loader(module_loader.clone())
             .host_hooks(Rc::new(BrowserHostHooks))
             .build()?;
 
-        register_host_bindings(&mut context, &host_state)?;
+        let host_roots_provider = unsafe {
+            RootProvider::register(std::ptr::NonNull::from(&*host_state.borrow()))
+        };
 
         let mut runtime = Self {
+            _host_roots_provider: host_roots_provider,
             context,
             host_state,
             module_loader,
             sandbox,
         };
+        register_host_bindings(&mut runtime.context, &runtime.host_state)?;
         runtime.eval(DOM_BOOTSTRAP)?;
         // Parsed resource elements are already connected before the JS wrapper
         // exists. Queue their loads only after bootstrap so dispatch can wrap
@@ -20273,6 +20299,10 @@ b</textarea></form>"#);
             Some(0.0)
         );
 
+        // The callback is retained by the host-side timer queue rather than
+        // Boa's VM stack, so it must survive a collection before the timer
+        // fires.
+        boa_gc::force_collect();
         runtime.tick(0).unwrap();
 
         assert_eq!(
