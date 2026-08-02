@@ -6032,32 +6032,34 @@ fn computed_style_native(
             return Ok(js_string!("{}").into());
         };
         let document_id = document.identity();
-        let mut state = state.borrow_mut();
-        state.ensure_style_resolver(&document);
-        let needs_container_layout = state
-            .document_styles
-            .get(&document_id)
-            .and_then(|entry| entry.resolver.as_ref())
-            .is_some_and(StyleResolver::has_container_queries);
-        if needs_container_layout {
-            if document_id == state.document.identity() {
-                state.ensure_layout();
-            } else {
-                let viewport = state.viewport_for_document(&document);
-                let _ = state
-                    .document_styles
-                    .get_mut(&document_id)
-                    .and_then(|entry| entry.resolver.as_mut())
-                    .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
+        let json = {
+            let mut state = state.borrow_mut();
+            state.ensure_style_resolver(&document);
+            let needs_container_layout = state
+                .document_styles
+                .get(&document_id)
+                .and_then(|entry| entry.resolver.as_ref())
+                .is_some_and(StyleResolver::has_container_queries);
+            if needs_container_layout {
+                if document_id == state.document.identity() {
+                    state.ensure_layout();
+                } else {
+                    let viewport = state.viewport_for_document(&document);
+                    let _ = state
+                        .document_styles
+                        .get_mut(&document_id)
+                        .and_then(|entry| entry.resolver.as_mut())
+                        .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
+                }
             }
-        }
-        let json = match state
-            .document_styles
-            .get_mut(&document_id)
-            .and_then(|entry| entry.resolver.as_mut())
-        {
-            Some(resolver) => serialize_computed_style(&resolver.computed_style(&node)),
-            None => "{}".to_string(),
+            match state
+                .document_styles
+                .get_mut(&document_id)
+                .and_then(|entry| entry.resolver.as_mut())
+            {
+                Some(resolver) => serialize_computed_style(&resolver.computed_style(&node)),
+                None => "{}".to_string(),
+            }
         };
         Ok(js_string!(json.as_str()).into())
     })
@@ -6162,66 +6164,69 @@ fn layout_metrics_native(
             .parent_node()
             .is_some_and(|parent| parent.node_type() == NodeType::Document);
         let document = document_root_for_node(&node);
-        let mut state = state.borrow_mut();
-        let viewport = document
-            .as_ref()
-            .map(|document| state.viewport_for_document(document));
-        state.ensure_layout();
-        let current_scroll = state.window_scroll;
-        state.set_window_scroll(current_scroll.0, current_scroll.1);
-        let main_document_id = state.document.identity();
-        let is_main_document = document
-            .as_ref()
-            .is_some_and(|document| document.identity() == main_document_id);
-        // Client geometry comes from the same paint-time clone used by hit
-        // testing and rendering. Besides ordinary scroll offsets this applies
-        // `position: sticky` without changing document-coordinate layout.
-        if is_main_document {
-            state.ensure_adjusted_layout();
-        }
-        let mut metrics = LayoutMetrics::zero();
-        {
-            if let Some(root) = state.layout_root.as_ref() {
-                let mut fragments = Vec::new();
-                if let Some((layout, transform)) = find_layout_box_with_transform(
-                    root, &node, AffineTransform::identity(), &mut fragments,
-                ) {
-                    metrics = compute_transformed_layout_metrics(layout, transform);
-                } else {
-                    metrics = compute_image_fragment_metrics(fragments);
-                }
-
-                if is_main_document && let Some(painted_root) = state
-                    .adjusted_layout_cache
-                    .as_ref()
-                    .map(|cache| &cache.root)
-                {
-                    let mut painted_fragments = Vec::new();
-                    let painted = if let Some((layout, transform)) = find_layout_box_with_transform(
-                        &painted_root, &node, AffineTransform::identity(), &mut painted_fragments,
+        let metrics = {
+            let mut state = state.borrow_mut();
+            let viewport = document
+                .as_ref()
+                .map(|document| state.viewport_for_document(document));
+            state.ensure_layout();
+            let current_scroll = state.window_scroll;
+            state.set_window_scroll(current_scroll.0, current_scroll.1);
+            let main_document_id = state.document.identity();
+            let is_main_document = document
+                .as_ref()
+                .is_some_and(|document| document.identity() == main_document_id);
+            // Client geometry comes from the same paint-time clone used by hit
+            // testing and rendering. Besides ordinary scroll offsets this applies
+            // `position: sticky` without changing document-coordinate layout.
+            if is_main_document {
+                state.ensure_adjusted_layout();
+            }
+            let mut metrics = LayoutMetrics::zero();
+            {
+                if let Some(root) = state.layout_root.as_ref() {
+                    let mut fragments = Vec::new();
+                    if let Some((layout, transform)) = find_layout_box_with_transform(
+                        root, &node, AffineTransform::identity(), &mut fragments,
                     ) {
-                        compute_transformed_layout_metrics(layout, transform)
+                        metrics = compute_transformed_layout_metrics(layout, transform);
                     } else {
-                        compute_image_fragment_metrics(painted_fragments)
-                    };
-                    if painted.has_box {
-                        metrics.x = painted.x;
-                        metrics.y = painted.y;
-                        metrics.width = painted.width;
-                        metrics.height = painted.height;
-                        metrics.client_rects = painted.client_rects;
+                        metrics = compute_image_fragment_metrics(fragments);
+                    }
+
+                    if is_main_document && let Some(painted_root) = state
+                        .adjusted_layout_cache
+                        .as_ref()
+                        .map(|cache| &cache.root)
+                    {
+                        let mut painted_fragments = Vec::new();
+                        let painted = if let Some((layout, transform)) = find_layout_box_with_transform(
+                            &painted_root, &node, AffineTransform::identity(), &mut painted_fragments,
+                        ) {
+                            compute_transformed_layout_metrics(layout, transform)
+                        } else {
+                            compute_image_fragment_metrics(painted_fragments)
+                        };
+                        if painted.has_box {
+                            metrics.x = painted.x;
+                            metrics.y = painted.y;
+                            metrics.width = painted.width;
+                            metrics.height = painted.height;
+                            metrics.client_rects = painted.client_rects;
+                        }
                     }
                 }
             }
-        }
-        if is_root_element && let Some(viewport) = viewport {
-            metrics.client_width = viewport.width;
-            metrics.client_height = viewport.height;
-            metrics.client_top = 0.0;
-            metrics.client_left = 0.0;
-            metrics.scroll_width = metrics.scroll_width.max(viewport.width);
-            metrics.scroll_height = metrics.scroll_height.max(viewport.height);
-        }
+            if is_root_element && let Some(viewport) = viewport {
+                metrics.client_width = viewport.width;
+                metrics.client_height = viewport.height;
+                metrics.client_top = 0.0;
+                metrics.client_left = 0.0;
+                metrics.scroll_width = metrics.scroll_width.max(viewport.width);
+                metrics.scroll_height = metrics.scroll_height.max(viewport.height);
+            }
+            metrics
+        };
         Ok(js_string!(metrics.to_json().as_str()).into())
     })
 }
@@ -6237,7 +6242,10 @@ fn element_scroll_offset_native(
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let (x, y) = match node {
-            Some(node) => state.borrow_mut().element_scroll_offset(&node),
+            Some(node) => {
+                let mut state = state.borrow_mut();
+                state.element_scroll_offset(&node)
+            }
             None => (0.0, 0.0),
         };
         let json = format!("{{\"x\":{},\"y\":{}}}", json_number(x), json_number(y));
@@ -6276,12 +6284,14 @@ fn window_scroll_offset_native(
     _: &mut Context,
 ) -> JsResult<JsValue> {
     with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let current = state.window_scroll;
-        if current != (0.0, 0.0) {
-            state.set_window_scroll(current.0, current.1);
-        }
-        let (x, y) = state.window_scroll;
+        let (x, y) = {
+            let mut state = state.borrow_mut();
+            let current = state.window_scroll;
+            if current != (0.0, 0.0) {
+                state.set_window_scroll(current.0, current.1);
+            }
+            state.window_scroll
+        };
         let json = format!("{{\"x\":{},\"y\":{}}}", json_number(x), json_number(y));
         Ok(js_string!(json).into())
     })
@@ -6861,22 +6871,24 @@ fn take_transition_events_native(
     _: &mut Context,
 ) -> JsResult<JsValue> {
     with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let events = state
-            .document_styles
-            .values_mut()
-            .filter_map(|entry| entry.resolver.as_mut())
-            .flat_map(StyleResolver::take_transition_events)
-            .map(|event| {
-                serde_json::json!({
-                    "nodeId": event.node_id,
-                    "type": event.event_type,
-                    "propertyName": event.property_name,
-                    "elapsedTime": event.elapsed_time,
-                    "pseudoElement": "",
+        let events = {
+            let mut state = state.borrow_mut();
+            state
+                .document_styles
+                .values_mut()
+                .filter_map(|entry| entry.resolver.as_mut())
+                .flat_map(StyleResolver::take_transition_events)
+                .map(|event| {
+                    serde_json::json!({
+                        "nodeId": event.node_id,
+                        "type": event.event_type,
+                        "propertyName": event.property_name,
+                        "elapsedTime": event.elapsed_time,
+                        "pseudoElement": "",
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        };
         Ok(js_string!(serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string())).into())
     })
 }
@@ -7799,7 +7811,7 @@ fn websocket_connect_native(
     let protocols: Vec<String> = serde_json::from_str(&protocols_json).map_err(|_| {
         JsError::from(JsNativeError::typ().with_message("invalid WebSocket protocols"))
     })?;
-    with_host_state(|state| {
+    let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let document = state.document.clone();
         if !state
@@ -7830,8 +7842,9 @@ fn websocket_connect_native(
         let id = state.next_websocket_id;
         state.next_websocket_id = state.next_websocket_id.saturating_add(1);
         state.websocket_clients.insert(id, WebSocketConnection { client, incoming });
-        Ok(js_string!(serde_json::json!({"id": id, "protocol": protocol}).to_string()).into())
-    })
+        Ok(serde_json::json!({"id": id, "protocol": protocol}).to_string())
+    })?;
+    Ok(js_string!(payload).into())
 }
 
 fn websocket_send_native(
@@ -7900,7 +7913,7 @@ fn event_source_fetch_native(
     let url = string_argument(args.first(), "", context)?;
     let last_event_id = string_argument(args.get(1), "", context)?;
     let with_credentials = args.get(2).is_some_and(JsValue::to_boolean);
-    with_host_state(|state| {
+    let body = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let parsed = url.parse::<crate::http::Url>()
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
@@ -7942,8 +7955,9 @@ fn event_source_fetch_native(
         if !content_type.to_ascii_lowercase().starts_with("text/event-stream") {
             return Err(JsNativeError::error().with_message("EventSource response must be text/event-stream").into());
         }
-        Ok(js_string!(String::from_utf8_lossy(fetched.response.body()).as_ref()).into())
-    })
+        Ok(String::from_utf8_lossy(fetched.response.body()).into_owned())
+    })?;
+    Ok(js_string!(body).into())
 }
 
 fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -8016,7 +8030,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         }
     };
 
-    with_host_state(|state| {
+    let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let parsed_url = url.parse::<crate::http::Url>().map_err(|error| {
             JsError::from(JsNativeError::typ().with_message(error.to_string()))
@@ -8118,8 +8132,9 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             "bodyBase64": body_base64,
         })
         .to_string();
-        Ok(js_string!(payload.as_str()).into())
-    })
+        Ok(payload)
+    })?;
+    Ok(js_string!(payload.as_str()).into())
 }
 
 /// `__omoikane_csp_violations(documentId)` exposes the enforced violations
