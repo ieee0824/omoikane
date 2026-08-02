@@ -256,6 +256,9 @@
     });
   }
 
+  // Share one ASCII fold between native wrapper classification and the legacy
+  // insert-adjacent position parser. Captured intrinsics keep both paths
+  // independent of page changes to String and its prototype.
   function asciiLowercase(value) {
     let result = "";
     for (let index = 0; index < value.length; index += 1) {
@@ -2959,20 +2962,6 @@
       throw new IntrinsicTypeError("Cannot convert a Symbol value to a string");
     }
     return intrinsicString(value);
-  }
-
-  // DOM's legacy insert-adjacent APIs compare `where` using an ASCII
-  // case-insensitive match. Do the fold from captured intrinsics so page code
-  // cannot change the accepted positions through String.prototype poisoning.
-  function asciiLowercase(value) {
-    let output = "";
-    for (let index = 0; index < value.length; index++) {
-      const code = stringCharCodeAt(value, index);
-      output += code >= 0x41 && code <= 0x5a
-        ? stringFromCharCode(code + 0x20)
-        : value[index];
-    }
-    return output;
   }
 
   function elementNodeDocument(element) {
