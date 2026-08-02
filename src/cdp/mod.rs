@@ -672,6 +672,10 @@ pub struct CdpSession {
     node_to_id: HashMap<usize, u64>,
     id_to_node: HashMap<u64, NodeHandle>,
     next_object_id: u64,
+    /// Document generation which owns each live Runtime remote-object handle.
+    /// Cross-document commits clear the table; same-document history changes
+    /// intentionally preserve it.
+    remote_object_generations: HashMap<String, u64>,
     next_browser_context_id: u64,
     browser_context_ids: Vec<String>,
     pending_events: Vec<CdpEvent>,
@@ -744,6 +748,7 @@ impl CdpSession {
             node_to_id: HashMap::new(),
             id_to_node: HashMap::new(),
             next_object_id: 0,
+            remote_object_generations: HashMap::new(),
             next_browser_context_id: 0,
             browser_context_ids: Vec::new(),
             pending_events: Vec::new(),
@@ -1326,9 +1331,11 @@ impl CdpSession {
             .get("returnByValue")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let object_expr = params
-            .get("objectId")
-            .and_then(Value::as_str)
+        let object_id = params.get("objectId").and_then(Value::as_str);
+        if let Some(object_id) = object_id {
+            self.validate_remote_object(object_id)?;
+        }
+        let object_expr = object_id
             .map(|id| format!("globalThis[{id:?}]"))
             .unwrap_or_else(|| "undefined".to_string());
         let argument_expr = params
@@ -1337,7 +1344,12 @@ impl CdpSession {
             .map(|arguments| {
                 arguments
                     .iter()
-                    .map(argument_to_js)
+                    .map(|argument| {
+                        if let Some(object_id) = argument.get("objectId").and_then(Value::as_str) {
+                            self.validate_remote_object(object_id)?;
+                        }
+                        argument_to_js(argument)
+                    })
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?
@@ -1351,6 +1363,20 @@ impl CdpSession {
         let result = self.evaluate_expression(&expression, return_by_value)?;
         self.drive_navigation_requests()?;
         Ok(result)
+    }
+
+    fn validate_remote_object(&self, object_id: &str) -> Result<(), JsonRpcError> {
+        if self
+            .remote_object_generations
+            .get(object_id)
+            .is_some_and(|generation| *generation == self.document_generation)
+        {
+            return Ok(());
+        }
+        Err(JsonRpcError {
+            code: -32000,
+            message: format!("Could not find object with given id: {object_id}"),
+        })
     }
 
     fn target_create_browser_context(&mut self) -> Value {
@@ -1629,14 +1655,21 @@ impl CdpSession {
         value: JsValue,
         return_by_value: bool,
     ) -> Result<Value, JsonRpcError> {
-        let serialization_function = if return_by_value {
-            "value => JSON.stringify({ result: __cdpSerializeValue(value) })".to_string()
+        let remote_object_id = if return_by_value {
+            None
         } else {
             let object_id = format!("__cdp_object_{}", self.next_object_id);
-            self.next_object_id += 1;
-            format!(
+            self.next_object_id = self.next_object_id.checked_add(1).ok_or(JsonRpcError {
+                code: -32000,
+                message: "Runtime remote object id space exhausted".to_string(),
+            })?;
+            Some(object_id)
+        };
+        let serialization_function = match remote_object_id.as_ref() {
+            None => "value => JSON.stringify({ result: __cdpSerializeValue(value) })".to_string(),
+            Some(object_id) => format!(
                 "value => {{ globalThis[{object_id:?}] = value; return JSON.stringify({{ result: __cdpRemoteObject(value, {object_id:?}) }}); }}"
-            )
+            ),
         };
         let raw = self
             .runtime
@@ -1653,10 +1686,16 @@ impl CdpSession {
                 message: "Runtime evaluation did not return a string payload".to_string(),
             })?
             .to_std_string_escaped();
-        let result = serde_json::from_str(&payload).map_err(|error| JsonRpcError {
+        let result: Value = serde_json::from_str(&payload).map_err(|error| JsonRpcError {
             code: -32000,
             message: error.to_string(),
         })?;
+        if let Some(object_id) = remote_object_id
+            && result["result"]["objectId"].as_str() == Some(object_id.as_str())
+        {
+            self.remote_object_generations
+                .insert(object_id, self.document_generation);
+        }
         Ok(result)
     }
 
@@ -1782,6 +1821,7 @@ impl CdpSession {
         self.drag_candidate = false;
         self.drag_active = false;
         self.document_generation = self.document_generation.saturating_add(1);
+        self.remote_object_generations.clear();
         self.current_url = url.to_string();
         self.last_html = html.to_string();
         self.rebuild_node_index();
@@ -1875,6 +1915,7 @@ impl CdpSession {
         self.drag_candidate = false;
         self.drag_active = false;
         self.document_generation = pending.generation;
+        self.remote_object_generations.clear();
         self.current_url = pending.url;
         self.last_html = pending.html;
         self.rebuild_node_index();
@@ -4483,6 +4524,93 @@ mod tests {
             .unwrap();
 
         assert_eq!(called["result"]["value"], 6);
+    }
+
+    #[test]
+    fn remote_objects_survive_same_document_history_but_expire_on_document_commit() {
+        let mut session = CdpSession::new().unwrap();
+        let object = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "({ count: 7 })",
+                    "returnByValue": false,
+                }),
+            )
+            .unwrap();
+        let object_id = object["result"]["objectId"].as_str().unwrap().to_string();
+        let initial_generation = session.document_generation;
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "history.pushState({ same: true }, '')" }),
+            )
+            .unwrap();
+        assert_eq!(session.document_generation, initial_generation);
+        let same_document_call = session
+            .dispatch(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": "function() { return this.count; }",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(same_document_call["result"]["value"], 7);
+
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<p>replacement</p>" }),
+            )
+            .unwrap();
+        let stale = session
+            .dispatch(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": "function() { return this.count; }",
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(stale.code, -32000);
+        assert_eq!(
+            stale.message,
+            format!("Could not find object with given id: {object_id}")
+        );
+
+        let replacement = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "({ fresh: true })",
+                    "returnByValue": false,
+                }),
+            )
+            .unwrap();
+        let replacement_id = replacement["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        session.dispatch("Page.reload", json!({})).unwrap();
+        let stale_argument = session
+            .dispatch(
+                "Runtime.callFunctionOn",
+                json!({
+                    "functionDeclaration": "function(value) { return value; }",
+                    "arguments": [{ "objectId": replacement_id }],
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(stale_argument.code, -32000);
+        assert_eq!(
+            stale_argument.message,
+            format!("Could not find object with given id: {replacement_id}")
+        );
+        assert!(session.remote_object_generations.is_empty());
     }
 
     #[test]
