@@ -1687,12 +1687,88 @@ fn hit_test_box(
             }
         }
     }
+    // Inline SVG is represented by one replaced layout box for painting, but
+    // pointer events still target its child geometry.  Resolve the child hit
+    // before line fragments return the SVG viewport element itself.
+    if layout.node.tag_name().as_deref() == Some("svg") {
+        // SVG is painted by the inline-image path into the fragment's content
+        // box.  Use that exact destination when available so padding and
+        // borders remain click-through instead of being mapped into the SVG
+        // viewBox.  The layout content box is a safe fallback for boxes that
+        // do not carry an inline image fragment (e.g. an empty SVG).
+        let svg_box = layout
+            .lines
+            .iter()
+            .flat_map(|line| line.fragments.iter())
+            .find_map(|fragment| match &fragment.content {
+                InlineFragmentContent::Image(_, fragment_style)
+                    if fragment.node.identity() == layout.node.identity() =>
+                {
+                    let border = EdgeSizesForPaint::from_style(fragment_style);
+                    Some(inline_fragment_content_rect(fragment.rect, fragment_style, border))
+                }
+                _ => None,
+            })
+            .unwrap_or(layout.dimensions.content);
+        if rect_contains_point(svg_box, local_point.0, local_point.1) {
+            let local_x = local_point.0 - svg_box.x;
+            let local_y = local_point.1 - svg_box.y;
+            let mut computed_pointer_events = |node: &NodeHandle| {
+                match resolver.computed_property(node, "pointer-events") {
+                    Some(ComputedValue::Keyword(value)) => Some(value),
+                    _ => None,
+                }
+            };
+            if let Some(target) = crate::svg::hit_test_svg(
+                &layout.node,
+                local_x,
+                local_y,
+                svg_box.width,
+                svg_box.height,
+                &mut computed_pointer_events,
+            ) {
+                return Some(target);
+            }
+        }
+    }
     for line in layout.lines.iter().rev() {
         for fragment in line.fragments.iter().rev() {
             if rect_contains_point(fragment.rect, local_point.0, local_point.1) {
+                if fragment.node.identity() != layout.node.identity()
+                    && fragment.node.tag_name().as_deref() == Some("svg")
+                {
+                    let svg_box = match &fragment.content {
+                        InlineFragmentContent::Image(_, fragment_style) => {
+                            let border = EdgeSizesForPaint::from_style(fragment_style);
+                            inline_fragment_content_rect(fragment.rect, fragment_style, border)
+                        }
+                        _ => fragment.rect,
+                    };
+                    if rect_contains_point(svg_box, local_point.0, local_point.1) {
+                        let local_x = local_point.0 - svg_box.x;
+                        let local_y = local_point.1 - svg_box.y;
+                        let mut computed_pointer_events = |node: &NodeHandle| {
+                            match resolver.computed_property(node, "pointer-events") {
+                                Some(ComputedValue::Keyword(value)) => Some(value),
+                                _ => None,
+                            }
+                        };
+                        if let Some(target) = crate::svg::hit_test_svg(
+                            &fragment.node,
+                            local_x,
+                            local_y,
+                            svg_box.width,
+                            svg_box.height,
+                            &mut computed_pointer_events,
+                        ) {
+                            return Some(target);
+                        }
+                    }
+                }
                 let target = event_target_element(&fragment.node)?;
-                let target_style = resolver.computed_style(&target);
-                if accepts_pointer_events(&target_style) {
+                if accepts_pointer_events_value(
+                    resolver.computed_property(&target, "pointer-events"),
+                ) {
                     return Some(target);
                 }
             }
@@ -1714,10 +1790,14 @@ fn hit_test_box(
 }
 
 fn accepts_pointer_events(style: &ComputedStyle) -> bool {
-    !matches!(
-        style.get("pointer-events"),
-        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
-    )
+    accepts_pointer_events_value(style.get("pointer-events").cloned())
+}
+
+fn accepts_pointer_events_value(value: Option<ComputedValue>) -> bool {
+    match value {
+        Some(ComputedValue::Keyword(value)) => !value.eq_ignore_ascii_case("none"),
+        _ => true,
+    }
 }
 
 fn event_target_element(node: &NodeHandle) -> Option<NodeHandle> {

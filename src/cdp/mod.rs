@@ -4744,6 +4744,163 @@ mod tests {
     }
 
     #[test]
+    fn mouse_hit_test_respects_pointer_events_and_svg_geometry() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><head><style>*{margin:0}#back,#overlay{position:absolute;left:0;top:0;width:120px;height:80px}#back{background:gray}#overlay{background:red;pointer-events:none}#icon{position:absolute;left:130px;top:0;width:100px;height:100px;pointer-events:none}#shape{pointer-events:fill}</style></head><body>
+                    <div id="back"></div><div id="overlay"></div>
+                    <svg id="icon" width="100" height="100" viewBox="0 0 100 100">
+                      <rect id="base" x="0" y="0" width="100" height="100" fill="red" pointer-events="none"></rect>
+                      <rect id="shape" x="20" y="20" width="30" height="30" fill="blue"></rect>
+                      <rect id="stroke" x="60" y="20" width="30" height="30" fill="none" stroke="green" stroke-width="4" pointer-events="stroke"></rect>
+                      <g id="inherited" stroke-width="10">
+                        <line id="wide" x1="10" y1="70" x2="90" y2="70" fill="none" stroke="green" pointer-events="stroke"></line>
+                      </g>
+                      <circle id="bounds" cx="70" cy="70" r="10" fill="none" pointer-events="bounding-box"></circle>
+                    </svg>
+                    <script>
+                      globalThis.targets=[];
+                      document.addEventListener('click',e=>targets.push(e.target.id||e.target.localName));
+                    </script>
+                </body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        for (x, y) in [(10, 10), (155, 35), (190, 35), (140, 66), (190, 60)] {
+            session
+                .dispatch(
+                    "Input.dispatchMouseEvent",
+                    json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1}),
+                )
+                .unwrap();
+            session
+                .dispatch(
+                    "Input.dispatchMouseEvent",
+                    json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0}),
+                )
+                .unwrap();
+        }
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "JSON.stringify({targets,none:getComputedStyle(document.getElementById('overlay')).pointerEvents})",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            state["result"]["value"],
+            r#"{"targets":["back","shape","stroke","wide","bounds"],"none":"none"}"#
+        );
+    }
+
+    #[test]
+    fn mouse_hit_test_maps_svg_children_to_the_painted_content_box() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><head><style>*{margin:0}#back{position:absolute;left:0;top:0;width:240px;height:180px;background:gray}#icon{position:absolute;left:20px;top:20px;width:100px;height:100px;padding:10px;border:5px solid black;pointer-events:none}</style></head><body>
+                    <div id="back"></div>
+                    <svg id="icon" width="100" height="100" viewBox="0 0 100 100">
+                      <rect id="shape" x="0" y="0" width="100" height="100" fill="blue" pointer-events="fill"></rect>
+                    </svg>
+                    <script>
+                      globalThis.targets=[];
+                      document.addEventListener('click',e=>targets.push(e.target.id||e.target.localName));
+                    </script>
+                </body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+
+        let bounds = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "(()=>{const r=document.getElementById('icon').getBoundingClientRect();return JSON.stringify([r.x,r.y,r.width,r.height])})()",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        let bounds: Vec<f32> = serde_json::from_str(
+            bounds["result"]["value"].as_str().expect("SVG bounds JSON"),
+        )
+        .unwrap();
+        assert_eq!(bounds.len(), 4);
+        for (x, y) in [
+            (bounds[0] + 2.0, bounds[1] + bounds[3] / 2.0),
+            (bounds[0] + bounds[2] / 2.0, bounds[1] + bounds[3] / 2.0),
+        ] {
+            session
+                .dispatch(
+                    "Input.dispatchMouseEvent",
+                    json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1}),
+                )
+                .unwrap();
+            session
+                .dispatch(
+                    "Input.dispatchMouseEvent",
+                    json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0}),
+                )
+                .unwrap();
+        }
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression":"JSON.stringify(targets)","returnByValue":true}),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], r#"["back","shape"]"#);
+    }
+
+    #[test]
+    fn mouse_hit_test_targets_geometry_painted_through_svg_use() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r##"<html><body><svg id="icon" width="100" height="100" viewBox="0 0 100 100">
+                    <defs><rect id="template" x="0" y="0" width="20" height="20" fill="blue"></rect></defs>
+                    <use id="instance" href="#template" x="40" y="40" pointer-events="fill"></use>
+                    <use id="blocked" href="#template" x="40" y="40" pointer-events="none"></use>
+                    <script>globalThis.targets=[];document.addEventListener('click',e=>targets.push(e.target.id||e.target.localName));</script>
+                </svg></body></html>"##,
+                1,
+                "null",
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mousePressed","x":50,"y":50,"button":"left","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseReleased","x":50,"y":50,"button":"left","buttons":0}),
+            )
+            .unwrap();
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression":"JSON.stringify({targets,instancePE:getComputedStyle(document.getElementById('instance')).pointerEvents,blockedPE:getComputedStyle(document.getElementById('blocked')).pointerEvents,href:document.getElementById('instance').getAttribute('href')})","returnByValue":true}),
+            )
+            .unwrap();
+        assert_eq!(
+            state["result"]["value"],
+            r##"{"targets":["instance"],"instancePE":"fill","blockedPE":"none","href":"#template"}"##,
+        );
+    }
+
+    #[test]
     fn keyboard_input_targets_the_focused_element_with_cdp_fields() {
         let mut session = CdpSession::new().unwrap();
         session

@@ -541,6 +541,21 @@ impl StyleResolver {
         style
     }
 
+    /// Resolves one computed property without cloning the complete style map
+    /// when the node is already cached.  Hot hit-test paths only need a single
+    /// value, such as `pointer-events`.
+    pub fn computed_property(
+        &mut self,
+        node: &NodeHandle,
+        name: &str,
+    ) -> Option<ComputedValue> {
+        let key = node.identity();
+        if let Some(style) = self.cache.get(&key) {
+            return style.get(name).cloned();
+        }
+        self.computed_style(node).get(name).cloned()
+    }
+
     /// Resolves computed style for a pseudo-element attached to `node`.
     pub fn computed_pseudo_style(
         &mut self,
@@ -1064,6 +1079,21 @@ enum DeclarationValidation {
     Unvalidated,
 }
 
+fn is_supported_pointer_events_keyword(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("auto")
+        || value.eq_ignore_ascii_case("none")
+        || value.eq_ignore_ascii_case("visiblepainted")
+        || value.eq_ignore_ascii_case("visiblefill")
+        || value.eq_ignore_ascii_case("visiblestroke")
+        || value.eq_ignore_ascii_case("visible")
+        || value.eq_ignore_ascii_case("painted")
+        || value.eq_ignore_ascii_case("fill")
+        || value.eq_ignore_ascii_case("stroke")
+        || value.eq_ignore_ascii_case("bounding-box")
+        || value.eq_ignore_ascii_case("all")
+}
+
 /// Validates a resolved declaration value against the property's grammar.
 ///
 /// This is the single extension point for per-property value validation.
@@ -1369,22 +1399,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return match value {
             Value::Keyword(keyword) => {
                 let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(
-                        lower.as_str(),
-                        "auto"
-                            | "none"
-                            | "visiblepainted"
-                            | "visiblefill"
-                            | "visiblestroke"
-                            | "visible"
-                            | "painted"
-                            | "fill"
-                            | "stroke"
-                            | "bounding-box"
-                            | "all"
-                    )
-                {
+                if is_css_wide_keyword(&lower) || is_supported_pointer_events_keyword(&lower) {
                     DeclarationValidation::Valid(ComputedValue::Keyword(lower))
                 } else {
                     DeclarationValidation::Invalid
@@ -4579,6 +4594,36 @@ fn divide_calc_quantities(left: CalcQuantity, right: CalcQuantity) -> Option<Cal
     })
 }
 
+fn is_svg_element_for_presentational_hints(node: &NodeHandle) -> bool {
+    if node.namespace_uri().as_deref() == Some("http://www.w3.org/2000/svg") {
+        return true;
+    }
+    let Some(tag) = node.tag_name().map(|name| name.to_ascii_lowercase()) else {
+        return false;
+    };
+    if !matches!(
+        tag.as_str(),
+        "svg" | "g" | "rect" | "circle" | "ellipse" | "line"
+            | "polyline" | "polygon" | "path" | "text" | "tspan" | "textpath" | "use"
+    ) {
+        return false;
+    }
+    let mut current = Some(node.clone());
+    while let Some(candidate) = current {
+        let tag = candidate
+            .tag_name()
+            .map(|name| name.to_ascii_lowercase());
+        if tag.as_deref() == Some("foreignobject") {
+            return false;
+        }
+        if tag.as_deref() == Some("svg") {
+            return true;
+        }
+        current = candidate.parent_node();
+    }
+    false
+}
+
 fn apply_presentational_hints(
     node: &NodeHandle,
     properties: &mut BTreeMap<String, ComputedValue>,
@@ -4589,6 +4634,29 @@ fn apply_presentational_hints(
     }
 
     let attributes = node.attributes().unwrap_or_default();
+
+    // SVG presentation attributes participate in the CSS cascade below author
+    // declarations. Expose pointer-events through computed style so hit
+    // testing can distinguish a local attribute from an inherited value and
+    // still honor explicit CSS overrides, including `auto`.
+    let is_svg_element = is_svg_element_for_presentational_hints(node);
+    if is_svg_element
+        && !properties.contains_key("pointer-events")
+        && let Some(value) = attributes
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("pointer-events"))
+            .map(|(_, value)| value.trim())
+            .filter(|value| !value.is_empty())
+            .filter(|value| {
+                let lower = value.to_ascii_lowercase();
+                is_css_wide_keyword(&lower) || is_supported_pointer_events_keyword(&lower)
+            })
+    {
+        properties.insert(
+            "pointer-events".to_string(),
+            ComputedValue::Keyword(value.to_ascii_lowercase()),
+        );
+    }
 
     if !properties.contains_key("background-color")
         && let Some(background) = attributes
