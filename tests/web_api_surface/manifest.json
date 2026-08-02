@@ -9,6 +9,14 @@
       "baseline_supported": true
     },
     {
+      "id": "cssom.offset-parent",
+      "area": "layout",
+      "description": "HTMLElement.offsetParent resolves positioned ancestors and hidden boxes",
+      "setup": "globalThis.__offsetParentHost = document.createElement('div'); __offsetParentHost.style.position = 'relative'; globalThis.__offsetParentChild = document.createElement('div'); __offsetParentHost.appendChild(__offsetParentChild); document.body.appendChild(__offsetParentHost)",
+      "probe": "__offsetParentChild.offsetParent === __offsetParentHost && document.createElement('div').offsetParent === null",
+      "baseline_supported": false
+    },
+    {
       "id": "css.selector-list-pseudos",
       "area": "css",
       "description": ":is(), :where(), and selector-list :not() share Selectors Level 4 matching",
