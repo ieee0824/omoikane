@@ -6046,10 +6046,11 @@ mod tests {
             .dispatch(
                 "Runtime.evaluate",
                 json!({
-                    "expression": "globalThis.__cdp_object_0 = { count: 99 }; delete globalThis.__cdp_object_0"
+                    "expression": "globalThis.__cdp_object_0 = { count: 99 }; delete globalThis.__cdp_object_0; Object.prototype.__cdp_object_0 = { count: 777 }"
                 }),
             )
             .unwrap();
+        boa_gc::force_collect();
 
         let called = session
             .dispatch(
@@ -6064,6 +6065,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(called["result"]["value"], 6);
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "delete Object.prototype.__cdp_object_0" }),
+            )
+            .unwrap();
 
         let multiplier = session
             .dispatch(
