@@ -823,6 +823,10 @@ struct HostState {
     /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
     /// returns their native node identity.
     canonical_node_identity_resolver: Option<JsValue>,
+    /// CDP remote object handles are retained by the host rather than by a
+    /// page-visible global property.  Keeping these values in HostState also
+    /// lets the runtime root provider trace them across Boa collections.
+    remote_objects: HashMap<String, JsValue>,
     console_logs: Vec<String>,
     /// Errors raised by page script while an event-loop task ran.
     ///
@@ -985,6 +989,9 @@ unsafe impl Trace for HostState {
         unsafe { self.event_loop.trace(tracer) };
         if let Some(resolver) = &self.canonical_node_identity_resolver {
             unsafe { resolver.trace(tracer) };
+        }
+        for value in self.remote_objects.values() {
+            unsafe { value.trace(tracer) };
         }
         if let Some(owner) = &self.worker_owner_object {
             unsafe { owner.trace(tracer) };
@@ -1347,6 +1354,7 @@ impl HostState {
             document: document.clone(),
             nodes: HashMap::new(),
             canonical_node_identity_resolver: None,
+            remote_objects: HashMap::new(),
             console_logs: Vec::new(),
             task_errors: Vec::new(),
             suppressed_task_errors: 0,
@@ -2562,10 +2570,36 @@ impl JsRuntime {
         .and_then(Self::accessibility_node_identity)
     }
 
+    /// Retains a CDP remote object in the host-side registry.
+    pub(crate) fn retain_remote_object(&mut self, object_id: String, value: JsValue) {
+        self.host_state
+            .borrow_mut()
+            .remote_objects
+            .insert(object_id, value);
+    }
+
+    /// Returns a clone of a CDP remote object from the host-side registry.
+    pub(crate) fn remote_object(&self, object_id: &str) -> Option<JsValue> {
+        self.host_state
+            .borrow()
+            .remote_objects
+            .get(object_id)
+            .cloned()
+    }
+
+    /// Releases a CDP remote object. Unknown handles are intentionally
+    /// idempotent, matching the CDP release operation's lifecycle semantics.
+    pub(crate) fn release_remote_object(&mut self, object_id: &str) -> bool {
+        self.host_state
+            .borrow_mut()
+            .remote_objects
+            .remove(object_id)
+            .is_some()
+    }
+
     /// Resolves a Runtime remote object when it is a live DOM Node wrapper.
     pub(crate) fn node_for_remote_object_id(&mut self, object_id: &str) -> Option<NodeHandle> {
-        let object_id = serde_json::to_string(object_id).ok()?;
-        let value = self.eval(&format!("globalThis[{object_id}]")).ok()?;
+        let value = self.remote_object(object_id)?;
         let resolver = self
             .host_state
             .borrow()
@@ -3086,6 +3120,29 @@ impl JsRuntime {
         // This helper is a synchronous execution boundary. If a serializer
         // getter/toJSON attempts to open a modal dialog, Boa rejects the
         // suspension; discard the corresponding host metadata on every exit.
+        self.host_state.borrow_mut().pending_javascript_dialog = None;
+        result
+    }
+
+    /// Calls a JavaScript function with host-provided `this` and argument
+    /// values.  CDP uses this boundary for remote object handles so page code
+    /// never needs a global lookup to recover a retained object.
+    pub(crate) fn call_function_with_arguments(
+        &mut self,
+        function_source: &str,
+        this_value: JsValue,
+        arguments: Vec<JsValue>,
+    ) -> JsResult<JsValue> {
+        let result = self.with_active_host(|context| {
+            let function_source = format!("({function_source})");
+            let function = context.eval(Source::from_bytes(&function_source))?;
+            let callable = function.as_callable().ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::typ().with_message("CDP function declaration is not callable"),
+                )
+            })?;
+            callable.call(&this_value, &arguments, context)
+        });
         self.host_state.borrow_mut().pending_javascript_dialog = None;
         result
     }

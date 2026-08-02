@@ -802,6 +802,7 @@ impl CdpSession {
             "Accessibility.queryAXTree" => self.accessibility_query_tree(&params),
             "Runtime.evaluate" => self.runtime_evaluate(&params),
             "Runtime.callFunctionOn" => self.runtime_call_function_on(&params),
+            "Runtime.releaseObject" => self.runtime_release_object(&params),
             "Target.createBrowserContext" => Ok(self.target_create_browser_context()),
             "Target.getBrowserContexts" => Ok(self.target_get_browser_contexts()),
             "Target.disposeBrowserContext" => self.target_dispose_browser_context(&params),
@@ -1815,31 +1816,59 @@ impl CdpSession {
             .get("returnByValue")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let object_expr = params
-            .get("objectId")
-            .and_then(Value::as_str)
-            .map(|id| format!("globalThis[{id:?}]"))
-            .unwrap_or_else(|| "undefined".to_string());
-        let argument_expr = params
+
+        let this_value = match params.get("objectId").and_then(Value::as_str) {
+            Some(object_id) => self.runtime.remote_object(object_id).ok_or_else(|| {
+                JsonRpcError {
+                    code: -32000,
+                    message: format!("Cannot find remote object: {object_id}"),
+                }
+            })?,
+            None => JsValue::undefined(),
+        };
+
+        let mut arguments = Vec::new();
+        for argument in params
             .get("arguments")
             .and_then(Value::as_array)
-            .map(|arguments| {
-                arguments
-                    .iter()
-                    .map(argument_to_js)
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default()
-            .join(", ");
+            .into_iter()
+            .flatten()
+        {
+            if let Some(object_id) = argument.get("objectId").and_then(Value::as_str) {
+                arguments.push(self.runtime.remote_object(object_id).ok_or_else(|| {
+                    JsonRpcError {
+                        code: -32000,
+                        message: format!("Cannot find remote object: {object_id}"),
+                    }
+                })?);
+            } else if let Some(value) = argument.get("value") {
+                // The value came from serde_json, so its textual form is a
+                // data literal rather than page-provided source. Parentheses
+                // keep object literals from being parsed as statement blocks.
+                let source = format!("({value})");
+                arguments.push(self.runtime.eval(&source).map_err(js_error)?);
+            } else {
+                return Err(invalid_params(
+                    "Each Runtime.callFunctionOn argument must include value or objectId"
+                        .to_string(),
+                ));
+            }
+        }
 
-        let expression = format!(
-            "(() => {{ const __fn = ({function_declaration}); return __fn.call({object_expr}{comma}{argument_expr}); }})()",
-            comma = if argument_expr.is_empty() { "" } else { ", " }
-        );
-        let result = self.evaluate_expression(&expression, return_by_value)?;
+        let value = self
+            .runtime
+            .call_function_with_arguments(&function_declaration, this_value, arguments)
+            .map_err(js_error)?;
+        self.runtime.run_until_idle().map_err(js_error)?;
+        let result = self.serialize_evaluation_value(value, return_by_value)?;
         self.drive_navigation_requests()?;
         Ok(result)
+    }
+
+    fn runtime_release_object(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let object_id = require_string(params, "objectId")?;
+        self.runtime.release_remote_object(&object_id);
+        Ok(json!({}))
     }
 
     fn target_create_browser_context(&mut self) -> Value {
@@ -2118,13 +2147,22 @@ impl CdpSession {
         value: JsValue,
         return_by_value: bool,
     ) -> Result<Value, JsonRpcError> {
+        let object_id = if return_by_value {
+            None
+        } else {
+            let object_id = format!("remote-{}", self.next_object_id);
+            self.next_object_id += 1;
+            Some(object_id)
+        };
+        let retained_value = object_id.as_ref().map(|_| value.clone());
         let serialization_function = if return_by_value {
             "value => JSON.stringify({ result: __cdpSerializeValue(value) })".to_string()
         } else {
-            let object_id = format!("__cdp_object_{}", self.next_object_id);
-            self.next_object_id += 1;
+            let object_id = object_id
+                .as_deref()
+                .expect("non-value serialization always has a remote object id");
             format!(
-                "value => {{ globalThis[{object_id:?}] = value; return JSON.stringify({{ result: __cdpRemoteObject(value, {object_id:?}) }}); }}"
+                "value => JSON.stringify({{ result: __cdpRemoteObject(value, {object_id:?}) }})"
             )
         };
         let raw = self
@@ -2146,6 +2184,18 @@ impl CdpSession {
             code: -32000,
             message: error.to_string(),
         })?;
+        if let Some(object_id) = object_id {
+            if result
+                .get("result")
+                .and_then(|result| result.get("objectId"))
+                .is_some()
+            {
+                self.runtime.retain_remote_object(
+                    object_id,
+                    retained_value.expect("remote object value was cloned above"),
+                );
+            }
+        }
         Ok(result)
     }
 
@@ -3252,21 +3302,6 @@ fn button_mask(button: i32) -> u64 {
         4 => 16,
         _ => 0,
     }
-}
-
-fn argument_to_js(argument: &Value) -> Result<String, JsonRpcError> {
-    if let Some(object_id) = argument.get("objectId").and_then(Value::as_str) {
-        return Ok(format!("globalThis[{object_id:?}]"));
-    }
-
-    if let Some(value) = argument.get("value") {
-        return Ok(value.to_string());
-    }
-
-    Err(JsonRpcError {
-        code: -32602,
-        message: "Each Runtime.callFunctionOn argument must include value or objectId".to_string(),
-    })
 }
 
 fn percent_decode(input: &str) -> String {
@@ -6002,6 +6037,19 @@ mod tests {
             )
             .unwrap();
         let object_id = object["result"]["objectId"].as_str().unwrap().to_string();
+        assert!(object_id.starts_with("remote-"));
+
+        // Remote handles are host-owned. A page-visible property with the
+        // legacy predictable name must not be able to replace or delete the
+        // value retained for the protocol client.
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "globalThis.__cdp_object_0 = { count: 99 }; delete globalThis.__cdp_object_0"
+                }),
+            )
+            .unwrap();
 
         let called = session
             .dispatch(
@@ -6016,6 +6064,74 @@ mod tests {
             .unwrap();
 
         assert_eq!(called["result"]["value"], 6);
+
+        let multiplier = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "({ factor: 3 })", "returnByValue": false }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let called_with_remote_argument = session
+            .dispatch(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": "function(other) { return this.count * other.factor; }",
+                    "arguments": [{ "objectId": multiplier }],
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(called_with_remote_argument["result"]["value"], 6);
+
+        session
+            .dispatch("Runtime.releaseObject", json!({ "objectId": object_id }))
+            .unwrap();
+        assert!(session
+            .dispatch(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": "function() { return this.count; }",
+                    "returnByValue": true,
+                }),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn runtime_remote_object_handles_expire_when_navigation_replaces_runtime() {
+        let mut session = CdpSession::new().unwrap();
+        let object_id = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "({ old: true })", "returnByValue": false }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<html><body>new</body></html>" }),
+            )
+            .unwrap();
+
+        assert!(session
+            .dispatch(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": "function() { return this.old; }",
+                    "returnByValue": true,
+                }),
+            )
+            .is_err());
     }
 
     #[test]
