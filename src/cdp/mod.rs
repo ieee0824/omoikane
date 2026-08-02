@@ -2180,7 +2180,7 @@ impl CdpSession {
                 message: "Runtime evaluation did not return a string payload".to_string(),
             })?
             .to_std_string_escaped();
-        let result = serde_json::from_str(&payload).map_err(|error| JsonRpcError {
+        let result: Value = serde_json::from_str(&payload).map_err(|error| JsonRpcError {
             code: -32000,
             message: error.to_string(),
         })?;
