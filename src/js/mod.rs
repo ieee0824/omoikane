@@ -33010,6 +33010,55 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn iframe_child_realm_routes_dynamic_script_and_load_event() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>
+                const script = document.createElement('script');
+                script.src = 'data:text/javascript,document.documentElement.setAttribute(%22data-external-child%22,%22yes%22)';
+                script.addEventListener('load', () => document.documentElement.setAttribute('data-external-load', 'yes'));
+                document.head.appendChild(script);
+            </script></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/dynamic.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        pump_zero_delay_tasks(&mut runtime);
+
+        let child_root = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            let document = state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("dynamic child iframe must load")
+                .document
+                .clone();
+            document
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("dynamic child document must have a root")
+        };
+        assert_eq!(
+            child_root.get_attribute("data-external-child").as_deref(),
+            Some("yes")
+        );
+        assert_eq!(
+            child_root.get_attribute("data-external-load").as_deref(),
+            Some("yes")
+        );
+    }
+
+    #[test]
     fn nested_same_origin_child_realm_uses_owning_parent_global() {
         use crate::html::TreeBuilder;
         let port = spawn_nested_xhtml_server();
