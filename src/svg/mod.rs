@@ -222,7 +222,12 @@ fn hit_test_svg_children(
         ) {
             return Some(target);
         }
-        let geometry = svg_hit_geometry(&tag, &attrs, local_point);
+        let geometry = svg_hit_geometry(
+            &tag,
+            &attrs,
+            local_point,
+            style.paint.stroke_width,
+        );
         if geometry.is_empty() {
             continue;
         }
@@ -275,10 +280,12 @@ fn pointer_events_accepts(
     }
 }
 
-fn svg_hit_geometry(tag: &str, attrs: &BTreeMap<String, String>, point: (f32, f32)) -> SvgHitGeometry {
-    let stroke_width = property_value(attrs, "stroke-width")
-        .and_then(|value| parse_svg_nonnegative(Some(&value)))
-        .unwrap_or(1.0);
+fn svg_hit_geometry(
+    tag: &str,
+    attrs: &BTreeMap<String, String>,
+    point: (f32, f32),
+    stroke_width: f32,
+) -> SvgHitGeometry {
     match tag {
         "rect" => {
             let x = parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0);

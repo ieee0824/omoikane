@@ -541,6 +541,21 @@ impl StyleResolver {
         style
     }
 
+    /// Resolves one computed property without cloning the complete style map
+    /// when the node is already cached.  Hot hit-test paths only need a single
+    /// value, such as `pointer-events`.
+    pub fn computed_property(
+        &mut self,
+        node: &NodeHandle,
+        name: &str,
+    ) -> Option<ComputedValue> {
+        let key = node.identity();
+        if let Some(style) = self.cache.get(&key) {
+            return style.get(name).cloned();
+        }
+        self.computed_style(node).get(name).cloned()
+    }
+
     /// Resolves computed style for a pseudo-element attached to `node`.
     pub fn computed_pseudo_style(
         &mut self,

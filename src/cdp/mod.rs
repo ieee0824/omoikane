@@ -4568,6 +4568,9 @@ mod tests {
                       <rect id="base" x="0" y="0" width="100" height="100" fill="red" pointer-events="none"></rect>
                       <rect id="shape" x="20" y="20" width="30" height="30" fill="blue"></rect>
                       <rect id="stroke" x="60" y="20" width="30" height="30" fill="none" stroke="green" stroke-width="4" pointer-events="stroke"></rect>
+                      <g id="inherited" stroke-width="10">
+                        <line id="wide" x1="10" y1="70" x2="90" y2="70" fill="none" stroke="green" pointer-events="stroke"></line>
+                      </g>
                     </svg>
                     <script>
                       globalThis.targets=[];
@@ -4579,7 +4582,7 @@ mod tests {
             )
             .unwrap();
 
-        for (x, y) in [(10, 10), (155, 35), (190, 35)] {
+        for (x, y) in [(10, 10), (155, 35), (190, 35), (140, 66)] {
             session
                 .dispatch(
                     "Input.dispatchMouseEvent",
@@ -4604,7 +4607,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state["result"]["value"],
-            r#"{"targets":["back","shape","stroke"],"none":"none"}"#
+            r#"{"targets":["back","shape","stroke","wide"],"none":"none"}"#
         );
     }
 
