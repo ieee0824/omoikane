@@ -698,10 +698,11 @@ struct AdjustedLayoutCache {
 
 /// Monotonic generations shared by the style, layout, and paint cache layers.
 ///
-/// A style generation advances when DOM-derived computed values are invalidated;
-/// a layout generation advances when the layout tree is rebuilt; and a paint
-/// generation advances when scroll-adjusted geometry is invalidated. Consumers
-/// can compare a snapshot with a later one without retaining engine internals.
+/// A style generation advances when computed values are invalidated by DOM
+/// changes or transition sampling; a layout generation advances when the
+/// layout tree is rebuilt; and a paint generation advances when scroll-adjusted
+/// geometry is invalidated. Consumers can compare a snapshot with a later one
+/// without retaining engine internals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderGenerations {
     pub style: u64,
