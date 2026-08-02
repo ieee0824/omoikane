@@ -1562,9 +1562,9 @@ impl CdpSession {
         let length = text.encode_utf16().count() as u64;
         let selection_start = require_u64(params, "selectionStart")?;
         let selection_end = require_u64(params, "selectionEnd")?;
-        if selection_start > length || selection_end > length {
+        if selection_start > selection_end || selection_end > length {
             return Err(invalid_params(
-                "Composition selection must be within the text".to_string(),
+                "Composition selection must be ordered and within the text".to_string(),
             ));
         }
         let handled = self.eval_input_bool(&format!(
@@ -4962,6 +4962,24 @@ mod tests {
             keys["result"]["value"],
             "field:keydown:A:KeyA:65:true:true:true:true|document:field|field:keyup:A|field:keypress:a:97"
         );
+    }
+
+    #[test]
+    fn ime_composition_rejects_invalid_selection_ranges() {
+        let mut session = CdpSession::new().unwrap();
+        for (start, end) in [(2, 1), (0, 3)] {
+            let error = session
+                .dispatch(
+                    "Input.imeSetComposition",
+                    json!({ "text": "a", "selectionStart": start, "selectionEnd": end }),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, -32602);
+            assert_eq!(
+                error.message,
+                "Composition selection must be ordered and within the text"
+            );
+        }
     }
 
     #[test]
