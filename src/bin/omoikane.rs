@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use omoikane::cdp::CdpSession;
-use omoikane::frame::render_browser_frame;
+use omoikane::frame::{PlatformFrameScheduler, render_browser_frame};
 use omoikane::platform_input::{
     InputModifiers, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
 };
@@ -25,7 +25,7 @@ struct BrowserApp {
     window: Option<Arc<Window>>,
     context: Option<Context<Arc<Window>>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
-    started_at: Instant,
+    frame_scheduler: PlatformFrameScheduler,
     input: PlatformInput,
     window_title: String,
 }
@@ -34,18 +34,19 @@ impl BrowserApp {
     fn new(url: &str) -> Result<Self, Box<dyn Error>> {
         let mut session = CdpSession::new().map_err(std::io::Error::other)?;
         session.dispatch("Page.navigate", json!({ "url": url }))?;
+        let started_at = Instant::now();
         Ok(Self {
             session,
             window: None,
             context: None,
             surface: None,
-            started_at: Instant::now(),
+            frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
             input: PlatformInput::new(),
             window_title: DEFAULT_WINDOW_TITLE.to_string(),
         })
     }
 
-    fn draw(&mut self) -> Result<(), Box<dyn Error>> {
+    fn draw(&mut self, elapsed_ms: u64) -> Result<(), Box<dyn Error>> {
         let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
             return Ok(());
         };
@@ -55,11 +56,6 @@ impl BrowserApp {
         else {
             return Ok(());
         };
-        let elapsed_ms = self
-            .started_at
-            .elapsed()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
         let frame = render_browser_frame(&mut self.session, size.width, size.height, elapsed_ms)?;
         if let Some(title) = changed_window_title(
             &mut self.window_title,
@@ -235,7 +231,8 @@ impl ApplicationHandler for BrowserApp {
                 return;
             }
         };
-        window.request_redraw();
+        self.frame_scheduler
+            .request_rendering_opportunity(Instant::now());
         self.window = Some(window);
         self.context = Some(context);
         self.surface = Some(surface);
@@ -257,23 +254,35 @@ impl ApplicationHandler for BrowserApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => {
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
+                self.frame_scheduler
+                    .request_rendering_opportunity(Instant::now());
             }
             WindowEvent::RedrawRequested => {
-                if let Err(error) = self.draw() {
+                let elapsed_ms = self.frame_scheduler.begin_frame(Instant::now());
+                if let Err(error) = self.draw(elapsed_ms) {
                     eprintln!("frame failed: {error}");
                 }
             }
-            event => self.dispatch_input(&event),
+            event => {
+                self.dispatch_input(&event);
+                self.frame_scheduler
+                    .request_rendering_opportunity(Instant::now());
+            }
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(window) = &self.window {
-            window.request_redraw();
-            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
+            let now = Instant::now();
+            if self.frame_scheduler.queue_redraw_if_due(now) {
+                window.request_redraw();
+            }
+            if self.frame_scheduler.redraw_pending() {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            } else {
+                event_loop
+                    .set_control_flow(ControlFlow::WaitUntil(self.frame_scheduler.deadline()));
+            }
         }
     }
 }
