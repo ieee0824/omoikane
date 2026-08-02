@@ -2853,10 +2853,12 @@ impl JsRuntime {
     fn eval_in_document_realm(&mut self, document_id: usize, source: &str) -> JsResult<()> {
         let realm = self.realm_for_document(document_id)?;
         let Some(realm) = realm else {
-            if document_id == self.document().identity() {
-                self.eval(source)?;
-                self.run_jobs()?;
-            }
+            // A child Document that has not run page code yet has no child
+            // Realm. Its DOM wrappers can still be owned by the caller Realm
+            // (for example when a parent script moves an iframe into that
+            // document), so keep the historical caller-Realm dispatch path.
+            self.eval(source)?;
+            self.run_jobs()?;
             return Ok(());
         };
         if !self.iframe_realm_is_live(document_id, &realm) {
@@ -32866,6 +32868,9 @@ b</textarea></form>"#);
         runtime.eval("globalThis.topOnly = 'top';").unwrap();
 
         pump_zero_delay_tasks(&mut runtime);
+        // Timers queued by the iframe's resource-load task become due on the
+        // following event-loop turn, just like browser macrotasks.
+        pump_zero_delay_tasks(&mut runtime);
 
         // The frame is intentionally cross-origin, so its `contentDocument`
         // is hidden from the parent Realm. Inspect the native child tree to
@@ -32885,12 +32890,6 @@ b</textarea></form>"#);
             .into_iter()
             .find(|node| node.node_type() == NodeType::Element)
             .expect("child document must have a document element");
-        eprintln!(
-            "[iframe child realm test] document={} root={} attrs={:?}",
-            child_document.identity(),
-            child_root.identity(),
-            child_root.attribute_records()
-        );
         for attribute in ["data-child-script", "data-child-job", "data-child-timer"] {
             assert_eq!(
                 child_root
