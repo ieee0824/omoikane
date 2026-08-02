@@ -3634,11 +3634,16 @@ impl JsRuntime {
         if kind == ScriptKind::NotExecutable {
             return Ok(());
         }
+        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
         if !self
             .host_state
             .borrow()
             .sandbox_allows_scripts_for_node(&script_node)
         {
+            let dispatch =
+                dispatch_resource_timing_script("error", node_id, &timing_name, false, 0.0);
+            let result = self.eval_async(&dispatch).await;
+            self.record_error_from(&src, result);
             return Ok(());
         }
         if !self
@@ -3654,7 +3659,6 @@ impl JsRuntime {
             );
             return Ok(());
         }
-        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
         let fetch_start = std::time::Instant::now();
         let fetched = {
             let mut state = self.host_state.borrow_mut();
@@ -4650,6 +4654,18 @@ impl JsRuntime {
                         if log_scripts {
                             eprintln!("[omoikane][script] blocked dynamic {src} by iframe sandbox");
                         }
+                        let timing_name =
+                            resource_reference_timing_name(&src, base_url.as_ref());
+                        let dispatched = self.eval(&dispatch_resource_timing_script(
+                            "error",
+                            node_id,
+                            &timing_name,
+                            false,
+                            0.0,
+                        ));
+                        self.record_error_from(&src, dispatched);
+                        let jobs = self.run_jobs();
+                        self.record_error_from(&src, jobs);
                         dispatch_load = false;
                     } else if !self
                         .host_state
@@ -30653,7 +30669,7 @@ b</textarea></form>"#);
                 r#"(() => {
                     const frame = document.getElementById('frame');
                     const tokens = frame.sandbox;
-                    tokens.add('allow-scripts', 'allow-same-origin');
+                    tokens.add('ALLOW-SCRIPTS', 'allow-same-origin');
                     tokens.toggle('allow-forms', true);
                     tokens.replace('allow-forms', 'allow-modals');
                     const reflected = frame.getAttribute('sandbox');

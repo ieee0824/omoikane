@@ -1120,14 +1120,15 @@
       if (/[\t\n\f\r ]/.test(token)) {
         throw new DOMException("The token contains whitespace.", "InvalidCharacterError");
       }
-      return token;
+      return this.__supportedTokens ? token.toLowerCase() : token;
     }
 
     __tokens() {
       const tokens = [];
       for (const token of (this.__node.getAttribute(this.__attribute) || "")
         .split(/[\t\n\f\r ]+/)) {
-        if (token && !tokens.includes(token)) tokens.push(token);
+        const normalized = this.__supportedTokens ? token.toLowerCase() : token;
+        if (normalized && !tokens.includes(normalized)) tokens.push(normalized);
       }
       return tokens;
     }
