@@ -610,8 +610,15 @@ fn parse_path_subpaths(value: Option<&String>) -> Vec<(Vec<(f32, f32)>, bool)> {
     for command in parse_path_data(value.map(String::as_str).unwrap_or_default()) {
         match command {
             PathCommand::MoveTo(x, y) => {
-                if points.len() >= 2 {
-                    subpaths.push((std::mem::take(&mut points), closed));
+                if !points.is_empty() {
+                    if points.len() >= 2 {
+                        subpaths.push((std::mem::take(&mut points), closed));
+                    } else {
+                        // A close command leaves only the subpath's start
+                        // point. It is not a segment to carry into the next
+                        // moveto.
+                        points.clear();
+                    }
                 }
                 closed = false;
                 current = (x, y);
@@ -2793,6 +2800,17 @@ mod tests {
     fn close_path_restores_current_point_for_relative_commands() {
         let cmds = parse_path_data("M10 10L20 10Zm5 0");
         assert!(matches!(cmds.last(), Some(PathCommand::MoveTo(15.0, 10.0))));
+    }
+
+    #[test]
+    fn svg_hit_path_does_not_bridge_subpaths_after_close() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "d".to_string(),
+            "M0 0 L0 10 Z M20 0 L20 10".to_string(),
+        );
+        let geometry = svg_hit_geometry("path", &attrs, (10.0, 0.0), 2.0, 1.0, 1.0);
+        assert!(!geometry.stroke);
     }
 
     #[test]
