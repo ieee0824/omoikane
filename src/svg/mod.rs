@@ -324,7 +324,7 @@ fn hit_test_svg_use(
         visible,
         displayed,
     };
-    if let Some(target_child) = hit_test_svg_children(
+    if hit_test_svg_children(
         root,
         &target,
         local_point,
@@ -333,8 +333,9 @@ fn hit_test_svg_use(
         &style,
         computed_pointer_events,
         visited_uses,
-    ) {
-        let _ = target_child;
+    )
+    .is_some()
+    {
         return true;
     }
     let geometry = svg_hit_geometry(

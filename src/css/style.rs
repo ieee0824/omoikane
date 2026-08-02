@@ -1079,6 +1079,25 @@ enum DeclarationValidation {
     Unvalidated,
 }
 
+fn is_supported_pointer_events_keyword(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    is_css_wide_keyword(&lower)
+        || matches!(
+            lower.as_str(),
+            "auto"
+                | "none"
+                | "visiblepainted"
+                | "visiblefill"
+                | "visiblestroke"
+                | "visible"
+                | "painted"
+                | "fill"
+                | "stroke"
+                | "bounding-box"
+                | "all"
+        )
+}
+
 /// Validates a resolved declaration value against the property's grammar.
 ///
 /// This is the single extension point for per-property value validation.
@@ -1384,22 +1403,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return match value {
             Value::Keyword(keyword) => {
                 let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(
-                        lower.as_str(),
-                        "auto"
-                            | "none"
-                            | "visiblepainted"
-                            | "visiblefill"
-                            | "visiblestroke"
-                            | "visible"
-                            | "painted"
-                            | "fill"
-                            | "stroke"
-                            | "bounding-box"
-                            | "all"
-                    )
-                {
+                if is_supported_pointer_events_keyword(&lower) {
                     DeclarationValidation::Valid(ComputedValue::Keyword(lower))
                 } else {
                     DeclarationValidation::Invalid
@@ -4624,10 +4628,11 @@ fn apply_presentational_hints(
             .find(|(name, _)| name.eq_ignore_ascii_case("pointer-events"))
             .map(|(_, value)| value.trim())
             .filter(|value| !value.is_empty())
+            .filter(|value| is_supported_pointer_events_keyword(value))
     {
         properties.insert(
             "pointer-events".to_string(),
-            ComputedValue::Keyword(value.to_string()),
+            ComputedValue::Keyword(value.to_ascii_lowercase()),
         );
     }
 
