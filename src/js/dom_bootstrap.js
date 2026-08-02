@@ -6050,17 +6050,18 @@
     return Number.parseInt(digits, 10);
   }
 
-  function normalizeTableCellSpanSetter(value) {
+  function coerceTableCellSpanSetterValue(value) {
     if (typeof value === "bigint") throw new TypeError("Value is not a finite number");
-    return Number(value) >>> 0;
+    return Number(value) >> 0;
   }
 
   // HTMLTableCellElement covers the cell-specific IDL surface shared by
   // <td> and <th>. The numeric span attributes reflect HTML parsing rules:
   // getters accept a leading "+" and digit prefix from the content attribute
   // and clamp oversized values to the HTML limits, while setters first apply
-  // Web IDL unsigned-long conversion and then rely on the getter's HTML
-  // defaults/caps when the serialized attribute is read back.
+  // the platform's signed 32-bit integer conversion and serialize negative
+  // results back to the default span value before the getter re-applies the
+  // HTML defaults/caps when the attribute is read.
   class HTMLTableCellElement extends HTMLElement {
     get cellIndex() {
       const parent = this.parentNode;
@@ -6073,7 +6074,8 @@
       return Number.isFinite(value) && value >= 1 ? Math.min(value, 1000) : 1;
     }
     set colSpan(value) {
-      this.setAttribute("colspan", String(normalizeTableCellSpanSetter(value)));
+      const normalized = coerceTableCellSpanSetterValue(value);
+      this.setAttribute("colspan", String(normalized < 0 ? 1 : normalized));
     }
     get rowSpan() {
       const value = parseTableCellSpanAttribute(this.getAttribute("rowspan"), 65534);
@@ -6081,7 +6083,8 @@
       return Number.isFinite(value) && value >= 0 ? Math.min(value, 65534) : 1;
     }
     set rowSpan(value) {
-      this.setAttribute("rowspan", String(normalizeTableCellSpanSetter(value)));
+      const normalized = coerceTableCellSpanSetterValue(value);
+      this.setAttribute("rowspan", String(normalized < 0 ? 1 : normalized));
     }
     get headers() {
       return this.getAttribute("headers") || "";
