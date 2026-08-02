@@ -426,6 +426,10 @@ fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
         "(function(){{ try {{ var __v = ({expr}); return (__v === null || __v === undefined) ? '' : String(__v); }} catch (e) {{ return '<<eval-error: ' + e + '>>'; }} }})()"
     );
     let result = runtime.eval(&wrapped);
+    let value = match result {
+        Ok(value) => value.as_string().map(|s| s.to_std_string_escaped()),
+        Err(_) => None,
+    };
     // The harness intentionally performs thousands of tiny evaluations while
     // driving the page. Collect periodically so the integration test remains
     // bounded when host-retained values are exposed to Boa GC without forcing
@@ -439,10 +443,7 @@ fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
             count.set(next);
         }
     });
-    match result {
-        Ok(value) => value.as_string().map(|s| s.to_std_string_escaped()),
-        Err(_) => None,
-    }
+    value
 }
 
 /// Reads a numeric global as an `i64`, returning `None` if unreadable/NaN.
