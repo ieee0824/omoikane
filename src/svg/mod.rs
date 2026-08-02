@@ -146,6 +146,15 @@ pub(crate) fn hit_test_svg(
         ),
     };
     let mut visited_uses = HashSet::new();
+    #[cfg(test)]
+    eprintln!(
+        "svg-hit root children={:?} point={point:?} scale=({scale_x},{scale_y})",
+        svg_node
+            .child_nodes()
+            .iter()
+            .map(|node| node.tag_name())
+            .collect::<Vec<_>>()
+    );
     hit_test_svg_children(
         svg_node,
         svg_node,
@@ -219,6 +228,12 @@ fn hit_test_svg_children(
         let next_scale_x = scale_x * child_scale_x;
         let next_scale_y = scale_y * child_scale_y;
         if tag == "use" {
+            #[cfg(test)]
+            eprintln!(
+                "svg-hit use id={:?} attrs={attrs:?} inherited-pe={}",
+                child.get_attribute("id"),
+                inherited.pointer_events
+            );
             let inserted = visited_uses.insert(child.identity());
             if inserted {
                 let hit = hit_test_svg_use(
@@ -287,9 +302,16 @@ fn hit_test_svg_use(
         .or_else(|| attribute_value(&attrs, "xlink:href"))
         .and_then(|href| parse_fragment_reference(&href))
     else {
+        #[cfg(test)]
+        eprintln!("svg-hit use id={:?} has no href", use_node.get_attribute("id"));
         return false;
     };
     let Some(target) = find_svg_resource(root, &id) else {
+        #[cfg(test)]
+        eprintln!(
+            "svg-hit use id={:?} resource #{id} not found",
+            use_node.get_attribute("id")
+        );
         return false;
     };
     let target_attrs = target.attributes().unwrap_or_default();
@@ -300,6 +322,12 @@ fn hit_test_svg_use(
     let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0);
     let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0);
     let local_point = (point.0 - x, point.1 - y);
+    #[cfg(test)]
+    eprintln!(
+        "svg-hit use id={:?} target={:?} target-attrs={target_attrs:?} point={point:?} local={local_point:?}",
+        use_node.get_attribute("id"),
+        target.tag_name()
+    );
     // The `<use>` instance controls the hit-test mode for the referenced
     // geometry.  A referenced node normally computes to the initial `auto`,
     // which must not erase an explicit mode such as `fill`/`none` on the
@@ -334,6 +362,16 @@ fn hit_test_svg_use(
         visible,
         displayed,
     };
+    #[cfg(test)]
+    eprintln!(
+        "svg-hit use id={:?} resolved pe={} paint-fill={} stroke={} visible={} displayed={}",
+        use_node.get_attribute("id"),
+        style.pointer_events,
+        style.paint.fill.is_some(),
+        style.paint.stroke.is_some(),
+        style.visible,
+        style.displayed
+    );
     if hit_test_svg_children(
         root,
         &target,
@@ -355,6 +393,14 @@ fn hit_test_svg_use(
         style.paint.stroke_width,
         scale_x,
         scale_y,
+    );
+    #[cfg(test)]
+    eprintln!(
+        "svg-hit use id={:?} geometry fill={} stroke={} bbox={}",
+        use_node.get_attribute("id"),
+        geometry.fill,
+        geometry.stroke,
+        geometry.bounding_box
     );
     !geometry.is_empty()
         && pointer_events_accepts(
