@@ -46,27 +46,50 @@
   const cache = new Map();
   // Platform-object and string conversions used by the insert-adjacent APIs
   // must not depend on page-mutable constructors or prototypes.
-  const wrapperNodeIds = new WeakMap();
-  const wrapperLocalNames = new WeakMap();
-  // Keep private wrapper metadata primitive-only. Retaining ordinary wrapper
-  // objects as WeakMap values can cross Boa's generational-GC shape edges.
-  const ownerDocumentIds = new WeakMap();
-  const canonicalElementWrappers = new WeakSet();
-  const canonicalHtmlElementWrappers = new WeakSet();
-  const canonicalHtmlSlotWrappers = new WeakSet();
-  const getWrapperNodeId = Function.prototype.call.bind(WeakMap.prototype.get);
-  const setWrapperNodeId = Function.prototype.call.bind(WeakMap.prototype.set);
-  const getWrapperLocalName = Function.prototype.call.bind(WeakMap.prototype.get);
-  const setWrapperLocalName = Function.prototype.call.bind(WeakMap.prototype.set);
-  const getOwnerDocumentId = Function.prototype.call.bind(WeakMap.prototype.get);
-  const setOwnerDocumentId = Function.prototype.call.bind(WeakMap.prototype.set);
-  const addCanonicalElementWrapper = Function.prototype.call.bind(WeakSet.prototype.add);
-  const hasCanonicalElementWrapper = Function.prototype.call.bind(WeakSet.prototype.has);
-  const deleteCanonicalElementWrapper = Function.prototype.call.bind(WeakSet.prototype.delete);
+  // `cache` already owns canonical wrappers strongly. Keep the reverse/private
+  // metadata in ordinary collections with primitive values and ids so it does
+  // not add Boa weak-table or object-valued GC edges.
+  const wrapperNodeIds = new Map();
+  const wrapperLocalNames = new Map();
+  const ownerDocumentIds = new Map();
+  const canonicalElementIds = new Set();
+  const canonicalHtmlElementIds = new Set();
+  const canonicalHtmlSlotIds = new Set();
+  const getWrapperNodeId = Function.prototype.call.bind(Map.prototype.get);
+  const setWrapperNodeId = Function.prototype.call.bind(Map.prototype.set);
+  const getWrapperLocalName = Function.prototype.call.bind(Map.prototype.get);
+  const setWrapperLocalName = Function.prototype.call.bind(Map.prototype.set);
+  const getOwnerDocumentId = Function.prototype.call.bind(Map.prototype.get);
+  const setOwnerDocumentId = Function.prototype.call.bind(Map.prototype.set);
+  const addCanonicalElementId = Function.prototype.call.bind(Set.prototype.add);
+  const hasCanonicalElementId = Function.prototype.call.bind(Set.prototype.has);
+  const deleteCanonicalElementId = Function.prototype.call.bind(Set.prototype.delete);
   const intrinsicString = globalThis.String;
   const IntrinsicTypeError = globalThis.TypeError;
   const stringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
   const stringFromCharCode = String.fromCharCode;
+
+  function canonicalWrapperId(node) {
+    if ((typeof node !== "object" && typeof node !== "function") || node === null) {
+      return undefined;
+    }
+    return getWrapperNodeId(wrapperNodeIds, node);
+  }
+
+  function addCanonicalWrapperId(ids, node) {
+    const id = canonicalWrapperId(node);
+    if (id !== undefined) addCanonicalElementId(ids, id);
+  }
+
+  function hasCanonicalWrapperId(ids, node) {
+    const id = canonicalWrapperId(node);
+    return id !== undefined && hasCanonicalElementId(ids, id);
+  }
+
+  function deleteCanonicalWrapperId(ids, node) {
+    const id = canonicalWrapperId(node);
+    if (id !== undefined) deleteCanonicalElementId(ids, id);
+  }
   const validatesSpecialStyleProperties = new Set([
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
@@ -175,7 +198,7 @@
     for (let current = node; current; current = internalParentNode(current)) {
       const id = internalNodeId(current);
       if (id === undefined || __omoikane_node_type(id) !== 1 ||
-          !hasCanonicalElementWrapper(canonicalHtmlSlotWrappers, current)) {
+          !hasCanonicalWrapperId(canonicalHtmlSlotIds, current)) {
         continue;
       }
       let root = current;
@@ -197,7 +220,7 @@
       slotAssignmentRefreshQueued = false;
       for (let index = 0; index < knownSlots.length; index += 1) {
         const node = knownSlots[index];
-        if (!hasCanonicalElementWrapper(canonicalHtmlSlotWrappers, node)) {
+        if (!hasCanonicalWrapperId(canonicalHtmlSlotIds, node)) {
           continue;
         }
         const ids = __omoikane_assigned_nodes(internalNodeId(node), false) || [];
@@ -255,14 +278,14 @@
     if (nodeType === 1) {
       const localName = __omoikane_node_local_name(id);
       setWrapperLocalName(wrapperLocalNames, node, localName);
-      addCanonicalElementWrapper(canonicalElementWrappers, node);
+      addCanonicalWrapperId(canonicalElementIds, node);
       if (__omoikane_node_namespace_uri(id) === HTML_NAMESPACE ||
           nativeNodeIsHtmlElement(id)) {
-        addCanonicalElementWrapper(canonicalHtmlElementWrappers, node);
+        addCanonicalWrapperId(canonicalHtmlElementIds, node);
       }
-      if (hasCanonicalElementWrapper(canonicalHtmlElementWrappers, node) &&
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, node) &&
           localName === "slot") {
-        addCanonicalElementWrapper(canonicalHtmlSlotWrappers, node);
+        addCanonicalWrapperId(canonicalHtmlSlotIds, node);
         knownSlots.push(node);
       }
     }
@@ -351,7 +374,7 @@
     const docId = internalNodeId(doc);
     if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
     if (__omoikane_node_type(id) === 1) {
-      if (hasCanonicalElementWrapper(canonicalHtmlElementWrappers, node) &&
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, node) &&
           internalNodeLocalName(node) === "template") {
         stampOwnerDoc(
           wrapNode(__omoikane_template_content(id)),
@@ -2710,7 +2733,7 @@
   function requireCanonicalElement(value, message) {
     if ((typeof value !== "object" && typeof value !== "function") ||
         value === null ||
-        !hasCanonicalElementWrapper(canonicalElementWrappers, value)) {
+        !hasCanonicalWrapperId(canonicalElementIds, value)) {
       throw new IntrinsicTypeError(message);
     }
     return value;
@@ -4065,13 +4088,13 @@
       for (let index = knownSlots.length - 1; index >= 0; index--) {
         if (knownSlots[index] === node) knownSlots.splice(index, 1);
       }
-      deleteCanonicalElementWrapper(canonicalHtmlSlotWrappers, node);
-      deleteCanonicalElementWrapper(canonicalHtmlElementWrappers, node);
+      deleteCanonicalWrapperId(canonicalHtmlSlotIds, node);
+      deleteCanonicalWrapperId(canonicalHtmlElementIds, node);
       if (info.namespace === HTML_NAMESPACE) {
-        addCanonicalElementWrapper(canonicalHtmlElementWrappers, node);
+        addCanonicalWrapperId(canonicalHtmlElementIds, node);
       }
       if (info.namespace === HTML_NAMESPACE && info.localName === "slot") {
-        addCanonicalElementWrapper(canonicalHtmlSlotWrappers, node);
+        addCanonicalWrapperId(canonicalHtmlSlotIds, node);
         knownSlots.push(node);
       }
       if (info.namespace === HTML_NAMESPACE) {
@@ -8988,7 +9011,7 @@
     if (!element || id === undefined || element.__customElementState === "custom" ||
         element.__customElementState === "precustomized" ||
         element.__customElementState === "failed" ||
-        !hasCanonicalElementWrapper(canonicalHtmlElementWrappers, element) ||
+        !hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
         internalNodeLocalName(element) !== definition.name) {
       return;
     }
