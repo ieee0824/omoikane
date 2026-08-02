@@ -29292,6 +29292,76 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn svg_text_geometry_uses_utf16_ranges_and_nested_transforms() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const ns = 'http://www.w3.org/2000/svg';
+                const svg = document.createElementNS(ns, 'svg');
+                const text = document.createElementNS(ns, 'text');
+                text.setAttribute('x', '10');
+                text.setAttribute('y', '20');
+                text.setAttribute('font-size', '10');
+                text.appendChild(document.createTextNode('AB'));
+                const span = document.createElementNS(ns, 'tspan');
+                span.setAttribute('dx', '2');
+                span.setAttribute('transform', 'translate(5 3)');
+                span.appendChild(document.createTextNode('C'));
+                text.appendChild(span);
+                svg.appendChild(text);
+                document.body.appendChild(svg);
+                const start = text.getStartPositionOfChar(2);
+                const end = text.getEndPositionOfChar(2);
+                const extent = text.getExtentOfChar(2);
+                const box = text.getBBox();
+                const spanStart = span.getStartPositionOfChar(0);
+                const spanBox = span.getBBox();
+                const group = document.createElementNS(ns, 'g');
+                group.setAttribute('transform', 'translate(7 4)');
+                const deep = document.createElementNS(ns, 'tspan');
+                deep.setAttribute('transform', 'scale(2)');
+                deep.appendChild(document.createTextNode('D'));
+                group.appendChild(deep);
+                text.appendChild(group);
+                const deepStart = deep.getStartPositionOfChar(0);
+                const deepBox = deep.getBBox();
+                const singular = document.createElementNS(ns, 'tspan');
+                singular.setAttribute('transform', 'scale(0)');
+                singular.appendChild(document.createTextNode('E'));
+                text.appendChild(singular);
+                let singularSafe = true;
+                try { singular.getBBox(); } catch (_) { singularSafe = false; }
+                const round = value => Math.round(value * 100) / 100;
+                return [
+                    text.getNumberOfChars(),
+                    round(text.getComputedTextLength()),
+                    round(text.getSubStringLength(1, 2)),
+                    round(start.x), round(start.y), round(end.x), round(end.y),
+                    round(extent.x), round(extent.y), round(extent.width), round(extent.height),
+                    round(box.x), round(box.y), round(box.width), round(box.height),
+                    start instanceof SVGPoint,
+                    extent instanceof SVGRect,
+                    Object.getPrototypeOf(start) === SVGPoint.prototype,
+                    Object.getPrototypeOf(extent) === SVGRect.prototype,
+                    Object.getOwnPropertyDescriptor(SVGRectElement.prototype, 'width').set === undefined,
+                    span instanceof SVGTextContentElement,
+                    span instanceof SVGTSpanElement,
+                    round(spanStart.x), round(spanStart.y),
+                    round(spanBox.x), round(spanBox.y),
+                    round(deepStart.x), round(deepStart.y),
+                    round(deepBox.x), round(deepBox.y),
+                    singularSafe,
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "5|30|12|29|23|35|23|29|15|6|10|10|12|25|13|true|true|true|true|true|true|true|24|20|24|12|30|20|30|12|true"
+        );
+    }
+
+    #[test]
     fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
         let port = spawn_static_http_server(
             "image/svg+xml",

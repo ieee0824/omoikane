@@ -7704,6 +7704,9 @@
 
   function svgShapeBBox(element) {
     const tag = String(element && element.localName || "").toLowerCase();
+    if (tag === "text" || tag === "tspan" || tag === "textpath") {
+      return svgTextElementBBox(element);
+    }
     if (tag === "rect") {
       return new SVGRect(
         svgAttributeNumber(element, "x"), svgAttributeNumber(element, "y"),
@@ -7757,6 +7760,266 @@
       if (childBox) result = svgUnionRect(result, svgTransformRect(childBox, svgTransformForElement(child)));
     }
     return result || new SVGRect();
+  }
+
+  // Text layout is intentionally deterministic rather than font-platform
+  // dependent.  The native renderer already uses a 0.6em advance for its
+  // canvas text approximation; using the same value here keeps SVG geometry
+  // queries stable in headless and WPT smoke environments alike.
+  function svgTextNumberList(element, name) {
+    return svgNumberList(element && element.getAttribute(name) || "");
+  }
+
+  function svgTextCssValue(element, name) {
+    if (!element) return "";
+    const attribute = element.getAttribute(name);
+    if (attribute !== null && String(attribute).trim() !== "") return String(attribute);
+    try {
+      const inline = element.style && element.style.getPropertyValue(name);
+      if (inline) return String(inline);
+    } catch (_) {}
+    try {
+      const computed = globalThis.getComputedStyle && globalThis.getComputedStyle(element);
+      if (computed) {
+        const value = computed.getPropertyValue(name) || computed[name];
+        if (value) return String(value);
+      }
+    } catch (_) {}
+    return "";
+  }
+
+  function svgTextDeclaredValue(element, name) {
+    if (!element) return "";
+    const attribute = element.getAttribute(name);
+    if (attribute !== null && String(attribute).trim() !== "") return String(attribute);
+    try {
+      const inline = element.style && element.style.getPropertyValue(name);
+      if (inline) return String(inline);
+    } catch (_) {}
+    return "";
+  }
+
+  function svgTextFontSize(element) {
+    for (let current = element; current && current.nodeType === 1; current = current.parentNode) {
+      const value = Number.parseFloat(svgTextDeclaredValue(current, "font-size"));
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    const computed = Number.parseFloat(svgTextCssValue(element, "font-size"));
+    if (Number.isFinite(computed) && computed > 0) return computed;
+    return 16;
+  }
+
+  function svgTextLetterSpacing(element) {
+    const value = Number.parseFloat(svgTextCssValue(element, "letter-spacing"));
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  function svgTextTransformPoint(point, matrix) {
+    return {
+      x: matrix.a * point.x + matrix.c * point.y + matrix.e,
+      y: matrix.b * point.x + matrix.d * point.y + matrix.f,
+    };
+  }
+
+  function svgTextRelativeTransform(element, owner) {
+    const path = [];
+    for (let current = element; current && current !== owner; current = current.parentNode) {
+      if (current.nodeType === 1 && current.namespaceURI === SVG_NAMESPACE) path.push(current);
+    }
+    let matrix = new DOMMatrix();
+    for (let index = path.length - 1; index >= 0; index -= 1) {
+      matrix = matrix.multiply(svgTransformMatrix(path[index].getAttribute("transform") || ""));
+    }
+    return matrix;
+  }
+
+  function svgTextLayout(element) {
+    const records = [];
+    if (!element || element.nodeType !== 1) return records;
+    let owner = element.parentNode;
+    while (owner && owner.nodeType === 1 && owner.namespaceURI === SVG_NAMESPACE) {
+      if (String(owner.localName || "").toLowerCase() === "text") break;
+      owner = owner.parentNode;
+    }
+    if (!owner || owner.nodeType !== 1 || owner.namespaceURI !== SVG_NAMESPACE ||
+        String(owner.localName || "").toLowerCase() !== "text") {
+      owner = null;
+    }
+    if (owner && owner !== element) {
+      const allRecords = svgTextLayout(owner);
+      let offset = 0;
+      let found = false;
+      const countBefore = node => {
+        if (node === element) {
+          found = true;
+          return;
+        }
+        if (node.nodeType === 3) {
+          offset += String(node.data || "").length;
+          return;
+        }
+        for (const child of node.childNodes || []) {
+          if (found) break;
+          countBefore(child);
+        }
+      };
+      countBefore(owner);
+      if (found) {
+        const length = String(element.textContent || "").length;
+        const sliced = allRecords.slice(offset, offset + length);
+        const relative = svgTextRelativeTransform(element, owner);
+        if (relative.isIdentity) return sliced;
+        let inverse;
+        try {
+          inverse = relative.inverse();
+        } catch (_) {
+          // A singular SVG transform has no local coordinate system. Keep the
+          // owning text's records usable instead of making geometry queries
+          // throw merely because a transform cannot be inverted.
+          return sliced;
+        }
+        return sliced.map(record => {
+          const start = inverse.transformPoint(record.start);
+          const end = inverse.transformPoint(record.end);
+          const corners = [
+            [record.box.x, record.box.y],
+            [record.box.x + record.box.width, record.box.y],
+            [record.box.x, record.box.y + record.box.height],
+            [record.box.x + record.box.width, record.box.y + record.box.height],
+          ].map(([x, y]) => inverse.transformPoint({ x, y }));
+          return {
+            ...record,
+            start: new SVGPoint(start.x, start.y),
+            end: new SVGPoint(end.x, end.y),
+            box: svgRectBounds(corners.map(point => [point.x, point.y])),
+          };
+        });
+      }
+    }
+    const cursor = {
+      x: svgTextNumberList(element, "x")[0] || 0,
+      y: svgTextNumberList(element, "y")[0] || 0,
+    };
+    let characterIndex = 0;
+    const contexts = [];
+
+    const emitText = (text, context) => {
+      const value = String(text || "");
+      const fontSize = svgTextFontSize(context.element);
+      const glyphWidth = fontSize * 0.6;
+      const letterSpacing = svgTextLetterSpacing(context.element);
+      for (let offset = 0; offset < value.length; offset += 1) {
+        const active = contexts;
+        let x = cursor.x;
+        let y = cursor.y;
+        let dx = 0;
+        let dy = 0;
+        for (const entry of active) {
+          const index = characterIndex - entry.startIndex;
+          if (entry.x[index] !== undefined) {
+            x = entry.x[index];
+          }
+          if (entry.y[index] !== undefined) {
+            y = entry.y[index];
+          }
+          if (entry.dx[index] !== undefined) dx += entry.dx[index];
+          if (entry.dy[index] !== undefined) dy += entry.dy[index];
+        }
+        x += dx;
+        y += dy;
+        cursor.x = x;
+        cursor.y = y;
+        const start = svgTextTransformPoint({ x, y }, context.matrix);
+        const end = svgTextTransformPoint({ x: x + glyphWidth, y }, context.matrix);
+        const topLeft = svgTextTransformPoint({ x, y: y - fontSize * 0.8 }, context.matrix);
+        const topRight = svgTextTransformPoint({ x: x + glyphWidth, y: y - fontSize * 0.8 }, context.matrix);
+        const bottomLeft = svgTextTransformPoint({ x, y: y + fontSize * 0.2 }, context.matrix);
+        const bottomRight = svgTextTransformPoint({ x: x + glyphWidth, y: y + fontSize * 0.2 }, context.matrix);
+        const box = svgRectBounds([
+          [topLeft.x, topLeft.y], [topRight.x, topRight.y],
+          [bottomLeft.x, bottomLeft.y], [bottomRight.x, bottomRight.y],
+        ]);
+        records.push({
+          index: characterIndex,
+          start: new SVGPoint(start.x, start.y),
+          end: new SVGPoint(end.x, end.y),
+          box,
+          width: glyphWidth,
+          letterSpacing,
+        });
+        cursor.x += glyphWidth + letterSpacing;
+        characterIndex += 1;
+      }
+    };
+
+    const walk = (node, inheritedMatrix, isRoot = false) => {
+      if (!node) return;
+      if (node.nodeType === 3) {
+        const context = contexts[contexts.length - 1];
+        if (context) emitText(node.data, context);
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      const matrix = isRoot
+        ? inheritedMatrix
+        : inheritedMatrix.multiply(svgTransformMatrix(node.getAttribute("transform") || ""));
+      const context = {
+        element: node,
+        matrix,
+        startIndex: characterIndex,
+        x: svgTextNumberList(node, "x"),
+        y: svgTextNumberList(node, "y"),
+        dx: svgTextNumberList(node, "dx"),
+        dy: svgTextNumberList(node, "dy"),
+      };
+      contexts.push(context);
+      for (const child of node.childNodes || []) walk(child, matrix, false);
+      contexts.pop();
+    };
+
+    walk(element, new DOMMatrix(), true);
+    return records;
+  }
+
+  function svgTextLength(records, start = 0, end = records.length) {
+    let length = 0;
+    for (let index = start; index < end; index += 1) {
+      const record = records[index];
+      length += record.width;
+      if (index + 1 < end) length += record.letterSpacing;
+    }
+    return length;
+  }
+
+  function svgTextElementBBox(element) {
+    let result = null;
+    for (const record of svgTextLayout(element)) {
+      result = svgUnionRect(result, record.box);
+    }
+    return result || new SVGRect();
+  }
+
+  function svgTextIndex(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) return 0xffffffff;
+    return Math.trunc(numeric);
+  }
+
+  function svgTextRecord(records, charnum) {
+    const index = svgTextIndex(charnum);
+    if (index >= records.length) {
+      throw new DOMException("The character index is outside the text.", "IndexSizeError");
+    }
+    return records[index];
+  }
+
+  function svgTextRange(records, charnum, nchars) {
+    const start = svgTextIndex(charnum);
+    const count = svgTextIndex(nchars);
+    if (start > records.length || count > records.length - start) {
+      throw new DOMException("The text range is outside the text.", "IndexSizeError");
+    }
+    return [start, start + count];
   }
 
   function svgAncestorChain(element) {
@@ -7834,10 +8097,43 @@
   class SVGPolygonElement extends SVGGeometryElement {}
   class SVGTextContentElement extends SVGGraphicsElement {
     getNumberOfChars() {
-      return String(this.textContent || "").length;
+      return svgTextLayout(this).length;
+    }
+    getComputedTextLength() {
+      return svgTextLength(svgTextLayout(this));
+    }
+    getSubStringLength(charnum, nchars) {
+      if (arguments.length < 2) {
+        throw new TypeError("getSubStringLength requires 2 arguments");
+      }
+      const records = svgTextLayout(this);
+      const [start, end] = svgTextRange(records, charnum, nchars);
+      return svgTextLength(records, start, end);
+    }
+    getStartPositionOfChar(charnum) {
+      if (arguments.length < 1) {
+        throw new TypeError("getStartPositionOfChar requires 1 argument");
+      }
+      return svgTextRecord(svgTextLayout(this), charnum).start;
+    }
+    getEndPositionOfChar(charnum) {
+      if (arguments.length < 1) {
+        throw new TypeError("getEndPositionOfChar requires 1 argument");
+      }
+      return svgTextRecord(svgTextLayout(this), charnum).end;
+    }
+    getExtentOfChar(charnum) {
+      if (arguments.length < 1) {
+        throw new TypeError("getExtentOfChar requires 1 argument");
+      }
+      const box = svgTextRecord(svgTextLayout(this), charnum).box;
+      return new SVGRect(box.x, box.y, box.width, box.height);
     }
   }
-  class SVGTextElement extends SVGTextContentElement {}
+  class SVGTextPositioningElement extends SVGTextContentElement {}
+  class SVGTextElement extends SVGTextPositioningElement {}
+  class SVGTSpanElement extends SVGTextPositioningElement {}
+  class SVGTextPathElement extends SVGTextContentElement {}
 
   function svgViewBoxValues(element) {
     const values = svgNumberList(element.getAttribute("viewBox") || element.getAttribute("viewbox"));
@@ -7933,7 +8229,9 @@
     [SVGEllipseElement, "SVGEllipseElement"], [SVGLineElement, "SVGLineElement"],
     [SVGPathElement, "SVGPathElement"], [SVGPolylineElement, "SVGPolylineElement"],
     [SVGPolygonElement, "SVGPolygonElement"], [SVGTextContentElement, "SVGTextContentElement"],
-    [SVGTextElement, "SVGTextElement"],
+    [SVGTextPositioningElement, "SVGTextPositioningElement"],
+    [SVGTextElement, "SVGTextElement"], [SVGTSpanElement, "SVGTSpanElement"],
+    [SVGTextPathElement, "SVGTextPathElement"],
   ]) {
     Object.defineProperty(ctor.prototype, Symbol.toStringTag, {
       configurable: true, value: tag,
@@ -7991,6 +8289,8 @@
     polyline: SVGPolylineElement,
     polygon: SVGPolygonElement,
     text: SVGTextElement,
+    tspan: SVGTSpanElement,
+    textpath: SVGTextPathElement,
   };
 
   // Tag-name → constructor table consulted by wrapNode() for element nodes.
@@ -8945,7 +9245,10 @@
   globalThis.SVGPolylineElement = SVGPolylineElement;
   globalThis.SVGPolygonElement = SVGPolygonElement;
   globalThis.SVGTextContentElement = SVGTextContentElement;
+  globalThis.SVGTextPositioningElement = SVGTextPositioningElement;
   globalThis.SVGTextElement = SVGTextElement;
+  globalThis.SVGTSpanElement = SVGTSpanElement;
+  globalThis.SVGTextPathElement = SVGTextPathElement;
   globalThis.Event = Event;
   globalThis.CustomEvent = CustomEvent;
   globalThis.MessageEvent = MessageEvent;
