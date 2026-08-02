@@ -5018,14 +5018,12 @@
       return this.__sandboxTokenList;
     }
 
-    set sandbox(value) {
-      this.setAttribute("sandbox", String(value));
-    }
-
     get contentDocument() {
       // Removing an iframe destroys its active nested browsing context. Keep
       // the stable WindowProxy object around, but expose no live Document until
       // the element is connected again and a fresh navigation is committed.
+      // A connected document with an opaque sandbox origin is likewise hidden
+      // from its parent browsing context.
       if (!this.isConnected) return null;
       return wrapNode(__omoikane_iframe_content_document(this.__id));
     }
@@ -5052,7 +5050,7 @@
             if (!iframe.isConnected) return null;
             const document = iframe.contentDocument;
             if (!document) {
-              throw new DOMException("Blocked access to an unavailable frame.", "SecurityError");
+              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
             }
             return document;
           },
@@ -5062,21 +5060,21 @@
           get customElements() {
             const document = iframe.contentDocument;
             if (!document) {
-              throw new DOMException("Blocked access to an unavailable frame.", "SecurityError");
+              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
             }
             return registryForDocument(document);
           },
           get localStorage() {
             const document = iframe.contentDocument;
             if (!document) {
-              throw new DOMException("Blocked access to an unavailable frame.", "SecurityError");
+              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
             }
             return storageForDocument("local", document, this);
           },
           get sessionStorage() {
             const document = iframe.contentDocument;
             if (!document) {
-              throw new DOMException("Blocked access to an unavailable frame.", "SecurityError");
+              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
             }
             return storageForDocument("session", document, this);
           },
