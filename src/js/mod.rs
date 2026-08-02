@@ -19590,6 +19590,34 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn toggle_attribute_reflects_force_and_mutation_semantics() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const element = document.createElement('div');
+                const added = element.toggleAttribute('hidden');
+                const removed = element.toggleAttribute('hidden');
+                const forcedAbsent = element.toggleAttribute('hidden', false);
+                const forcedPresent = element.toggleAttribute('hidden', true);
+                const explicitUndefined = element.toggleAttribute('hidden', undefined);
+                const readded = element.toggleAttribute('hidden', true);
+                return [
+                    added,
+                    removed,
+                    forcedAbsent,
+                    forcedPresent,
+                    explicitUndefined,
+                    readded,
+                    element.getAttribute('hidden') === '',
+                    element.hasAttribute('hidden')
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(actual, "true|false|false|true|false|true|true|true");
+    }
+
+    #[test]
     fn dom_mixins_and_html_members_have_spec_scoped_prototypes() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
         let actual = eval_str(

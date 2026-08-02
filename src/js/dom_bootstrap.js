@@ -1799,6 +1799,25 @@
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
     }
 
+    toggleAttribute(name, force) {
+      const attr = String(name);
+      const present = this.hasAttribute(attr);
+      if (arguments.length < 2) {
+        if (present) {
+          this.removeAttribute(attr);
+          return false;
+        }
+        this.setAttribute(attr, "");
+        return true;
+      }
+      if (Boolean(force)) {
+        if (!present) this.setAttribute(attr, "");
+        return true;
+      }
+      if (present) this.removeAttribute(attr);
+      return false;
+    }
+
     setAttributeNS(namespace, qualifiedName, value) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       const name = String(qualifiedName);
@@ -2438,7 +2457,7 @@
   distributePrototypeMembers(Node.prototype, [Element.prototype], [
     "namespaceURI", "prefix", "localName", "tagName",
     "id", "className", "classList",
-    "getAttribute", "setAttribute", "hasAttribute", "removeAttribute",
+    "getAttribute", "setAttribute", "hasAttribute", "removeAttribute", "toggleAttribute",
     "setAttributeNS", "getAttributeNS", "removeAttributeNS", "attributes",
     "matches", "closest",
     "__layoutMetrics", "getBoundingClientRect", "getClientRects",

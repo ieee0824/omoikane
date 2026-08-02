@@ -9,6 +9,14 @@
       "baseline_supported": true
     },
     {
+      "id": "dom.toggle-attribute",
+      "area": "dom",
+      "description": "Element.toggleAttribute reflects boolean force and returns the resulting presence",
+      "setup": "globalThis.__toggleProbe = document.createElement('div')",
+      "probe": "__toggleProbe.toggleAttribute('hidden') === true && __toggleProbe.toggleAttribute('hidden') === false && __toggleProbe.toggleAttribute('hidden', undefined) === false && __toggleProbe.toggleAttribute('hidden', true) === true && __toggleProbe.hasAttribute('hidden') && __toggleProbe.getAttribute('hidden') === ''",
+      "baseline_supported": false
+    },
+    {
       "id": "css.selector-list-pseudos",
       "area": "css",
       "description": ":is(), :where(), and selector-list :not() share Selectors Level 4 matching",
