@@ -3,7 +3,13 @@
   // unfiltered slot lookup private to the event dispatcher so page scripts
   // cannot use it to inspect closed shadow trees.
   const internalAssignedSlot = globalThis.__omoikane_internal_assigned_slot;
+  let registerCanonicalNodeIdentity = globalThis.__omoikane_register_canonical_node_identity;
+  const nativeGetOptionSelected = globalThis.__omoikane_get_option_selected;
+  const nativeSetOptionSelected = globalThis.__omoikane_set_option_selected;
   delete globalThis.__omoikane_internal_assigned_slot;
+  delete globalThis.__omoikane_register_canonical_node_identity;
+  delete globalThis.__omoikane_get_option_selected;
+  delete globalThis.__omoikane_set_option_selected;
   // Keep the host clipboard bindings private to this bootstrap closure. Page
   // code must go through the Promise-based Clipboard API, where secure-context
   // and permission checks are applied consistently.
@@ -112,7 +118,6 @@
     const id = canonicalWrapperId(node);
     return id !== undefined && hasCanonicalElementId(ids, id);
   }
-
   const validatesSpecialStyleProperties = new Set([
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
@@ -415,6 +420,21 @@
     }
     return mapGet(canonicalNodeIds, node);
   }
+
+  function canonicalNodeIdentity(receiver) {
+    if ((typeof receiver !== "object" && typeof receiver !== "function") || receiver === null) {
+      throw new IntrinsicTypeError("Illegal invocation");
+    }
+    const id = canonicalNodeId(receiver);
+    if (id === undefined || mapGet(cache, id) !== receiver) {
+      throw new IntrinsicTypeError("Illegal invocation");
+    }
+    return id;
+  }
+  if (typeof registerCanonicalNodeIdentity === "function") {
+    registerCanonicalNodeIdentity(canonicalNodeIdentity);
+  }
+  registerCanonicalNodeIdentity = null;
 
   function markCanonicalCdata(node) {
     if (canonicalNodeId(node) !== undefined) {
@@ -3288,6 +3308,14 @@
         previous.focus();
       }
       this.dispatchEvent(new Event("close"));
+    }
+  }
+
+  class HTMLDetailsElement extends HTMLElement {
+    get open() { return this.hasAttribute("open"); }
+    set open(value) {
+      if (value) this.setAttribute("open", "");
+      else this.removeAttribute("open");
     }
   }
   class HTMLStyleElement extends HTMLElement {
@@ -7013,11 +7041,10 @@
       else this.removeAttribute("selected");
     }
     get selected() {
-      if (this.__selected !== undefined) return this.__selected;
-      return this.hasAttribute("selected");
+      return nativeGetOptionSelected(canonicalNodeIdentity(this));
     }
     set selected(v) {
-      this.__selected = !!v;
+      nativeSetOptionSelected(canonicalNodeIdentity(this), !!v);
     }
     get value() {
       if (this.hasAttribute("value")) return this.getAttribute("value");
@@ -9133,6 +9160,7 @@
     template: HTMLTemplateElement,
     slot: HTMLSlotElement,
     dialog: HTMLDialogElement,
+    details: HTMLDetailsElement,
   };
 
   const CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION = {};
@@ -9566,6 +9594,7 @@
   globalThis.HTMLParagraphElement = HTMLParagraphElement;
   globalThis.HTMLAnchorElement = HTMLAnchorElement;
   globalThis.HTMLDialogElement = HTMLDialogElement;
+  globalThis.HTMLDetailsElement = HTMLDetailsElement;
   globalThis.HTMLStyleElement = HTMLStyleElement;
   globalThis.HTMLTemplateElement = HTMLTemplateElement;
   globalThis.HTMLSlotElement = HTMLSlotElement;

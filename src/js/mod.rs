@@ -27,6 +27,7 @@ use boa_engine::object::{
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
 use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
+use crate::accessibility::{AccessibilityRenderState, AccessibilitySnapshotState};
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
     parse_scope_prelude, parse_selector_list,
@@ -819,6 +820,9 @@ struct HostState {
     event_loop: EventLoop,
     document: NodeHandle,
     nodes: HashMap<usize, NodeHandle>,
+    /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
+    /// returns their native node identity.
+    canonical_node_identity_resolver: Option<JsValue>,
     console_logs: Vec<String>,
     /// Errors raised by page script while an event-loop task ran.
     ///
@@ -979,6 +983,9 @@ impl Finalize for HostState {}
 unsafe impl Trace for HostState {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.event_loop.trace(tracer) };
+        if let Some(resolver) = &self.canonical_node_identity_resolver {
+            unsafe { resolver.trace(tracer) };
+        }
         if let Some(owner) = &self.worker_owner_object {
             unsafe { owner.trace(tracer) };
         }
@@ -1339,6 +1346,7 @@ impl HostState {
             event_loop: EventLoop::default(),
             document: document.clone(),
             nodes: HashMap::new(),
+            canonical_node_identity_resolver: None,
             console_logs: Vec::new(),
             task_errors: Vec::new(),
             suppressed_task_errors: 0,
@@ -2521,6 +2529,180 @@ impl JsRuntime {
     /// Returns the current DOM document.
     pub fn document(&self) -> NodeHandle {
         self.host_state.borrow().document.clone()
+    }
+
+    /// Returns the stable native identity of the explicitly focused element.
+    ///
+    /// `Document.activeElement` has a body/document-element fallback even when
+    /// no element owns focus. The accessibility tree needs to distinguish that
+    /// fallback from an actual focused control, so it reads the bootstrap's
+    /// per-document focus slot directly.
+    fn accessibility_node_identity(value: f64) -> Option<usize> {
+        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let maximum = MAX_SAFE_INTEGER.min(usize::MAX as f64);
+        if value.is_finite()
+            && value >= 0.0
+            && value.fract() == 0.0
+            && value <= maximum
+        {
+            Some(value as usize)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn accessibility_focused_node_identity(&mut self) -> Option<usize> {
+        self.eval(
+            "(() => { document.activeElement; return \
+             document.hasFocus() && document.__focusedElementId != null \
+               ? document.__focusedElementId : null; })()",
+        )
+        .ok()
+        .and_then(|value| value.as_number())
+        .and_then(Self::accessibility_node_identity)
+    }
+
+    /// Resolves a Runtime remote object when it is a live DOM Node wrapper.
+    pub(crate) fn node_for_remote_object_id(&mut self, object_id: &str) -> Option<NodeHandle> {
+        let object_id = serde_json::to_string(object_id).ok()?;
+        let value = self.eval(&format!("globalThis[{object_id}]")).ok()?;
+        let resolver = self
+            .host_state
+            .borrow()
+            .canonical_node_identity_resolver
+            .clone()?;
+        let identity = self
+            .with_active_host(|context| {
+                let callable = resolver.as_callable().ok_or_else(|| {
+                    JsError::from(
+                        JsNativeError::typ()
+                            .with_message("canonical node identity resolver is not callable"),
+                    )
+                })?;
+                callable.call(&JsValue::undefined(), &[value], context)
+            })
+            .ok()?
+            .as_number()
+            .and_then(Self::accessibility_node_identity)?;
+        self.host_state.borrow().get_node(identity)
+    }
+
+    /// Captures live form and disclosure state for accessibility consumers.
+    ///
+    /// Option selectedness is mirrored into the native DOM by a bootstrap-only
+    /// binding, and `<details open>` is a reflected content attribute. Keeping
+    /// this traversal native avoids exposing closed-shadow node identities or
+    /// wrappers to page JavaScript.
+    pub(crate) fn accessibility_snapshot_state(&mut self) -> AccessibilitySnapshotState {
+        fn collect_options(node: &NodeHandle, options: &mut Vec<NodeHandle>) {
+            for child in node.child_nodes() {
+                if child.tag_name().as_deref() == Some("option") {
+                    options.push(child);
+                } else {
+                    collect_options(&child, options);
+                }
+            }
+        }
+
+        fn collect(node: &NodeHandle, snapshot: &mut AccessibilitySnapshotState) {
+            if node.tag_name().as_deref() == Some("select") {
+                let mut options = Vec::new();
+                collect_options(node, &mut options);
+                let mut selected = options
+                    .iter()
+                    .filter(|option| option.selected())
+                    .collect::<Vec<_>>();
+                if node.get_attribute("multiple").is_none() && selected.is_empty() {
+                    selected = options
+                        .iter()
+                        .find(|option| !is_actually_disabled(option))
+                        .into_iter()
+                        .collect();
+                } else if node.get_attribute("multiple").is_none() && selected.len() > 1 {
+                    selected = selected.split_off(selected.len() - 1);
+                }
+                snapshot
+                    .selected_option_identities
+                    .extend(selected.into_iter().map(|option| option.identity()));
+            } else if node.tag_name().as_deref() == Some("details")
+                && node.get_attribute("open").is_some()
+            {
+                snapshot.open_details_identities.insert(node.identity());
+            }
+            if let Some(root) = node.shadow_root() {
+                collect(&root, snapshot);
+            }
+            for child in node.child_nodes() {
+                collect(&child, snapshot);
+            }
+        }
+
+        let mut snapshot = AccessibilitySnapshotState::default();
+        collect(&self.document(), &mut snapshot);
+        snapshot
+    }
+
+    /// Resolves whether an element participates in the rendered accessibility
+    /// tree, including stylesheet-driven ancestor `display:none` and inherited
+    /// `visibility` state. HTML/ARIA hidden attributes are handled by the
+    /// accessibility builder so it can report the matching ignored reason.
+    pub(crate) fn accessibility_render_state(
+        &mut self,
+        node: &NodeHandle,
+    ) -> AccessibilityRenderState {
+        if node.node_type() != NodeType::Element {
+            return AccessibilityRenderState::Rendered;
+        }
+        let Some(document) = document_root_for_node(node) else {
+            return AccessibilityRenderState::NotRendered;
+        };
+        let document_id = document.identity();
+        let mut state = self.host_state.borrow_mut();
+        state.ensure_style_resolver(&document);
+
+        let mut current = Some(node.clone());
+        while let Some(element) = current {
+            let Some(resolver) = state
+                .document_styles
+                .get_mut(&document_id)
+                .and_then(|entry| entry.resolver.as_mut())
+            else {
+                return AccessibilityRenderState::NotRendered;
+            };
+            if matches!(
+                resolver.computed_property(&element, "display"),
+                Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
+            )
+            {
+                return AccessibilityRenderState::NotRendered;
+            }
+            current = element.assigned_slot().or_else(|| {
+                element.parent_node().and_then(|parent| {
+                    if parent.node_type() == NodeType::Element {
+                        Some(parent)
+                    } else {
+                        parent.shadow_host()
+                    }
+                })
+            });
+        }
+
+        let Some(resolver) = state
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+        else {
+            return AccessibilityRenderState::NotRendered;
+        };
+        match resolver.computed_property(node, "visibility") {
+            Some(ComputedValue::Keyword(value))
+                if value.eq_ignore_ascii_case("hidden")
+                    || value.eq_ignore_ascii_case("collapse") =>
+            {
+                AccessibilityRenderState::NotVisible
+            }
+            _ => AccessibilityRenderState::Rendered,
+        }
     }
 
     /// Cancels every worker when this global is replaced by navigation,
@@ -5951,6 +6133,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(open_javascript_dialog_native),
         ),
         (
+            js_string!("__omoikane_register_canonical_node_identity"),
+            1,
+            NativeFunction::from_copy_closure(register_canonical_node_identity_native),
+        ),
+        (
             js_string!("__omoikane_performance_now"),
             0,
             NativeFunction::from_copy_closure(performance_now_native),
@@ -6154,6 +6341,16 @@ fn register_host_bindings(
             js_string!("__omoikane_set_checked"),
             2,
             NativeFunction::from_copy_closure(set_checked_native),
+        ),
+        (
+            js_string!("__omoikane_get_option_selected"),
+            1,
+            NativeFunction::from_copy_closure(get_option_selected_native),
+        ),
+        (
+            js_string!("__omoikane_set_option_selected"),
+            2,
+            NativeFunction::from_copy_closure(set_option_selected_native),
         ),
         (
             js_string!("__omoikane_set_text_control_state"),
@@ -6734,6 +6931,27 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
             JsError::from(JsNativeError::error().with_message("host state is not active"))
         })?;
         f(&state)
+    })
+}
+
+fn register_canonical_node_identity_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let resolver = args.first().cloned().ok_or_else(|| {
+        JsError::from(
+            JsNativeError::typ().with_message("canonical node identity resolver is required"),
+        )
+    })?;
+    if resolver.as_callable().is_none() {
+        return Err(JsNativeError::typ()
+            .with_message("canonical node identity resolver must be callable")
+            .into());
+    }
+    with_host_state(|state| {
+        state.borrow_mut().canonical_node_identity_resolver = Some(resolver);
+        Ok(JsValue::undefined())
     })
 }
 
@@ -9244,6 +9462,52 @@ fn set_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.set_checked(checked);
         state.borrow_mut().invalidate_style_cache_for_node(&node);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn get_option_selected_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| {
+                JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+            })?;
+        if node.tag_name().as_deref() != Some("option") {
+            return Err(JsNativeError::typ()
+                .with_message("Illegal invocation")
+                .into());
+        }
+        Ok(JsValue::from(node.selected()))
+    })
+}
+
+fn set_option_selected_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let selected = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| {
+                JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+            })?;
+        if node.tag_name().as_deref() != Some("option") {
+            return Err(JsNativeError::typ()
+                .with_message("Illegal invocation")
+                .into());
+        }
+        node.set_selected(selected);
         Ok(JsValue::undefined())
     })
 }
@@ -12725,6 +12989,27 @@ mod tests {
         let value = runtime.eval("1 + 2 + 3").unwrap();
 
         assert_eq!(value.as_number(), Some(6.0));
+    }
+
+    #[test]
+    fn accessibility_node_identities_require_in_range_integers() {
+        let maximum = 9_007_199_254_740_991.0_f64.min(usize::MAX as f64);
+        assert_eq!(JsRuntime::accessibility_node_identity(42.0), Some(42));
+        assert_eq!(
+            JsRuntime::accessibility_node_identity(maximum),
+            Some(maximum as usize)
+        );
+        for invalid in [
+            -1.0,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            maximum + 1.0,
+            2.0_f64.powi(usize::BITS as i32),
+        ] {
+            assert_eq!(JsRuntime::accessibility_node_identity(invalid), None);
+        }
     }
 
     #[test]

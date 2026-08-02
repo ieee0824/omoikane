@@ -186,6 +186,8 @@ pub struct Element {
     attribute_names: BTreeMap<String, AttributeName>,
     checked: bool,
     dirty_checkedness: bool,
+    selected: bool,
+    dirty_selectedness: bool,
     text_control_state: Option<TextControlState>,
     /// Scroll offset of this element's scrolling box in CSS pixels, as set
     /// through `scrollTop` / `scrollLeft` and friends.
@@ -227,6 +229,8 @@ impl Element {
             attribute_names: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
+            selected: false,
+            dirty_selectedness: false,
             text_control_state: None,
             scroll_offset: (0.0, 0.0),
             template_content,
@@ -253,6 +257,8 @@ impl Element {
             attribute_names: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
+            selected: false,
+            dirty_selectedness: false,
             text_control_state: None,
             scroll_offset: (0.0, 0.0),
             template_content: None,
@@ -802,6 +808,9 @@ impl NodeHandle {
             if name == "checked" && !element.dirty_checkedness {
                 element.checked = true;
             }
+            if name == "selected" && !element.dirty_selectedness {
+                element.selected = true;
+            }
             element.attributes.insert(name.clone(), value.into());
             element
                 .attribute_names
@@ -873,6 +882,9 @@ impl NodeHandle {
             if name == "checked" && !element.dirty_checkedness {
                 element.checked = false;
             }
+            if name == "selected" && !element.dirty_selectedness {
+                element.selected = false;
+            }
         }
     }
 
@@ -922,6 +934,25 @@ impl NodeHandle {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             element.checked = checked;
             element.dirty_checkedness = true;
+        }
+    }
+
+    /// Returns an option element's live selectedness.
+    pub(crate) fn selected(&self) -> bool {
+        match &self.0.borrow().data {
+            NodeData::Element(element) if element.tag_name == "option" => element.selected,
+            _ => false,
+        }
+    }
+
+    /// Updates an option element's live selectedness independently of its
+    /// `selected` content attribute.
+    pub(crate) fn set_selected(&self, selected: bool) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data
+            && element.tag_name == "option"
+        {
+            element.selected = selected;
+            element.dirty_selectedness = true;
         }
     }
 
@@ -1283,6 +1314,25 @@ mod tests {
         assert_eq!(text.node_name(), "#text");
         assert_eq!(comment.node_name(), "#comment");
         assert_eq!(doctype.node_name(), "html");
+    }
+
+    #[test]
+    fn option_selectedness_tracks_default_until_property_becomes_dirty() {
+        let option = NodeHandle::element("option");
+        assert!(!option.selected());
+
+        option.set_attribute("selected", "");
+        assert!(option.selected());
+        option.remove_attribute("selected");
+        assert!(!option.selected());
+
+        option.set_selected(true);
+        option.remove_attribute("selected");
+        assert!(option.selected());
+        option.set_attribute("selected", "");
+        option.set_selected(false);
+        assert!(!option.selected());
+        assert!(option.get_attribute("selected").is_some());
     }
 
     #[test]
