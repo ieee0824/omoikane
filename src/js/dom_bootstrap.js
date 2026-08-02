@@ -65,11 +65,13 @@
   globalThis.top = globalThis;
   const cache = new Map();
   // A Node wrapper's native identity is platform state, not its script-visible
-  // `__id` expando. Keep the canonical id and interface private so Web IDL
-  // brand checks and node equality survive prototype/expando changes.
-  const canonicalNodeStates = new WeakMap();
-  const getCanonicalNodeState = Function.prototype.call.bind(WeakMap.prototype.get);
-  const setCanonicalNodeState = Function.prototype.call.bind(WeakMap.prototype.set);
+  // `__id` expando. Keep only primitive private values here: retaining ordinary
+  // JS state objects through a map can cross Boa's generational-GC shape edges.
+  // `cache` already owns every wrapper strongly, so these reverse maps do not
+  // extend wrapper lifetime.
+  const canonicalNodeIds = new Map();
+  const canonicalCdataNodes = new Map();
+  const canonicalCharacterDataOverrides = new Map();
   const mapHas = Function.prototype.call.bind(Map.prototype.has);
   const mapGet = Function.prototype.call.bind(Map.prototype.get);
   const mapSet = Function.prototype.call.bind(Map.prototype.set);
@@ -254,16 +256,6 @@
       : htmlElement ? HTMLElement : Element);
   }
 
-  function makeCanonicalNodeState(id, interfaceType, nodeType) {
-    const state = { id, interfaceType, nodeType };
-    if (nodeType === 1) {
-      state.namespaceURI = canonicalElementNamespace(id);
-      state.prefix = nativeNodePrefix(id);
-      state.localName = nativeNodeLocalName(id);
-    }
-    return state;
-  }
-
   function wrapNode(id) {
     if (id === null || id === undefined) {
       return null;
@@ -279,35 +271,27 @@
     } else {
       node = new interfaceType(id);
     }
-    setCanonicalNodeState(
-      canonicalNodeStates,
-      node,
-      makeCanonicalNodeState(id, interfaceType, nodeType)
-    );
+    mapSet(canonicalNodeIds, node, id);
     mapSet(cache, id, node);
     if (interfaceType === HTMLSlotElement) knownSlots.push(node);
     return node;
   }
 
-  function canonicalNodeState(node) {
+  function canonicalNodeId(node) {
     if ((typeof node !== "object" && typeof node !== "function") || node === null) {
       return undefined;
     }
-    return getCanonicalNodeState(canonicalNodeStates, node);
+    return mapGet(canonicalNodeIds, node);
   }
 
-  function canonicalNodeId(node) {
-    const state = canonicalNodeState(node);
-    return state && state.id;
-  }
-
-  function setCanonicalNodeInterface(node, interfaceType) {
-    const state = canonicalNodeState(node);
-    if (state) state.interfaceType = interfaceType;
+  function markCanonicalCdata(node) {
+    if (canonicalNodeId(node) !== undefined) {
+      mapSet(canonicalCdataNodes, node, true);
+    }
   }
 
   function requireNodeReceiver(node) {
-    if (!canonicalNodeState(node)) {
+    if (canonicalNodeId(node) === undefined) {
       throw new IntrinsicTypeError("Node method called on an incompatible receiver");
     }
     return node;
@@ -315,15 +299,15 @@
 
   function convertNullableNode(value) {
     if (value === null || value === undefined) return null;
-    if (!canonicalNodeState(value)) {
+    if (canonicalNodeId(value) === undefined) {
       throw new IntrinsicTypeError("Argument is not a Node");
     }
     return value;
   }
 
-  function cachedCanonicalNodeState(id) {
+  function cachedCanonicalNode(id) {
     if (!mapHas(cache, id)) return undefined;
-    return getCanonicalNodeState(canonicalNodeStates, mapGet(cache, id));
+    return mapGet(cache, id);
   }
 
   function namespacedAttributeRecord(id, namespace, localName) {
@@ -336,16 +320,16 @@
     return null;
   }
 
-  function canonicalCharacterData(id, state) {
-    return state && state.characterData !== undefined
-      ? state.characterData
+  function canonicalCharacterData(id, node) {
+    return node && mapHas(canonicalCharacterDataOverrides, node)
+      ? mapGet(canonicalCharacterDataOverrides, node)
       : (nativeGetTextContent(id) || "");
   }
 
-  function canonicalElementProperty(id, state, property, nativeGetter) {
-    return state && state.nodeType === 1
-      ? state[property]
-      : nativeGetter(id);
+  function canonicalInterfaceType(id, nodeType, node) {
+    return node && mapHas(canonicalCdataNodes, node)
+      ? CDATASection
+      : nativeInterfaceTypeForNodeId(id, nodeType);
   }
 
   function equalElementAttributes(left, right) {
@@ -373,16 +357,12 @@
     return true;
   }
 
-  function equalCanonicalNodeIds(leftId, rightId, leftState, rightState) {
+  function equalCanonicalNodeIds(leftId, rightId, leftNode, rightNode) {
     if (leftId === rightId) return true;
     const nodeType = nativeNodeType(leftId);
     if (nodeType !== nativeNodeType(rightId)) return false;
-    const leftInterface = leftState
-      ? leftState.interfaceType
-      : nativeInterfaceTypeForNodeId(leftId, nodeType);
-    const rightInterface = rightState
-      ? rightState.interfaceType
-      : nativeInterfaceTypeForNodeId(rightId, nodeType);
+    const leftInterface = canonicalInterfaceType(leftId, nodeType, leftNode);
+    const rightInterface = canonicalInterfaceType(rightId, nodeType, rightNode);
     if (leftInterface !== rightInterface) return false;
 
     if (nodeType === 10) {
@@ -392,12 +372,9 @@
         return false;
       }
     } else if (nodeType === 1) {
-      if (canonicalElementProperty(leftId, leftState, "namespaceURI", canonicalElementNamespace) !==
-            canonicalElementProperty(rightId, rightState, "namespaceURI", canonicalElementNamespace) ||
-          canonicalElementProperty(leftId, leftState, "prefix", nativeNodePrefix) !==
-            canonicalElementProperty(rightId, rightState, "prefix", nativeNodePrefix) ||
-          canonicalElementProperty(leftId, leftState, "localName", nativeNodeLocalName) !==
-            canonicalElementProperty(rightId, rightState, "localName", nativeNodeLocalName) ||
+      if (canonicalElementNamespace(leftId) !== canonicalElementNamespace(rightId) ||
+          nativeNodePrefix(leftId) !== nativeNodePrefix(rightId) ||
+          nativeNodeLocalName(leftId) !== nativeNodeLocalName(rightId) ||
           !equalElementAttributes(
             nativeAttributeRecords(leftId) || [],
             nativeAttributeRecords(rightId) || []
@@ -406,13 +383,13 @@
       }
     } else if (nodeType === 7) {
       if (nativeNodeName(leftId) !== nativeNodeName(rightId) ||
-          canonicalCharacterData(leftId, leftState) !==
-            canonicalCharacterData(rightId, rightState)) {
+          canonicalCharacterData(leftId, leftNode) !==
+            canonicalCharacterData(rightId, rightNode)) {
         return false;
       }
     } else if ((nodeType === 3 || nodeType === 8) &&
-               canonicalCharacterData(leftId, leftState) !==
-                 canonicalCharacterData(rightId, rightState)) {
+               canonicalCharacterData(leftId, leftNode) !==
+                 canonicalCharacterData(rightId, rightNode)) {
       return false;
     }
 
@@ -425,8 +402,8 @@
       if (!equalCanonicalNodeIds(
         leftChildId,
         rightChildId,
-        cachedCanonicalNodeState(leftChildId),
-        cachedCanonicalNodeState(rightChildId)
+        cachedCanonicalNode(leftChildId),
+        cachedCanonicalNode(rightChildId)
       )) {
         return false;
       }
@@ -435,14 +412,10 @@
   }
 
   function equalCanonicalNodes(left, right) {
-    const leftState = canonicalNodeState(left);
-    const rightState = canonicalNodeState(right);
-    return !!leftState && !!rightState && equalCanonicalNodeIds(
-      leftState.id,
-      rightState.id,
-      leftState,
-      rightState
-    );
+    const leftId = canonicalNodeId(left);
+    const rightId = canonicalNodeId(right);
+    return leftId !== undefined && rightId !== undefined &&
+      equalCanonicalNodeIds(leftId, rightId, left, right);
   }
 
   // Stamps `node` and (for a deep subtree) every descendant with `doc` as its
@@ -1915,12 +1888,12 @@
       // their preceding siblings, matching sequential pre-remove semantics.
       for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_text_content(this.__id, text);
-      const canonicalState = canonicalNodeState(this);
-      if (canonicalState && (canonicalState.nodeType === 3 ||
-          canonicalState.nodeType === 7 || canonicalState.nodeType === 8)) {
+      const canonicalId = canonicalNodeId(this);
+      const canonicalType = canonicalId === undefined ? undefined : nativeNodeType(canonicalId);
+      if (canonicalType === 3 || canonicalType === 7 || canonicalType === 8) {
         // Keep the private WTF-16 override coherent even when callers invoke
         // this base-class descriptor setter directly on CharacterData.
-        canonicalState.characterData = text;
+        mapSet(canonicalCharacterDataOverrides, this, text);
       }
       const addedNodes = this.childNodes.slice();
       if (wasConnected) {
@@ -2122,7 +2095,7 @@
         if (source instanceof CDATASection) {
           Object.setPrototypeOf(target, CDATASection.prototype);
           Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
-          setCanonicalNodeInterface(target, CDATASection);
+          markCanonicalCdata(target);
         }
         if (source instanceof CharacterData) target.textContent = source.textContent;
         if (!deep) return;
@@ -2207,14 +2180,14 @@
         this.setAttribute(name, value);
         return;
       }
-      const state = canonicalNodeState(this);
-      const previous = namespacedAttributeRecord(state.id, ns, localName);
+      const id = canonicalNodeId(requireNodeReceiver(this));
+      const previous = namespacedAttributeRecord(id, ns, localName);
       const oldValue = previous ? previous[3] : null;
       if (previous && previous[0] !== name) {
-        nativeRemoveAttributeNS(state.id, previous[0]);
+        nativeRemoveAttributeNS(id, previous[0]);
       }
       const newValue = String(value);
-      nativeSetAttributeNS(state.id, ns, name, localName, newValue);
+      nativeSetAttributeNS(id, ns, name, localName, newValue);
       queueMutation(this, "attributes", { attributeName: localName, attributeNamespace: ns, oldValue });
       notifyCustomElementAttributeChanged(this, localName, oldValue, newValue, ns);
     }
@@ -2222,10 +2195,8 @@
     getAttributeNS(namespace, localName) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       if (ns === null) return this.getAttribute(localName);
-      const state = canonicalNodeState(this);
-      const entry = state
-        ? namespacedAttributeRecord(state.id, ns, String(localName))
-        : null;
+      const id = canonicalNodeId(requireNodeReceiver(this));
+      const entry = namespacedAttributeRecord(id, ns, String(localName));
       return entry ? entry[3] : null;
     }
 
@@ -2235,12 +2206,10 @@
         this.removeAttribute(localName);
         return;
       }
-      const state = canonicalNodeState(this);
-      const entry = state
-        ? namespacedAttributeRecord(state.id, ns, String(localName))
-        : null;
+      const id = canonicalNodeId(requireNodeReceiver(this));
+      const entry = namespacedAttributeRecord(id, ns, String(localName));
       if (!entry) return;
-      nativeRemoveAttributeNS(state.id, entry[0]);
+      nativeRemoveAttributeNS(id, entry[0]);
       queueMutation(this, "attributes", { attributeName: entry[2], attributeNamespace: ns, oldValue: entry[3] });
       notifyCustomElementAttributeChanged(this, entry[2], entry[3], null, ns);
     }
@@ -3077,8 +3046,9 @@
   class CharacterData extends Node {
     remove() { removeChildNode.call(this); }
     get textContent() {
-      const state = canonicalNodeState(this);
-      if (state && state.characterData !== undefined) return state.characterData;
+      if (mapHas(canonicalCharacterDataOverrides, this)) {
+        return mapGet(canonicalCharacterDataOverrides, this);
+      }
       return super.textContent;
     }
 
@@ -4112,7 +4082,7 @@
       const node = this.createTextNode(text);
       Object.setPrototypeOf(node, CDATASection.prototype);
       Object.defineProperty(node, "__cdataSection", { value: true, configurable: true });
-      setCanonicalNodeInterface(node, CDATASection);
+      markCanonicalCdata(node);
       return node;
     }
 
