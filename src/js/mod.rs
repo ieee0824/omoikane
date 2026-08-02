@@ -33047,6 +33047,59 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn reloaded_iframe_drops_stale_child_realm_timers() {
+        use crate::html::TreeBuilder;
+        let old_port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>
+                setTimeout(() => document.documentElement.setAttribute('data-stale', 'bad'), 10);
+            </script></body></html>"#,
+        );
+        let new_port = spawn_static_http_server(
+            "application/xhtml+xml",
+            "<html xmlns='http://www.w3.org/1999/xhtml'><body></body></html>",
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{old_port}/old.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{old_port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').src = 'http://127.0.0.1:{new_port}/new.xhtml'"
+            ))
+            .unwrap();
+        runtime.tick(10).unwrap();
+
+        let current_root = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            let document = state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("replacement iframe document must be live")
+                .document
+                .clone();
+            document
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("replacement document must have a root")
+        };
+        assert_eq!(
+            current_root.get_attribute("data-stale"),
+            None,
+            "a timer from the replaced child Realm must not mutate the new Document",
+        );
+    }
+
+    #[test]
     fn iframe_sandbox_dom_token_list_is_live_and_reflected() {
         let mut runtime = runtime_from_html(
             r#"<html><body><iframe id="frame"></iframe></body></html>"#,
