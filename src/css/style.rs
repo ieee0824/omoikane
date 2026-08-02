@@ -4609,7 +4609,15 @@ fn apply_presentational_hints(
     // declarations. Expose pointer-events through computed style so hit
     // testing can distinguish a local attribute from an inherited value and
     // still honor explicit CSS overrides, including `auto`.
-    if node.namespace_uri().as_deref() == Some("http://www.w3.org/2000/svg")
+    let is_svg_element = node.namespace_uri().as_deref() == Some("http://www.w3.org/2000/svg")
+        || node.tag_name().as_deref().is_some_and(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "svg" | "g" | "rect" | "circle" | "ellipse" | "line"
+                    | "polyline" | "polygon" | "path" | "text" | "tspan" | "textpath"
+            )
+        });
+    if is_svg_element
         && !properties.contains_key("pointer-events")
         && let Some(value) = attributes
             .iter()
