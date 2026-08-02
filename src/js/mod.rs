@@ -1464,7 +1464,14 @@ impl HostState {
         }
 
         let (document, csp_headers, child_url) = self.load_iframe_document(&src);
-        let sandbox = IframeSandboxPolicy::from_iframe(iframe);
+        let sandbox = if iframe
+            .tag_name()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
+        {
+            IframeSandboxPolicy::from_iframe(iframe)
+        } else {
+            IframeSandboxPolicy::default()
+        };
         let origin = if sandbox.active && !sandbox.allow_same_origin {
             None
         } else if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {
@@ -30816,6 +30823,11 @@ b</textarea></form>"#);
                         frame.getAttribute('sandbox') === 'allow-same-origin';
                     const absent = document.createElement('iframe');
                     absent.sandbox.remove('allow-scripts');
+                    const assignmentRejected = (() => {
+                        "use strict";
+                        try { frame.sandbox = ''; return false; }
+                        catch (error) { return error instanceof TypeError; }
+                    })();
                     return [
                         tokens === frame.sandbox,
                         tokens instanceof DOMTokenList,
@@ -30825,11 +30837,33 @@ b</textarea></form>"#);
                         tokens.supports('future-token'),
                         undefinedForcesFalse,
                         duplicateToggle,
-                        !absent.hasAttribute('sandbox')
+                        !absent.hasAttribute('sandbox'),
+                        assignmentRejected,
+                        frame.getAttribute('sandbox') === 'allow-same-origin'
                     ].join('|');
                 })()"#,
             ),
-            "true|true|allow-scripts allow-same-origin allow-modals|allow-scripts,allow-same-origin,allow-modals|true|false|true|true|true"
+            "true|true|allow-scripts allow-same-origin allow-modals|allow-scripts,allow-same-origin,allow-modals|true|false|true|true|true|true|true"
+        );
+    }
+
+    #[test]
+    fn object_sandbox_attribute_does_not_create_iframe_policy() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><object id="embedded" sandbox></object></body></html>"#,
+        );
+        assert!(runtime
+            .eval("document.getElementById('embedded').contentDocument !== null")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        let state = runtime.host_state.borrow();
+        let object = state.document.query_selector("#embedded").unwrap();
+        let document = &state.iframe_documents[&object.identity()].document;
+        assert_eq!(
+            state.document_sandbox.get(&document.identity()),
+            Some(&IframeSandboxPolicy::default())
         );
     }
 
