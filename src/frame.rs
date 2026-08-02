@@ -164,7 +164,7 @@ pub fn render_browser_frame(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use serde_json::json;
 
