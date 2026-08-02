@@ -8129,6 +8129,12 @@
     }
   }
   class SVGRectElement extends SVGGeometryElement {}
+  class SVGImageElement extends SVGGraphicsElement {
+    get href() {
+      if (!this.__animatedHref) this.__animatedHref = new SVGAnimatedString(this, "href", "xlink:href");
+      return this.__animatedHref;
+    }
+  }
   class SVGCircleElement extends SVGGeometryElement {}
   class SVGEllipseElement extends SVGGeometryElement {}
   class SVGLineElement extends SVGGeometryElement {}
@@ -8242,6 +8248,23 @@
     get [Symbol.toStringTag]() { return "SVGAnimatedLength"; }
   }
 
+  class SVGAnimatedString {
+    constructor(element, name, fallbackName = null) {
+      const read = () => element.getAttribute(name) ??
+        (fallbackName === null ? "" : element.getAttribute(fallbackName)) ?? "";
+      Object.defineProperty(this, "baseVal", {
+        configurable: true,
+        enumerable: true,
+        get: read,
+        set: value => element.setAttribute(name, String(value)),
+      });
+      Object.defineProperty(this, "animVal", {
+        configurable: true, enumerable: true, get: read,
+      });
+    }
+    get [Symbol.toStringTag]() { return "SVGAnimatedString"; }
+  }
+
   function defineSvgAnimatedLengthProperties(ctor, names) {
     for (const name of names) {
       Object.defineProperty(ctor.prototype, name, {
@@ -8257,6 +8280,7 @@
   }
 
   defineSvgAnimatedLengthProperties(SVGRectElement, ["x", "y", "width", "height", "rx", "ry"]);
+  defineSvgAnimatedLengthProperties(SVGImageElement, ["x", "y", "width", "height"]);
   defineSvgAnimatedLengthProperties(SVGCircleElement, ["cx", "cy", "r"]);
   defineSvgAnimatedLengthProperties(SVGEllipseElement, ["cx", "cy", "rx", "ry"]);
   defineSvgAnimatedLengthProperties(SVGLineElement, ["x1", "y1", "x2", "y2"]);
@@ -8265,7 +8289,8 @@
   for (const [ctor, tag] of [
     [SVGElement, "SVGElement"], [SVGGraphicsElement, "SVGGraphicsElement"],
     [SVGGeometryElement, "SVGGeometryElement"], [SVGSVGElement, "SVGSVGElement"],
-    [SVGRectElement, "SVGRectElement"], [SVGCircleElement, "SVGCircleElement"],
+    [SVGRectElement, "SVGRectElement"], [SVGImageElement, "SVGImageElement"],
+    [SVGCircleElement, "SVGCircleElement"],
     [SVGEllipseElement, "SVGEllipseElement"], [SVGLineElement, "SVGLineElement"],
     [SVGPathElement, "SVGPathElement"], [SVGPolylineElement, "SVGPolylineElement"],
     [SVGPolygonElement, "SVGPolygonElement"], [SVGTextContentElement, "SVGTextContentElement"],
@@ -8318,7 +8343,7 @@
     defs: SVGGraphicsElement,
     symbol: SVGGraphicsElement,
     use: SVGGraphicsElement,
-    image: SVGGraphicsElement,
+    image: SVGImageElement,
     foreignobject: SVGGraphicsElement,
     switch: SVGGraphicsElement,
     rect: SVGRectElement,
@@ -9274,10 +9299,12 @@
   globalThis.SVGPoint = SVGPoint;
   globalThis.SVGMatrix = SVGMatrix;
   globalThis.SVGAnimatedLength = SVGAnimatedLength;
+  globalThis.SVGAnimatedString = SVGAnimatedString;
   globalThis.SVGAnimatedRect = SVGAnimatedRect;
   globalThis.DOMPoint = DOMPoint;
   globalThis.DOMMatrix = DOMMatrix;
   globalThis.SVGRectElement = SVGRectElement;
+  globalThis.SVGImageElement = SVGImageElement;
   globalThis.SVGCircleElement = SVGCircleElement;
   globalThis.SVGEllipseElement = SVGEllipseElement;
   globalThis.SVGLineElement = SVGLineElement;

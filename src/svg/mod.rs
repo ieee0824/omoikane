@@ -1,5 +1,6 @@
 //! Basic SVG rendering: rasterizes inline SVG elements to an RGBA image.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -7,6 +8,28 @@ use crate::layout::Rect;
 use crate::paint::Canvas;
 use crate::paint::Image;
 use crate::paint::color::{Color, parse_color};
+
+thread_local! {
+    static ACTIVE_SVG_IMAGE_REFERENCES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+struct ActiveSvgImageReference(String);
+
+impl ActiveSvgImageReference {
+    fn acquire(href: &str) -> Option<Self> {
+        ACTIVE_SVG_IMAGE_REFERENCES
+            .with(|active| active.borrow_mut().insert(href.to_string()))
+            .then(|| Self(href.to_string()))
+    }
+}
+
+impl Drop for ActiveSvgImageReference {
+    fn drop(&mut self) {
+        ACTIVE_SVG_IMAGE_REFERENCES.with(|active| {
+            active.borrow_mut().remove(&self.0);
+        });
+    }
+}
 
 /// Renders an inline `<svg>` element to an RGBA image.
 ///
@@ -466,7 +489,7 @@ fn svg_hit_geometry(
         0.0
     };
     match tag {
-        "rect" => {
+        "rect" | "image" => {
             let (x, y) = to_viewport(
                 parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0),
                 parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0),
@@ -1610,8 +1633,100 @@ fn render_svg_element(
                 render_path(canvas, &d, sx, sy, tx, ty, fill.as_ref(), fill_rule, stroke.as_ref(), paint.stroke_width * sx.min(sy), paint.line_cap, paint.line_join, transform);
             }
         }
+        "image" => {
+            let Some(href) = attribute_value(&attrs, "href")
+                .or_else(|| attribute_value(&attrs, "xlink:href"))
+            else {
+                return;
+            };
+            let Some(image) = decode_svg_image_reference(&href) else {
+                return;
+            };
+            let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0) * sx + tx;
+            let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0) * sy + ty;
+            let width = parse_svg_size(attribute_ref(&attrs, "width"))
+                .unwrap_or(image.width() as f32)
+                * sx;
+            let height = parse_svg_size(attribute_ref(&attrs, "height"))
+                .unwrap_or(image.height() as f32)
+                * sy;
+            let viewport = Rect { x, y, width, height };
+            let destination = svg_image_destination(
+                viewport,
+                image.width() as f32,
+                image.height() as f32,
+                attribute_ref(&attrs, "preserveAspectRatio").map(String::as_str),
+            );
+            if destination.width <= 0.0 || destination.height <= 0.0 {
+                return;
+            }
+            if paint.opacity >= 1.0 {
+                canvas.draw_image_scaled_clipped(&image, destination, Some(viewport));
+            } else if paint.opacity > 0.0 {
+                let mut pixels = image.pixels().to_vec();
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel[3] = (f32::from(pixel[3]) * paint.opacity).round() as u8;
+                }
+                if let Ok(image) = Image::new(image.width(), image.height(), pixels) {
+                    canvas.draw_image_scaled_clipped(&image, destination, Some(viewport));
+                }
+            }
+        }
         _ => render_svg_children(child, canvas, sx, sy, tx, ty, paint, resources, visited),
     }
+}
+
+fn decode_svg_image_reference(href: &str) -> Option<Image> {
+    let _active = ActiveSvgImageReference::acquire(href)?;
+    crate::layout::decode_or_fetch_image_asset(href)
+}
+
+fn svg_image_destination(
+    viewport: Rect,
+    intrinsic_width: f32,
+    intrinsic_height: f32,
+    preserve_aspect_ratio: Option<&str>,
+) -> Rect {
+    if viewport.width <= 0.0
+        || viewport.height <= 0.0
+        || intrinsic_width <= 0.0
+        || intrinsic_height <= 0.0
+    {
+        return Rect { x: viewport.x, y: viewport.y, width: 0.0, height: 0.0 };
+    }
+    let value = preserve_aspect_ratio.unwrap_or("xMidYMid meet");
+    let mut tokens = value.split_ascii_whitespace();
+    let mut alignment = tokens.next().unwrap_or("xMidYMid");
+    if alignment.eq_ignore_ascii_case("defer") {
+        alignment = tokens.next().unwrap_or("xMidYMid");
+    }
+    if alignment.eq_ignore_ascii_case("none") {
+        return viewport;
+    }
+    let meet = !tokens.any(|token| token.eq_ignore_ascii_case("slice"));
+    let scale = if meet {
+        (viewport.width / intrinsic_width).min(viewport.height / intrinsic_height)
+    } else {
+        (viewport.width / intrinsic_width).max(viewport.height / intrinsic_height)
+    };
+    let width = intrinsic_width * scale;
+    let height = intrinsic_height * scale;
+    let lower = alignment.to_ascii_lowercase();
+    let x = if lower.contains("xmax") {
+        viewport.x + viewport.width - width
+    } else if lower.contains("xmid") {
+        viewport.x + (viewport.width - width) / 2.0
+    } else {
+        viewport.x
+    };
+    let y = if lower.contains("ymax") {
+        viewport.y + viewport.height - height
+    } else if lower.contains("ymid") {
+        viewport.y + (viewport.height - height) / 2.0
+    } else {
+        viewport.y
+    };
+    Rect { x, y, width, height }
 }
 
 fn attribute_ref<'a>(attrs: &'a BTreeMap<String, String>, name: &str) -> Option<&'a String> {
@@ -2711,6 +2826,43 @@ mod tests {
         assert!(pixel(25, 8).g > 0);
         assert_eq!(pixel(32, 8), Color::rgb(255, 255, 0));
         assert!(pixel(8, 3).a > 0, "ellipse stroke should be painted");
+    }
+
+    #[test]
+    fn renders_svg_image_href_with_opacity_and_intrinsic_aspect_ratio() {
+        let html = r#"<svg width="12" height="6">
+          <image x="2" y="1" width="8" height="4" opacity="0.5"
+            href="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMiIgaGVpZ2h0PSIxIj48cmVjdCB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJyZWQiLz48cmVjdCB4PSIxIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJibHVlIi8+PC9zdmc+"/>
+        </svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
+        let pixel = |x: u32, y: u32| {
+            let index = (y * image.width() + x) as usize * 4;
+            Color::rgba(
+                image.pixels()[index],
+                image.pixels()[index + 1],
+                image.pixels()[index + 2],
+                image.pixels()[index + 3],
+            )
+        };
+        assert_eq!(pixel(1, 2).a, 0);
+        assert_eq!((pixel(3, 2).r, pixel(3, 2).b), (255, 0));
+        assert_eq!((pixel(8, 2).r, pixel(8, 2).b), (0, 255));
+        assert!(matches!(pixel(3, 2).a, 127 | 128));
+    }
+
+    #[test]
+    fn svg_image_preserve_aspect_ratio_supports_meet_none_and_slice() {
+        let viewport = Rect { x: 10.0, y: 20.0, width: 100.0, height: 100.0 };
+        assert_eq!(
+            svg_image_destination(viewport, 200.0, 100.0, None),
+            Rect { x: 10.0, y: 45.0, width: 100.0, height: 50.0 },
+        );
+        assert_eq!(svg_image_destination(viewport, 200.0, 100.0, Some("none")), viewport);
+        assert_eq!(
+            svg_image_destination(viewport, 200.0, 100.0, Some("xMaxYMax slice")),
+            Rect { x: -90.0, y: 20.0, width: 200.0, height: 100.0 },
+        );
     }
 
     #[test]
