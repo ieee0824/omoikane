@@ -435,11 +435,10 @@ fn sanitize_filename(value: &str) -> String {
 }
 
 fn filename_from_url(url: &str) -> String {
-    let path = url
-        .split_once('#')
-        .map_or(url, |(path, _)| path)
+    let without_fragment = url.split_once('#').map_or(url, |(path, _)| path);
+    let path = without_fragment
         .split_once('?')
-        .map_or(url, |(path, _)| path);
+        .map_or(without_fragment, |(path, _)| path);
     let candidate = path.rsplit('/').next().unwrap_or_default();
     let candidate = sanitize_filename(candidate);
     if candidate.is_empty() {
