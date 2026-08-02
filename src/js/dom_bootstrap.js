@@ -1124,12 +1124,18 @@
     }
 
     __tokens() {
-      return (this.__node.getAttribute(this.__attribute) || "")
-        .split(/[\t\n\f\r ]+/)
-        .filter(Boolean);
+      return Array.from(new Set(
+        (this.__node.getAttribute(this.__attribute) || "")
+          .split(/[\t\n\f\r ]+/)
+          .filter(Boolean)
+      ));
     }
 
     __replace(tokens) {
+      // A no-op mutation must not manufacture a boolean attribute. This is
+      // security-sensitive for iframe.sandbox: an absent attribute means no
+      // sandbox, while sandbox="" enables every restriction.
+      if (!tokens.length && !this.__node.hasAttribute(this.__attribute)) return;
       this.__node.setAttribute(this.__attribute, tokens.join(" "));
     }
 

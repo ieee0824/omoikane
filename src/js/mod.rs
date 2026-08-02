@@ -30656,18 +30656,26 @@ b</textarea></form>"#);
                     tokens.add('allow-scripts', 'allow-same-origin');
                     tokens.toggle('allow-forms', true);
                     tokens.replace('allow-forms', 'allow-modals');
+                    const reflected = frame.getAttribute('sandbox');
+                    const iterated = Array.from(tokens).join(',');
+                    frame.setAttribute('sandbox', 'allow-scripts allow-scripts allow-same-origin');
+                    const duplicateToggle = !tokens.toggle('allow-scripts') &&
+                        frame.getAttribute('sandbox') === 'allow-same-origin';
+                    const absent = document.createElement('iframe');
+                    absent.sandbox.remove('allow-scripts');
                     return [
                         tokens === frame.sandbox,
                         tokens instanceof DOMTokenList,
-                        frame.getAttribute('sandbox'),
-                        tokens.length,
-                        Array.from(tokens).join(','),
+                        reflected,
+                        iterated,
                         tokens.supports('ALLOW-SCRIPTS'),
-                        tokens.supports('future-token')
+                        tokens.supports('future-token'),
+                        duplicateToggle,
+                        !absent.hasAttribute('sandbox')
                     ].join('|');
                 })()"#,
             ),
-            "true|true|allow-scripts allow-same-origin allow-modals|3|allow-scripts,allow-same-origin,allow-modals|true|false"
+            "true|true|allow-scripts allow-same-origin allow-modals|allow-scripts,allow-same-origin,allow-modals|true|false|true|true"
         );
     }
 
@@ -30675,15 +30683,15 @@ b</textarea></form>"#);
     fn iframe_sandbox_enforces_script_and_origin_boundaries() {
         let blocked_port = spawn_static_http_server(
             "application/xhtml+xml",
-            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.blockedSandboxRan=true</script></body></html>"#,
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>document.documentElement.setAttribute('data-script-ran','true')</script></body></html>"#,
         );
         let scripts_port = spawn_static_http_server(
             "application/xhtml+xml",
-            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.sandboxScriptRan=true</script></body></html>"#,
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>document.documentElement.setAttribute('data-script-ran','true')</script></body></html>"#,
         );
         let same_origin_port = spawn_static_http_server(
             "application/xhtml+xml",
-            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.sameOriginSandboxRuns=(parent.sameOriginSandboxRuns||0)+1</script></body></html>"#,
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>document.documentElement.setAttribute('data-script-ran','true')</script></body></html>"#,
         );
         let mut runtime = runtime_from_html(&format!(
             r#"<html><body>
@@ -30703,14 +30711,6 @@ b</textarea></form>"#);
         pump_zero_delay_tasks(&mut runtime);
         assert!(runtime
             .eval(
-                "typeof blockedSandboxRan === 'undefined' && sandboxScriptRan === true && \
-                 sameOriginSandboxRuns === 1",
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
-        assert!(runtime
-            .eval(
                 "blocked.contentDocument === null && scripts.contentDocument === null && \
                  same.contentDocument !== null && blocked.contentWindow.closed === false",
             )
@@ -30718,17 +30718,34 @@ b</textarea></form>"#);
             .as_boolean()
             .unwrap());
 
-        {
+        let same_document_before_reload = {
             let state = runtime.host_state.borrow();
-            for id in ["blocked", "scripts"] {
+            for (id, script_ran) in [("blocked", false), ("scripts", true)] {
                 let iframe = state.document.query_selector(&format!("#{id}")).unwrap();
                 let document = &state.iframe_documents[&iframe.identity()].document;
                 assert_eq!(state.document_origins.get(&document.identity()), Some(&None));
+                assert_eq!(
+                    document
+                        .query_selector("html")
+                        .unwrap()
+                        .get_attribute("data-script-ran")
+                        .as_deref(),
+                    script_ran.then_some("true")
+                );
             }
             let iframe = state.document.query_selector("#same").unwrap();
             let document = &state.iframe_documents[&iframe.identity()].document;
             assert!(state.document_origins[&document.identity()].is_some());
-        }
+            assert_eq!(
+                document
+                    .query_selector("html")
+                    .unwrap()
+                    .get_attribute("data-script-ran")
+                    .as_deref(),
+                Some("true")
+            );
+            document.identity()
+        };
 
         runtime
             .eval(
@@ -30739,13 +30756,23 @@ b</textarea></form>"#);
             .unwrap();
         pump_zero_delay_tasks(&mut runtime);
         assert!(runtime
-            .eval(
-                "sameBeforeReload === true && same.contentDocument === null && \
-                 sameOriginSandboxRuns === 2",
-            )
+            .eval("sameBeforeReload === true && same.contentDocument === null")
             .unwrap()
             .as_boolean()
             .unwrap());
+        let state = runtime.host_state.borrow();
+        let iframe = state.document.query_selector("#same").unwrap();
+        let document = &state.iframe_documents[&iframe.identity()].document;
+        assert_ne!(document.identity(), same_document_before_reload);
+        assert_eq!(state.document_origins.get(&document.identity()), Some(&None));
+        assert_eq!(
+            document
+                .query_selector("html")
+                .unwrap()
+                .get_attribute("data-script-ran")
+                .as_deref(),
+            Some("true")
+        );
     }
 
     #[test]
