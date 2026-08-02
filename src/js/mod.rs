@@ -23303,6 +23303,7 @@ b</textarea></form>"#);
                   const direct = document.createElement("em");
                   template.appendChild(direct);
                   const clone = template.cloneNode(true);
+                  const cloneInserted = clone.content.querySelector("span");
                   return content === template.content &&
                     content.parentNode === null &&
                     template.childNodes.length === 1 &&
@@ -23316,7 +23317,8 @@ b</textarea></form>"#);
                     nestedInserted.ownerDocument === nestedContent.ownerDocument &&
                     clone.content !== content &&
                     clone.content.ownerDocument === content.ownerDocument &&
-                    clone.content.firstElementChild !== inserted;
+                    cloneInserted !== null &&
+                    cloneInserted !== inserted;
                 })()"#,
             )
             .unwrap()
