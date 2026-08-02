@@ -145,13 +145,16 @@ pub(crate) fn hit_test_svg(
             Some(value) if value.eq_ignore_ascii_case("none")
         ),
     };
+    let mut visited_uses = HashSet::new();
     hit_test_svg_children(
+        svg_node,
         svg_node,
         point,
         scale_x,
         scale_y,
         &initial,
         computed_pointer_events,
+        &mut visited_uses,
     )
 }
 
@@ -164,12 +167,14 @@ struct SvgHitStyle {
 }
 
 fn hit_test_svg_children(
+    root: &NodeHandle,
     parent: &NodeHandle,
     point: (f32, f32),
     scale_x: f32,
     scale_y: f32,
     inherited: &SvgHitStyle,
     computed_pointer_events: &mut dyn FnMut(&NodeHandle) -> Option<String>,
+    visited_uses: &mut HashSet<usize>,
 ) -> Option<NodeHandle> {
     let children = parent.child_nodes();
     for child in children.iter().rev() {
@@ -213,13 +218,34 @@ fn hit_test_svg_children(
         };
         let next_scale_x = scale_x * child_scale_x;
         let next_scale_y = scale_y * child_scale_y;
+        if tag == "use" {
+            let inserted = visited_uses.insert(child.identity());
+            if inserted {
+                let hit = hit_test_svg_use(
+                    root,
+                    child,
+                    local_point,
+                    next_scale_x,
+                    next_scale_y,
+                    &style,
+                    computed_pointer_events,
+                    visited_uses,
+                );
+                visited_uses.remove(&child.identity());
+                if hit {
+                    return Some(child.clone());
+                }
+            }
+        }
         if let Some(target) = hit_test_svg_children(
+            root,
             child,
             local_point,
             next_scale_x,
             next_scale_y,
             &style,
             computed_pointer_events,
+            visited_uses,
         ) {
             return Some(target);
         }
@@ -228,8 +254,8 @@ fn hit_test_svg_children(
             &attrs,
             local_point,
             style.paint.stroke_width,
-            scale_x,
-            scale_y,
+            next_scale_x,
+            next_scale_y,
         );
         if geometry.is_empty() {
             continue;
@@ -241,6 +267,104 @@ fn hit_test_svg_children(
             geometry,
         ) {
             return Some(child.clone());
+        }
+    }
+    None
+}
+
+fn hit_test_svg_use(
+    root: &NodeHandle,
+    use_node: &NodeHandle,
+    point: (f32, f32),
+    scale_x: f32,
+    scale_y: f32,
+    inherited: &SvgHitStyle,
+    computed_pointer_events: &mut dyn FnMut(&NodeHandle) -> Option<String>,
+    visited_uses: &mut HashSet<usize>,
+) -> bool {
+    let attrs = use_node.attributes().unwrap_or_default();
+    let Some(id) = attribute_value(&attrs, "href")
+        .or_else(|| attribute_value(&attrs, "xlink:href"))
+        .and_then(|href| parse_fragment_reference(&href))
+    else {
+        return false;
+    };
+    let Some(target) = find_svg_resource(root, &id) else {
+        return false;
+    };
+    let target_attrs = target.attributes().unwrap_or_default();
+    let target_tag = target
+        .tag_name()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0);
+    let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0);
+    let local_point = (point.0 - x, point.1 - y);
+    let pointer_events = computed_pointer_events(&target)
+        .or_else(|| property_value(&target_attrs, "pointer-events"))
+        .unwrap_or_else(|| inherited.pointer_events.clone())
+        .to_ascii_lowercase();
+    let visible = inherited.visible
+        && !matches!(
+            property_value(&target_attrs, "visibility").as_deref(),
+            Some(value)
+                if value.eq_ignore_ascii_case("hidden") || value.eq_ignore_ascii_case("collapse")
+        );
+    let displayed = inherited.displayed
+        && !matches!(
+            property_value(&target_attrs, "display").as_deref(),
+            Some(value) if value.eq_ignore_ascii_case("none")
+        );
+    if !displayed {
+        return false;
+    }
+    let style = SvgHitStyle {
+        paint: resolve_paint(&inherited.paint, &target_attrs),
+        pointer_events,
+        visible,
+        displayed,
+    };
+    if let Some(target_child) = hit_test_svg_children(
+        root,
+        &target,
+        local_point,
+        scale_x,
+        scale_y,
+        &style,
+        computed_pointer_events,
+        visited_uses,
+    ) {
+        let _ = target_child;
+        return true;
+    }
+    let geometry = svg_hit_geometry(
+        &target_tag,
+        &target_attrs,
+        local_point,
+        style.paint.stroke_width,
+        scale_x,
+        scale_y,
+    );
+    !geometry.is_empty()
+        && pointer_events_accepts(
+            &style.pointer_events,
+            &style.paint,
+            style.visible,
+            geometry,
+        )
+}
+
+fn find_svg_resource(root: &NodeHandle, id: &str) -> Option<NodeHandle> {
+    if root
+        .attributes()
+        .and_then(|attrs| attribute_value(&attrs, "id"))
+        .is_some_and(|value| value == id)
+    {
+        return Some(root.clone());
+    }
+    for child in root.child_nodes() {
+        if let Some(found) = find_svg_resource(&child, id) {
+            return Some(found);
         }
     }
     None
@@ -371,11 +495,22 @@ fn svg_hit_geometry(
                 return SvgHitGeometry::default();
             }
             let normalized = ((point.0 - cx) / rx).powi(2) + ((point.1 - cy) / ry).powi(2);
-            let stroke = stroke_width > 0.0
-                && (normalized.sqrt() - 1.0).abs() * rx.min(ry) <= stroke_width / 2.0;
+            let outer_rx = rx + stroke_width / 2.0;
+            let outer_ry = ry + stroke_width / 2.0;
+            let inner_rx = (rx - stroke_width / 2.0).max(0.0);
+            let inner_ry = (ry - stroke_width / 2.0).max(0.0);
+            let outer = stroke_width > 0.0
+                && ((point.0 - cx) / outer_rx).powi(2)
+                    + ((point.1 - cy) / outer_ry).powi(2)
+                    <= 1.0;
+            let inner = inner_rx > 0.0
+                && inner_ry > 0.0
+                && ((point.0 - cx) / inner_rx).powi(2)
+                    + ((point.1 - cy) / inner_ry).powi(2)
+                    < 1.0;
             SvgHitGeometry {
                 fill: normalized <= 1.0,
-                stroke,
+                stroke: outer && !inner,
                 bounding_box: point_in_rect(
                     point,
                     Rect {

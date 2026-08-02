@@ -4861,6 +4861,42 @@ mod tests {
     }
 
     #[test]
+    fn mouse_hit_test_targets_geometry_painted_through_svg_use() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                r#"<html><body><svg id="icon" width="100" height="100" viewBox="0 0 100 100">
+                    <defs><rect id="template" x="0" y="0" width="20" height="20" fill="blue"></rect></defs>
+                    <use id="instance" href="#template" x="40" y="40" pointer-events="fill"></use>
+                    <script>globalThis.targets=[];document.addEventListener('click',e=>targets.push(e.target.id||e.target.localName));</script>
+                </svg></body></html>"#,
+                1,
+                "null",
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mousePressed","x":50,"y":50,"button":"left","buttons":1}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseReleased","x":50,"y":50,"button":"left","buttons":0}),
+            )
+            .unwrap();
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression":"JSON.stringify(targets)","returnByValue":true}),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], r#"["instance"]"#);
+    }
+
+    #[test]
     fn keyboard_input_targets_the_focused_element_with_cdp_fields() {
         let mut session = CdpSession::new().unwrap();
         session
