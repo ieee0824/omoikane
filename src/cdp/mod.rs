@@ -2223,14 +2223,16 @@ impl BrowserSessionState {
             let Some(mut pending) = self.pending_page.take() else {
                 return;
             };
-            if pending.opened.is_some() {
-                self.pending_page = Some(pending);
-                return;
-            }
             let waker: &'static Waker = Waker::noop();
             let mut context = TaskContext::from_waker(waker);
             match pending.task.as_mut().poll(&mut context) {
                 Poll::Ready(completed) => {
+                    if pending.opened.take().is_some() {
+                        self.actions.push(BrowserSessionAction::Notify(
+                            "Page.javascriptDialogClosed",
+                            json!({ "result": false, "userInput": "" }),
+                        ));
+                    }
                     let result = self
                         .session
                         .as_mut()
@@ -2248,7 +2250,9 @@ impl BrowserSessionState {
                     return;
                 }
                 Poll::Pending => {
-                    if let Some(dialog) = pending.controller.pending() {
+                    if pending.opened.is_none()
+                        && let Some(dialog) = pending.controller.pending()
+                    {
                         self.actions.push(BrowserSessionAction::Notify(
                             "Page.javascriptDialogOpening",
                             dialog_opening_params(&dialog, &pending.page_url),
@@ -2272,6 +2276,12 @@ impl BrowserSessionState {
         match pending.future.as_mut().poll(&mut context) {
             Poll::Ready((session, result)) => {
                 self.session = Some(session);
+                if pending.opened.take().is_some() {
+                    self.actions.push(BrowserSessionAction::Notify(
+                        "Page.javascriptDialogClosed",
+                        json!({ "result": false, "userInput": "" }),
+                    ));
+                }
                 self.actions
                     .push(BrowserSessionAction::Complete(pending.token, result));
             }
@@ -2500,6 +2510,7 @@ impl BrowserSession {
     }
 
     fn flush_actions(&mut self) -> Result<(), CdpError> {
+        self.state.borrow_mut().poll_evaluation();
         self.state.borrow_mut().poll_page_navigation();
         let actions = std::mem::take(&mut self.state.borrow_mut().actions);
         for action in actions {
@@ -2931,6 +2942,20 @@ mod tests {
             .unwrap();
     }
 
+    fn browser_session_with_timeout(timeout: Duration) -> BrowserSession {
+        let session = BrowserSession::new().unwrap();
+        session.state.borrow_mut().session.as_mut().unwrap().runtime =
+            JsRuntime::with_document_and_sandbox(
+                TreeBuilder::parse("<html><head></head><body></body></html>").document(),
+                crate::js::SandboxConfig {
+                    timeout,
+                    max_loop_iterations: u64::MAX,
+                },
+            )
+            .unwrap();
+        session
+    }
+
     fn browser_payloads(session: &mut BrowserSession, client_id: u64) -> Vec<Value> {
         session
             .drain_outgoing(client_id)
@@ -3035,6 +3060,38 @@ mod tests {
         assert_eq!(completed[1]["params"]["result"], false);
         assert_eq!(completed[2]["id"], "eval");
         assert_eq!(completed[2]["result"]["result"]["value"], false);
+        assert_eq!(session.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn browser_session_times_out_a_suspended_runtime_evaluation() {
+        let mut session = browser_session_with_timeout(Duration::from_millis(2));
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"alert('timeout')","returnByValue":true}}"#,
+        );
+        let mut payloads = browser_payloads(&mut session, client.client_id);
+        assert_eq!(payloads[0]["method"], "Page.javascriptDialogOpening");
+        for _ in 0..8 {
+            if session.pending_response_count() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            payloads.extend(browser_payloads(&mut session, client.client_id));
+        }
+        assert_eq!(session.pending_response_count(), 0, "{payloads:#?}");
+        assert!(payloads.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == false
+        }));
+        assert!(payloads.iter().any(|value| {
+            value["id"] == "eval"
+                && value["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("wall-clock timeout"))
+        }));
         assert_eq!(session.pending_response_count(), 0);
     }
 
@@ -3447,6 +3504,75 @@ mod tests {
         assert!(state.iter().any(|value| {
             value["id"] == "state" && value["result"]["result"]["value"] == "new:undefined"
         }));
+    }
+
+    #[test]
+    fn pending_page_navigation_times_out_while_a_dialog_is_open() {
+        let runtime = JsRuntime::with_document_and_sandbox(
+            crate::dom::NodeHandle::document(),
+            crate::js::SandboxConfig {
+                timeout: Duration::from_millis(2),
+                max_loop_iterations: u64::MAX,
+            },
+        )
+        .unwrap();
+        let task = runtime.into_page_task(
+            1,
+            vec![PageTaskSource::Classic {
+                source: "alert('startup-timeout')".to_string(),
+                label: "startup".to_string(),
+                script_node_id: None,
+            }],
+        );
+        let controller = task.dialog_controller();
+        let mut state = BrowserSessionState {
+            session: Some(CdpSession::new().unwrap()),
+            pending: None,
+            pending_page: Some(PendingPageNavigation {
+                token: DeferredResponseToken(1),
+                controller,
+                page_url: "about:blank".to_string(),
+                opened: None,
+                task: Box::pin(task),
+                commit: PendingDocumentCommit {
+                    url: "about:blank".to_string(),
+                    html: "<html><head></head><body></body></html>".to_string(),
+                    generation: 1,
+                    history_commit: NavigationCommit::Push,
+                    loader_id: "1".to_string(),
+                    status: 200,
+                },
+                response: json!({ "frameId": "frame-0", "loaderId": "1" }),
+            }),
+            actions: Vec::new(),
+        };
+
+        state.poll_page_navigation();
+        assert!(matches!(
+            state.actions.first(),
+            Some(BrowserSessionAction::Notify("Page.javascriptDialogOpening", _))
+        ));
+        state.actions.clear();
+
+        for _ in 0..8 {
+            if state.pending_page.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            state.poll_page_navigation();
+        }
+
+        assert!(state.pending_page.is_none());
+        assert!(state.actions.iter().any(|action| matches!(
+            action,
+            BrowserSessionAction::Notify("Page.javascriptDialogClosed", params)
+                if params["result"] == false
+        )));
+        assert!(state.actions.iter().any(|action| matches!(
+            action,
+            BrowserSessionAction::Complete(_, Err(error))
+                if error.message.contains("wall-clock timeout")
+        )));
     }
 
     #[test]

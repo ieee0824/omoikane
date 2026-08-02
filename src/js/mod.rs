@@ -188,6 +188,7 @@ fn is_wall_clock_timeout(error: &JsError) -> bool {
 struct TimedJsFuture<F> {
     future: Option<Pin<Box<F>>>,
     deadline: Instant,
+    deadline_wake_scheduled: bool,
 }
 
 impl<F> TimedJsFuture<F> {
@@ -196,6 +197,7 @@ impl<F> TimedJsFuture<F> {
         Self {
             future: Some(Box::pin(future)),
             deadline: now.checked_add(timeout).unwrap_or(now),
+            deadline_wake_scheduled: false,
         }
     }
 }
@@ -218,6 +220,15 @@ where
             .expect("timed future polled after completion")
             .as_mut()
             .poll(cx);
+        if result.is_pending() && !self.deadline_wake_scheduled {
+            let delay = self.deadline.saturating_duration_since(Instant::now());
+            let waker = cx.waker().clone();
+            self.deadline_wake_scheduled = true;
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                waker.wake();
+            });
+        }
 
         // A single VM budget can take longer than the remaining deadline. Do
         // the second check after polling so the timeout remains a real
@@ -13672,6 +13683,46 @@ mod tests {
         assert_eq!(completed.generation, 19);
         assert_eq!(completed.result, Err(PageTaskError::TimedOut));
         assert_eq!(completed.runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+    }
+
+    #[test]
+    fn owned_page_task_timeout_propagates_string_timer_timeout() {
+        let sandbox = SandboxConfig {
+            timeout: Duration::from_millis(2),
+            max_loop_iterations: u64::MAX,
+        };
+        let runtime = JsRuntime::with_document_and_sandbox(
+            crate::dom::NodeHandle::document(),
+            sandbox,
+        )
+        .unwrap();
+        let mut task = Box::pin(runtime.into_page_task(
+            20,
+            vec![PageTaskSource::Classic {
+                source: "globalThis.stringTimerScheduled = true; setTimeout('for (;;) {}', 0)"
+                    .to_string(),
+                label: "string timer timeout".to_string(),
+                script_node_id: None,
+            }],
+        ));
+        let waker: &'static Waker = Waker::noop();
+        let mut context = FutureContext::from_waker(waker);
+        let mut completed = loop {
+            match task.as_mut().poll(&mut context) {
+                Poll::Ready(completed) => break completed,
+                Poll::Pending => {}
+            }
+        };
+        assert_eq!(completed.generation, 20);
+        assert_eq!(completed.result, Err(PageTaskError::TimedOut));
+        assert_eq!(
+            completed
+                .runtime
+                .eval("stringTimerScheduled === true && 1 + 1")
+                .unwrap()
+                .as_number(),
+            Some(2.0)
+        );
     }
 
     #[test]
