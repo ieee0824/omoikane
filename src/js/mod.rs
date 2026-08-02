@@ -25,6 +25,7 @@ use boa_engine::object::{
     builtins::{JsArrayBuffer, JsPromise, JsUint8Array},
 };
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
+use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
@@ -838,6 +839,10 @@ struct HostState {
     /// Dedicated workers owned by this global. The map lives on the page
     /// global; worker globals instead hold `worker_owner` and `worker_id`.
     workers: HashMap<u64, Rc<RefCell<WorkerRuntime>>>,
+    /// Owner-side worker objects are kept separately from `workers` so the
+    /// host root tracer never has to borrow a `WorkerRuntime` through its
+    /// `RefCell` while a worker operation is in flight.
+    worker_owner_objects: HashMap<u64, JsValue>,
     next_worker_id: u64,
     worker_owner: Option<Rc<RefCell<HostState>>>,
     worker_id: Option<u64>,
@@ -878,6 +883,39 @@ struct HostState {
     /// the synchronous style resolver include their parsed text without
     /// manufacturing DOM `<style>` nodes.
     adopted_stylesheets: HashMap<usize, Vec<String>>,
+}
+
+impl Finalize for HostState {}
+
+// Values retained by the host event loop are not visible from Boa's VM root
+// provider. Keep them alive for as long as this runtime's host state owns them.
+unsafe impl Trace for HostState {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        unsafe { self.event_loop.trace(tracer) };
+        if let Some(owner) = &self.worker_owner_object {
+            unsafe { owner.trace(tracer) };
+        }
+        for owner in self.worker_owner_objects.values() {
+            unsafe { owner.trace(tracer) };
+        }
+        for request in self.geolocation_requests.values() {
+            unsafe { request.success.trace(tracer) };
+            if let Some(error) = &request.error {
+                unsafe { error.trace(tracer) };
+            }
+        }
+        if let Some(dialog) = &self.pending_javascript_dialog {
+            unsafe { dialog.suspension.trace(tracer) };
+        }
+        for channel in self.broadcast_channels.values() {
+            unsafe { channel.trace(tracer) };
+        }
+        for port in self.shared_worker_ports.values() {
+            unsafe { port.trace(tracer) };
+        }
+    }
+
+    fn run_finalizer(&self) {}
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1268,6 +1306,7 @@ impl HostState {
             csp_violation_keys: HashSet::new(),
             module_loader: None,
             workers: HashMap::new(),
+            worker_owner_objects: HashMap::new(),
             next_worker_id: 1,
             worker_owner: None,
             worker_id: None,
@@ -2239,6 +2278,9 @@ impl Default for SandboxConfig {
 }
 
 pub struct JsRuntime {
+    // The provider must be dropped before `host_state` so it never traces a
+    // freed host allocation during teardown.
+    _host_roots_provider: RootProvider,
     context: Context,
     host_state: Rc<RefCell<HostState>>,
     module_loader: Rc<HttpModuleLoader>,
@@ -2344,19 +2386,23 @@ impl JsRuntime {
         )));
         let module_loader = Rc::new(HttpModuleLoader::default());
         host_state.borrow_mut().module_loader = Some(Rc::downgrade(&module_loader));
-        let mut context = Context::builder()
+        let context = Context::builder()
             .module_loader(module_loader.clone())
             .host_hooks(Rc::new(BrowserHostHooks))
             .build()?;
 
-        register_host_bindings(&mut context, &host_state)?;
+        let host_roots_provider = unsafe {
+            RootProvider::register(std::ptr::NonNull::from(&*host_state.borrow()))
+        };
 
         let mut runtime = Self {
+            _host_roots_provider: host_roots_provider,
             context,
             host_state,
             module_loader,
             sandbox,
         };
+        register_host_bindings(&mut runtime.context, &runtime.host_state)?;
         runtime.eval(DOM_BOOTSTRAP)?;
         // DOM bootstrap is runtime initialization rather than page code. Apply
         // the caller's budget only after it has completed so a deliberately
@@ -2404,6 +2450,10 @@ impl JsRuntime {
         }
         terminate_shared_worker_connections(&self.host_state);
         terminate_worklet_runtime(&self.host_state);
+        self.host_state
+            .borrow_mut()
+            .worker_owner_objects
+            .clear();
     }
 
     fn advance_worker_clocks(&mut self, elapsed_ms: u64) {
@@ -2445,6 +2495,10 @@ impl JsRuntime {
             let (owner_state, result, errors, terminated) = {
                 let mut worker = entry.borrow_mut();
                 if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
+                    self.host_state
+                        .borrow_mut()
+                        .worker_owner_objects
+                        .remove(&worker_id);
                     continue;
                 }
                 let result = worker.runtime.run_until_idle();
@@ -2457,6 +2511,11 @@ impl JsRuntime {
                     .borrow_mut()
                     .workers
                     .insert(worker_id, Rc::clone(&entry));
+            } else {
+                self.host_state
+                    .borrow_mut()
+                    .worker_owner_objects
+                    .remove(&worker_id);
             }
             // A worker task failure is reported to the owner as an error event,
             // but must not abort the owner's event-loop pump. `run_timer_payload`
@@ -4296,6 +4355,10 @@ impl JsRuntime {
         let Some(entry) = entry else { return Ok(()); };
         let mut worker = entry.borrow_mut();
         if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
+            self.host_state
+                .borrow_mut()
+                .worker_owner_objects
+                .remove(&worker_id);
             return Ok(());
         }
         let owner_state = Rc::clone(&worker.owner_state);
@@ -4337,6 +4400,11 @@ impl JsRuntime {
                 .borrow_mut()
                 .workers
                 .insert(worker_id, entry);
+        } else {
+            self.host_state
+                .borrow_mut()
+                .worker_owner_objects
+                .remove(&worker_id);
         }
         Ok(())
     }
@@ -6551,13 +6619,14 @@ fn notification_request_permission_native(
     _args: &[JsValue],
     _context: &mut Context,
 ) -> JsResult<JsValue> {
-    with_host_state(|state| {
+    let permission = with_host_state(|state| {
         let mut state = state.borrow_mut();
         if state.notification_permission == "default" {
             state.notification_permission = "denied".to_string();
         }
-        Ok(js_string!(state.notification_permission.as_str()).into())
-    })
+        Ok(state.notification_permission.clone())
+    })?;
+    Ok(js_string!(permission).into())
 }
 
 fn geolocation_permission_native(
@@ -7764,32 +7833,34 @@ fn computed_style_native(
             return Ok(js_string!("{}").into());
         };
         let document_id = document.identity();
-        let mut state = state.borrow_mut();
-        state.ensure_style_resolver(&document);
-        let needs_container_layout = state
-            .document_styles
-            .get(&document_id)
-            .and_then(|entry| entry.resolver.as_ref())
-            .is_some_and(StyleResolver::has_container_queries);
-        if needs_container_layout {
-            if document_id == state.document.identity() {
-                state.ensure_layout();
-            } else {
-                let viewport = state.viewport_for_document(&document);
-                let _ = state
-                    .document_styles
-                    .get_mut(&document_id)
-                    .and_then(|entry| entry.resolver.as_mut())
-                    .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
+        let json = {
+            let mut state = state.borrow_mut();
+            state.ensure_style_resolver(&document);
+            let needs_container_layout = state
+                .document_styles
+                .get(&document_id)
+                .and_then(|entry| entry.resolver.as_ref())
+                .is_some_and(StyleResolver::has_container_queries);
+            if needs_container_layout {
+                if document_id == state.document.identity() {
+                    state.ensure_layout();
+                } else {
+                    let viewport = state.viewport_for_document(&document);
+                    let _ = state
+                        .document_styles
+                        .get_mut(&document_id)
+                        .and_then(|entry| entry.resolver.as_mut())
+                        .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
+                }
             }
-        }
-        let json = match state
-            .document_styles
-            .get_mut(&document_id)
-            .and_then(|entry| entry.resolver.as_mut())
-        {
-            Some(resolver) => serialize_computed_style(&resolver.computed_style(&node)),
-            None => "{}".to_string(),
+            match state
+                .document_styles
+                .get_mut(&document_id)
+                .and_then(|entry| entry.resolver.as_mut())
+            {
+                Some(resolver) => serialize_computed_style(&resolver.computed_style(&node)),
+                None => "{}".to_string(),
+            }
         };
         Ok(js_string!(json.as_str()).into())
     })
@@ -7894,66 +7965,69 @@ fn layout_metrics_native(
             .parent_node()
             .is_some_and(|parent| parent.node_type() == NodeType::Document);
         let document = document_root_for_node(&node);
-        let mut state = state.borrow_mut();
-        let viewport = document
-            .as_ref()
-            .map(|document| state.viewport_for_document(document));
-        state.ensure_layout();
-        let current_scroll = state.window_scroll;
-        state.set_window_scroll(current_scroll.0, current_scroll.1);
-        let main_document_id = state.document.identity();
-        let is_main_document = document
-            .as_ref()
-            .is_some_and(|document| document.identity() == main_document_id);
-        // Client geometry comes from the same paint-time clone used by hit
-        // testing and rendering. Besides ordinary scroll offsets this applies
-        // `position: sticky` without changing document-coordinate layout.
-        if is_main_document {
-            state.ensure_adjusted_layout();
-        }
-        let mut metrics = LayoutMetrics::zero();
-        {
-            if let Some(root) = state.layout_root.as_ref() {
-                let mut fragments = Vec::new();
-                if let Some((layout, transform)) = find_layout_box_with_transform(
-                    root, &node, AffineTransform::identity(), &mut fragments,
-                ) {
-                    metrics = compute_transformed_layout_metrics(layout, transform);
-                } else {
-                    metrics = compute_image_fragment_metrics(fragments);
-                }
-
-                if is_main_document && let Some(painted_root) = state
-                    .adjusted_layout_cache
-                    .as_ref()
-                    .map(|cache| &cache.root)
-                {
-                    let mut painted_fragments = Vec::new();
-                    let painted = if let Some((layout, transform)) = find_layout_box_with_transform(
-                        &painted_root, &node, AffineTransform::identity(), &mut painted_fragments,
+        let metrics = {
+            let mut state = state.borrow_mut();
+            let viewport = document
+                .as_ref()
+                .map(|document| state.viewport_for_document(document));
+            state.ensure_layout();
+            let current_scroll = state.window_scroll;
+            state.set_window_scroll(current_scroll.0, current_scroll.1);
+            let main_document_id = state.document.identity();
+            let is_main_document = document
+                .as_ref()
+                .is_some_and(|document| document.identity() == main_document_id);
+            // Client geometry comes from the same paint-time clone used by hit
+            // testing and rendering. Besides ordinary scroll offsets this applies
+            // `position: sticky` without changing document-coordinate layout.
+            if is_main_document {
+                state.ensure_adjusted_layout();
+            }
+            let mut metrics = LayoutMetrics::zero();
+            {
+                if let Some(root) = state.layout_root.as_ref() {
+                    let mut fragments = Vec::new();
+                    if let Some((layout, transform)) = find_layout_box_with_transform(
+                        root, &node, AffineTransform::identity(), &mut fragments,
                     ) {
-                        compute_transformed_layout_metrics(layout, transform)
+                        metrics = compute_transformed_layout_metrics(layout, transform);
                     } else {
-                        compute_image_fragment_metrics(painted_fragments)
-                    };
-                    if painted.has_box {
-                        metrics.x = painted.x;
-                        metrics.y = painted.y;
-                        metrics.width = painted.width;
-                        metrics.height = painted.height;
-                        metrics.client_rects = painted.client_rects;
+                        metrics = compute_image_fragment_metrics(fragments);
+                    }
+
+                    if is_main_document && let Some(painted_root) = state
+                        .adjusted_layout_cache
+                        .as_ref()
+                        .map(|cache| &cache.root)
+                    {
+                        let mut painted_fragments = Vec::new();
+                        let painted = if let Some((layout, transform)) = find_layout_box_with_transform(
+                            &painted_root, &node, AffineTransform::identity(), &mut painted_fragments,
+                        ) {
+                            compute_transformed_layout_metrics(layout, transform)
+                        } else {
+                            compute_image_fragment_metrics(painted_fragments)
+                        };
+                        if painted.has_box {
+                            metrics.x = painted.x;
+                            metrics.y = painted.y;
+                            metrics.width = painted.width;
+                            metrics.height = painted.height;
+                            metrics.client_rects = painted.client_rects;
+                        }
                     }
                 }
             }
-        }
-        if is_root_element && let Some(viewport) = viewport {
-            metrics.client_width = viewport.width;
-            metrics.client_height = viewport.height;
-            metrics.client_top = 0.0;
-            metrics.client_left = 0.0;
-            metrics.scroll_width = metrics.scroll_width.max(viewport.width);
-            metrics.scroll_height = metrics.scroll_height.max(viewport.height);
-        }
+            if is_root_element && let Some(viewport) = viewport {
+                metrics.client_width = viewport.width;
+                metrics.client_height = viewport.height;
+                metrics.client_top = 0.0;
+                metrics.client_left = 0.0;
+                metrics.scroll_width = metrics.scroll_width.max(viewport.width);
+                metrics.scroll_height = metrics.scroll_height.max(viewport.height);
+            }
+            metrics
+        };
         Ok(js_string!(metrics.to_json().as_str()).into())
     })
 }
@@ -7969,7 +8043,10 @@ fn element_scroll_offset_native(
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let (x, y) = match node {
-            Some(node) => state.borrow_mut().element_scroll_offset(&node),
+            Some(node) => {
+                let mut state = state.borrow_mut();
+                state.element_scroll_offset(&node)
+            }
             None => (0.0, 0.0),
         };
         let json = format!("{{\"x\":{},\"y\":{}}}", json_number(x), json_number(y));
@@ -8008,12 +8085,14 @@ fn window_scroll_offset_native(
     _: &mut Context,
 ) -> JsResult<JsValue> {
     with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let current = state.window_scroll;
-        if current != (0.0, 0.0) {
-            state.set_window_scroll(current.0, current.1);
-        }
-        let (x, y) = state.window_scroll;
+        let (x, y) = {
+            let mut state = state.borrow_mut();
+            let current = state.window_scroll;
+            if current != (0.0, 0.0) {
+                state.set_window_scroll(current.0, current.1);
+            }
+            state.window_scroll
+        };
         let json = format!("{{\"x\":{},\"y\":{}}}", json_number(x), json_number(y));
         Ok(js_string!(json).into())
     })
@@ -8652,22 +8731,24 @@ fn take_transition_events_native(
     _: &mut Context,
 ) -> JsResult<JsValue> {
     with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let events = state
-            .document_styles
-            .values_mut()
-            .filter_map(|entry| entry.resolver.as_mut())
-            .flat_map(StyleResolver::take_transition_events)
-            .map(|event| {
-                serde_json::json!({
-                    "nodeId": event.node_id,
-                    "type": event.event_type,
-                    "propertyName": event.property_name,
-                    "elapsedTime": event.elapsed_time,
-                    "pseudoElement": "",
+        let events = {
+            let mut state = state.borrow_mut();
+            state
+                .document_styles
+                .values_mut()
+                .filter_map(|entry| entry.resolver.as_mut())
+                .flat_map(StyleResolver::take_transition_events)
+                .map(|event| {
+                    serde_json::json!({
+                        "nodeId": event.node_id,
+                        "type": event.event_type,
+                        "propertyName": event.property_name,
+                        "elapsedTime": event.elapsed_time,
+                        "pseudoElement": "",
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        };
         Ok(js_string!(serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string())).into())
     })
 }
@@ -9474,12 +9555,13 @@ fn create_worklet_native(
     _: &[JsValue],
     _: &mut Context,
 ) -> JsResult<JsValue> {
-    with_host_state(|state| {
+    let id = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let id = state.next_worklet_id;
         state.next_worklet_id = state.next_worklet_id.saturating_add(1);
-        Ok(js_string!(id.to_string()).into())
-    })
+        Ok(id.to_string())
+    })?;
+    Ok(js_string!(id).into())
 }
 
 /// Loads and evaluates one Worklet module in the owner page's isolated
@@ -10016,6 +10098,10 @@ fn bind_worker_owner_native(
     with_host_state(|state| {
         let entry = state.borrow().workers.get(&id).cloned();
         let Some(entry) = entry else { return Ok(JsValue::undefined()); };
+        state
+            .borrow_mut()
+            .worker_owner_objects
+            .insert(id, owner_object.clone());
         let mut worker = entry.borrow_mut();
         worker.owner_object = Some(owner_object.clone());
         {
@@ -10040,7 +10126,9 @@ fn bind_worker_owner_native(
                 .enqueue_worker_error(id, Some(owner_object.clone()), message);
         }
         if worker.terminated {
-            state.borrow_mut().workers.remove(&id);
+            let mut state = state.borrow_mut();
+            state.workers.remove(&id);
+            state.worker_owner_objects.remove(&id);
         }
         Ok(JsValue::undefined())
     })
@@ -10081,6 +10169,7 @@ fn terminate_worker_native(
         // already queued tasks retain only the id and become harmless no-ops
         // when the owner map lookup below fails.
         let entry = state.borrow_mut().workers.remove(&id);
+        state.borrow_mut().worker_owner_objects.remove(&id);
         if let Some(entry) = entry {
             let mut worker = entry.borrow_mut();
             worker.terminated = true;
@@ -10144,7 +10233,12 @@ fn worker_close_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<
         if let (Some(owner), Some(worker_id)) = (owner.clone(), worker_id)
             && owner_bound
         {
-            if let Some(entry) = owner.borrow_mut().workers.remove(&worker_id) {
+            let entry = {
+                let mut owner_state = owner.borrow_mut();
+                owner_state.worker_owner_objects.remove(&worker_id);
+                owner_state.workers.remove(&worker_id)
+            };
+            if let Some(entry) = entry {
                 let mut worker = entry.borrow_mut();
                 worker.terminated = true;
                 worker.outgoing.clear();
@@ -10250,7 +10344,7 @@ fn websocket_connect_native(
     let protocols: Vec<String> = serde_json::from_str(&protocols_json).map_err(|_| {
         JsError::from(JsNativeError::typ().with_message("invalid WebSocket protocols"))
     })?;
-    with_host_state(|state| {
+    let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let document = state.document.clone();
         if !state
@@ -10281,8 +10375,9 @@ fn websocket_connect_native(
         let id = state.next_websocket_id;
         state.next_websocket_id = state.next_websocket_id.saturating_add(1);
         state.websocket_clients.insert(id, WebSocketConnection { client, incoming });
-        Ok(js_string!(serde_json::json!({"id": id, "protocol": protocol}).to_string()).into())
-    })
+        Ok(serde_json::json!({"id": id, "protocol": protocol}).to_string())
+    })?;
+    Ok(js_string!(payload).into())
 }
 
 fn websocket_send_native(
@@ -10351,7 +10446,7 @@ fn event_source_fetch_native(
     let url = string_argument(args.first(), "", context)?;
     let last_event_id = string_argument(args.get(1), "", context)?;
     let with_credentials = args.get(2).is_some_and(JsValue::to_boolean);
-    with_host_state(|state| {
+    let body = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let parsed = url.parse::<crate::http::Url>()
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
@@ -10393,8 +10488,9 @@ fn event_source_fetch_native(
         if !content_type.to_ascii_lowercase().starts_with("text/event-stream") {
             return Err(JsNativeError::error().with_message("EventSource response must be text/event-stream").into());
         }
-        Ok(js_string!(String::from_utf8_lossy(fetched.response.body()).as_ref()).into())
-    })
+        Ok(String::from_utf8_lossy(fetched.response.body()).into_owned())
+    })?;
+    Ok(js_string!(body).into())
 }
 
 fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -10479,7 +10575,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         None
     };
 
-    with_host_state(|state| {
+    let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let parsed_url = url.parse::<crate::http::Url>().map_err(|error| {
             JsError::from(JsNativeError::typ().with_message(error.to_string()))
@@ -10525,7 +10621,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         ) {
             Ok(fetched) => fetched,
             Err(crate::http::cors::CorsError::Timeout) if timeout.is_some() => {
-                return Ok(js_string!(r#"{"__omoikane_timeout":true}"#).into());
+                return Ok(r#"{"__omoikane_timeout":true}"#.to_string());
             }
             Err(error) => {
                 return Err(JsError::from(JsNativeError::error().with_message(error.to_string())).into());
@@ -10595,8 +10691,9 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             "bodyPresent": body_present,
         })
         .to_string();
-        Ok(js_string!(payload.as_str()).into())
-    })
+        Ok(payload)
+    })?;
+    Ok(js_string!(payload.as_str()).into())
 }
 
 /// `__omoikane_csp_violations(documentId)` exposes the enforced violations
@@ -12327,6 +12424,7 @@ mod tests {
                  globalThis.workerDocumentType = typeof worker.document;",
             )
             .unwrap();
+        boa_gc::force_collect();
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.eval("workerValues[0]").unwrap().as_number(), Some(42.0));
         assert_eq!(runtime.eval("workerDocumentType").unwrap().as_string().unwrap().to_std_string_escaped(), "undefined");
@@ -13318,6 +13416,7 @@ mod tests {
         );
         assert_eq!(controller.pending(), Some(dialog.clone()));
 
+        boa_gc::force_collect();
         controller.handle(dialog.id, true, None).unwrap();
         assert_eq!(
             controller.handle(dialog.id, true, None),
@@ -25862,6 +25961,10 @@ b</textarea></form>"#);
             Some(0.0)
         );
 
+        // The callback is retained by the host-side timer queue rather than
+        // Boa's VM stack, so it must survive a collection before the timer
+        // fires.
+        boa_gc::force_collect();
         runtime.tick(0).unwrap();
 
         assert_eq!(

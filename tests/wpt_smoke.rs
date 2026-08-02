@@ -710,6 +710,10 @@ fn selected_wpt_testharness_cases_match_expectations() {
         let document = TreeBuilder::parse(&document_source).document();
         let base: Url = url.parse().expect("parse WPT URL");
         let mut runtime = JsRuntime::with_document(document).expect("create WPT runtime");
+        // The bootstrap itself creates a large graph of host API constructors.
+        // Collect its short-lived initialization temporaries before page code
+        // starts allocating, keeping each WPT case's GC pressure bounded.
+        boa_gc::force_collect();
         let errors = runtime.execute_document_scripts(Some(&base));
         runtime
             .wire_inline_event_handlers()
@@ -734,6 +738,15 @@ fn selected_wpt_testharness_cases_match_expectations() {
             .ok()
             .and_then(|value| value.as_string().map(|text| text.to_std_string_escaped()))
             .unwrap_or_else(|| "[]".to_string());
+        // Each WPT case uses a fresh Boa realm.  The main branch's expanded
+        // bootstrap creates considerably more short-lived objects than the
+        // original smoke set, so dropping the runtime alone can leave enough
+        // allocator pressure accumulated across dozens of cases to make this
+        // bounded integration test request an absurd allocation.  Collect only
+        // after the provider and realm have been dropped; this keeps the test
+        // deterministic without changing page-runtime behavior.
+        drop(runtime);
+        boa_gc::force_collect();
         println!(
             "WPT {}: actual={} classification={classification:?}",
             case.path,
