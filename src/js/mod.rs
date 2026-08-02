@@ -2441,6 +2441,19 @@ impl JsRuntime {
     /// no element owns focus. The accessibility tree needs to distinguish that
     /// fallback from an actual focused control, so it reads the bootstrap's
     /// per-document focus slot directly.
+    fn accessibility_node_identity(value: f64) -> Option<usize> {
+        let upper_bound = 2.0_f64.powi(usize::BITS as i32);
+        if value.is_finite()
+            && value >= 0.0
+            && value.fract() == 0.0
+            && value < upper_bound
+        {
+            Some(value as usize)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn accessibility_focused_node_identity(&mut self) -> Option<usize> {
         self.eval(
             "(() => { document.activeElement; return \
@@ -2449,8 +2462,7 @@ impl JsRuntime {
         )
         .ok()
         .and_then(|value| value.as_number())
-        .filter(|value| value.is_finite() && *value >= 0.0)
-        .map(|value| value as usize)
+        .and_then(Self::accessibility_node_identity)
     }
 
     /// Resolves a Runtime remote object when it is a live DOM Node wrapper.
@@ -2463,7 +2475,7 @@ impl JsRuntime {
             ))
             .ok()?
             .as_number()
-            .filter(|value| value.is_finite() && *value >= 0.0)? as usize;
+            .and_then(Self::accessibility_node_identity)?;
         self.host_state.borrow().get_node(identity)
     }
 
@@ -12554,6 +12566,21 @@ mod tests {
         let value = runtime.eval("1 + 2 + 3").unwrap();
 
         assert_eq!(value.as_number(), Some(6.0));
+    }
+
+    #[test]
+    fn accessibility_node_identities_require_in_range_integers() {
+        assert_eq!(JsRuntime::accessibility_node_identity(42.0), Some(42));
+        for invalid in [
+            -1.0,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            2.0_f64.powi(usize::BITS as i32),
+        ] {
+            assert_eq!(JsRuntime::accessibility_node_identity(invalid), None);
+        }
     }
 
     #[test]

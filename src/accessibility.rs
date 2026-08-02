@@ -1438,7 +1438,7 @@ fn accessibility_value(
         }
         if let Some(value) = node
             .get_attribute("aria-valuenow")
-            .and_then(|value| value.parse::<f64>().ok())
+            .and_then(|value| parse_finite_number(&value))
         {
             return Some(AccessibilityValue::Number(value));
         }
@@ -1483,17 +1483,21 @@ fn accessibility_value(
         }
         "progress" | "meter" => node
             .get_attribute("value")
-            .and_then(|value| value.parse::<f64>().ok())
+            .and_then(|value| parse_finite_number(&value))
             .map(AccessibilityValue::Number),
         _ => node
             .get_attribute("aria-valuetext")
             .map(AccessibilityValue::String)
             .or_else(|| {
                 node.get_attribute("aria-valuenow")
-                    .and_then(|value| value.parse::<f64>().ok())
+                    .and_then(|value| parse_finite_number(&value))
                     .map(AccessibilityValue::Number)
             }),
     }
+}
+
+fn parse_finite_number(value: &str) -> Option<f64> {
+    value.parse::<f64>().ok().filter(|value| value.is_finite())
 }
 
 fn accessibility_properties(
@@ -1611,7 +1615,7 @@ fn accessibility_properties(
     for (attribute, property) in [("aria-valuemin", "valuemin"), ("aria-valuemax", "valuemax")] {
         if let Some(value) = node
             .get_attribute(attribute)
-            .and_then(|value| value.parse::<f64>().ok())
+            .and_then(|value| parse_finite_number(&value))
         {
             properties.push(AccessibilityProperty {
                 name: property.to_string(),
@@ -1826,6 +1830,36 @@ mod tests {
                 .properties
                 .iter()
                 .all(|property| property.name != "level")
+        );
+    }
+
+    #[test]
+    fn non_finite_numeric_values_are_ignored() {
+        let tree = tree(
+            "<html><body>\
+             <div id='slider' role='slider' aria-label='Slider' aria-valuenow='NaN' aria-valuemin='-inf' aria-valuemax='inf'></div>\
+             <progress id='progress' value='NaN'></progress>\
+             <meter id='meter' value='inf'></meter>\
+             <div id='fallback' role='generic' tabindex='0' aria-valuenow='-inf'></div>\
+             </body></html>",
+        );
+        let nodes = tree.nodes_preorder();
+        let by_id = |id: &str| {
+            nodes
+                .iter()
+                .copied()
+                .find(|node| node.dom_node.get_attribute("id").as_deref() == Some(id))
+                .unwrap()
+        };
+
+        for id in ["slider", "progress", "meter", "fallback"] {
+            assert_eq!(by_id(id).value, None);
+        }
+        assert!(
+            by_id("slider")
+                .properties
+                .iter()
+                .all(|property| !matches!(property.name.as_str(), "valuemin" | "valuemax"))
         );
     }
 
