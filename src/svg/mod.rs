@@ -216,6 +216,7 @@ fn hit_test_svg_children(
             visible,
             displayed,
         };
+        let pointer_events_none = style.pointer_events.eq_ignore_ascii_case("none");
         let next_scale_x = scale_x * child_scale_x;
         let next_scale_y = scale_y * child_scale_y;
         if tag == "use" {
@@ -249,7 +250,7 @@ fn hit_test_svg_children(
         ) {
             return Some(target);
         }
-        if pointer_events.eq_ignore_ascii_case("none") {
+        if pointer_events_none {
             continue;
         }
         let geometry = svg_hit_geometry(
