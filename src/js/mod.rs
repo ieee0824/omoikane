@@ -2667,12 +2667,6 @@ impl JsRuntime {
         self.host_state
             .borrow_mut()
             .canonical_node_identity_resolver = previous_resolver;
-        #[cfg(test)]
-        if let Err(error) = &setup {
-            eprintln!(
-                "[iframe child realm] bootstrap for iframe {iframe_id} document {document_id} failed: {error}"
-            );
-        }
         setup?;
 
         let mut state = self.host_state.borrow_mut();
@@ -2703,10 +2697,6 @@ impl JsRuntime {
             self.eval(source)?;
             self.run_jobs()
         })();
-        #[cfg(test)]
-        if let Err(error) = &result {
-            eprintln!("[iframe child realm] script {script_id} failed: {error}");
-        }
         let _ = self.eval("__omoikane_set_current_script(null)");
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.context.enter_realm(old_realm);
@@ -32742,15 +32732,29 @@ b</textarea></form>"#);
 
         pump_zero_delay_tasks(&mut runtime);
 
+        // The frame is intentionally cross-origin, so its `contentDocument`
+        // is hidden from the parent Realm. Inspect the native child tree to
+        // verify that all three callbacks still mutated that child Document.
+        let child_document = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("iframe load must install a child document")
+                .document
+                .clone()
+        };
+        let child_root = child_document
+            .child_nodes()
+            .into_iter()
+            .find(|node| node.node_type() == NodeType::Element)
+            .expect("child document must have a document element");
         for attribute in ["data-child-script", "data-child-job", "data-child-timer"] {
             assert_eq!(
-                eval_string_value(
-                    &mut runtime,
-                    &format!(
-                        "document.getElementById('f').contentDocument.documentElement.getAttribute('{attribute}')"
-                    ),
-                )
-                .as_deref(),
+                child_root
+                    .get_attribute(attribute)
+                    .as_deref(),
                 Some("yes"),
                 "child script state must stay in the child Document",
             );
