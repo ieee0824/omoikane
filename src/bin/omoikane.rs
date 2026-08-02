@@ -74,7 +74,7 @@ impl BrowserApp {
         Ok(())
     }
 
-    fn dispatch_input(&mut self, event: &WindowEvent) {
+    fn dispatch_input(&mut self, event: &WindowEvent) -> bool {
         let scale_factor = self
             .window
             .as_ref()
@@ -86,7 +86,7 @@ impl BrowserApp {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(button) = platform_mouse_button(*button) else {
-                    return;
+                    return false;
                 };
                 self.input
                     .mouse_button(&mut self.session, button, *state == ElementState::Pressed)
@@ -103,7 +103,7 @@ impl BrowserApp {
                     meta: state.super_key(),
                     shift: state.shift_key(),
                 });
-                return;
+                return true;
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let text = event
@@ -122,11 +122,12 @@ impl BrowserApp {
                     },
                 )
             }
-            _ => return,
+            _ => return false,
         };
         if let Err(error) = result {
             eprintln!("input event failed: {error}");
         }
+        true
     }
 }
 
@@ -264,9 +265,10 @@ impl ApplicationHandler for BrowserApp {
                 }
             }
             event => {
-                self.dispatch_input(&event);
-                self.frame_scheduler
-                    .request_rendering_opportunity(Instant::now());
+                if self.dispatch_input(&event) {
+                    self.frame_scheduler
+                        .request_rendering_opportunity(Instant::now());
+                }
             }
         }
     }
