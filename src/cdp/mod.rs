@@ -5607,14 +5607,30 @@ mod tests {
                       const names = ['__omoikane_accessibility_snapshot',\
                         '__omoikane_get_option_selected',\
                         '__omoikane_set_option_selected'];\
-                      return names.map(name => typeof globalThis[name]).join('|');\
+                      const option = document.createElement('option');\
+                      const accessors = Object.getOwnPropertyDescriptor(\
+                        HTMLOptionElement.prototype, 'selected');\
+                      const forged = { __id: option.__id };\
+                      const originalMapGet = Map.prototype.get;\
+                      Map.prototype.get = function() { return forged; };\
+                      let getterRejected = false; let setterRejected = false;\
+                      try { accessors.get.call(forged); }\
+                      catch (error) { getterRejected = error instanceof TypeError; }\
+                      try { accessors.set.call(forged, true); }\
+                      catch (error) { setterRejected = error instanceof TypeError; }\
+                      Map.prototype.get = originalMapGet;\
+                      return names.map(name => typeof globalThis[name]).join('|') + '|' +\
+                        getterRejected + '|' + setterRejected + '|' + option.selected;\
                     })()",
                     "returnByValue": true,
                 }),
             )
             .unwrap();
 
-        assert_eq!(result["result"]["value"], "undefined|undefined|undefined");
+        assert_eq!(
+            result["result"]["value"],
+            "undefined|undefined|undefined|true|true|false"
+        );
     }
 
     #[test]

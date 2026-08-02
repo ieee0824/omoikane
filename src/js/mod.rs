@@ -9153,11 +9153,18 @@ fn get_option_selected_native(
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
-        let selected = state
+        let node = state
             .borrow()
             .get_node(node_id)
-            .is_some_and(|node| node.selected());
-        Ok(JsValue::from(selected))
+            .ok_or_else(|| {
+                JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+            })?;
+        if node.tag_name().as_deref() != Some("option") {
+            return Err(JsNativeError::typ()
+                .with_message("Illegal invocation")
+                .into());
+        }
+        Ok(JsValue::from(node.selected()))
     })
 }
 
@@ -9172,7 +9179,14 @@ fn set_option_selected_native(
         let node = state
             .borrow()
             .get_node(node_id)
-            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+            .ok_or_else(|| {
+                JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+            })?;
+        if node.tag_name().as_deref() != Some("option") {
+            return Err(JsNativeError::typ()
+                .with_message("Illegal invocation")
+                .into());
+        }
         node.set_selected(selected);
         Ok(JsValue::undefined())
     })

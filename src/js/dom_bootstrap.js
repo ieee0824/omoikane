@@ -46,6 +46,10 @@
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
   const cache = new Map();
+  // Capture the intrinsic before page code can replace Map.prototype methods.
+  // Private native bindings use this to ensure an exposed prototype accessor
+  // was invoked on the canonical wrapper, not a forged `{ __id }` receiver.
+  const cachedNodeForId = Function.prototype.call.bind(Map.prototype.get);
   const validatesSpecialStyleProperties = new Set([
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
@@ -219,6 +223,17 @@
     cache.set(id, node);
     if (node instanceof HTMLSlotElement) knownSlots.push(node);
     return node;
+  }
+
+  function canonicalNodeIdentity(receiver) {
+    if ((typeof receiver !== "object" && typeof receiver !== "function") || receiver === null) {
+      throw new TypeError("Illegal invocation");
+    }
+    const id = receiver.__id;
+    if (cachedNodeForId(cache, id) !== receiver) {
+      throw new TypeError("Illegal invocation");
+    }
+    return id;
   }
 
   // Stamps `node` and (for a deep subtree) every descendant with `doc` as its
@@ -6463,10 +6478,10 @@
       else this.removeAttribute("selected");
     }
     get selected() {
-      return nativeGetOptionSelected(this.__id);
+      return nativeGetOptionSelected(canonicalNodeIdentity(this));
     }
     set selected(v) {
-      nativeSetOptionSelected(this.__id, !!v);
+      nativeSetOptionSelected(canonicalNodeIdentity(this), !!v);
     }
     get value() {
       if (this.hasAttribute("value")) return this.getAttribute("value");
