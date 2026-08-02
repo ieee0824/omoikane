@@ -193,7 +193,7 @@
       "description": "Table cells expose the HTMLTableCellElement interface and span/reflection semantics",
       "setup": "globalThis.__table = document.createElement('table'); globalThis.__tableRow = __table.insertRow(); globalThis.__tableCell = __tableRow.insertCell(); __tableCell.colSpan = 2; __tableCell.rowSpan = 0; __tableCell.headers = 'head-id'; __tableCell.scope = 'col'; __tableCell.abbr = 'Amount'; document.body.appendChild(__table)",
       "probe": "typeof HTMLTableCellElement === 'function' && __tableCell instanceof HTMLTableCellElement && __tableCell.cellIndex === 0 && __tableCell.colSpan === 2 && __tableCell.rowSpan === 0 && __tableCell.headers === 'head-id' && __tableCell.scope === 'col' && __tableCell.abbr === 'Amount' && __tableRow.cells.length === 1",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "html.dialog",
