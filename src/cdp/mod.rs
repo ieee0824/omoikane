@@ -1568,7 +1568,7 @@ impl CdpSession {
             ));
         }
         let handled = self.eval_input_bool(&format!(
-            "__omoikane_set_composition({}, {selection_start}, {selection_end})",
+            "__omoikane_dispatch_composition_input(\"set\", {}, {selection_start}, {selection_end})",
             serde_json::to_string(&text).expect("a string is JSON serializable"),
         ))?;
         Ok(json!({ "handled": handled }))
@@ -1577,7 +1577,7 @@ impl CdpSession {
     fn input_insert_text(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let text = require_string(params, "text")?;
         let handled = self.eval_input_bool(&format!(
-            "__omoikane_commit_text_input({})",
+            "__omoikane_dispatch_composition_input(\"commit\", {})",
             serde_json::to_string(&text).expect("a string is JSON serializable"),
         ))?;
         Ok(json!({ "handled": handled }))

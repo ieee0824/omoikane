@@ -9697,100 +9697,88 @@
     }
     return notCanceled;
   };
-  let __activeComposition = null;
-  function focusedTextControl() {
+  globalThis.__omoikane_dispatch_composition_input = function dispatchCompositionInput(
+    action, text, selectionStart = 0, selectionEnd = selectionStart,
+  ) {
     const focusedDocument = focusChainDocuments()[0] || document;
     const target = focusedElementOf(focusedDocument);
-    return isTextControl(target) && !target.readOnly && !target.__isDisabledControl()
+    const control = isTextControl(target) && !target.readOnly && !target.__isDisabledControl()
       ? target : null;
-  }
-  function finishActiveComposition() {
-    if (!__activeComposition) return;
-    const state = __activeComposition;
-    __activeComposition = null;
-    state.control.dispatchEvent(new CompositionEvent("compositionend", {
-      bubbles: true, composed: true, data: state.text,
-    }));
-  }
-  function replaceCompositionText(state, text) {
-    const control = state.control;
-    let replacement = String(text);
-    if (control.maxLength >= 0) {
-      const outsideLength = control.value.length - (state.end - state.start);
-      replacement = replacement.slice(0, Math.max(control.maxLength - outsideLength, 0));
-    }
-    control.dispatchEvent(new CompositionEvent("compositionupdate", {
-      bubbles: true, composed: true, data: replacement,
-    }));
-    const changed = dispatchTextControlInput(
-      control,
-      "insertCompositionText",
-      replacement,
-      control.value.slice(0, state.start) + replacement + control.value.slice(state.end),
-      state.start + replacement.length,
-      true,
-    );
-    if (changed) {
-      state.end = state.start + replacement.length;
-      state.text = replacement;
-    }
-    return changed;
-  }
-  globalThis.__omoikane_set_composition = function(text, selectionStart, selectionEnd) {
-    const control = focusedTextControl();
+    let state = dispatchCompositionInput.active || null;
     if (!control) {
-      finishActiveComposition();
+      if (state) {
+        state.control.dispatchEvent(new CompositionEvent("compositionend", {
+          bubbles: true, composed: true, data: state.text,
+        }));
+        dispatchCompositionInput.active = null;
+      }
       return false;
     }
-    if (!__activeComposition || __activeComposition.control !== control) {
-      finishActiveComposition();
-      ensureTextControlSelection(control);
-      __activeComposition = {
-        control,
-        start: control.selectionStart,
-        end: control.selectionEnd,
-        text: "",
-      };
-      control.dispatchEvent(new CompositionEvent("compositionstart", {
-        bubbles: true, composed: true, data: "",
+    if (state && state.control !== control) {
+      state.control.dispatchEvent(new CompositionEvent("compositionend", {
+        bubbles: true, composed: true, data: state.text,
       }));
+      state = null;
+      dispatchCompositionInput.active = null;
     }
-    const changed = replaceCompositionText(__activeComposition, text);
-    if (changed) {
-      const length = __activeComposition.text.length;
-      const start = Math.min(Math.max(Number(selectionStart) || 0, 0), length);
-      const end = Math.min(Math.max(Number(selectionEnd) || 0, start), length);
-      setTextControlSelection(
+
+    const value = String(text);
+    if (action === "set") {
+      if (!state) {
+        ensureTextControlSelection(control);
+        state = {
+          control,
+          start: control.selectionStart,
+          end: control.selectionEnd,
+          text: "",
+        };
+        dispatchCompositionInput.active = state;
+        control.dispatchEvent(new CompositionEvent("compositionstart", {
+          bubbles: true, composed: true, data: "",
+        }));
+      }
+      let replacement = value;
+      if (control.maxLength >= 0) {
+        const outsideLength = control.value.length - (state.end - state.start);
+        replacement = replacement.slice(0, Math.max(control.maxLength - outsideLength, 0));
+      }
+      control.dispatchEvent(new CompositionEvent("compositionupdate", {
+        bubbles: true, composed: true, data: replacement,
+      }));
+      const changed = dispatchTextControlInput(
         control,
-        __activeComposition.start + start,
-        __activeComposition.start + end,
-        "none",
+        "insertCompositionText",
+        replacement,
+        control.value.slice(0, state.start) + replacement + control.value.slice(state.end),
+        state.start + replacement.length,
+        true,
       );
+      if (changed) {
+        state.end = state.start + replacement.length;
+        state.text = replacement;
+        const start = Math.min(Math.max(Number(selectionStart) || 0, 0), replacement.length);
+        const end = Math.min(Math.max(Number(selectionEnd) || 0, start), replacement.length);
+        setTextControlSelection(control, state.start + start, state.start + end, "none");
+      }
+      return true;
     }
-    return true;
-  };
-  globalThis.__omoikane_commit_text_input = function(text) {
-    const control = focusedTextControl();
-    if (!control) {
-      finishActiveComposition();
-      return false;
-    }
-    if (__activeComposition && __activeComposition.control !== control) {
-      finishActiveComposition();
-    }
-    const committed = String(text);
-    if (__activeComposition && __activeComposition.control === control) {
-      if (__activeComposition.text !== committed) replaceCompositionText(__activeComposition, committed);
-      const data = __activeComposition.text;
-      setTextControlSelection(control, __activeComposition.end, __activeComposition.end, "none");
-      __activeComposition = null;
+
+    if (state) {
+      if (state.text !== value) {
+        dispatchCompositionInput("set", value, value.length, value.length);
+        state = dispatchCompositionInput.active;
+      }
+      const data = state.text;
+      setTextControlSelection(control, state.end, state.end, "none");
+      dispatchCompositionInput.active = null;
       control.dispatchEvent(new CompositionEvent("compositionend", {
         bubbles: true, composed: true, data,
       }));
       return true;
     }
+
     ensureTextControlSelection(control);
-    let inserted = committed;
+    let inserted = value;
     if (control.maxLength >= 0) {
       const available = Math.max(
         control.maxLength - (control.value.length - (control.selectionEnd - control.selectionStart)),
@@ -9798,7 +9786,7 @@
       );
       inserted = inserted.slice(0, available);
     }
-    if (!inserted) return committed.length === 0;
+    if (!inserted) return value.length === 0;
     return dispatchTextControlInput(
       control,
       "insertText",
