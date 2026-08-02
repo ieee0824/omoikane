@@ -3506,7 +3506,9 @@
         // Array prototype members (Symbol.iterator, forEach, ...) and anything
         // else resolve against the live snapshot; bind methods to it.
         const value = list[prop];
-        if (value === undefined && missingNamedValue !== undefined) return missingNamedValue;
+        if (typeof prop === "string" && value === undefined && missingNamedValue !== undefined) {
+          return missingNamedValue;
+        }
         return typeof value === "function" ? value.bind(list) : value;
       },
       has(_target, prop) {

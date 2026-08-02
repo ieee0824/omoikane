@@ -27088,17 +27088,18 @@ b</textarea></form>"#);
                 if (f.elements.item(0) !== i) return 6;
                 if (f.elements.namedItem('first') !== i) return 7;
                 if (!(0 in f.elements) || !('first' in f.elements)) return 8;
+                if (f.elements[Symbol('missing')] !== undefined) return 9;
                 i.name = 'second';
-                if (f.elements.second !== i) return 9;
-                if (f.elements.first !== null) return 10;
+                if (f.elements.second !== i) return 10;
+                if (f.elements.first !== null) return 11;
                 var select = document.createElement('select');
                 select.name = 'choice';
                 f.appendChild(select);
                 var retained = f.elements;
-                if (retained.length !== 2 || retained.namedItem('choice') !== select) return 11;
-                if (Array.from(retained).length !== 2) return 12;
+                if (retained.length !== 2 || retained.namedItem('choice') !== select) return 12;
+                if (Array.from(retained).length !== 2) return 13;
                 f.removeChild(i);
-                if (retained.length !== 1 || retained[0] !== select) return 13;
+                if (retained.length !== 1 || retained[0] !== select) return 14;
                 return 0;
             })()
         "#,
