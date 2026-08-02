@@ -5833,6 +5833,60 @@
     }
   }
 
+  // HTMLTableCellElement covers the cell-specific IDL surface shared by
+  // <td> and <th>. The numeric span attributes are limited unsigned-long
+  // reflections in HTML: colSpan is clamped to [1, 1000], while rowSpan is
+  // clamped to [0, 65534] (zero means all remaining rows).
+  class HTMLTableCellElement extends HTMLElement {
+    get cellIndex() {
+      const parent = this.parentNode;
+      if (!parent || parent.tagName !== "TR") return -1;
+      return parent.cells.findIndex(cell => cell.__id === this.__id);
+    }
+    get colSpan() {
+      const raw = this.getAttribute("colspan");
+      const value = raw === null ? 1 : Number.parseInt(raw, 10);
+      return Number.isFinite(value) && value >= 1 ? Math.min(value, 1000) : 1;
+    }
+    set colSpan(value) {
+      const numeric = Number(value);
+      const normalized = Number.isFinite(numeric) && numeric >= 1
+        ? Math.min(Math.trunc(numeric), 1000)
+        : 1;
+      this.setAttribute("colspan", String(Math.max(1, normalized)));
+    }
+    get rowSpan() {
+      const raw = this.getAttribute("rowspan");
+      const value = raw === null ? 1 : Number.parseInt(raw, 10);
+      return Number.isFinite(value) && value >= 0 ? Math.min(value, 65534) : 1;
+    }
+    set rowSpan(value) {
+      const numeric = Number(value);
+      const normalized = Number.isFinite(numeric) && numeric >= 0
+        ? Math.min(Math.trunc(numeric), 65534)
+        : 1;
+      this.setAttribute("rowspan", String(Math.max(0, normalized)));
+    }
+    get headers() {
+      return this.getAttribute("headers") || "";
+    }
+    set headers(value) {
+      this.setAttribute("headers", String(value));
+    }
+    get scope() {
+      return this.getAttribute("scope") || "";
+    }
+    set scope(value) {
+      this.setAttribute("scope", String(value));
+    }
+    get abbr() {
+      return this.getAttribute("abbr") || "";
+    }
+    set abbr(value) {
+      this.setAttribute("abbr", String(value));
+    }
+  }
+
   const FORM_CONTROL_TAGS = new Set([
     "INPUT", "SELECT", "TEXTAREA", "BUTTON", "FIELDSET", "OBJECT", "OUTPUT", "KEYGEN",
   ]);
@@ -8549,6 +8603,8 @@
     tbody: HTMLTableSectionElement,
     tfoot: HTMLTableSectionElement,
     tr: HTMLTableRowElement,
+    td: HTMLTableCellElement,
+    th: HTMLTableCellElement,
     form: HTMLFormElement,
     input: HTMLInputElement,
     textarea: HTMLTextAreaElement,
@@ -9418,6 +9474,7 @@
   globalThis.HTMLTableElement = HTMLTableElement;
   globalThis.HTMLTableSectionElement = HTMLTableSectionElement;
   globalThis.HTMLTableRowElement = HTMLTableRowElement;
+  globalThis.HTMLTableCellElement = HTMLTableCellElement;
   globalThis.HTMLFormElement = HTMLFormElement;
   globalThis.HTMLInputElement = HTMLInputElement;
   globalThis.HTMLTextAreaElement = HTMLTextAreaElement;
