@@ -6254,6 +6254,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(node_type_native),
         ),
         (
+            js_string!("__omoikane_node_is_html_element"),
+            1,
+            NativeFunction::from_copy_closure(node_is_html_element_native),
+        ),
+        (
             js_string!("__omoikane_clone_node"),
             2,
             NativeFunction::from_copy_closure(clone_node_native),
@@ -11361,6 +11366,21 @@ fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             crate::dom::NodeType::DocumentFragment => 11,
         };
         Ok(JsValue::from(node_type))
+    })
+}
+
+fn node_is_html_element_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        Ok(JsValue::from(node.is_html_element()))
     })
 }
 
@@ -20145,6 +20165,278 @@ b</textarea></form>"#);
             })()"#,
         );
         assert_eq!(actual, "true");
+    }
+
+    #[test]
+    fn insert_adjacent_enforces_webidl_brands_hierarchy_and_adoption() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const insertElement = Element.prototype.insertAdjacentElement;
+                const insertText = Element.prototype.insertAdjacentText;
+                const detached = document.createElement("div");
+                const candidate = document.createElement("span");
+
+                let forgedArgument;
+                let forgedReceiver;
+                const forged = Object.create(Element.prototype);
+                try { insertElement.call(detached, "beforebegin", forged); }
+                catch (error) { forgedArgument = error.name; }
+                try { insertElement.call(forged, "beforeend", candidate); }
+                catch (error) { forgedReceiver = error.name; }
+
+                const originalHasInstance = Object.getOwnPropertyDescriptor(
+                    Element, Symbol.hasInstance
+                );
+                let poisonedHasInstance;
+                try {
+                    Object.defineProperty(Element, Symbol.hasInstance, {
+                        configurable: true,
+                        value() { return true; }
+                    });
+                    insertElement.call(detached, "beforebegin", forged);
+                } catch (error) {
+                    poisonedHasInstance = error.name;
+                } finally {
+                    if (originalHasInstance) {
+                        Object.defineProperty(Element, Symbol.hasInstance, originalHasInstance);
+                    } else {
+                        delete Element[Symbol.hasInstance];
+                    }
+                }
+
+                const changedReceiver = document.createElement("div");
+                const changedChild = document.createElement("b");
+                const receiverPrototype = Object.getPrototypeOf(changedReceiver);
+                const childPrototype = Object.getPrototypeOf(changedChild);
+                const receiverId = changedReceiver.__id;
+                const childId = changedChild.__id;
+                let changedPrototypeResult;
+                try {
+                    Object.setPrototypeOf(changedReceiver, null);
+                    Object.setPrototypeOf(changedChild, null);
+                    changedReceiver.__id = -1;
+                    changedChild.__id = -1;
+                    changedPrototypeResult = insertElement.call(
+                        changedReceiver, "beforeend", changedChild
+                    );
+                } finally {
+                    changedReceiver.__id = receiverId;
+                    changedChild.__id = childId;
+                    Object.setPrototypeOf(changedReceiver, receiverPrototype);
+                    Object.setPrototypeOf(changedChild, childPrototype);
+                }
+                const changedPrototypeInsertion =
+                    changedPrototypeResult === changedChild &&
+                    changedReceiver.firstChild === changedChild;
+
+                const changedTextTarget = document.createElement("div");
+                const textTargetPrototype = Object.getPrototypeOf(changedTextTarget);
+                let changedTextResult;
+                try {
+                    Object.setPrototypeOf(changedTextTarget, null);
+                    changedTextResult = insertText.call(
+                        changedTextTarget, "afterbegin", "inside"
+                    );
+                } finally {
+                    Object.setPrototypeOf(changedTextTarget, textTargetPrototype);
+                }
+                const changedTextInsertion = changedTextResult === undefined &&
+                    changedTextTarget.textContent === "inside";
+
+                let symbolWhere;
+                let symbolData;
+                try { insertElement.call(detached, Symbol("where"), candidate); }
+                catch (error) { symbolWhere = error.name; }
+                try { insertText.call(detached, "beforebegin", Symbol("data")); }
+                catch (error) { symbolData = error.name; }
+
+                const OriginalString = globalThis.String;
+                const originalReplace = OriginalString.prototype.replace;
+                const originalToLowerCase = OriginalString.prototype.toLowerCase;
+                const originalCharCodeAt = OriginalString.prototype.charCodeAt;
+                const originalFromCharCode = OriginalString.fromCharCode;
+                const poisonedDocument = document.implementation.createHTMLDocument("poisoned");
+                const poisonedTarget = poisonedDocument.createElement("div");
+                const poisonedSubtree = new DOMParser().parseFromString(
+                    "<root><unwrapped/></root>",
+                    "application/xml"
+                ).documentElement;
+                let poisonedStringResult;
+                try {
+                    globalThis.String = function PoisonedString() { return "middle"; };
+                    OriginalString.prototype.replace = function() { return "middle"; };
+                    OriginalString.prototype.toLowerCase = function() {
+                        throw new Error("poisoned toLowerCase");
+                    };
+                    OriginalString.prototype.charCodeAt = function() { return 0; };
+                    OriginalString.fromCharCode = function() { return "?"; };
+                    poisonedStringResult = insertElement.call(
+                        poisonedTarget, "BeFoReEnD", poisonedSubtree
+                    );
+                } finally {
+                    globalThis.String = OriginalString;
+                    OriginalString.prototype.replace = originalReplace;
+                    OriginalString.prototype.toLowerCase = originalToLowerCase;
+                    OriginalString.prototype.charCodeAt = originalCharCodeAt;
+                    OriginalString.fromCharCode = originalFromCharCode;
+                }
+                poisonedSubtree.remove();
+                const poisonedDescendant = poisonedSubtree.firstChild;
+                const poisonedSubtreeOwner =
+                    poisonedSubtree.ownerDocument === poisonedDocument &&
+                    poisonedDescendant.ownerDocument === poisonedDocument;
+
+                const conversionOrder = [];
+                const converted = insertText.call(
+                    detached,
+                    { toString() { conversionOrder.push("where"); return "beforebegin"; } },
+                    { toString() { conversionOrder.push("data"); return "text"; } }
+                );
+
+                let missingReference;
+                try { detached.insertBefore(document.createElement("u")); }
+                catch (error) { missingReference = error.name; }
+                const undefinedReference = document.createElement("u");
+                const undefinedReferenceResult = detached.insertBefore(
+                    undefinedReference,
+                    undefined
+                );
+
+                const root = document.documentElement;
+                const documentChildCount = document.childNodes.length;
+                const hierarchyErrors = [];
+                for (const position of ["beforebegin", "afterend"]) {
+                    const element = document.createElement("x-hierarchy");
+                    try { insertElement.call(root, position, element); }
+                    catch (error) { hierarchyErrors.push(error.name); }
+                    try { insertText.call(root, position, "text"); }
+                    catch (error) { hierarchyErrors.push(error.name); }
+                    hierarchyErrors.push(element.parentNode === null);
+                }
+
+                const otherDocument = document.implementation.createHTMLDocument("other");
+                const adopted = document.createElement("article");
+                const adoptedChild = document.createElement("span");
+                const adoptedShadow = adopted.attachShadow({ mode: "closed" });
+                const adoptedShadowChild = document.createElement("em");
+                adoptedShadow.appendChild(adoptedShadowChild);
+                adopted.appendChild(adoptedChild);
+                otherDocument.body.insertAdjacentElement("beforeend", adopted);
+                const ownerWhileConnected = adopted.ownerDocument === otherDocument &&
+                    adoptedChild.ownerDocument === otherDocument &&
+                    adoptedShadow.ownerDocument === otherDocument &&
+                    adoptedShadowChild.ownerDocument === otherDocument;
+                adopted.remove();
+                const ownerAfterDetach = adopted.ownerDocument === otherDocument &&
+                    adoptedChild.ownerDocument === otherDocument &&
+                    adoptedShadow.ownerDocument === otherDocument &&
+                    adoptedShadowChild.ownerDocument === otherDocument;
+
+                const notAdopted = document.createElement("aside");
+                const detachedOtherTarget = otherDocument.createElement("div");
+                const detachedOtherResult = detachedOtherTarget.insertAdjacentElement(
+                    "beforebegin", notAdopted
+                );
+
+                return [
+                    forgedArgument === "TypeError",
+                    forgedReceiver === "TypeError",
+                    poisonedHasInstance === "TypeError",
+                    changedPrototypeInsertion,
+                    changedTextInsertion,
+                    symbolWhere === "TypeError",
+                    symbolData === "TypeError",
+                    poisonedStringResult === poisonedSubtree && poisonedSubtreeOwner,
+                    converted === undefined && conversionOrder.join(",") === "where,data",
+                    missingReference === "TypeError",
+                    undefinedReferenceResult === undefinedReference &&
+                        detached.lastChild === undefinedReference,
+                    hierarchyErrors.length === 6,
+                    hierarchyErrors.every(value => value === "HierarchyRequestError" || value === true),
+                    document.documentElement === root &&
+                        document.childNodes.length === documentChildCount,
+                    ownerWhileConnected,
+                    ownerAfterDetach,
+                    detachedOtherResult === null && notAdopted.ownerDocument === document
+                ].every(Boolean);
+            })()"#,
+        );
+        assert_eq!(actual, "true");
+    }
+
+    #[test]
+    fn fallback_slot_signaling_ignores_non_html_slot_elements() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const host = document.createElement("div");
+                  const root = host.attachShadow({ mode: "open" });
+                  const svgSlot = document.createElementNS(
+                    "http://www.w3.org/2000/svg",
+                    "slot"
+                  );
+                  const htmlSlot = document.createElementNS(
+                    "http://www.w3.org/1999/xhtml",
+                    "slot"
+                  );
+                  const nullSlot = document.createElementNS(null, "slot");
+                  const xmlSlot = new DOMParser().parseFromString(
+                    "<slot/>",
+                    "application/xml"
+                  ).documentElement;
+                  const xhtmlSlot = new DOMParser().parseFromString(
+                    '<slot xmlns="http://www.w3.org/1999/xhtml"/>',
+                    "application/xhtml+xml"
+                  ).documentElement;
+                  globalThis.svgSlotChanges = 0;
+                  globalThis.htmlSlotChanges = 0;
+                  globalThis.nullSlotChanges = 0;
+                  globalThis.xmlSlotChanges = 0;
+                  globalThis.xhtmlSlotChanges = 0;
+                  svgSlot.addEventListener("slotchange", () => svgSlotChanges++);
+                  htmlSlot.addEventListener("slotchange", () => htmlSlotChanges++);
+                  nullSlot.addEventListener("slotchange", () => nullSlotChanges++);
+                  xmlSlot.addEventListener("slotchange", () => xmlSlotChanges++);
+                  xhtmlSlot.addEventListener("slotchange", () => xhtmlSlotChanges++);
+                  root.appendChild(svgSlot);
+                  root.appendChild(htmlSlot);
+                  root.appendChild(nullSlot);
+                  root.appendChild(xmlSlot);
+                  root.appendChild(xhtmlSlot);
+                  svgSlot.appendChild(document.createElement("span"));
+                  htmlSlot.appendChild(document.createElement("span"));
+                  nullSlot.appendChild(document.createElement("span"));
+                  xmlSlot.appendChild(document.createElement("span"));
+                  xhtmlSlot.appendChild(document.createElement("span"));
+                  return svgSlot.namespaceURI === "http://www.w3.org/2000/svg" &&
+                    htmlSlot instanceof HTMLSlotElement &&
+                    nullSlot instanceof Element && !(nullSlot instanceof HTMLElement) &&
+                    xmlSlot instanceof Element && !(xmlSlot instanceof HTMLElement) &&
+                    xhtmlSlot instanceof HTMLSlotElement &&
+                    svgSlotChanges === 0 && htmlSlotChanges === 0 &&
+                    nullSlotChanges === 0 && xmlSlotChanges === 0 &&
+                    xhtmlSlotChanges === 0;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval(concat!(
+                    "svgSlotChanges + '|' + htmlSlotChanges + '|' + ",
+                    "nullSlotChanges + '|' + xmlSlotChanges + '|' + xhtmlSlotChanges"
+                ))
+                .unwrap()
+                .to_string(&mut runtime.context)
+                .unwrap()
+                .to_std_string_escaped(),
+            "0|1|0|0|1"
+        );
     }
 
     #[test]
