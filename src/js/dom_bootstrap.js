@@ -1802,7 +1802,7 @@
     toggleAttribute(name, force) {
       const attr = String(name);
       const present = this.hasAttribute(attr);
-      if (force === undefined) {
+      if (arguments.length < 2) {
         if (present) {
           this.removeAttribute(attr);
           return false;

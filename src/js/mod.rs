@@ -19561,17 +19561,21 @@ b</textarea></form>"#);
                 const removed = element.toggleAttribute('hidden');
                 const forcedAbsent = element.toggleAttribute('hidden', false);
                 const forcedPresent = element.toggleAttribute('hidden', true);
+                const explicitUndefined = element.toggleAttribute('hidden', undefined);
+                const readded = element.toggleAttribute('hidden', true);
                 return [
                     added,
                     removed,
                     forcedAbsent,
                     forcedPresent,
+                    explicitUndefined,
+                    readded,
                     element.getAttribute('hidden') === '',
                     element.hasAttribute('hidden')
                 ].join('|');
             })()"#,
         );
-        assert_eq!(actual, "true|false|false|true|true|true");
+        assert_eq!(actual, "true|false|false|true|false|true|true|true");
     }
 
     #[test]

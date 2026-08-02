@@ -13,7 +13,7 @@
       "area": "dom",
       "description": "Element.toggleAttribute reflects boolean force and returns the resulting presence",
       "setup": "globalThis.__toggleProbe = document.createElement('div')",
-      "probe": "__toggleProbe.toggleAttribute('hidden') === true && __toggleProbe.toggleAttribute('hidden') === false && __toggleProbe.toggleAttribute('hidden', true) === true && __toggleProbe.hasAttribute('hidden') && __toggleProbe.getAttribute('hidden') === ''",
+      "probe": "__toggleProbe.toggleAttribute('hidden') === true && __toggleProbe.toggleAttribute('hidden') === false && __toggleProbe.toggleAttribute('hidden', undefined) === false && __toggleProbe.toggleAttribute('hidden', true) === true && __toggleProbe.hasAttribute('hidden') && __toggleProbe.getAttribute('hidden') === ''",
       "baseline_supported": false
     },
     {
