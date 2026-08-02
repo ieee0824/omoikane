@@ -1166,32 +1166,41 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if name.eq_ignore_ascii_case("transform-style") {
         return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(keyword.to_ascii_lowercase().as_str(), "flat" | "preserve-3d") =>
-            {
-                DeclarationValidation::Unvalidated
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(lower.as_str(), "flat" | "preserve-3d")
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
             }
             _ => DeclarationValidation::Invalid,
         };
     }
     if name.eq_ignore_ascii_case("backface-visibility") {
         return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(keyword.to_ascii_lowercase().as_str(), "visible" | "hidden") =>
-            {
-                DeclarationValidation::Unvalidated
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(lower.as_str(), "visible" | "hidden")
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
             }
             _ => DeclarationValidation::Invalid,
         };
     }
     if name.eq_ignore_ascii_case("mix-blend-mode") {
         return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
                     || matches!(
-                        keyword.to_ascii_lowercase().as_str(),
+                        lower.as_str(),
                         "normal"
                             | "multiply"
                             | "screen"
@@ -1210,20 +1219,27 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                             | "luminosity"
                             | "plus-darker"
                             | "plus-lighter"
-                    ) =>
-            {
-                DeclarationValidation::Unvalidated
+                    )
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
             }
             _ => DeclarationValidation::Invalid,
         };
     }
     if name.eq_ignore_ascii_case("isolation") {
         return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(keyword.to_ascii_lowercase().as_str(), "auto" | "isolate") =>
-            {
-                DeclarationValidation::Unvalidated
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(lower.as_str(), "auto" | "isolate")
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
             }
             _ => DeclarationValidation::Invalid,
         };

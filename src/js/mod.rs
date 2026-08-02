@@ -18249,6 +18249,8 @@ b</textarea></form>"#);
                     CSS.supports('isolation', 'isolate'),
                     initial.transformStyle,
                     initial.backfaceVisibility,
+                    initial.mixBlendMode,
+                    initial.isolation,
                     getComputedStyle(el).transformStyle,
                     getComputedStyle(el).backfaceVisibility,
                     getComputedStyle(el).mixBlendMode,
@@ -18256,7 +18258,7 @@ b</textarea></form>"#);
                 ].join('|');
             })()"#,
         );
-        assert_eq!(actual, "true|true|true|true|true|flat|visible|preserve-3d|hidden|multiply|isolate");
+        assert_eq!(actual, "true|true|true|true|true|flat|visible|normal|auto|preserve-3d|hidden|multiply|isolate");
     }
 
     #[test]
