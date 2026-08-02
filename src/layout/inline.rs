@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, load_default_text_fonts};
-use crate::http::{HttpRequest, url::resolve_url};
+use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
@@ -1044,17 +1044,49 @@ pub(crate) fn decode_or_fetch_image_asset(url_like: &str) -> Option<Image> {
     decode_or_fetch_image(url_like)
 }
 
-fn resolve_image_url(url_like: &str) -> Option<String> {
-    if url_like.starts_with("http://") || url_like.starts_with("https://") {
+pub(crate) fn canonical_image_asset_reference(url_like: &str) -> Option<String> {
+    let url_like = url_like.trim();
+    if url_like.is_empty() {
+        return None;
+    }
+    if url_like.starts_with("data:") {
         return Some(url_like.to_string());
+    }
+    if url_like
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("blob:"))
+    {
+        return Some(format!("blob:{}", &url_like[5..]));
+    }
+    resolve_image_url(url_like)
+}
+
+fn resolve_image_url(url_like: &str) -> Option<String> {
+    let is_http = url_like
+        .split_once("://")
+        .is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        });
+    if is_http {
+        return url_like.parse::<Url>().ok().and_then(normalize_image_url);
     }
     if url_like.contains("://") || url_like.starts_with("//") {
         return None;
     }
     IMAGE_BASE_URL.with(|cell| {
         let base = cell.borrow().clone()?;
-        resolve_url(&base, url_like).ok().map(|url| url.to_string())
+        resolve_url(&base, url_like).ok().and_then(normalize_image_url)
     })
+}
+
+fn normalize_image_url(url: Url) -> Option<String> {
+    let normalized = resolve_url(&url, &url.request_target()).ok()?;
+    Some(format!(
+        "{}://{}{}",
+        normalized.scheme(),
+        normalized.authority().to_ascii_lowercase(),
+        normalized.request_target(),
+    ))
 }
 
 pub(super) fn image_alt_fallback_text(node: &NodeHandle, style: &ComputedStyle) -> Option<String> {

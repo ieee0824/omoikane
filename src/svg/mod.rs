@@ -1703,7 +1703,8 @@ fn render_svg_element(
 }
 
 fn decode_svg_image_reference(href: &str) -> Option<Image> {
-    let _active = ActiveSvgImageReference::acquire(href)?;
+    let reference = crate::layout::canonical_image_asset_reference(href)?;
+    let _active = ActiveSvgImageReference::acquire(&reference)?;
     crate::layout::decode_or_fetch_image_asset(href)
 }
 
@@ -2908,6 +2909,23 @@ mod tests {
         let decoded = render_svg_to_image(&svg).unwrap();
         assert_eq!(&decoded.pixels()[..4], &[255, 0, 0, 255]);
         assert_eq!(&decoded.pixels()[4..8], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn svg_image_reference_guard_canonicalizes_relative_and_absolute_urls() {
+        let base = "https://example.test/assets/document.svg".parse().unwrap();
+        crate::layout::with_image_base_url(Some(base), || {
+            let relative = crate::layout::canonical_image_asset_reference("self.svg").unwrap();
+            let absolute =
+                crate::layout::canonical_image_asset_reference(
+                    "HTTPS://EXAMPLE.TEST:443/assets/./self.svg",
+                )
+                .unwrap();
+            assert_eq!(relative, absolute);
+
+            let _active = ActiveSvgImageReference::acquire(&relative).unwrap();
+            assert!(decode_svg_image_reference("https://example.test/assets/self.svg").is_none());
+        });
     }
 
     #[test]
