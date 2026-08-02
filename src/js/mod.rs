@@ -29685,6 +29685,9 @@ b</textarea></form>"#);
                        var rect = d.createElementNS('http://www.w3.org/2000/svg', 'rect');
                        var text = d.createElementNS('http://www.w3.org/2000/svg', 'text');
                        var circle = d.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                       var image = d.createElementNS('http://www.w3.org/2000/svg', 'image');
+                       image.setAttribute('width', '12');
+                       image.setAttribute('xlink:href', 'fallback.png');
                        text.appendChild(d.createTextNode('abc'));
                        [d.documentElement instanceof SVGSVGElement,
                         rect instanceof SVGRectElement,
@@ -29693,13 +29696,18 @@ b</textarea></form>"#);
                         text instanceof SVGTextElement,
                         text instanceof SVGTextContentElement,
                         text.getNumberOfChars(),
-                        circle instanceof SVGElement].join('|')"#,
+                        circle instanceof SVGElement,
+                        image instanceof SVGImageElement,
+                        image instanceof SVGGraphicsElement,
+                        image.width.baseVal.value,
+                        image.href.baseVal,
+                        Object.prototype.toString.call(image.href)].join('|')"#,
                 )
                 .unwrap()
                 .as_string()
                 .map(|s| s.to_std_string_escaped())
                 .as_deref(),
-            Some("true|true|SVGRectElement|true|true|true|3|true")
+            Some("true|true|SVGRectElement|true|true|true|3|true|true|true|12|fallback.png|[object SVGAnimatedString]")
         );
         assert_eq!(
             runtime

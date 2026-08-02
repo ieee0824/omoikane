@@ -872,6 +872,24 @@ impl Canvas {
         destination: Rect,
         clip: Option<Rect>,
     ) {
+        self.draw_image_scaled_clipped_with_opacity(image, destination, clip, 1.0);
+    }
+
+    pub(crate) fn draw_image_scaled_clipped_with_opacity(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        clip: Option<Rect>,
+        opacity: f32,
+    ) {
+        let opacity = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if opacity <= 0.0 {
+            return;
+        }
         let Some(destination) = normalize_rect(destination) else {
             return;
         };
@@ -910,7 +928,7 @@ impl Canvas {
                     continue;
                 }
 
-                let color = if shrink_x || shrink_y {
+                let mut color = if shrink_x || shrink_y {
                     let source_left = if shrink_x {
                         ((dest_x as f32 - destination.x) * source_per_dest_x)
                             .clamp(0.0, image.width as f32)
@@ -946,6 +964,9 @@ impl Canvas {
                         a: image.pixels[source_index + 3],
                     }
                 };
+                if opacity < 1.0 {
+                    color.a = (f32::from(color.a) * opacity).round() as u8;
+                }
                 let dest_index = ((dest_y as u32 * self.width + dest_x as u32) * 4) as usize;
                 blend_pixel(&mut self.pixels[dest_index..dest_index + 4], color);
             }

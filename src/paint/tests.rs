@@ -1756,6 +1756,20 @@ fn one_to_one_image_drawing_is_bit_exact() {
 }
 
 #[test]
+fn scaled_image_opacity_modulates_alpha_and_treats_non_finite_as_default() {
+    let image = Image::new(1, 1, vec![10, 20, 30, 200]).unwrap();
+    let destination = Rect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 };
+
+    let mut translucent = Canvas::new(1, 1);
+    translucent.draw_image_scaled_clipped_with_opacity(&image, destination, None, 0.5);
+    assert_eq!(translucent.pixel(0, 0), Some(Color::rgba(10, 20, 30, 100)));
+
+    let mut defaulted = Canvas::new(1, 1);
+    defaulted.draw_image_scaled_clipped_with_opacity(&image, destination, None, f32::NAN);
+    assert_eq!(defaulted.pixel(0, 0), Some(Color::rgba(10, 20, 30, 200)));
+}
+
+#[test]
 fn parses_text_and_png_data_uris() {
     let text = parse_data_uri("data:,hello%20world").unwrap();
     assert_eq!(
@@ -1764,6 +1778,13 @@ fn parses_text_and_png_data_uris() {
             mime_type: "text/plain".to_string(),
             data: "hello world".to_string(),
         }
+    );
+    assert_eq!(
+        parse_data_uri("DATA:,uppercase%20scheme").unwrap(),
+        DataUri::Text {
+            mime_type: "text/plain".to_string(),
+            data: "uppercase scheme".to_string(),
+        },
     );
 
     let mut canvas = Canvas::new(1, 1);
