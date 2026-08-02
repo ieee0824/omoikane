@@ -21,7 +21,7 @@ use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
 
-const EVALS_PER_GC: usize = 8;
+const EVALS_PER_GC: usize = 512;
 
 thread_local! {
     static EVALS_SINCE_GC: Cell<usize> = const { Cell::new(0) };
@@ -400,7 +400,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
         }
     }
 
-    Acid3Run {
+    let result = Acid3Run {
         mode,
         page_status,
         html_bytes,
@@ -416,7 +416,14 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
         ),
         log: eval_string(&mut runtime, "typeof log !== 'undefined' ? String(log) : null"),
         iterations,
-    }
+    };
+
+    // Boa's generational collector retains allocation indexes across runtime
+    // teardown. Finish the runtime first, then run a major collection so the
+    // next independent runtime in the same process cannot observe stale state.
+    drop(runtime);
+    boa_gc::force_collect();
+    result
 }
 
 /// Evaluates `expr` and returns it coerced to a Rust `String`. Any thrown error
