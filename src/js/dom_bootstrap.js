@@ -3000,8 +3000,9 @@
         return insertNodeBeforeInternal(parent, node, element);
       }
       case "afterbegin": {
-        const children = internalChildNodes(element);
-        return insertNodeBeforeInternal(element, node, children[0] || null);
+        const childIds = nativeChildNodeIds(internalNodeId(element)) || [];
+        const firstChild = childIds.length > 0 ? wrapNode(childIds[0]) : null;
+        return insertNodeBeforeInternal(element, node, firstChild);
       }
       case "beforeend":
         return insertNodeBeforeInternal(element, node, null);
