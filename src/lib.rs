@@ -3,6 +3,7 @@
 // Layout and paint pipelines intentionally pass explicit rendering context.
 #![allow(clippy::too_many_arguments)]
 
+pub mod accessibility;
 pub mod cdp;
 pub mod canvas;
 pub mod css;

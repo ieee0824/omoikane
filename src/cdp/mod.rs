@@ -1,7 +1,7 @@
 //! CDP transport primitives: WebSocket upgrade, frame handling, and JSON-RPC routing.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -14,6 +14,9 @@ use boa_engine::JsValue;
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
+use crate::accessibility::{
+    AccessibilityNode, AccessibilityProperty, AccessibilityTree, AccessibilityValue,
+};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::{Client, HttpRequest, Method};
@@ -657,7 +660,8 @@ pub(crate) struct SessionSettleTimings {
     pub animation_frames: Duration,
 }
 
-/// Minimal stateful CDP session spanning Page, DOM, Network, Runtime, Target, and Input.
+/// Minimal stateful CDP session spanning Accessibility, Page, DOM, Network,
+/// Runtime, Target, and Input.
 #[derive(Debug)]
 pub struct CdpSession {
     runtime: JsRuntime,
@@ -683,6 +687,7 @@ pub struct CdpSession {
     history_entries: Vec<SessionHistoryEntry>,
     history_index: usize,
     document_generation: u64,
+    accessibility_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -758,6 +763,7 @@ impl CdpSession {
             }],
             history_index: 0,
             document_generation: 0,
+            accessibility_enabled: false,
         };
         session
             .install_runtime_helpers()
@@ -776,6 +782,22 @@ impl CdpSession {
             "DOM.getAttributes" => self.dom_get_attributes(&params),
             "DOM.querySelector" => self.dom_query_selector(&params),
             "DOM.getOuterHTML" => self.dom_get_outer_html(&params),
+            "Accessibility.enable" => {
+                self.accessibility_enabled = true;
+                Ok(json!({}))
+            }
+            "Accessibility.disable" => {
+                self.accessibility_enabled = false;
+                Ok(json!({}))
+            }
+            "Accessibility.getFullAXTree" => self.accessibility_get_full_tree(&params),
+            "Accessibility.getRootAXNode" => self.accessibility_get_root_node(&params),
+            "Accessibility.getPartialAXTree" => self.accessibility_get_partial_tree(&params),
+            "Accessibility.getAXNodeAndAncestors" => {
+                self.accessibility_get_node_and_ancestors(&params)
+            }
+            "Accessibility.getChildAXNodes" => self.accessibility_get_child_nodes(&params),
+            "Accessibility.queryAXTree" => self.accessibility_query_tree(&params),
             "Runtime.evaluate" => self.runtime_evaluate(&params),
             "Runtime.callFunctionOn" => self.runtime_call_function_on(&params),
             "Target.createBrowserContext" => Ok(self.target_create_browser_context()),
@@ -1306,6 +1328,471 @@ impl CdpSession {
         Ok(json!({
             "outerHTML": serialize_outer_html(&node),
         }))
+    }
+
+    fn accessibility_tree(&mut self) -> AccessibilityTree {
+        let document = self.runtime.document();
+        let title = document
+            .query_selector("title")
+            .map(|title| dom_text_content(&title))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| self.current_url.clone());
+        let focused_identity = self.runtime.accessibility_focused_node_identity();
+        let snapshot_state = self.runtime.accessibility_snapshot_state();
+        AccessibilityTree::build(
+            &document,
+            title,
+            self.document_generation,
+            focused_identity,
+            &snapshot_state,
+            |node| self.runtime.accessibility_render_state(node),
+        )
+    }
+
+    fn accessibility_inspected_node(&mut self, target: &NodeHandle) -> Option<AccessibilityNode> {
+        let document = self.runtime.document();
+        let focused_identity = self.runtime.accessibility_focused_node_identity();
+        let snapshot_state = self.runtime.accessibility_snapshot_state();
+        AccessibilityTree::build_inspected_node(
+            &document,
+            target,
+            self.document_generation,
+            focused_identity,
+            &snapshot_state,
+            |node| self.runtime.accessibility_render_state(node),
+        )
+    }
+
+    fn accessibility_get_full_tree(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        self.validate_accessibility_frame(params)?;
+        let depth = accessibility_depth(params)?;
+        let tree = self.accessibility_tree();
+        let mut nodes = Vec::new();
+        self.serialize_ax_subtree(&tree.root, None, depth, &mut nodes);
+        Ok(json!({ "nodes": nodes }))
+    }
+
+    fn accessibility_get_root_node(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        self.require_accessibility_enabled()?;
+        self.validate_accessibility_frame(params)?;
+        let tree = self.accessibility_tree();
+        Ok(json!({
+            "node": self.serialize_ax_node(&tree.root, None, false),
+        }))
+    }
+
+    fn accessibility_get_partial_tree(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let target = self.accessibility_dom_node(params, false)?;
+        let tree = self.accessibility_tree();
+        let fetch_relatives = params
+            .get("fetchRelatives")
+            .map(Value::as_bool)
+            .unwrap_or(Some(true))
+            .ok_or_else(|| invalid_params("fetchRelatives must be a boolean".to_string()))?;
+        let Some(path) = tree.path_to_dom_identity(target.identity()) else {
+            let reason = self
+                .accessibility_inspected_node(&target)
+                .and_then(|node| node.ignored_reasons.first().cloned())
+                .unwrap_or_else(|| "notRendered".to_string());
+            let ancestor_path = fetch_relatives
+                .then(|| nearest_ax_ancestor_path(&tree, &target))
+                .flatten();
+            let parent_id = ancestor_path
+                .as_ref()
+                .and_then(|path| path.last())
+                .map(|parent| parent.node_id.as_str());
+            let mut nodes = vec![self.serialize_synthetic_ax_node(&target, &reason, parent_id)];
+            if let Some(path) = ancestor_path {
+                for (index, ancestor) in path.into_iter().rev().enumerate() {
+                    let parent_id = ax_parent_id(&tree.root, &ancestor.node_id);
+                    let mut serialized =
+                        self.serialize_ax_node(ancestor, parent_id.as_deref(), false);
+                    if index == 0 {
+                        let mut child_ids = serialized["childIds"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        if !child_ids.iter().any(|id| id == "0") {
+                            child_ids.insert(0, Value::String("0".to_string()));
+                        }
+                        serialized["childIds"] = Value::Array(child_ids);
+                    }
+                    nodes.push(serialized);
+                }
+            }
+            return Ok(json!({ "nodes": nodes }));
+        };
+        let target_ax = *path.last().expect("accessibility path contains target");
+        let mut ordered = vec![target_ax];
+        if fetch_relatives {
+            if !target_ax.ignored {
+                collect_reachable_ax_children(target_ax, &mut ordered);
+            }
+            if path.len() > 1 {
+                for sibling in &path[path.len() - 2].children {
+                    if sibling.node_id == target_ax.node_id {
+                        continue;
+                    }
+                    ordered.push(sibling);
+                    if sibling.ignored {
+                        collect_reachable_ax_children(sibling, &mut ordered);
+                    }
+                }
+            }
+            ordered.extend(path[..path.len() - 1].iter().rev().copied());
+        }
+        let mut seen = HashSet::new();
+        ordered.retain(|node| seen.insert(node.node_id.clone()));
+        Ok(json!({
+            "nodes": self.serialize_ax_nodes_in_order(&tree, ordered, false),
+        }))
+    }
+
+    fn accessibility_get_node_and_ancestors(
+        &mut self,
+        params: &Value,
+    ) -> Result<Value, JsonRpcError> {
+        self.require_accessibility_enabled()?;
+        let target = self.accessibility_dom_node(params, false)?;
+        let tree = self.accessibility_tree();
+        let Some(path) = tree.path_to_dom_identity(target.identity()) else {
+            let reason = self
+                .accessibility_inspected_node(&target)
+                .and_then(|node| node.ignored_reasons.first().cloned())
+                .unwrap_or_else(|| "notRendered".to_string());
+            let ancestor_path = nearest_ax_ancestor_path(&tree, &target);
+            let parent_id = ancestor_path
+                .as_ref()
+                .and_then(|path| path.last())
+                .map(|parent| parent.node_id.as_str());
+            let mut nodes = vec![self.serialize_synthetic_ax_node(&target, &reason, parent_id)];
+            if let Some(path) = ancestor_path {
+                for (index, ancestor) in path.into_iter().rev().enumerate() {
+                    let parent_id = ax_parent_id(&tree.root, &ancestor.node_id);
+                    let mut serialized =
+                        self.serialize_ax_node(ancestor, parent_id.as_deref(), false);
+                    if index == 0 {
+                        let mut child_ids = serialized["childIds"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        if !child_ids.iter().any(|id| id == "0") {
+                            child_ids.insert(0, Value::String("0".to_string()));
+                        }
+                        serialized["childIds"] = Value::Array(child_ids);
+                    }
+                    nodes.push(serialized);
+                }
+            }
+            return Ok(json!({
+                "nodes": nodes,
+            }));
+        };
+        Ok(json!({
+            "nodes": self.serialize_ax_nodes_in_order(
+                &tree,
+                path.into_iter().rev().collect(),
+                false,
+            ),
+        }))
+    }
+
+    fn accessibility_get_child_nodes(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        self.require_accessibility_enabled()?;
+        self.validate_accessibility_frame(params)?;
+        let node_id = require_string(params, "id")?;
+        let tree = self.accessibility_tree();
+        let node = tree.find_by_node_id(&node_id).ok_or(JsonRpcError {
+            code: -32000,
+            message: format!("Unknown accessibility node: {node_id}"),
+        })?;
+        let mut children = Vec::new();
+        collect_reachable_ax_children(node, &mut children);
+        let nodes = self.serialize_ax_nodes_in_order(&tree, children, false);
+        Ok(json!({ "nodes": nodes }))
+    }
+
+    fn accessibility_query_tree(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let target = self.accessibility_dom_node(params, false)?;
+        let accessible_name = optional_string(params, "accessibleName")?;
+        let role = optional_string(params, "role")?.map(|role| role.to_ascii_lowercase());
+        let target = if target.node_type() == NodeType::DocumentFragment {
+            target.shadow_host().unwrap_or(target)
+        } else {
+            target
+        };
+        let full_tree = self.accessibility_tree();
+        let Some(root) = full_tree.find_by_dom_identity(target.identity()).cloned() else {
+            return Ok(json!({ "nodes": [] }));
+        };
+        let tree = AccessibilityTree { root };
+        let mut candidates = Vec::new();
+        collect_ax_nodes(&tree.root, &mut candidates);
+        let selected = candidates
+            .into_iter()
+            .filter(|node| {
+                accessible_name
+                    .as_ref()
+                    .is_none_or(|expected| node.name == *expected)
+            })
+            .filter(|node| {
+                role.as_ref()
+                    .is_none_or(|expected| node.role.eq_ignore_ascii_case(expected))
+            })
+            .map(|node| node.node_id.clone())
+            .collect::<HashSet<_>>();
+        Ok(json!({
+            "nodes": self.serialize_query_ax_nodes(&tree, &full_tree, &selected),
+        }))
+    }
+
+    fn require_accessibility_enabled(&self) -> Result<(), JsonRpcError> {
+        if self.accessibility_enabled {
+            Ok(())
+        } else {
+            Err(JsonRpcError {
+                code: -32000,
+                message: "Accessibility has not been enabled".to_string(),
+            })
+        }
+    }
+
+    fn validate_accessibility_frame(&self, params: &Value) -> Result<(), JsonRpcError> {
+        let Some(frame_id) = params.get("frameId") else {
+            return Ok(());
+        };
+        let frame_id = frame_id
+            .as_str()
+            .ok_or_else(|| invalid_params("frameId must be a string".to_string()))?;
+        if frame_id == self.frame_id {
+            Ok(())
+        } else {
+            Err(invalid_params(format!(
+                "Frame with the given frameId is not found: {frame_id}"
+            )))
+        }
+    }
+
+    fn accessibility_dom_node(
+        &mut self,
+        params: &Value,
+        allow_document_default: bool,
+    ) -> Result<NodeHandle, JsonRpcError> {
+        if let Some(object_id) = params.get("objectId") {
+            let object_id = object_id.as_str().ok_or_else(|| {
+                invalid_params("Accessibility objectId must be a string".to_string())
+            })?;
+            return self
+                .runtime
+                .node_for_remote_object_id(object_id)
+                .ok_or(JsonRpcError {
+                    code: -32000,
+                    message: format!("Remote object is not a DOM node: {object_id}"),
+                });
+        }
+        let node_id = params
+            .get("nodeId")
+            .or_else(|| params.get("backendNodeId"))
+            .and_then(Value::as_u64);
+        match node_id {
+            Some(node_id) => self.lookup_node(node_id),
+            None if allow_document_default => Ok(self.runtime.document()),
+            None => Err(invalid_params(
+                "Missing nodeId or backendNodeId".to_string(),
+            )),
+        }
+    }
+
+    fn serialize_ax_subtree(
+        &mut self,
+        node: &AccessibilityNode,
+        parent_id: Option<&str>,
+        depth: i64,
+        output: &mut Vec<Value>,
+    ) {
+        output.push(self.serialize_ax_node(node, parent_id, false));
+        if depth == 0 {
+            return;
+        }
+        let next_depth = if depth < 0 { -1 } else { depth - 1 };
+        for child in &node.children {
+            self.serialize_ax_subtree(child, Some(&node.node_id), next_depth, output);
+        }
+    }
+
+    fn serialize_ax_nodes_in_order(
+        &mut self,
+        tree: &AccessibilityTree,
+        nodes: Vec<&AccessibilityNode>,
+        force_computed_ignored: bool,
+    ) -> Vec<Value> {
+        nodes
+            .into_iter()
+            .map(|node| {
+                let parent_id = ax_parent_id(&tree.root, &node.node_id);
+                self.serialize_ax_node(node, parent_id.as_deref(), force_computed_ignored)
+            })
+            .collect()
+    }
+
+    fn serialize_query_ax_nodes(
+        &mut self,
+        query_tree: &AccessibilityTree,
+        full_tree: &AccessibilityTree,
+        selected: &HashSet<String>,
+    ) -> Vec<Value> {
+        query_tree
+            .nodes_preorder()
+            .into_iter()
+            .filter(|node| selected.contains(&node.node_id))
+            .map(|node| {
+                let parent_id = ax_parent_id(&query_tree.root, &node.node_id)
+                    .or_else(|| ax_parent_id(&full_tree.root, &node.node_id))
+                    .or_else(|| {
+                        nearest_ax_ancestor_path(full_tree, &node.dom_node)
+                            .and_then(|path| path.last().map(|parent| parent.node_id.clone()))
+                    });
+                self.serialize_ax_node(node, parent_id.as_deref(), true)
+            })
+            .collect()
+    }
+
+    fn serialize_synthetic_ax_node(
+        &mut self,
+        node: &NodeHandle,
+        reason: &str,
+        parent_id: Option<&str>,
+    ) -> Value {
+        let mut payload = json!({
+            "nodeId": "0",
+            "ignored": true,
+            "ignoredReasons": [{
+                "name": reason,
+                "value": { "type": "boolean", "value": true },
+            }],
+            "role": { "type": "role", "value": "none" },
+            "backendDOMNodeId": self.ensure_node_id(node),
+        });
+        if let Some(parent_id) = parent_id {
+            payload["parentId"] = Value::String(parent_id.to_string());
+        }
+        payload
+    }
+
+    fn serialize_ax_node(
+        &mut self,
+        node: &AccessibilityNode,
+        parent_id: Option<&str>,
+        force_computed_ignored: bool,
+    ) -> Value {
+        let backend_node_id = self.ensure_node_id(&node.dom_node);
+        let mut payload = json!({
+            "nodeId": node.node_id,
+            "ignored": node.ignored,
+            "childIds": node.children.iter().map(|child| child.node_id.clone()).collect::<Vec<_>>(),
+            "backendDOMNodeId": backend_node_id,
+        });
+        if let Some(parent_id) = parent_id {
+            payload["parentId"] = Value::String(parent_id.to_string());
+        } else {
+            payload["frameId"] = Value::String(self.frame_id.clone());
+        }
+        if node.ignored && !force_computed_ignored {
+            payload["role"] = json!({ "type": "role", "value": "none" });
+        }
+        if !node.ignored {
+            payload["role"] = json!({ "type": "role", "value": node.role });
+            payload["name"] = json!({ "type": "computedString", "value": node.name });
+            payload["properties"] = Value::Array(
+                node.properties
+                    .iter()
+                    .map(|property| self.serialize_ax_property(property))
+                    .collect(),
+            );
+            if !node.description.is_empty() {
+                payload["description"] = json!({
+                    "type": "computedString",
+                    "value": node.description,
+                });
+            }
+            if let Some(value) = node.value.as_ref() {
+                payload["value"] = self.serialize_ax_value(value, "string");
+            }
+        } else if force_computed_ignored {
+            payload["role"] = json!({ "type": "role", "value": node.role });
+            payload["name"] = json!({ "type": "computedString", "value": node.name });
+        }
+        if node.ignored {
+            payload["ignoredReasons"] = Value::Array(
+                node.ignored_reasons
+                    .iter()
+                    .map(|reason| {
+                        json!({
+                            "name": reason,
+                            "value": { "type": "boolean", "value": true },
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        payload
+    }
+
+    fn serialize_ax_property(&mut self, property: &AccessibilityProperty) -> Value {
+        json!({
+            "name": property.name,
+            "value": self.serialize_ax_value(&property.value, "string"),
+        })
+    }
+
+    fn serialize_ax_value(&mut self, value: &AccessibilityValue, string_type: &str) -> Value {
+        match value {
+            AccessibilityValue::Boolean(value) => {
+                json!({ "type": "boolean", "value": value })
+            }
+            AccessibilityValue::Integer(value) => {
+                json!({ "type": "integer", "value": value })
+            }
+            AccessibilityValue::Number(value) => json!({ "type": "number", "value": value }),
+            AccessibilityValue::String(value) => {
+                json!({ "type": string_type, "value": value })
+            }
+            AccessibilityValue::Token(value) => json!({ "type": "token", "value": value }),
+            AccessibilityValue::TokenList(value) => {
+                json!({ "type": "tokenList", "value": value })
+            }
+            AccessibilityValue::Tristate(value) => {
+                json!({ "type": "tristate", "value": value })
+            }
+            AccessibilityValue::IdRef {
+                value,
+                related_nodes,
+            } => json!({
+                "type": "idref",
+                "value": value,
+                "relatedNodes": related_nodes.iter().map(|related| {
+                    json!({
+                        "backendDOMNodeId": self.ensure_node_id(&related.dom_node),
+                        "idref": related.idref,
+                        "text": related.text,
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+            AccessibilityValue::IdRefList {
+                value,
+                related_nodes,
+            } => json!({
+                "type": "idrefList",
+                "value": value,
+                "relatedNodes": related_nodes.iter().map(|related| {
+                    json!({
+                        "backendDOMNodeId": self.ensure_node_id(&related.dom_node),
+                        "idref": related.idref,
+                        "text": related.text,
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+        }
     }
 
     fn runtime_evaluate(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
@@ -2027,6 +2514,91 @@ impl CdpSession {
     }
 }
 
+fn accessibility_depth(params: &Value) -> Result<i64, JsonRpcError> {
+    match params.get("depth") {
+        None => Ok(-1),
+        Some(depth) => depth
+            .as_u64()
+            .and_then(|depth| i64::try_from(depth).ok())
+            .ok_or_else(|| {
+                invalid_params("Accessibility depth must be a non-negative integer".to_string())
+            }),
+    }
+}
+
+fn dom_text_content(node: &NodeHandle) -> String {
+    if node.node_type() == NodeType::Text {
+        return node.data().unwrap_or_default();
+    }
+    node.child_nodes()
+        .iter()
+        .map(dom_text_content)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn collect_ax_nodes<'a>(node: &'a AccessibilityNode, output: &mut Vec<&'a AccessibilityNode>) {
+    output.push(node);
+    for child in &node.children {
+        collect_ax_nodes(child, output);
+    }
+}
+
+fn collect_reachable_ax_children<'a>(
+    node: &'a AccessibilityNode,
+    output: &mut Vec<&'a AccessibilityNode>,
+) {
+    for child in &node.children {
+        output.push(child);
+        if child.ignored {
+            collect_reachable_ax_children(child, output);
+        }
+    }
+}
+
+fn ax_parent_id(node: &AccessibilityNode, target_id: &str) -> Option<String> {
+    for child in &node.children {
+        if child.node_id == target_id {
+            return Some(node.node_id.clone());
+        }
+        if let Some(parent) = ax_parent_id(child, target_id) {
+            return Some(parent);
+        }
+    }
+    None
+}
+
+fn ax_composed_parent(node: &NodeHandle) -> Option<NodeHandle> {
+    if node.node_type() == NodeType::DocumentFragment {
+        return node.shadow_host();
+    }
+    node.assigned_slot().or_else(|| {
+        node.parent_node().and_then(|parent| {
+            if parent.node_type() == NodeType::DocumentFragment {
+                parent.shadow_host()
+            } else {
+                Some(parent)
+            }
+        })
+    })
+}
+
+fn nearest_ax_ancestor_path<'a>(
+    tree: &'a AccessibilityTree,
+    target: &NodeHandle,
+) -> Option<Vec<&'a AccessibilityNode>> {
+    let mut current = ax_composed_parent(target);
+    while let Some(ancestor) = current {
+        if let Some(path) = tree.path_to_dom_identity(ancestor.identity()) {
+            return Some(path);
+        }
+        current = ax_composed_parent(&ancestor);
+    }
+    None
+}
+
 type SessionEvaluation = Pin<
     Box<dyn Future<Output = (CdpSession, Result<Value, JsonRpcError>)>>,
 >;
@@ -2418,6 +2990,14 @@ impl BrowserSession {
             "DOM.getAttributes",
             "DOM.querySelector",
             "DOM.getOuterHTML",
+            "Accessibility.enable",
+            "Accessibility.disable",
+            "Accessibility.getFullAXTree",
+            "Accessibility.getRootAXNode",
+            "Accessibility.getPartialAXTree",
+            "Accessibility.getAXNodeAndAncestors",
+            "Accessibility.getChildAXNodes",
+            "Accessibility.queryAXTree",
             "Runtime.callFunctionOn",
             "Target.createBrowserContext",
             "Target.getBrowserContexts",
@@ -2549,6 +3129,16 @@ fn require_string(params: &Value, key: &'static str) -> Result<String, JsonRpcEr
             code: -32602,
             message: format!("Missing or invalid string parameter: {key}"),
         })
+}
+
+fn optional_string(params: &Value, key: &'static str) -> Result<Option<String>, JsonRpcError> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|value| Some(value.to_string()))
+            .ok_or_else(|| invalid_params(format!("Invalid string parameter: {key}"))),
+    }
 }
 
 fn require_u64(params: &Value, key: &'static str) -> Result<u64, JsonRpcError> {
@@ -2726,6 +3316,29 @@ mod tests {
     use std::net::TcpListener;
     use std::rc::Rc;
     use std::thread;
+
+    fn ax_node_by_name<'a>(nodes: &'a [Value], name: &str) -> &'a Value {
+        nodes
+            .iter()
+            .find(|node| node["name"]["value"] == name)
+            .unwrap_or_else(|| panic!("missing accessibility node named {name:?}: {nodes:?}"))
+    }
+
+    fn ax_node_by_role_and_name<'a>(nodes: &'a [Value], role: &str, name: &str) -> &'a Value {
+        nodes
+            .iter()
+            .find(|node| node["role"]["value"] == role && node["name"]["value"] == name)
+            .unwrap_or_else(|| {
+                panic!("missing accessibility node with role {role:?} and name {name:?}: {nodes:?}")
+            })
+    }
+
+    fn ax_property<'a>(node: &'a Value, name: &str) -> &'a Value {
+        node["properties"]
+            .as_array()
+            .and_then(|properties| properties.iter().find(|property| property["name"] == name))
+            .unwrap_or_else(|| panic!("missing accessibility property {name:?}: {node:?}"))
+    }
 
     #[test]
     fn evaluation_busy_message_distinguishes_navigation_from_evaluation() {
@@ -2949,6 +3562,32 @@ mod tests {
         assert_eq!(response[0]["id"], "document");
         assert_eq!(response[0]["result"]["root"]["nodeName"], "#document");
         assert!(response[0].get("error").is_none());
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"enable-ax","method":"Accessibility.enable","params":{}}"#,
+        );
+        let response = browser_payloads(&mut session, client.client_id);
+        assert_eq!(response[0]["id"], "enable-ax");
+        assert_eq!(response[0]["result"], json!({}));
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"ax-root","method":"Accessibility.getRootAXNode","params":{}}"#,
+        );
+        let response = browser_payloads(&mut session, client.client_id);
+        assert_eq!(response[0]["id"], "ax-root");
+        assert_eq!(
+            response[0]["result"]["node"]["role"]["value"],
+            "RootWebArea"
+        );
+        assert!(
+            response[0]["result"]["node"]["backendDOMNodeId"]
+                .as_u64()
+                .is_some()
+        );
     }
 
     #[test]
@@ -4413,6 +5052,539 @@ mod tests {
             ])
         );
         assert_eq!(html["outerHTML"], "<main id=\"app\"><p>Hello</p></main>");
+    }
+
+    #[test]
+    fn accessibility_domain_exposes_semantics_relations_state_and_css_visibility() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({
+                    "url": "data:text/html,<html><head><title>Settings</title><style>.gone{display:none}</style></head><body>\
+                    <main aria-label='Preferences'><h2 id='heading'>Account</h2>\
+                    <button id='save' aria-labelledby='heading' aria-describedby='help' aria-expanded='false'>Save</button>\
+                    <span id='help' hidden>Stores changes</span>\
+                    <input id='agree' type='checkbox' checked aria-label='Accept'>\
+                    <img src='x' alt='Avatar'><button id='hidden-action' class='gone'>Hidden action</button>\
+                    <div role='slider' aria-label='Volume' aria-valuemin='0' aria-valuemax='10' aria-valuenow='5' aria-valuetext='Medium'></div>\
+                    </main></body></html>"
+                }),
+            )
+            .unwrap();
+
+        let disabled_error = session
+            .dispatch("Accessibility.getRootAXNode", json!({}))
+            .unwrap_err();
+        assert_eq!(disabled_error.code, -32000);
+        assert!(
+            session
+                .dispatch("Accessibility.getFullAXTree", json!({ "depth": -1 }))
+                .is_err()
+        );
+
+        session.dispatch("Accessibility.enable", json!({})).unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "document.querySelector('#save').focus()" }),
+            )
+            .unwrap();
+        let full = session
+            .dispatch("Accessibility.getFullAXTree", json!({}))
+            .unwrap();
+        let nodes = full["nodes"].as_array().unwrap();
+        let root = &nodes[0];
+        assert_eq!(root["role"]["value"], "RootWebArea");
+        assert_eq!(root["name"]["value"], "Settings");
+        assert_eq!(root["frameId"], "frame-0");
+        assert!(root["backendDOMNodeId"].as_u64().is_some());
+        assert!(!root["childIds"].as_array().unwrap().is_empty());
+        let root_ax_id = root["nodeId"].as_str().unwrap().to_string();
+        let root_children = session
+            .dispatch(
+                "Accessibility.getChildAXNodes",
+                json!({ "id": root_ax_id, "frameId": "frame-0" }),
+            )
+            .unwrap();
+        assert!(!root_children["nodes"].as_array().unwrap().is_empty());
+        assert!(
+            root_children["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|node| node.get("frameId").is_none())
+        );
+
+        let button = ax_node_by_role_and_name(nodes, "button", "Account");
+        assert_eq!(button["role"]["value"], "button");
+        assert_eq!(button["description"]["value"], "Stores changes");
+        assert!(button.get("frameId").is_none());
+        assert!(button["parentId"].as_str().is_some());
+        assert_eq!(ax_property(button, "expanded")["value"]["value"], false);
+        assert_eq!(ax_property(button, "focused")["value"]["value"], true);
+        let labelledby = ax_property(button, "labelledby");
+        assert_eq!(labelledby["value"]["type"], "idrefList");
+        assert_eq!(labelledby["value"]["value"], "heading");
+        assert_eq!(labelledby["value"]["relatedNodes"][0]["idref"], "heading");
+        assert!(
+            labelledby["value"]["relatedNodes"][0]["backendDOMNodeId"]
+                .as_u64()
+                .is_some()
+        );
+        let describedby = ax_property(button, "describedby");
+        assert_eq!(
+            describedby["value"]["relatedNodes"][0]["text"],
+            "Stores changes"
+        );
+
+        let checkbox = ax_node_by_name(nodes, "Accept");
+        assert_eq!(checkbox["role"]["value"], "checkbox");
+        assert_eq!(
+            ax_property(checkbox, "checked")["value"]["type"],
+            "tristate"
+        );
+        assert_eq!(ax_property(checkbox, "checked")["value"]["value"], "true");
+        assert_eq!(ax_node_by_name(nodes, "Avatar")["role"]["value"], "image");
+
+        let slider = ax_node_by_name(nodes, "Volume");
+        assert_eq!(slider["value"]["value"], "Medium");
+        assert_eq!(ax_property(slider, "valuemin")["value"]["type"], "number");
+        assert_eq!(ax_property(slider, "valuemax")["value"]["value"], 10.0);
+        assert_eq!(ax_property(slider, "valuetext")["value"]["value"], "Medium");
+        assert!(
+            slider["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|property| property["name"] != "valuenow")
+        );
+
+        assert!(
+            !nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Hidden action")
+        );
+        let document = session.dispatch("DOM.getDocument", json!({})).unwrap();
+        let root_dom_id = document["root"]["nodeId"].as_u64().unwrap();
+        let hidden_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({ "nodeId": root_dom_id, "accessibleName": "Hidden action" }),
+            )
+            .unwrap();
+        assert!(hidden_query["nodes"].as_array().unwrap().is_empty());
+        let hidden_dom_id = session
+            .dispatch(
+                "DOM.querySelector",
+                json!({ "nodeId": root_dom_id, "selector": "#hidden-action" }),
+            )
+            .unwrap()["nodeId"]
+            .as_u64()
+            .unwrap();
+        let hidden_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": hidden_dom_id, "fetchRelatives": false }),
+            )
+            .unwrap();
+        let hidden = &hidden_partial["nodes"][0];
+        assert_eq!(hidden["ignored"], true);
+        assert_eq!(hidden["ignoredReasons"][0]["name"], "notRendered");
+        assert_eq!(hidden["role"]["value"], "none");
+        let direct_hidden_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({ "nodeId": hidden_dom_id, "role": "button" }),
+            )
+            .unwrap();
+        assert!(direct_hidden_query["nodes"].as_array().unwrap().is_empty());
+        assert!(
+            session
+                .dispatch(
+                    "Accessibility.getFullAXTree",
+                    json!({ "frameId": "missing" }),
+                )
+                .is_err()
+        );
+        assert!(
+            session
+                .dispatch("Accessibility.getRootAXNode", json!({ "frameId": 1 }),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn accessibility_partial_query_and_dynamic_snapshots_use_stable_generation_ids() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({
+                    "url": "data:text/html,<html><head><title>First</title><style>.gone{display:none}</style></head>\
+                    <body><main id='scope'><button id='target'>Before</button><button>Sibling</button>\
+                    <button aria-hidden='true'>Ignored match</button></main></body></html>"
+                }),
+            )
+            .unwrap();
+        let document = session.dispatch("DOM.getDocument", json!({})).unwrap();
+        let root_dom_id = document["root"]["nodeId"].as_u64().unwrap();
+        let target_dom_id = session
+            .dispatch(
+                "DOM.querySelector",
+                json!({ "nodeId": root_dom_id, "selector": "#target" }),
+            )
+            .unwrap()["nodeId"]
+            .as_u64()
+            .unwrap();
+        let target_object_id = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.querySelector('#target')",
+                    "returnByValue": false,
+                }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let non_node_object_id = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "({ value: 1 })", "returnByValue": false }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": target_dom_id, "fetchRelatives": true }),
+            )
+            .unwrap();
+        let partial_nodes = partial["nodes"].as_array().unwrap();
+        let target = ax_node_by_role_and_name(partial_nodes, "button", "Before");
+        let stable_target_id = target["nodeId"].as_str().unwrap().to_string();
+        assert_eq!(partial_nodes[0]["nodeId"], stable_target_id);
+        assert!(stable_target_id.starts_with("ax-1-"));
+        assert!(
+            partial_nodes
+                .iter()
+                .any(|node| node["role"]["value"] == "RootWebArea")
+        );
+        assert!(
+            partial_nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Sibling")
+        );
+        let object_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "objectId": target_object_id, "fetchRelatives": false }),
+            )
+            .unwrap();
+        assert_eq!(object_partial["nodes"][0]["nodeId"], stable_target_id);
+        assert!(
+            session
+                .dispatch(
+                    "Accessibility.getPartialAXTree",
+                    json!({ "objectId": non_node_object_id }),
+                )
+                .is_err()
+        );
+
+        assert!(
+            session
+                .dispatch(
+                    "Accessibility.getAXNodeAndAncestors",
+                    json!({ "backendNodeId": target_dom_id }),
+                )
+                .is_err()
+        );
+        session.dispatch("Accessibility.enable", json!({})).unwrap();
+        let ancestors = session
+            .dispatch(
+                "Accessibility.getAXNodeAndAncestors",
+                json!({ "backendNodeId": target_dom_id }),
+            )
+            .unwrap();
+        assert_eq!(ancestors["nodes"][0]["nodeId"], stable_target_id);
+        assert!(
+            ancestors["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["nodeId"] == stable_target_id)
+        );
+        let rooted_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": target_dom_id,
+                    "accessibleName": "Before",
+                    "role": "button",
+                }),
+            )
+            .unwrap();
+        assert!(rooted_query["nodes"][0]["parentId"].as_str().is_some());
+        assert!(rooted_query["nodes"][0].get("frameId").is_none());
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.querySelector('#target').textContent = 'After'; const button = document.createElement('button'); button.textContent = 'Added'; document.querySelector('#scope').appendChild(button)"
+                }),
+            )
+            .unwrap();
+        let updated = session
+            .dispatch("Accessibility.getFullAXTree", json!({}))
+            .unwrap();
+        let updated_nodes = updated["nodes"].as_array().unwrap();
+        assert_eq!(
+            ax_node_by_role_and_name(updated_nodes, "button", "After")["nodeId"],
+            stable_target_id
+        );
+        assert!(
+            updated_nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Added")
+        );
+
+        let query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": root_dom_id,
+                    "accessibleName": "Added",
+                    "role": "button"
+                }),
+            )
+            .unwrap();
+        assert_eq!(query["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(query["nodes"][0]["name"]["value"], "Added");
+        let ignored_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": root_dom_id,
+                    "accessibleName": "Ignored match",
+                    "role": "button",
+                }),
+            )
+            .unwrap();
+        assert_eq!(ignored_query["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(ignored_query["nodes"][0]["ignored"], true);
+        assert_eq!(ignored_query["nodes"][0]["role"]["value"], "button");
+        assert!(ignored_query["nodes"][0].get("properties").is_none());
+        assert!(
+            session
+                .dispatch("Accessibility.queryAXTree", json!({ "role": "button" }))
+                .is_err()
+        );
+
+        let first_root = session
+            .dispatch("Accessibility.getRootAXNode", json!({}))
+            .unwrap()["node"]["nodeId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<html><head><title>Second</title></head><body></body></html>" }),
+            )
+            .unwrap();
+        let second_root = session
+            .dispatch("Accessibility.getRootAXNode", json!({}))
+            .unwrap()["node"]
+            .clone();
+        assert_eq!(second_root["name"]["value"], "Second");
+        assert!(second_root["nodeId"].as_str().unwrap().starts_with("ax-2-"));
+        assert_ne!(second_root["nodeId"], first_root);
+        assert!(
+            session
+                .dispatch(
+                    "Accessibility.getPartialAXTree",
+                    json!({ "objectId": target_object_id }),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn accessibility_dom_targets_synthesize_missing_nodes_and_preserve_relatives() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({
+                    "url": "data:text/html,<html><body><div id='host'><button id='unassigned'>Light only</button></div>\
+                    <img id='empty' alt=''><section id='owner' aria-owns='owned'></section>\
+                    <section id='second-owner' aria-owns='owned'></section>\
+                    <button id='owned'>Owned</button><script>const root = document.querySelector('#host').attachShadow({mode:'open'});\
+                    const child = document.createElement('span'); child.textContent = 'Shadow child'; root.appendChild(child);</script>\
+                    </body></html>"
+                }),
+            )
+            .unwrap();
+        let document = session.dispatch("DOM.getDocument", json!({})).unwrap();
+        let root_dom_id = document["root"]["nodeId"].as_u64().unwrap();
+        let query_dom = |session: &mut CdpSession, selector: &str| {
+            session
+                .dispatch(
+                    "DOM.querySelector",
+                    json!({ "nodeId": root_dom_id, "selector": selector }),
+                )
+                .unwrap()["nodeId"]
+                .as_u64()
+                .unwrap()
+        };
+        let target_dom_id = query_dom(&mut session, "#unassigned");
+        let empty_dom_id = query_dom(&mut session, "#empty");
+        let owner_dom_id = query_dom(&mut session, "#owner");
+        let second_owner_dom_id = query_dom(&mut session, "#second-owner");
+
+        let full = session
+            .dispatch("Accessibility.getFullAXTree", json!({}))
+            .unwrap();
+        let full_nodes = full["nodes"].as_array().unwrap();
+        let empty = full_nodes
+            .iter()
+            .find(|node| node["backendDOMNodeId"] == empty_dom_id)
+            .unwrap();
+        assert_eq!(empty["ignored"], true);
+        assert_eq!(empty["role"]["value"], "none");
+        assert!(empty.get("name").is_none());
+        assert!(empty.get("properties").is_none());
+
+        let partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": target_dom_id, "fetchRelatives": true }),
+            )
+            .unwrap();
+        let nodes = partial["nodes"].as_array().unwrap();
+        assert_eq!(nodes[0]["nodeId"], "0");
+        assert_eq!(nodes[0]["ignored"], true);
+        assert_eq!(nodes[0]["role"]["value"], "none");
+        assert_eq!(nodes[0]["ignoredReasons"][0]["name"], "notRendered");
+        assert_eq!(nodes[0]["backendDOMNodeId"], target_dom_id);
+        let parent_id = nodes[0]["parentId"].as_str().unwrap();
+        assert_eq!(nodes[1]["nodeId"], parent_id);
+        let parent_children = nodes[1]["childIds"].as_array().unwrap();
+        assert_eq!(parent_children[0], "0");
+        assert!(parent_children.len() > 1);
+
+        session.dispatch("Accessibility.enable", json!({})).unwrap();
+        let ancestors = session
+            .dispatch(
+                "Accessibility.getAXNodeAndAncestors",
+                json!({ "nodeId": target_dom_id }),
+            )
+            .unwrap();
+        let ancestor_nodes = ancestors["nodes"].as_array().unwrap();
+        assert_eq!(ancestor_nodes[0]["nodeId"], "0");
+        assert_eq!(ancestor_nodes[0]["parentId"], ancestor_nodes[1]["nodeId"]);
+        assert!(
+            ancestor_nodes
+                .iter()
+                .any(|node| node["role"]["value"] == "RootWebArea")
+        );
+
+        let owned_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": owner_dom_id,
+                    "accessibleName": "Owned",
+                    "role": "button",
+                }),
+            )
+            .unwrap();
+        assert_eq!(owned_query["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(owned_query["nodes"][0]["name"]["value"], "Owned");
+        assert!(owned_query["nodes"][0]["parentId"].as_str().is_some());
+        assert!(owned_query["nodes"][0].get("frameId").is_none());
+        let second_owner_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": second_owner_dom_id,
+                    "accessibleName": "Owned",
+                    "role": "button",
+                }),
+            )
+            .unwrap();
+        assert!(second_owner_query["nodes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn accessibility_uses_live_form_disclosure_and_closed_shadow_state() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({
+                    "url": "data:text/html,<html><body><input id='password' type='password' value='old' aria-label='Password'>\
+                    <select id='choice' aria-label='Choice'><option>First</option><option>Second</option></select>\
+                    <details id='details'><summary>More</summary><p>Body</p></details><div id='host'></div></body></html>"
+                }),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.querySelector('#password').value = 's😀';\
+                      document.querySelector('#choice').selectedIndex = 1;\
+                      document.querySelector('#details').open = true;\
+                      const root = document.querySelector('#host').attachShadow({mode:'closed'});\
+                      const select = document.createElement('select'); select.setAttribute('aria-label', 'Shadow choice');\
+                      const first = document.createElement('option'); first.textContent = 'Alpha';\
+                      const second = document.createElement('option'); second.textContent = 'Beta';\
+                      select.appendChild(first); select.appendChild(second); second.selected = true; root.appendChild(select);\
+                      const details = document.createElement('details'); const summary = document.createElement('summary');\
+                      summary.textContent = 'Shadow details'; details.appendChild(summary);\
+                      const body = document.createElement('p'); body.textContent = 'Shadow body'; details.appendChild(body);\
+                      details.open = true; root.appendChild(details);"
+                }),
+            )
+            .unwrap();
+        let full = session
+            .dispatch("Accessibility.getFullAXTree", json!({}))
+            .unwrap();
+        let nodes = full["nodes"].as_array().unwrap();
+
+        assert_eq!(ax_node_by_name(nodes, "Password")["value"]["value"], "•••");
+        assert_eq!(ax_node_by_name(nodes, "Choice")["value"]["value"], "Second");
+        assert_eq!(
+            ax_property(
+                ax_node_by_role_and_name(nodes, "button", "More"),
+                "expanded"
+            )["value"]["value"],
+            true
+        );
+        assert!(nodes.iter().any(|node| node["name"]["value"] == "Body"));
+        assert_eq!(
+            ax_node_by_name(nodes, "Shadow choice")["value"]["value"],
+            "Beta"
+        );
+        assert_eq!(
+            ax_property(
+                ax_node_by_role_and_name(nodes, "button", "Shadow details"),
+                "expanded"
+            )["value"]["value"],
+            true
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Shadow body")
+        );
     }
 
     #[test]

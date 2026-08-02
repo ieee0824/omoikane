@@ -217,6 +217,32 @@
     return node;
   }
 
+  // Native accessibility snapshots pass every relevant node identity so this
+  // also reaches closed shadow trees, which page-visible traversal cannot.
+  globalThis.__omoikane_accessibility_snapshot = function(selectIds, detailsIds) {
+    const selectedOptions = [];
+    for (const id of selectIds) {
+      const select = wrapNode(id);
+      if (!select || select.tagName !== "SELECT") continue;
+      const options = Array.from(select.options);
+      let selected = options.filter(option => option.selected);
+      if (!select.hasAttribute("multiple") && selected.length === 0) {
+        const fallback = options.find(option => !option.__isDisabledControl());
+        selected = fallback ? [fallback] : [];
+      } else if (!select.hasAttribute("multiple") && selected.length > 1) {
+        selected = [selected[selected.length - 1]];
+      }
+      selectedOptions.push(...selected.map(option => option.__id));
+    }
+    const openDetails = detailsIds.filter(id => {
+      const details = wrapNode(id);
+      return details && details.tagName === "DETAILS" &&
+        (details.open === true ||
+          (details.open === undefined && details.hasAttribute("open")));
+    });
+    return JSON.stringify({ selectedOptions, openDetails });
+  };
+
   // Stamps `node` and (for a deep subtree) every descendant with `doc` as its
   // owning document, mirroring how `Document.create*` stamps `__ownerDoc`. Used
   // by `cloneNode`, whose native clone carries no wrapper metadata: without this
@@ -2775,6 +2801,14 @@
         previous.focus();
       }
       this.dispatchEvent(new Event("close"));
+    }
+  }
+
+  class HTMLDetailsElement extends HTMLElement {
+    get open() { return this.hasAttribute("open"); }
+    set open(value) {
+      if (value) this.setAttribute("open", "");
+      else this.removeAttribute("open");
     }
   }
   class HTMLStyleElement extends HTMLElement {
@@ -8569,6 +8603,7 @@
     template: HTMLTemplateElement,
     slot: HTMLSlotElement,
     dialog: HTMLDialogElement,
+    details: HTMLDetailsElement,
   };
 
   const CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION = {};
@@ -9003,6 +9038,7 @@
   globalThis.HTMLParagraphElement = HTMLParagraphElement;
   globalThis.HTMLAnchorElement = HTMLAnchorElement;
   globalThis.HTMLDialogElement = HTMLDialogElement;
+  globalThis.HTMLDetailsElement = HTMLDetailsElement;
   globalThis.HTMLStyleElement = HTMLStyleElement;
   globalThis.HTMLTemplateElement = HTMLTemplateElement;
   globalThis.HTMLSlotElement = HTMLSlotElement;

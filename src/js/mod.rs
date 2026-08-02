@@ -27,6 +27,7 @@ use boa_engine::object::{
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
 use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
+use crate::accessibility::{AccessibilityRenderState, AccessibilitySnapshotState};
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
     parse_scope_prelude, parse_selector_list,
@@ -2432,6 +2433,152 @@ impl JsRuntime {
     /// Returns the current DOM document.
     pub fn document(&self) -> NodeHandle {
         self.host_state.borrow().document.clone()
+    }
+
+    /// Returns the stable native identity of the explicitly focused element.
+    ///
+    /// `Document.activeElement` has a body/document-element fallback even when
+    /// no element owns focus. The accessibility tree needs to distinguish that
+    /// fallback from an actual focused control, so it reads the bootstrap's
+    /// per-document focus slot directly.
+    pub(crate) fn accessibility_focused_node_identity(&mut self) -> Option<usize> {
+        self.eval(
+            "(() => { document.activeElement; return \
+             document.hasFocus() && document.__focusedElementId != null \
+               ? document.__focusedElementId : null; })()",
+        )
+        .ok()
+        .and_then(|value| value.as_number())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value as usize)
+    }
+
+    /// Resolves a Runtime remote object when it is a live DOM Node wrapper.
+    pub(crate) fn node_for_remote_object_id(&mut self, object_id: &str) -> Option<NodeHandle> {
+        let object_id = serde_json::to_string(object_id).ok()?;
+        let identity = self
+            .eval(&format!(
+                "(() => {{ const value = globalThis[{object_id}]; return \
+                 value instanceof Node ? value.__id : null; }})()"
+            ))
+            .ok()?
+            .as_number()
+            .filter(|value| value.is_finite() && *value >= 0.0)? as usize;
+        self.host_state.borrow().get_node(identity)
+    }
+
+    /// Captures JS-owned form and disclosure state that is not mirrored into
+    /// native DOM attributes.
+    pub(crate) fn accessibility_snapshot_state(&mut self) -> AccessibilitySnapshotState {
+        fn collect(node: &NodeHandle, selects: &mut Vec<usize>, details: &mut Vec<usize>) {
+            match node.tag_name().as_deref() {
+                Some("select") => selects.push(node.identity()),
+                Some("details") => details.push(node.identity()),
+                _ => {}
+            }
+            if let Some(root) = node.shadow_root() {
+                collect(&root, selects, details);
+            }
+            for child in node.child_nodes() {
+                collect(&child, selects, details);
+            }
+        }
+
+        let mut select_ids = Vec::new();
+        let mut details_ids = Vec::new();
+        collect(&self.document(), &mut select_ids, &mut details_ids);
+        let select_ids = serde_json::to_string(&select_ids).unwrap_or_else(|_| "[]".to_string());
+        let details_ids = serde_json::to_string(&details_ids).unwrap_or_else(|_| "[]".to_string());
+        let result = self.eval(&format!(
+            "__omoikane_accessibility_snapshot({select_ids}, {details_ids})"
+        ));
+        let Some(encoded) = result
+            .ok()
+            .and_then(|value| value.as_string())
+            .map(|value| value.to_std_string_escaped())
+        else {
+            return AccessibilitySnapshotState::default();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&encoded) else {
+            return AccessibilitySnapshotState::default();
+        };
+        let identities = |key: &str| {
+            value[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_u64)
+                .filter_map(|identity| usize::try_from(identity).ok())
+                .collect::<HashSet<_>>()
+        };
+        AccessibilitySnapshotState {
+            selected_option_identities: identities("selectedOptions"),
+            open_details_identities: identities("openDetails"),
+        }
+    }
+
+    /// Resolves whether an element participates in the rendered accessibility
+    /// tree, including stylesheet-driven ancestor `display:none` and inherited
+    /// `visibility` state. HTML/ARIA hidden attributes are handled by the
+    /// accessibility builder so it can report the matching ignored reason.
+    pub(crate) fn accessibility_render_state(
+        &mut self,
+        node: &NodeHandle,
+    ) -> AccessibilityRenderState {
+        if node.node_type() != NodeType::Element {
+            return AccessibilityRenderState::Rendered;
+        }
+        let Some(document) = document_root_for_node(node) else {
+            return AccessibilityRenderState::NotRendered;
+        };
+        let document_id = document.identity();
+        let mut state = self.host_state.borrow_mut();
+        state.ensure_style_resolver(&document);
+
+        let mut current = Some(node.clone());
+        while let Some(element) = current {
+            let style = state
+                .document_styles
+                .get_mut(&document_id)
+                .and_then(|entry| entry.resolver.as_mut())
+                .map(|resolver| resolver.computed_style(&element));
+            let Some(style) = style else {
+                return AccessibilityRenderState::NotRendered;
+            };
+            if matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none"))
+            {
+                return AccessibilityRenderState::NotRendered;
+            }
+            current = element.assigned_slot().or_else(|| {
+                element.parent_node().and_then(|parent| {
+                    if parent.node_type() == NodeType::Element {
+                        Some(parent)
+                    } else {
+                        parent.shadow_host()
+                    }
+                })
+            });
+        }
+
+        let style = state
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+            .map(|resolver| resolver.computed_style(node));
+        match style {
+            Some(style)
+                if matches!(
+                    style.get("visibility"),
+                    Some(ComputedValue::Keyword(value))
+                        if value.eq_ignore_ascii_case("hidden")
+                            || value.eq_ignore_ascii_case("collapse")
+                ) =>
+            {
+                AccessibilityRenderState::NotVisible
+            }
+            Some(_) => AccessibilityRenderState::Rendered,
+            None => AccessibilityRenderState::NotRendered,
+        }
     }
 
     /// Cancels every worker when this global is replaced by navigation,
