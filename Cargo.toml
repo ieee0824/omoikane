@@ -16,12 +16,14 @@ ab_glyph = "0.2"
 base64 = "0.22"
 brotli = { version = "7", default-features = false, features = ["std"] }
 crc32fast = "1.5"
-# Pinned to a fork revision so every fix it carries is reproducible and cannot
-# silently change under us: the inline-cache guard (issues 057-059), the
+# Pinned to a specific revision so every fix it carries is reproducible and
+# cannot silently change under us: the inline-cache guard (issues 057-059), the
 # primitive property fast path (#313), appending to a string in place when a
 # compound assignment owns it (#318, #319, #320), the collection threshold the
-# profiling in #315 settled on, and suspendable native host calls (#354).
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "f5aedba4", features = ["annex-b"] }
+# profiling in #315 settled on, suspendable native host calls (#354), and
+# registered roots for native builtin temporaries (ieee0824/boa#55).
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "5da9b8f757d1ef855851484c37f5ddc138206f56", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "5da9b8f757d1ef855851484c37f5ddc138206f56" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
@@ -46,7 +48,6 @@ path = "src/bin/omoikane.rs"
 required-features = ["gui"]
 
 [dev-dependencies]
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "f5aedba4" }
 rcgen = "0.13"
 
 [build-dependencies]

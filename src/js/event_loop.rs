@@ -8,6 +8,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use boa_engine::JsValue;
+use boa_gc::{Finalize, Trace, Tracer};
 
 use super::{NavigationRequest, TimerPayload};
 
@@ -94,6 +95,57 @@ pub(crate) struct EventLoop {
     next_animation_frame_id: u64,
     animation_frame_order: Vec<u64>,
     animation_frame_callbacks: HashMap<u64, JsValue>,
+}
+
+impl Finalize for EventLoop {}
+
+// JavaScript callbacks and message values live in the host-side event loop rather
+// than in Boa's VM stack. They therefore need to be exposed through the runtime's
+// host root provider while the event loop retains them.
+unsafe impl Trace for EventLoop {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        for queue in self.queues.values() {
+            for (_, task) in queue {
+                unsafe { trace_task(task, tracer) };
+            }
+        }
+        for timer in &self.timers {
+            unsafe { trace_timer_payload(&timer.payload, tracer) };
+        }
+        for callback in self.animation_frame_callbacks.values() {
+            unsafe { callback.trace(tracer) };
+        }
+    }
+
+    fn run_finalizer(&self) {}
+}
+
+unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
+    if let TimerPayload::Callback { callback, args } = payload {
+        unsafe { callback.trace(tracer) };
+        for arg in args {
+            unsafe { arg.trace(tracer) };
+        }
+    }
+}
+
+unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
+    match task {
+        Task::Timer(payload) => unsafe { trace_timer_payload(payload, tracer) },
+        Task::PostedMessage { port, data } => {
+            unsafe { port.trace(tracer) };
+            unsafe { data.trace(tracer) };
+        }
+        Task::WorkerOwnerMessage { owner, .. } => unsafe { owner.trace(tracer) },
+        Task::SharedWorkerOwnerMessage { port, .. } => unsafe { port.trace(tracer) },
+        Task::WorkerError { owner: Some(owner), .. } => unsafe { owner.trace(tracer) },
+        Task::Geolocation { .. }
+        | Task::Navigation(_)
+        | Task::BroadcastChannelMessage { .. }
+        | Task::WorkerMessage { .. }
+        | Task::SharedWorkerMessage { .. }
+        | Task::WorkerError { owner: None, .. } => {}
+    }
 }
 
 impl Default for EventLoop {

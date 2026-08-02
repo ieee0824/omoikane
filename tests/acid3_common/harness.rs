@@ -11,6 +11,7 @@
 
 #![allow(dead_code)]
 
+use std::cell::Cell;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -19,6 +20,12 @@ use std::sync::Arc;
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
+
+const EVALS_PER_GC: usize = 8;
+
+thread_local! {
+    static EVALS_SINCE_GC: Cell<usize> = const { Cell::new(0) };
+}
 
 /// Absolute path to `tests/fixtures/acid3`.
 pub fn fixture_dir() -> PathBuf {
@@ -271,6 +278,7 @@ pub struct Acid3Run {
 /// Fetches, parses, scripts, and drives the Acid3 page, returning an honest
 /// snapshot of the current engine behaviour. Never panics on engine failure.
 pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
+    EVALS_SINCE_GC.with(|count| count.set(0));
     let acid3_url = format!("{}/acid3.html", base_url.trim_end_matches('/'));
 
     // 1. Fetch over HTTP.
@@ -417,10 +425,25 @@ fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
     let wrapped = format!(
         "(function(){{ try {{ var __v = ({expr}); return (__v === null || __v === undefined) ? '' : String(__v); }} catch (e) {{ return '<<eval-error: ' + e + '>>'; }} }})()"
     );
-    match runtime.eval(&wrapped) {
+    let result = runtime.eval(&wrapped);
+    let value = match result {
         Ok(value) => value.as_string().map(|s| s.to_std_string_escaped()),
         Err(_) => None,
-    }
+    };
+    // The harness intentionally performs thousands of tiny evaluations while
+    // driving the page. Collect periodically so the integration test remains
+    // bounded when host-retained values are exposed to Boa GC without forcing
+    // a full collection on every tick.
+    EVALS_SINCE_GC.with(|count| {
+        let next = count.get().saturating_add(1);
+        if next >= EVALS_PER_GC {
+            count.set(0);
+            boa_gc::force_collect();
+        } else {
+            count.set(next);
+        }
+    });
+    value
 }
 
 /// Reads a numeric global as an `i64`, returning `None` if unreadable/NaN.
