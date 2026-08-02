@@ -1845,8 +1845,14 @@ impl CdpSession {
         {
             return Err("stale page startup task completion".to_string());
         }
-        if completed.result == Err(PageTaskError::Cancelled) {
-            return Err("page startup task was cancelled".to_string());
+        match completed.result {
+            Err(PageTaskError::Cancelled) => {
+                return Err("page startup task was cancelled".to_string());
+            }
+            Err(PageTaskError::TimedOut) => {
+                return Err("page startup task exceeded its wall-clock timeout".to_string());
+            }
+            Ok(_) => {}
         }
 
         let script_error_lines = take_page_task_script_error_lines(&mut completed);
