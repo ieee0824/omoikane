@@ -323,7 +323,8 @@ fn svg_hit_geometry(
                 return SvgHitGeometry::default();
             }
             let fill = point_in_rect(point, Rect { x, y, width, height });
-            let stroke = point_near_rect(point, Rect { x, y, width, height }, stroke_width / 2.0);
+            let stroke = stroke_width > 0.0
+                && point_near_rect(point, Rect { x, y, width, height }, stroke_width / 2.0);
             SvgHitGeometry {
                 fill,
                 stroke,
@@ -340,7 +341,9 @@ fn svg_hit_geometry(
             let distance = ((point.0 - cx).powi(2) + (point.1 - cy).powi(2)).sqrt();
             SvgHitGeometry {
                 fill: radius > 0.0 && distance <= radius,
-                stroke: radius > 0.0 && (distance - radius).abs() <= stroke_width / 2.0,
+                stroke: radius > 0.0
+                    && stroke_width > 0.0
+                    && (distance - radius).abs() <= stroke_width / 2.0,
                 bounding_box: radius > 0.0
                     && point_in_rect(
                         point,
@@ -368,7 +371,8 @@ fn svg_hit_geometry(
                 return SvgHitGeometry::default();
             }
             let normalized = ((point.0 - cx) / rx).powi(2) + ((point.1 - cy) / ry).powi(2);
-            let stroke = (normalized.sqrt() - 1.0).abs() * rx.min(ry) <= stroke_width / 2.0;
+            let stroke = stroke_width > 0.0
+                && (normalized.sqrt() - 1.0).abs() * rx.min(ry) <= stroke_width / 2.0;
             SvgHitGeometry {
                 fill: normalized <= 1.0,
                 stroke,
@@ -393,7 +397,7 @@ fn svg_hit_geometry(
                 parse_svg_coord(attribute_ref(attrs, "y2")).unwrap_or(0.0) * scale_y,
             );
             let distance = point_segment_distance(point, start, end);
-            let hit = distance <= stroke_width / 2.0;
+            let hit = stroke_width > 0.0 && distance <= stroke_width / 2.0;
             let bbox = rect_for_points(&[start, end]);
             let bounding_box = point_in_rect(point, bbox);
             SvgHitGeometry { fill: false, stroke: hit, bounding_box }
@@ -434,14 +438,17 @@ fn polygon_hit_geometry(
         return SvgHitGeometry::default();
     }
     let mut stroke = false;
-    for window in points.windows(2) {
-        if point_segment_distance(point, window[0], window[1]) <= stroke_width / 2.0 {
-            stroke = true;
-            break;
+    if stroke_width > 0.0 {
+        for window in points.windows(2) {
+            if point_segment_distance(point, window[0], window[1]) <= stroke_width / 2.0 {
+                stroke = true;
+                break;
+            }
         }
-    }
-    if closed && !stroke {
-        stroke = point_segment_distance(point, *points.last().unwrap(), points[0]) <= stroke_width / 2.0;
+        if closed && !stroke {
+            stroke = point_segment_distance(point, *points.last().unwrap(), points[0])
+                <= stroke_width / 2.0;
+        }
     }
     let fill = closed && point_in_polygon(point, points);
     let bounding_box = point_in_rect(point, rect_for_points(points));
