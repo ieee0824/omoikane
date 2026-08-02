@@ -1107,13 +1107,8 @@
     return parts;
   }
 
-  const domTokenListConstructionToken = Symbol("DOMTokenList construction");
-
   class DOMTokenList {
-    constructor(token, node, attribute, supportedTokens = null) {
-      if (token !== domTokenListConstructionToken) {
-        throw new TypeError("Illegal constructor");
-      }
+    constructor(node, attribute, supportedTokens = null) {
       this.__node = node;
       this.__attribute = attribute;
       this.__supportedTokens = supportedTokens;
@@ -1222,7 +1217,11 @@
     toString() { return this.value; }
     get [Symbol.toStringTag]() { return "DOMTokenList"; }
   }
-  globalThis.DOMTokenList = DOMTokenList;
+  const exposedDOMTokenList = function DOMTokenList() {
+    throw new TypeError("Illegal constructor");
+  };
+  exposedDOMTokenList.prototype = DOMTokenList.prototype;
+  globalThis.DOMTokenList = exposedDOMTokenList;
 
   class Node {
     constructor(id) {
@@ -5018,23 +5017,15 @@
   class HTMLIFrameElement extends HTMLElement {
     get sandbox() {
       if (!this.__sandboxTokenList) {
-        this.__sandboxTokenList = new DOMTokenList(
-          domTokenListConstructionToken,
-          this,
-          "sandbox",
-          iframeSandboxTokens,
-        );
+        this.__sandboxTokenList = new DOMTokenList(this, "sandbox", iframeSandboxTokens);
       }
       return this.__sandboxTokenList;
     }
 
-    // Keep the accessor pair in the class bytecode: the pinned Boa revision
-    // miscompiles the large bootstrap on x86_64 when this setter is omitted.
-    // The descriptor is made getter-only immediately after the class body, so
-    // web content still observes the readonly Web IDL surface.
-    set sandbox(value) {
-      this.setAttribute("sandbox", String(value));
-    }
+    // The pinned Boa revision miscompiles this large bootstrap on x86_64 when
+    // the accessor pair is reduced to a getter. Keep the setter shape, but make
+    // assignment a no-op so the reflected DOMTokenList remains readonly.
+    set sandbox(_value) {}
 
     get contentDocument() {
       // Removing an iframe destroys its active nested browsing context. Keep
@@ -5122,16 +5113,6 @@
       __omoikane_set_attribute(this.__id, "src", String(value));
     }
   }
-
-  const iframeSandboxDescriptor = Object.getOwnPropertyDescriptor(
-    HTMLIFrameElement.prototype,
-    "sandbox",
-  );
-  Object.defineProperty(HTMLIFrameElement.prototype, "sandbox", {
-    get: iframeSandboxDescriptor.get,
-    enumerable: iframeSandboxDescriptor.enumerable,
-    configurable: iframeSandboxDescriptor.configurable,
-  });
 
   class HTMLObjectElement extends HTMLElement {
     get contentDocument() {
