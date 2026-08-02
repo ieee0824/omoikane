@@ -799,6 +799,12 @@ unsafe impl Trace for HostState {
         if let Some(owner) = &self.worker_owner_object {
             unsafe { owner.trace(tracer) };
         }
+        for worker in self.workers.values() {
+            let worker = worker.borrow();
+            if let Some(owner) = &worker.owner_object {
+                unsafe { owner.trace(tracer) };
+            }
+        }
         for channel in self.broadcast_channels.values() {
             unsafe { channel.trace(tracer) };
         }
@@ -9790,6 +9796,7 @@ mod tests {
                  globalThis.workerDocumentType = typeof worker.document;",
             )
             .unwrap();
+        boa_gc::force_collect();
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.eval("workerValues[0]").unwrap().as_number(), Some(42.0));
         assert_eq!(runtime.eval("workerDocumentType").unwrap().as_string().unwrap().to_std_string_escaped(), "undefined");
