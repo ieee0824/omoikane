@@ -6041,8 +6041,9 @@
 
   // HTMLTableCellElement covers the cell-specific IDL surface shared by
   // <td> and <th>. The numeric span attributes are limited unsigned-long
-  // reflections in HTML: colSpan is clamped to [1, 1000], while rowSpan is
-  // clamped to [0, 65534] (zero means all remaining rows).
+  // reflections in HTML: colSpan is clamped to [1, 1000], while rowSpan keeps
+  // zero for "all remaining rows", caps positive values at 65534, and falls
+  // back to 1 for invalid input.
   class HTMLTableCellElement extends HTMLElement {
     get cellIndex() {
       const parent = this.parentNode;
