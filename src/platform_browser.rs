@@ -559,4 +559,58 @@ mod tests {
         assert_eq!(filename_from_url("https://example.test/path/?q=1"), "download");
         assert_eq!(filename_from_url("https://example.test/file.txt#part"), "file.txt");
     }
+
+    #[test]
+    fn traverse_history_zero_delta_is_noop() {
+        let mut browser = PlatformBrowser::new();
+        browser
+            .open_tab(Some(&navigate_url("<title>history</title>")))
+            .unwrap();
+        assert_eq!(browser.drain_events().len(), 1);
+
+        browser.traverse_history(0).unwrap();
+        assert!(browser.drain_events().is_empty());
+    }
+
+    #[test]
+    fn failed_download_returns_id_and_emits_correlated_failure_events() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        let mut browser = PlatformBrowser::with_tab(None).unwrap();
+        let error = browser
+            .download(&format!("http://{address}/download"), None)
+            .unwrap_err();
+        let failed_id = match error {
+            BrowserError::DownloadFailed { id, .. } => id,
+            other => panic!("expected DownloadFailed error, got {other:?}"),
+        };
+        let download = browser.download_info(failed_id).unwrap();
+        assert!(matches!(download.state, DownloadState::Failed(_)));
+        let events = browser.drain_events();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], BrowserEvent::TabOpened(_)));
+        assert!(matches!(events[1], BrowserEvent::DownloadStarted(_)));
+        assert!(matches!(events[2], BrowserEvent::DownloadFailed { id, .. } if id == failed_id));
+    }
+
+    #[test]
+    fn open_tab_fails_when_tab_id_space_exhausts() {
+        let mut browser = PlatformBrowser::new();
+        browser.next_tab_id = u64::MAX;
+        let error = browser.open_tab(None).unwrap_err();
+        assert!(matches!(error, BrowserError::IdExhausted("tab")));
+    }
+
+    #[test]
+    fn download_fails_when_download_id_space_exhausts() {
+        let mut browser = PlatformBrowser::with_tab(None).unwrap();
+        browser.next_download_id = u64::MAX;
+        let error = browser.download("http://127.0.0.1:1/download", None).unwrap_err();
+        assert!(matches!(error, BrowserError::IdExhausted("download")));
+        let events = browser.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], BrowserEvent::TabOpened(_)));
+    }
 }
