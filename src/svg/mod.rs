@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::layout::Rect;
@@ -10,23 +11,24 @@ use crate::paint::Image;
 use crate::paint::color::{Color, parse_color};
 
 thread_local! {
-    static ACTIVE_SVG_IMAGE_REFERENCES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static ACTIVE_SVG_IMAGE_REFERENCES: RefCell<HashSet<Arc<str>>> = RefCell::new(HashSet::new());
 }
 
-struct ActiveSvgImageReference(String);
+struct ActiveSvgImageReference(Arc<str>);
 
 impl ActiveSvgImageReference {
     fn acquire(href: &str) -> Option<Self> {
+        let href = Arc::<str>::from(href);
         ACTIVE_SVG_IMAGE_REFERENCES
-            .with(|active| active.borrow_mut().insert(href.to_string()))
-            .then(|| Self(href.to_string()))
+            .with(|active| active.borrow_mut().insert(Arc::clone(&href)))
+            .then_some(Self(href))
     }
 }
 
 impl Drop for ActiveSvgImageReference {
     fn drop(&mut self) {
         ACTIVE_SVG_IMAGE_REFERENCES.with(|active| {
-            active.borrow_mut().remove(&self.0);
+            active.borrow_mut().remove(self.0.as_ref());
         });
     }
 }
@@ -419,7 +421,7 @@ fn find_svg_resource(root: &NodeHandle, id: &str) -> Option<NodeHandle> {
     None
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct SvgHitGeometry {
     fill: bool,
     stroke: bool,
@@ -1644,12 +1646,14 @@ fn render_svg_element(
             };
             let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0) * sx + tx;
             let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0) * sy + ty;
-            let width = parse_svg_size(attribute_ref(&attrs, "width"))
-                .unwrap_or(image.width() as f32)
-                * sx;
-            let height = parse_svg_size(attribute_ref(&attrs, "height"))
-                .unwrap_or(image.height() as f32)
-                * sy;
+            let Some(width) = parse_svg_size(attribute_ref(&attrs, "width")) else {
+                return;
+            };
+            let Some(height) = parse_svg_size(attribute_ref(&attrs, "height")) else {
+                return;
+            };
+            let width = width * sx;
+            let height = height * sy;
             let viewport = Rect { x, y, width, height };
             let destination = svg_image_destination(
                 viewport,
@@ -1660,17 +1664,12 @@ fn render_svg_element(
             if destination.width <= 0.0 || destination.height <= 0.0 {
                 return;
             }
-            if paint.opacity >= 1.0 {
-                canvas.draw_image_scaled_clipped(&image, destination, Some(viewport));
-            } else if paint.opacity > 0.0 {
-                let mut pixels = image.pixels().to_vec();
-                for pixel in pixels.chunks_exact_mut(4) {
-                    pixel[3] = (f32::from(pixel[3]) * paint.opacity).round() as u8;
-                }
-                if let Ok(image) = Image::new(image.width(), image.height(), pixels) {
-                    canvas.draw_image_scaled_clipped(&image, destination, Some(viewport));
-                }
-            }
+            canvas.draw_image_scaled_clipped_with_opacity(
+                &image,
+                destination,
+                Some(viewport),
+                paint.opacity,
+            );
         }
         _ => render_svg_children(child, canvas, sx, sy, tx, ty, paint, resources, visited),
     }
@@ -2862,6 +2861,41 @@ mod tests {
         assert_eq!(
             svg_image_destination(viewport, 200.0, 100.0, Some("xMaxYMax slice")),
             Rect { x: -90.0, y: 20.0, width: 200.0, height: 100.0 },
+        );
+    }
+
+    #[test]
+    fn svg_image_reference_guard_stops_recursive_decode_and_recovers_afterward() {
+        let href = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMiIgaGVpZ2h0PSIxIj48cmVjdCB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJyZWQiLz48cmVjdCB4PSIxIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJibHVlIi8+PC9zdmc+";
+        let html = format!(
+            r#"<svg width="2" height="1"><image width="2" height="1" href="{href}"/></svg>"#,
+        );
+        let doc = TreeBuilder::parse(&html).document();
+        let svg = find_svg(&doc).unwrap();
+
+        let active = ActiveSvgImageReference::acquire(href).unwrap();
+        let blocked = render_svg_to_image(&svg).unwrap();
+        assert!(blocked.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0));
+        drop(active);
+
+        let decoded = render_svg_to_image(&svg).unwrap();
+        assert_eq!(&decoded.pixels()[..4], &[255, 0, 0, 255]);
+        assert_eq!(&decoded.pixels()[4..8], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn svg_image_without_explicit_dimensions_does_not_render_or_hit() {
+        let html = r#"<svg width="2" height="1">
+          <image href="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMiIgaGVpZ2h0PSIxIj48cmVjdCB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJyZWQiLz48cmVjdCB4PSIxIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBmaWxsPSJibHVlIi8+PC9zdmc+"/>
+        </svg>"#;
+        let doc = TreeBuilder::parse(html).document();
+        let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
+        assert!(image.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0));
+
+        let attrs = BTreeMap::new();
+        assert_eq!(
+            svg_hit_geometry("image", &attrs, (0.0, 0.0), 0.0, 1.0, 1.0, (0.0, 0.0)),
+            SvgHitGeometry::default(),
         );
     }
 

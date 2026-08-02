@@ -569,7 +569,7 @@
       "area": "graphics",
       "description": "SVG image elements expose their dedicated interface and animated geometry lengths",
       "setup": "globalThis.__svgImageProbe = document.createElementNS('http://www.w3.org/2000/svg', 'image'); __svgImageProbe.setAttribute('width', '12')",
-      "probe": "__svgImageProbe instanceof SVGImageElement && __svgImageProbe instanceof SVGGraphicsElement && __svgImageProbe.width.baseVal.value === 12 && __svgImageProbe.href instanceof SVGAnimatedString",
+      "probe": "typeof SVGImageElement === 'function' && typeof SVGAnimatedString === 'function' && __svgImageProbe instanceof SVGImageElement && __svgImageProbe instanceof SVGGraphicsElement && __svgImageProbe.width.baseVal.value === 12 && __svgImageProbe.href instanceof SVGAnimatedString",
       "baseline_supported": false
     },
     {
