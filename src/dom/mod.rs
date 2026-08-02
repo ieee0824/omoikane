@@ -183,6 +183,7 @@ pub struct Element {
     local_name: String,
     html: bool,
     attributes: BTreeMap<String, String>,
+    attribute_names: BTreeMap<String, AttributeName>,
     checked: bool,
     dirty_checkedness: bool,
     text_control_state: Option<TextControlState>,
@@ -205,6 +206,12 @@ pub struct Element {
     shadow_root: Option<NodeHandle>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttributeName {
+    namespace_uri: Option<String>,
+    local_name: String,
+}
+
 impl Element {
     /// Creates a new element payload.
     pub fn new(tag_name: impl Into<String>) -> Self {
@@ -217,6 +224,7 @@ impl Element {
             local_name: String::new(),
             html: true,
             attributes: BTreeMap::new(),
+            attribute_names: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
             text_control_state: None,
@@ -242,6 +250,7 @@ impl Element {
             local_name,
             html: false,
             attributes: BTreeMap::new(),
+            attribute_names: BTreeMap::new(),
             checked: false,
             dirty_checkedness: false,
             text_control_state: None,
@@ -249,6 +258,18 @@ impl Element {
             template_content: None,
             shadow_root: None,
         }
+    }
+
+    pub fn new_html_ns(
+        qualified_name: impl Into<String>,
+        namespace_uri: impl Into<String>,
+    ) -> Self {
+        // `createElementNS()` preserves its qualified name even for the HTML namespace.
+        let mut element = Self::new_xml(qualified_name, Some(namespace_uri.into()));
+        element.html = true;
+        element.template_content = element.local_name.eq_ignore_ascii_case("template")
+            .then(NodeHandle::document_fragment);
+        element
     }
 
     /// Returns the normalized tag name.
@@ -259,7 +280,7 @@ impl Element {
     pub fn namespace_uri(&self) -> Option<&str> { self.namespace_uri.as_deref() }
     pub fn prefix(&self) -> Option<&str> { self.prefix.as_deref() }
     pub fn local_name(&self) -> &str {
-        if self.html { &self.tag_name } else { &self.local_name }
+        if self.local_name.is_empty() { &self.tag_name } else { &self.local_name }
     }
     pub fn is_html(&self) -> bool { self.html }
 
@@ -409,6 +430,16 @@ impl NodeHandle {
         Self::new(NodeData::Element(Element::new(tag_name)))
     }
 
+    /// Creates an HTML element with explicit namespace metadata.
+    pub fn html_element_ns(
+        qualified_name: impl Into<String>,
+        namespace_uri: impl Into<String>,
+    ) -> Self {
+        Self::new(NodeData::Element(Element::new_html_ns(
+            qualified_name,
+            namespace_uri,
+        )))
+    }
 
     /// Creates an XML element, preserving its qualified name and namespace.
     pub fn xml_element(tag_name: impl Into<String>, namespace_uri: Option<String>) -> Self {
@@ -721,6 +752,24 @@ impl NodeHandle {
         }
     }
 
+    /// Returns qualified name, namespace, local name, and value for each
+    /// element attribute. Prefixes remain in the qualified name but are not
+    /// part of the equality key.
+    pub fn attribute_records(&self) -> Option<Vec<(String, Option<String>, String, String)>> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => Some(element.attributes.iter().map(|(name, value)| {
+                let metadata = element.attribute_names.get(name);
+                (
+                    name.clone(),
+                    metadata.and_then(|entry| entry.namespace_uri.clone()),
+                    metadata.map(|entry| entry.local_name.clone()).unwrap_or_else(|| name.clone()),
+                    value.clone(),
+                )
+            }).collect()),
+            _ => None,
+        }
+    }
+
     /// Returns a clone of one element attribute value, if it exists.
     ///
     /// The exact attribute name is checked first to preserve case-sensitive XML
@@ -730,7 +779,12 @@ impl NodeHandle {
             NodeData::Element(element) => element
                 .attributes
                 .get(name)
-                .or_else(|| element.attributes.get(&name.to_ascii_lowercase()))
+                .or_else(|| {
+                    element
+                        .html
+                        .then(|| element.attributes.get(&name.to_ascii_lowercase()))
+                        .flatten()
+                })
                 .cloned(),
             _ => None,
         }
@@ -739,21 +793,44 @@ impl NodeHandle {
     /// Sets an attribute on an element node. No-op for other node kinds.
     pub fn set_attribute(&self, name: impl Into<String>, value: impl Into<String>) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            let name = name.into().to_ascii_lowercase();
+            let name = name.into();
+            let name = if element.html { name.to_ascii_lowercase() } else { name };
             if name == "checked" && !element.dirty_checkedness {
                 element.checked = true;
             }
+            element.attributes.insert(name.clone(), value.into());
             element
-                .attributes
-                .insert(name, value.into());
+                .attribute_names
+                .entry(name.clone())
+                .or_insert_with(|| AttributeName {
+                    namespace_uri: None,
+                    local_name: name,
+                });
         }
     }
 
 
     /// Sets an XML attribute without HTML ASCII case folding.
     pub fn set_xml_attribute(&self, name: impl Into<String>, value: impl Into<String>) {
+        let name = name.into();
+        self.set_xml_attribute_ns(name.clone(), None, name, value);
+    }
+
+    /// Sets an XML/namespaced attribute without HTML ASCII case folding.
+    pub fn set_xml_attribute_ns(
+        &self,
+        qualified_name: impl Into<String>,
+        namespace_uri: Option<String>,
+        local_name: impl Into<String>,
+        value: impl Into<String>,
+    ) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            element.attributes.insert(name.into(), value.into());
+            let qualified_name = qualified_name.into();
+            element.attributes.insert(qualified_name.clone(), value.into());
+            element.attribute_names.insert(qualified_name, AttributeName {
+                namespace_uri,
+                local_name: local_name.into(),
+            });
         }
     }
 
@@ -786,11 +863,20 @@ impl NodeHandle {
     /// Removes an attribute from an element node. No-op for other node kinds.
     pub fn remove_attribute(&self, name: &str) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            let name = name.to_ascii_lowercase();
+            let name = if element.html { name.to_ascii_lowercase() } else { name.to_string() };
             element.attributes.remove(&name);
+            element.attribute_names.remove(&name);
             if name == "checked" && !element.dirty_checkedness {
                 element.checked = false;
             }
+        }
+    }
+
+    /// Removes an exactly-qualified XML/namespaced attribute.
+    pub fn remove_xml_attribute(&self, qualified_name: &str) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.attributes.remove(qualified_name);
+            element.attribute_names.remove(qualified_name);
         }
     }
 
@@ -1462,12 +1548,44 @@ mod tests {
         let element = NodeHandle::element("svg");
         element.set_xml_attribute("viewBox", "0 0 10 10");
         element.set_attribute("id", "example");
+        let xml = NodeHandle::xml_element("root", None);
+        xml.set_attribute("lowercase", "value");
 
         assert_eq!(
             element.get_attribute("viewBox"),
             Some("0 0 10 10".to_string())
         );
         assert_eq!(element.get_attribute("ID"), Some("example".to_string()));
+        assert_eq!(xml.get_attribute("LOWERCASE"), None);
+    }
+
+    #[test]
+    fn preserves_element_and_attribute_namespace_metadata() {
+        let html = NodeHandle::html_element_ns("P:DIV", "http://www.w3.org/1999/xhtml");
+        assert_eq!(html.tag_name().as_deref(), Some("P:DIV"));
+        assert_eq!(html.prefix().as_deref(), Some("P"));
+        assert_eq!(html.local_name().as_deref(), Some("DIV"));
+
+        let xml = NodeHandle::xml_element("p:Root", Some("urn:root".to_string()));
+        xml.set_attribute("MixedCase", "plain");
+        xml.set_xml_attribute_ns("a:item", Some("urn:attribute".to_string()), "item", "value");
+        assert_eq!(xml.get_attribute("mixedcase"), None);
+        assert_eq!(xml.attribute_records().unwrap(), vec![
+            ("MixedCase".into(), None, "MixedCase".into(), "plain".into()),
+            ("a:item".into(), Some("urn:attribute".into()), "item".into(), "value".into()),
+        ]);
+        xml.set_attribute("a:item", "updated");
+        assert!(xml.attribute_records().unwrap().contains(&(
+            "a:item".into(),
+            Some("urn:attribute".into()),
+            "item".into(),
+            "updated".into(),
+        )));
+        xml.remove_attribute("mixedcase");
+        assert!(xml.get_attribute("MixedCase").is_some());
+        xml.remove_attribute("MixedCase");
+        xml.remove_xml_attribute("a:item");
+        assert!(xml.attribute_records().unwrap().is_empty());
     }
 
     #[test]

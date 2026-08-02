@@ -41,6 +41,14 @@
       "baseline_supported": false
     },
     {
+      "id": "dom.node-equality",
+      "area": "dom",
+      "description": "Node identity and structural equality follow the DOM algorithms",
+      "setup": "globalThis.__nodeEqualityProbe = document.createElement('section'); __nodeEqualityProbe.setAttribute('data-kind', 'probe'); __nodeEqualityProbe.appendChild(document.createTextNode('value')); globalThis.__nodeEqualityClone = __nodeEqualityProbe.cloneNode(true)",
+      "probe": "typeof Node.prototype.isSameNode === 'function' && typeof Node.prototype.isEqualNode === 'function' && Node.prototype.isSameNode.length === 1 && Node.prototype.isEqualNode.length === 1 && __nodeEqualityProbe.isSameNode(__nodeEqualityProbe) && !__nodeEqualityProbe.isSameNode(__nodeEqualityClone) && __nodeEqualityProbe.isEqualNode(__nodeEqualityClone) && !__nodeEqualityProbe.isEqualNode(null)",
+      "baseline_supported": false
+    },
+    {
       "id": "css.compositing-properties",
       "area": "css",
       "description": "3D and compositing CSS properties validate through CSS.supports and computed style",

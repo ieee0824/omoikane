@@ -24,6 +24,22 @@
   const nativeCryptoDigest = globalThis.__omoikane_crypto_digest;
   const nativeCryptoHmac = globalThis.__omoikane_crypto_hmac;
   const nativeNodeIsHtmlElement = globalThis.__omoikane_node_is_html_element;
+  // Node equality is a platform operation. Capture every host hook it needs
+  // before page code can replace the public bootstrap globals.
+  const nativeNodeType = globalThis.__omoikane_node_type;
+  const nativeNodeName = globalThis.__omoikane_node_name;
+  const nativeNodeLocalName = globalThis.__omoikane_node_local_name;
+  const nativeNodeNamespaceURI = globalThis.__omoikane_node_namespace_uri;
+  const nativeNodePrefix = globalThis.__omoikane_node_prefix;
+  const nativeShadowHost = globalThis.__omoikane_shadow_host;
+  const nativeDoctypePublicId = globalThis.__omoikane_doctype_public_id;
+  const nativeDoctypeSystemId = globalThis.__omoikane_doctype_system_id;
+  const nativeChildNodeIds = globalThis.__omoikane_child_node_ids;
+  const nativeGetTextContent = globalThis.__omoikane_get_text_content;
+  const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
+  const nativeCreateElementNS = globalThis.__omoikane_create_element_ns;
+  const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
+  const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
   delete globalThis.__omoikane_clipboard_permission;
@@ -39,35 +55,45 @@
   delete globalThis.__omoikane_crypto_digest;
   delete globalThis.__omoikane_crypto_hmac;
   delete globalThis.__omoikane_node_is_html_element;
+  delete globalThis.__omoikane_attribute_records;
+  delete globalThis.__omoikane_create_element_ns;
+  delete globalThis.__omoikane_set_attribute_ns;
+  delete globalThis.__omoikane_remove_attribute_ns;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
   const cache = new Map();
-  // Platform-object and string conversions used by the insert-adjacent APIs
-  // must not depend on page-mutable constructors or prototypes.
-  // `cache` already owns canonical wrappers strongly. Keep the reverse/private
-  // metadata in ordinary collections with primitive values and ids so it does
-  // not add Boa weak-table or object-valued GC edges.
-  const wrapperNodeIds = new Map();
+  // Platform-object identity and insert-adjacent conversions must not depend on
+  // page-mutable expandos, constructors, or prototypes. `cache` already owns
+  // canonical wrappers strongly, so keep all added private state in ordinary
+  // collections with primitive values and native ids. This avoids adding Boa
+  // weak-table or object-valued GC edges.
+  const canonicalNodeIds = new Map();
+  const wrapperNodeIds = canonicalNodeIds;
+  const canonicalCdataNodes = new Map();
+  const canonicalCharacterDataOverrides = new Map();
   const wrapperLocalNames = new Map();
   const ownerDocumentIds = new Map();
   const canonicalElementIds = new Set();
   const canonicalHtmlElementIds = new Set();
   const canonicalHtmlSlotIds = new Set();
-  const getWrapperNodeId = Function.prototype.call.bind(Map.prototype.get);
-  const setWrapperNodeId = Function.prototype.call.bind(Map.prototype.set);
-  const getWrapperLocalName = Function.prototype.call.bind(Map.prototype.get);
-  const setWrapperLocalName = Function.prototype.call.bind(Map.prototype.set);
-  const getOwnerDocumentId = Function.prototype.call.bind(Map.prototype.get);
-  const setOwnerDocumentId = Function.prototype.call.bind(Map.prototype.set);
+  const mapHas = Function.prototype.call.bind(Map.prototype.has);
+  const mapGet = Function.prototype.call.bind(Map.prototype.get);
+  const mapSet = Function.prototype.call.bind(Map.prototype.set);
+  const getWrapperNodeId = mapGet;
+  const setWrapperNodeId = mapSet;
+  const getWrapperLocalName = mapGet;
+  const setWrapperLocalName = mapSet;
+  const getOwnerDocumentId = mapGet;
+  const setOwnerDocumentId = mapSet;
   const addCanonicalElementId = Function.prototype.call.bind(Set.prototype.add);
   const hasCanonicalElementId = Function.prototype.call.bind(Set.prototype.has);
-  const deleteCanonicalElementId = Function.prototype.call.bind(Set.prototype.delete);
   const intrinsicString = globalThis.String;
-  const IntrinsicTypeError = globalThis.TypeError;
   const stringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
   const stringFromCharCode = String.fromCharCode;
+  const hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+  const IntrinsicTypeError = globalThis.TypeError;
 
   function canonicalWrapperId(node) {
     if ((typeof node !== "object" && typeof node !== "function") || node === null) {
@@ -86,10 +112,6 @@
     return id !== undefined && hasCanonicalElementId(ids, id);
   }
 
-  function deleteCanonicalWrapperId(ids, node) {
-    const id = canonicalWrapperId(node);
-    if (id !== undefined) deleteCanonicalElementId(ids, id);
-  }
   const validatesSpecialStyleProperties = new Set([
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
@@ -233,63 +255,82 @@
     });
   }
 
+  function asciiLowercase(value) {
+    let result = "";
+    for (let index = 0; index < value.length; index += 1) {
+      const code = stringCharCodeAt(value, index);
+      result += code >= 65 && code <= 90
+        ? stringFromCharCode(code + 32)
+        : value[index];
+    }
+    return result;
+  }
+
+  function canonicalElementNamespace(id) {
+    const namespace = nativeNodeNamespaceURI(id);
+    // Legacy parser/createElement nodes carry an HTML bit but predate explicit
+    // namespace storage. Equality still observes their HTML namespace.
+    return namespace === null && nativeNodeIsHtmlElement(id)
+      ? HTML_NAMESPACE
+      : namespace;
+  }
+
+  function nativeInterfaceTypeForNodeId(id, nodeType) {
+    if (nodeType === 9) return Document;
+    if (nodeType === 11) {
+      return nativeShadowHost(id) === null ? DocumentFragment : ShadowRoot;
+    }
+    if (nodeType === 7) return ProcessingInstruction;
+    if (nodeType === 3) return Text;
+    if (nodeType === 8) return Comment;
+    if (nodeType === 10) return DocumentType;
+    if (nodeType !== 1) return Node;
+
+    const namespace = nativeNodeNamespaceURI(id);
+    const htmlElement = namespace === HTML_NAMESPACE || nativeNodeIsHtmlElement(id);
+    const constructors = namespace === SVG_NAMESPACE
+      ? SVG_ELEMENT_CTORS
+      : htmlElement ? ELEMENT_CTORS : {};
+    const localName = nativeNodeLocalName(id) || nativeNodeName(id) || "";
+    const normalizedLocalName = asciiLowercase(localName);
+    const ctor = hasOwnProperty(constructors, normalizedLocalName)
+      ? constructors[normalizedLocalName]
+      : undefined;
+    return ctor || (namespace === SVG_NAMESPACE
+      ? SVGElement
+      : htmlElement ? HTMLElement : Element);
+  }
+
   function wrapNode(id) {
     if (id === null || id === undefined) {
       return null;
     }
-    if (cache.has(id)) {
-      return cache.get(id);
+    if (mapHas(cache, id)) {
+      return mapGet(cache, id);
     }
-    const nodeType = __omoikane_node_type(id);
+    const nodeType = nativeNodeType(id);
+    const interfaceType = nativeInterfaceTypeForNodeId(id, nodeType);
     let node;
-    if (id === __omoikane_document_id || nodeType === 9) {
-      // The top-level document and every sub-browsing-context document (an
-      // iframe's contentDocument) are wrapped as Document so their DOM methods
-      // are scoped to their own tree.
-      node = new Document(id);
-    } else if (nodeType === 11) {
-      node = __omoikane_shadow_host(id) === null
-        ? new DocumentFragment(id)
-        : new ShadowRoot(id, SHADOW_ROOT_CONSTRUCTION);
-    } else if (nodeType === 7) {
-      node = new ProcessingInstruction(id);
-    } else if (nodeType === 3) {
-      node = new Text(id);
-    } else if (nodeType === 8) {
-      node = new Comment(id);
-    } else if (nodeType === 1) {
-      const namespace = __omoikane_node_namespace_uri(id);
-      const htmlElement = namespace === HTML_NAMESPACE || nativeNodeIsHtmlElement(id);
-      const constructors = namespace === SVG_NAMESPACE
-        ? SVG_ELEMENT_CTORS
-        : htmlElement ? ELEMENT_CTORS : {};
-      const ctor = constructors[asciiLowercase(
-        __omoikane_node_local_name(id) || __omoikane_node_name(id) || ""
-      )];
-      node = ctor ? new ctor(id)
-        : namespace === SVG_NAMESPACE ? new SVGElement(id)
-        : htmlElement ? new HTMLElement(id) : new Element(id);
-    } else if (nodeType === 10) {
-      node = new DocumentType(id);
+    if (interfaceType === ShadowRoot) {
+      node = new ShadowRoot(id, SHADOW_ROOT_CONSTRUCTION);
     } else {
-      node = new Node(id);
+      node = new interfaceType(id);
     }
     setWrapperNodeId(wrapperNodeIds, node, id);
     if (nodeType === 1) {
-      const localName = __omoikane_node_local_name(id);
+      const localName = nativeNodeLocalName(id);
       setWrapperLocalName(wrapperLocalNames, node, localName);
       addCanonicalWrapperId(canonicalElementIds, node);
-      if (__omoikane_node_namespace_uri(id) === HTML_NAMESPACE ||
+      if (nativeNodeNamespaceURI(id) === HTML_NAMESPACE ||
           nativeNodeIsHtmlElement(id)) {
         addCanonicalWrapperId(canonicalHtmlElementIds, node);
       }
-      if (hasCanonicalWrapperId(canonicalHtmlElementIds, node) &&
-          localName === "slot") {
+      if (interfaceType === HTMLSlotElement) {
         addCanonicalWrapperId(canonicalHtmlSlotIds, node);
         knownSlots.push(node);
       }
     }
-    cache.set(id, node);
+    mapSet(cache, id, node);
     return node;
   }
 
@@ -362,6 +403,147 @@
     if (rootId !== null && rootId !== undefined) return wrapNode(rootId);
     const fallbackId = getOwnerDocumentId(ownerDocumentIds, node);
     return fallbackId === undefined ? globalThis.document : wrapNode(fallbackId);
+  }
+
+  function canonicalNodeId(node) {
+    if ((typeof node !== "object" && typeof node !== "function") || node === null) {
+      return undefined;
+    }
+    return mapGet(canonicalNodeIds, node);
+  }
+
+  function markCanonicalCdata(node) {
+    if (canonicalNodeId(node) !== undefined) {
+      mapSet(canonicalCdataNodes, node, true);
+    }
+  }
+
+  function requireNodeReceiver(node) {
+    if (canonicalNodeId(node) === undefined) {
+      throw new IntrinsicTypeError("Node method called on an incompatible receiver");
+    }
+    return node;
+  }
+
+  function convertNullableNode(value) {
+    if (value === null || value === undefined) return null;
+    if (canonicalNodeId(value) === undefined) {
+      throw new IntrinsicTypeError("Argument is not a Node");
+    }
+    return value;
+  }
+
+  function cachedCanonicalNode(id) {
+    if (!mapHas(cache, id)) return undefined;
+    return mapGet(cache, id);
+  }
+
+  function namespacedAttributeRecord(id, namespace, localName) {
+    const records = nativeAttributeRecords(id) || [];
+    for (let index = 0; index < records.length; index += 1) {
+      if (records[index][1] === namespace && records[index][2] === localName) {
+        return records[index];
+      }
+    }
+    return null;
+  }
+
+  function canonicalCharacterData(id, node) {
+    return node && mapHas(canonicalCharacterDataOverrides, node)
+      ? mapGet(canonicalCharacterDataOverrides, node)
+      : (nativeGetTextContent(id) || "");
+  }
+
+  function canonicalInterfaceType(id, nodeType, node) {
+    return node && mapHas(canonicalCdataNodes, node)
+      ? CDATASection
+      : nativeInterfaceTypeForNodeId(id, nodeType);
+  }
+
+  function equalElementAttributes(left, right) {
+    if (left.length !== right.length) return false;
+    const matched = [];
+    for (let index = 0; index < right.length; index += 1) matched[index] = false;
+    for (let leftIndex = 0; leftIndex < left.length; leftIndex++) {
+      const expected = left[leftIndex];
+      let found = false;
+      for (let rightIndex = 0; rightIndex < right.length; rightIndex++) {
+        if (matched[rightIndex]) continue;
+        const candidate = right[rightIndex];
+        // Attribute prefixes and qualified names do not participate in node
+        // equality; namespace, local name, and value do.
+        if (candidate[1] === expected[1] &&
+            candidate[2] === expected[2] &&
+            candidate[3] === expected[3]) {
+          matched[rightIndex] = true;
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+    }
+    return true;
+  }
+
+  function equalCanonicalNodeIds(leftId, rightId, leftNode, rightNode) {
+    if (leftId === rightId) return true;
+    const nodeType = nativeNodeType(leftId);
+    if (nodeType !== nativeNodeType(rightId)) return false;
+    const leftInterface = canonicalInterfaceType(leftId, nodeType, leftNode);
+    const rightInterface = canonicalInterfaceType(rightId, nodeType, rightNode);
+    if (leftInterface !== rightInterface) return false;
+
+    if (nodeType === 10) {
+      if (nativeNodeName(leftId) !== nativeNodeName(rightId) ||
+          nativeDoctypePublicId(leftId) !== nativeDoctypePublicId(rightId) ||
+          nativeDoctypeSystemId(leftId) !== nativeDoctypeSystemId(rightId)) {
+        return false;
+      }
+    } else if (nodeType === 1) {
+      if (canonicalElementNamespace(leftId) !== canonicalElementNamespace(rightId) ||
+          nativeNodePrefix(leftId) !== nativeNodePrefix(rightId) ||
+          nativeNodeLocalName(leftId) !== nativeNodeLocalName(rightId) ||
+          !equalElementAttributes(
+            nativeAttributeRecords(leftId) || [],
+            nativeAttributeRecords(rightId) || []
+          )) {
+        return false;
+      }
+    } else if (nodeType === 7) {
+      if (nativeNodeName(leftId) !== nativeNodeName(rightId) ||
+          canonicalCharacterData(leftId, leftNode) !==
+            canonicalCharacterData(rightId, rightNode)) {
+        return false;
+      }
+    } else if ((nodeType === 3 || nodeType === 8) &&
+               canonicalCharacterData(leftId, leftNode) !==
+                 canonicalCharacterData(rightId, rightNode)) {
+      return false;
+    }
+
+    const leftChildren = nativeChildNodeIds(leftId) || [];
+    const rightChildren = nativeChildNodeIds(rightId) || [];
+    if (leftChildren.length !== rightChildren.length) return false;
+    for (let index = 0; index < leftChildren.length; index++) {
+      const leftChildId = leftChildren[index];
+      const rightChildId = rightChildren[index];
+      if (!equalCanonicalNodeIds(
+        leftChildId,
+        rightChildId,
+        cachedCanonicalNode(leftChildId),
+        cachedCanonicalNode(rightChildId)
+      )) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function equalCanonicalNodes(left, right) {
+    const leftId = canonicalNodeId(left);
+    const rightId = canonicalNodeId(right);
+    return leftId !== undefined && rightId !== undefined &&
+      equalCanonicalNodeIds(leftId, rightId, left, right);
   }
 
   // Stamp `node` and its shadow-including subtree with `doc`. Native ids keep
@@ -1920,6 +2102,13 @@
       // their preceding siblings, matching sequential pre-remove semantics.
       for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_text_content(this.__id, text);
+      const canonicalId = canonicalNodeId(this);
+      const canonicalType = canonicalId === undefined ? undefined : nativeNodeType(canonicalId);
+      if (canonicalType === 3 || canonicalType === 7 || canonicalType === 8) {
+        // Keep the private WTF-16 override coherent even when callers invoke
+        // this base-class descriptor setter directly on CharacterData.
+        mapSet(canonicalCharacterDataOverrides, this, text);
+      }
       const addedNodes = this.childNodes.slice();
       if (wasConnected) {
         for (const child of removedNodes) disconnectCustomElementTree(child);
@@ -2081,6 +2270,7 @@
         if (source instanceof CDATASection) {
           Object.setPrototypeOf(target, CDATASection.prototype);
           Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
+          markCanonicalCdata(target);
         }
         if (source instanceof CharacterData) target.textContent = source.textContent;
         if (!deep) return;
@@ -2095,6 +2285,24 @@
       };
       if (clone) preserveCharacterData(this, clone);
       return clone;
+    }
+
+    isEqualNode(otherNode) {
+      const receiver = requireNodeReceiver(this);
+      if (arguments.length < 1) {
+        throw new IntrinsicTypeError("isEqualNode requires 1 argument");
+      }
+      const other = convertNullableNode(otherNode);
+      return other !== null && equalCanonicalNodes(receiver, other);
+    }
+
+    isSameNode(otherNode) {
+      const receiver = requireNodeReceiver(this);
+      if (arguments.length < 1) {
+        throw new IntrinsicTypeError("isSameNode requires 1 argument");
+      }
+      const other = convertNullableNode(otherNode);
+      return other !== null && canonicalNodeId(receiver) === canonicalNodeId(other);
     }
 
     hasAttribute(name) {
@@ -2147,16 +2355,14 @@
         this.setAttribute(name, value);
         return;
       }
-      if (!this.__namespacedAttributes) this.__namespacedAttributes = new Map();
-      const key = String(ns) + "|" + localName;
-      const previous = this.__namespacedAttributes.get(key);
-      const oldValue = previous ? previous.value : null;
-      if (previous && previous.name !== name) {
-        __omoikane_remove_attribute(this.__id, previous.name);
+      const id = canonicalNodeId(requireNodeReceiver(this));
+      const previous = namespacedAttributeRecord(id, ns, localName);
+      const oldValue = previous ? previous[3] : null;
+      if (previous && previous[0] !== name) {
+        nativeRemoveAttributeNS(id, previous[0]);
       }
       const newValue = String(value);
-      this.__namespacedAttributes.set(key, { name, localName, namespaceURI: ns, value: newValue });
-      __omoikane_set_attribute(this.__id, name, newValue);
+      nativeSetAttributeNS(id, ns, name, localName, newValue);
       queueMutation(this, "attributes", { attributeName: localName, attributeNamespace: ns, oldValue });
       notifyCustomElementAttributeChanged(this, localName, oldValue, newValue, ns);
     }
@@ -2164,8 +2370,9 @@
     getAttributeNS(namespace, localName) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       if (ns === null) return this.getAttribute(localName);
-      const entry = this.__namespacedAttributes && this.__namespacedAttributes.get(String(ns) + "|" + String(localName));
-      return entry ? entry.value : null;
+      const id = canonicalNodeId(requireNodeReceiver(this));
+      const entry = namespacedAttributeRecord(id, ns, String(localName));
+      return entry ? entry[3] : null;
     }
 
     removeAttributeNS(namespace, localName) {
@@ -2174,13 +2381,12 @@
         this.removeAttribute(localName);
         return;
       }
-      const key = String(ns) + "|" + String(localName);
-      const entry = this.__namespacedAttributes && this.__namespacedAttributes.get(key);
+      const id = canonicalNodeId(requireNodeReceiver(this));
+      const entry = namespacedAttributeRecord(id, ns, String(localName));
       if (!entry) return;
-      this.__namespacedAttributes.delete(key);
-      __omoikane_remove_attribute(this.__id, entry.name);
-      queueMutation(this, "attributes", { attributeName: entry.localName, attributeNamespace: ns, oldValue: entry.value });
-      notifyCustomElementAttributeChanged(this, entry.localName, entry.value, null, ns);
+      nativeRemoveAttributeNS(id, entry[0]);
+      queueMutation(this, "attributes", { attributeName: entry[2], attributeNamespace: ns, oldValue: entry[3] });
+      notifyCustomElementAttributeChanged(this, entry[2], entry[3], null, ns);
     }
 
     get tagName() {
@@ -3131,15 +3337,14 @@
   class CharacterData extends Node {
     remove() { removeChildNode.call(this); }
     get textContent() {
-      if (Object.prototype.hasOwnProperty.call(this, "__characterData")) return this.__characterData;
+      if (mapHas(canonicalCharacterDataOverrides, this)) {
+        return mapGet(canonicalCharacterDataOverrides, this);
+      }
       return super.textContent;
     }
 
     set textContent(value) {
       const text = value == null ? "" : String(value);
-      // Preserve the authoritative WTF-16 value on the JS wrapper because
-      // the native Rust DOM cannot represent unpaired UTF-16 surrogates.
-      this.__characterData = text;
       super.textContent = text;
     }
 
@@ -4062,41 +4267,7 @@
         : String(namespace);
       const qname = String(qualifiedName);
       const info = validateAndExtractNS(ns, qname);
-      const node = this.__own(wrapNode(__omoikane_create_element(qname)));
-      setWrapperLocalName(wrapperLocalNames, node, info.localName);
-      // Namespaced elements preserve their exact qualified name (no ASCII
-      // upper-casing) and expose namespace metadata; shadow the prototype
-      // getters with per-instance data properties.
-      const define = (key, value) =>
-        Object.defineProperty(node, key, { value, configurable: true, enumerable: false });
-      define("namespaceURI", info.namespace);
-      define("prefix", info.prefix);
-      define("localName", info.localName);
-      define("tagName", qname);
-      define("nodeName", qname);
-      if (info.namespace === SVG_NAMESPACE) {
-        const ctor = SVG_ELEMENT_CTORS[info.localName.toLowerCase()] || SVGElement;
-        Object.setPrototypeOf(node, ctor.prototype);
-      } else if (info.namespace === HTML_NAMESPACE) {
-        const ctor = ELEMENT_CTORS[info.localName.toLowerCase()] || HTMLElement;
-        Object.setPrototypeOf(node, ctor.prototype);
-      } else {
-        Object.setPrototypeOf(node, Element.prototype);
-      }
-      // The native node starts with HTML creation semantics. Correct the
-      // private HTML/slot brands after createElementNS applies its namespace.
-      for (let index = knownSlots.length - 1; index >= 0; index--) {
-        if (knownSlots[index] === node) knownSlots.splice(index, 1);
-      }
-      deleteCanonicalWrapperId(canonicalHtmlSlotIds, node);
-      deleteCanonicalWrapperId(canonicalHtmlElementIds, node);
-      if (info.namespace === HTML_NAMESPACE) {
-        addCanonicalWrapperId(canonicalHtmlElementIds, node);
-      }
-      if (info.namespace === HTML_NAMESPACE && info.localName === "slot") {
-        addCanonicalWrapperId(canonicalHtmlSlotIds, node);
-        knownSlots.push(node);
-      }
+      const node = this.__own(wrapNode(nativeCreateElementNS(info.namespace, qname)));
       if (info.namespace === HTML_NAMESPACE) {
         const registry = customElementRegistryByDocument.get(this);
         if (registry) considerCustomElement(registry, node);
@@ -4203,6 +4374,7 @@
       const node = this.createTextNode(text);
       Object.setPrototypeOf(node, CDATASection.prototype);
       Object.defineProperty(node, "__cdataSection", { value: true, configurable: true });
+      markCanonicalCdata(node);
       return node;
     }
 
