@@ -5229,6 +5229,15 @@ impl JsRuntime {
     }
 }
 
+impl Drop for JsRuntime {
+    fn drop(&mut self) {
+        // WorkerRuntime keeps an owner/worker Rc cycle until the owner map is
+        // cleared. Do that before the RootProvider and host state fields drop,
+        // so a later collection cannot trace a stale worker realm.
+        self.terminate_workers();
+    }
+}
+
 fn script_source_context(source: &str) -> String {
     let preview: String = source
         .chars()
@@ -13358,6 +13367,22 @@ mod tests {
         runtime.terminate_workers();
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(0.0));
+    }
+
+    #[test]
+    fn dropping_runtime_clears_worker_cycle_before_collection() {
+        {
+            let mut runtime = JsRuntime::new().unwrap();
+            runtime
+                .eval(
+                    r#"const source = encodeURIComponent('onmessage = () => {};');
+                       new Worker('data:text/javascript,' + source);"#,
+                )
+                .unwrap();
+        }
+
+        boa_gc::force_collect();
+        let _next_runtime = JsRuntime::new().unwrap();
     }
 
     fn poll_until_dialog<F>(
