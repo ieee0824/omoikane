@@ -1611,8 +1611,8 @@ fn select_fragment_web_font<'a>(
 
 /// Measures the painted advance width of `text`, mirroring the advance model of
 /// [`paint_text_with_font_refs`] / [`paint_text_placeholder`] exactly:
-/// per-character advances, kerning between adjacent characters drawn from the
-/// same font, and letter-spacing between characters.
+/// non-zero advances, kerning between adjacent advancing characters drawn from
+/// the same font, and letter-spacing between advancing characters.
 ///
 /// Used to horizontally center form-control labels; when `fonts` is empty the
 /// placeholder advance of `font_size * 0.6` is used to match the glyph fallback.
@@ -1623,18 +1623,24 @@ pub(crate) fn measure_form_control_text_width(
     letter_spacing: f32,
 ) -> f32 {
     if fonts.is_empty() {
-        let char_count = text.chars().count();
-        if char_count == 0 {
+        let advancing_count = text
+            .chars()
+            .filter(|ch| !is_zero_advance_character(*ch))
+            .count();
+        if advancing_count == 0 {
             return 0.0;
         }
-        return char_count as f32 * (font_size * 0.6).max(1.0)
-            + letter_spacing * (char_count - 1) as f32;
+        return advancing_count as f32 * (font_size * 0.6).max(1.0)
+            + letter_spacing * (advancing_count - 1) as f32;
     }
     let mut width = 0.0;
-    let mut char_count = 0usize;
+    let mut advancing_count = 0usize;
     let mut previous: Option<(char, usize)> = None;
     for ch in text.chars() {
-        char_count += 1;
+        if is_zero_advance_character(ch) {
+            continue;
+        }
+        advancing_count += 1;
         let (font_index, _, advance) = rasterize_with_fallback_refs(fonts, ch, font_size);
         if let Some((prev, prev_index)) = previous
             && prev_index == font_index
@@ -1644,8 +1650,8 @@ pub(crate) fn measure_form_control_text_width(
         width += advance;
         previous = Some((ch, font_index));
     }
-    if char_count > 1 {
-        width += letter_spacing * (char_count - 1) as f32;
+    if advancing_count > 1 {
+        width += letter_spacing * (advancing_count - 1) as f32;
     }
     width
 }
