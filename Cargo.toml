@@ -34,9 +34,10 @@ crc32fast = "1.5"
 # Array.prototype.join/unshift receiver rooting during allocating property
 # callbacks (ieee0824/boa#61), and the verified bytecode/JIT metadata contract
 # (ieee0824/boa#62), and the allocation-free interpreter frame/fallback contract
-# (ieee0824/boa#63). The merge commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "3128ab90c3b7967323345dd467d603f9f1e46a97", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "3128ab90c3b7967323345dd467d603f9f1e46a97" }
+# (ieee0824/boa#63), and the stable inline-cache state/telemetry contract
+# (ieee0824/boa#64). The merge commit contains all listed fork changes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "2fe0b1911a898f9bb51cb822c18f89bf20835879", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "2fe0b1911a898f9bb51cb822c18f89bf20835879" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
