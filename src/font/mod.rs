@@ -86,14 +86,19 @@ pub enum ShapingDirection {
 /// Shaping can fold multiple grapheme clusters into one glyph, so callers
 /// must derive spacing from source clusters rather than shaped glyph count.
 pub(crate) fn grapheme_spacing_boundaries(text: &str) -> usize {
-    text.graphemes(true)
-        .filter(|cluster| {
+    grapheme_spacing_cluster_starts(text).len().saturating_sub(1)
+}
+
+/// Byte offsets of source grapheme clusters that participate in CSS spacing.
+pub(crate) fn grapheme_spacing_cluster_starts(text: &str) -> Vec<usize> {
+    text.grapheme_indices(true)
+        .filter_map(|(start, cluster)| {
             cluster
                 .chars()
                 .any(|ch| !is_zero_advance_character(ch))
+                .then_some(start)
         })
-        .count()
-        .saturating_sub(1)
+        .collect()
 }
 
 /// A shaped span whose complete grapheme clusters use one selected font.
