@@ -17216,7 +17216,7 @@ mod tests {
     #[test]
     fn text_control_selectionchange_bubbles_and_stays_with_owner_document() {
         let mut runtime = runtime_from_html(
-            r#"<html><body><input id="field" value="abcdef"><textarea id="area">hello</textarea><iframe id="frame"></iframe></body></html>"#,
+            r#"<html><body><input id="field" value="abcdef"><input id="number" type="number"><textarea id="area">hello</textarea><iframe id="frame"></iframe></body></html>"#,
         );
         runtime.run_until_idle().unwrap();
         assert!(
@@ -17227,6 +17227,7 @@ mod tests {
             .eval(
                 r#"(() => {
                     const field = document.getElementById("field");
+                    const number = document.getElementById("number");
                     const area = document.getElementById("area");
                     const childDocument = document.getElementById("frame").contentDocument;
                     const childField = childDocument.createElement("input");
@@ -17244,7 +17245,13 @@ mod tests {
                     childField.addEventListener("selectionchange", () => {
                         events.push(`child:${childField.selectionStart}/${childField.selectionEnd}/${childField.selectionDirection}`);
                     });
+                    childDocument.addEventListener("selectionchange", event => {
+                        events.push(`child-document:${event.target.tagName}`);
+                    });
 
+                    // Non-text inputs update their value without exposing a
+                    // text selection or dispatching a text-control event.
+                    number.value = "42";
                     field.setSelectionRange(1, 4, "backward");
                     // Repeating the same state must not enqueue a duplicate.
                     field.setSelectionRange(1, 4, "backward");
@@ -17269,7 +17276,7 @@ mod tests {
         runtime.run_until_idle().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "__textControlSelectionState.events.join('|')"),
-            "field:1/4/backward|document:INPUT|area:2/2/forward|document:TEXTAREA|child:1/3/forward"
+            "field:1/4/backward|document:INPUT|area:2/2/forward|document:TEXTAREA|child:1/3/forward|child-document:INPUT"
         );
         assert_eq!(
             eval_str(

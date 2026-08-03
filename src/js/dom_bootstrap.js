@@ -7284,6 +7284,7 @@
   }
 
   function setTextControlSelection(control, start, end, direction) {
+    if (!isTextControl(control)) return;
     ensureTextControlSelection(control);
     const previousStart = control.__selectionStart;
     const previousEnd = control.__selectionEnd;
