@@ -10,6 +10,7 @@ use crate::font::{
     is_zero_advance_character, load_default_text_fonts,
 };
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
+use unicode_bidi::{BidiInfo, Level};
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
 use super::color::{parse_color, Color};
@@ -175,15 +176,24 @@ pub(crate) fn paint_text_with_registry(
                     };
 
                     let transformed = apply_text_transform(text, text_transform);
-                    let display_text = transformed.as_deref().unwrap_or(text.as_str());
+                    let transformed_text = transformed.as_deref().unwrap_or(text.as_str());
+                    let vertical_mode = vertical_paint_mode(&fragment.style);
+                    // Unicode bidi reordering applies to the horizontal inline
+                    // axis.  Vertical writing keeps its existing column-aware
+                    // paint order until vertical bidi embedding is handled by
+                    // the writing-mode path.
+                    let visual_text = if vertical_mode.is_none() {
+                        bidi_visual_text(transformed_text, &fragment.style)
+                    } else {
+                        transformed_text.to_string()
+                    };
+                    let display_text = visual_text.as_str();
 
                     // Try to resolve the best web font variant for this fragment.
                     // If the fragment has a registered web-font family, use it as the
                     // primary font and fall back to the global system font list.
                     let web_font_for_fragment =
                         select_fragment_web_font(web_fonts, &fragment.style);
-                    let vertical_mode = vertical_paint_mode(&fragment.style);
-
                     if let Some(web_font) = web_font_for_fragment {
                         // Build a temporary font list: web variant first, then fallbacks
                         let mut variant_fonts: Vec<&Font> = vec![web_font];
@@ -677,6 +687,36 @@ fn vertical_paint_mode(style: &FragmentStyle) -> Option<(bool, bool)> {
     let vertical_rl = matches!(writing_mode, "vertical-rl" | "sideways-rl");
     let vertical = vertical_rl || matches!(writing_mode, "vertical-lr" | "sideways-lr");
     vertical.then_some((vertical_rl, style.direction.as_deref() == Some("rtl")))
+}
+
+/// Reorders one inline text fragment into Unicode visual order for painting.
+///
+/// Layout continues to measure and expose the source string in logical DOM
+/// order. The paint cursor, however, advances along the physical inline axis,
+/// so mixed-direction runs must be reordered before glyphs are rasterized.
+/// `unicode-bidi: bidi-override` is intentionally left untouched: that mode
+/// requires treating every character as the paragraph direction and is a
+/// separate embedding-mode concern.
+fn bidi_visual_text(text: &str, style: &FragmentStyle) -> String {
+    if text.is_empty() || style.unicode_bidi.as_deref() == Some("bidi-override") {
+        return text.to_string();
+    }
+
+    let paragraph_level = if style.direction.as_deref() == Some("rtl") {
+        Level::rtl()
+    } else {
+        Level::ltr()
+    };
+    let bidi = BidiInfo::new(text, Some(paragraph_level));
+    if !bidi.has_rtl() {
+        return text.to_string();
+    }
+
+    let mut visual = String::with_capacity(text.len());
+    for paragraph in &bidi.paragraphs {
+        visual.push_str(bidi.reorder_line(paragraph, paragraph.range.clone()).as_ref());
+    }
+    visual
 }
 
 /// Paints one text fragment using the direction produced by vertical inline
@@ -1434,4 +1474,39 @@ fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
         utf16_offset += ch.len_utf16();
     }
     value
+}
+
+#[cfg(test)]
+mod bidi_tests {
+    use super::{FragmentStyle, bidi_visual_text};
+
+    #[test]
+    fn mixed_ltr_text_is_reordered_into_visual_runs() {
+        let style = FragmentStyle {
+            direction: Some("ltr".to_string()),
+            unicode_bidi: Some("normal".to_string()),
+            ..FragmentStyle::default()
+        };
+        assert_eq!(bidi_visual_text("abc אבג", &style), "abc גבא");
+    }
+
+    #[test]
+    fn mixed_rtl_text_uses_the_rtl_paragraph_level() {
+        let style = FragmentStyle {
+            direction: Some("rtl".to_string()),
+            unicode_bidi: Some("normal".to_string()),
+            ..FragmentStyle::default()
+        };
+        assert_eq!(bidi_visual_text("abc אבג", &style), "גבא abc");
+    }
+
+    #[test]
+    fn bidi_override_keeps_logical_character_order_for_now() {
+        let style = FragmentStyle {
+            direction: Some("rtl".to_string()),
+            unicode_bidi: Some("bidi-override".to_string()),
+            ..FragmentStyle::default()
+        };
+        assert_eq!(bidi_visual_text("abc אבג", &style), "abc אבג");
+    }
 }
