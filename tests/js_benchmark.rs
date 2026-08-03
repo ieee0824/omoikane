@@ -23,25 +23,20 @@
 //! operation at two string lengths within a single run, which the machine's speed
 //! divides out of. Anything else added here belongs under the reported rule.
 //!
-//! Baselines are the median of five runs on an idle machine, where run-to-run
-//! spread was 1-10% per shape (`string-concat` and `primitive-string-method` are
-//! the loosest, since their cost depends on when collection happens). That is
-//! well inside the drift band, so an individual shape moving is worth reading.
+//! Omoikane baselines are the median of five independent processes on an idle
+//! machine. This estimates the typical runtime used by the report and is stable
+//! because the interpreter has no optimizing-tier transition.
 //!
-//! **The `spidermonkey_jit` reference is much less trustworthy than the other two
-//! columns, and not because the machine is noisy.** Across five recordings the
-//! interpreter reference held to about 15% per shape, while the JIT reference came
-//! out bimodal on several: `array` gave 7.04, 7.16, 12.00, 12.88, 13.48 and
-//! `prop-mono` gave 0.92, 0.92, 0.96, 4.14, 6.56. Those clusters are whether the
-//! optimizing tier was reached, so a median lands on whichever side happened to
-//! win 3-2 and a shape's recorded JIT figure can differ from the next recording by
-//! several times with no change to anything. Treat that column as an order of
-//! magnitude. Two consequences worth knowing before reading a ratio: for the
-//! cheapest shapes it is loop-overhead-bound rather than a measure of the
-//! operation at all (see `primitive-string-property` in `shapes.js`), and taking a
-//! median across runs contradicts the min-of-N rule `shapes.js` applies *within* a
-//! run for this same tiering reason — issue #317 tracks re-recording it
-//! consistently.
+//! SpiderMonkey references use the **minimum of five independent Firefox
+//! processes**, recorded by `scripts/record-spidermonkey-reference.sh`. A JIT run
+//! can be bimodal depending on whether its optimizing tier was reached; a median
+//! can therefore jump between tiers even when no code changed. The minimum gives
+//! every recording the warmed tier, matching the min-of-four timed-pass rule in
+//! `shapes.js`. It is also appropriate for the interpreter reference because
+//! external contention can only make a process slower. The cheapest JIT shapes
+//! can still be loop-overhead-bound rather than measuring the operation itself
+//! (see `primitive-string-property` in `shapes.js`). Do not mix Firefox versions
+//! or machines when judging reproducibility.
 //!
 //! When comparing two builds of the engine, `cargo clean -p boa_engine -p boa_gc`
 //! between them is **required**. Swapping a `[patch]` path without it produced

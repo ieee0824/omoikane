@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Omoikane SpiderMonkey reference recorder</title>
+<script src="shapes.js"></script>
+<script>
+  addEventListener("load", function () {
+    dump("OMOIKANE_BENCH_BEGIN\n");
+    dump(runBenchmarks() + "\n");
+    dump("OMOIKANE_BENCH_END\n");
+    window.close();
+  });
+</script>
