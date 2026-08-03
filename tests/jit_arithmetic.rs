@@ -25,6 +25,7 @@ fn issue_305_arithmetic_shape_matches_the_reference_result() {
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 fn issue_305_function_reports_a_compiled_entry() {
     let mut context = Context::default();
     let script = Script::parse(
