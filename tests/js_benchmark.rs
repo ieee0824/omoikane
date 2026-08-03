@@ -162,6 +162,51 @@ struct ShapeResult {
     versus_jit: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+struct JitDiagnostics {
+    enabled: bool,
+    compile_requests: u64,
+    successful_compilations: u64,
+    compile_rejections: u64,
+    total_compile_time_ns: u64,
+    generated_code_bytes: u64,
+    compiled_entries: u64,
+    bailouts: u64,
+    property_guard_hits: u64,
+    property_guard_misses: u64,
+    property_bailouts: u64,
+}
+
+impl JitDiagnostics {
+    fn add_assign(&mut self, other: Self) {
+        self.enabled |= other.enabled;
+        self.compile_requests = self.compile_requests.saturating_add(other.compile_requests);
+        self.successful_compilations = self
+            .successful_compilations
+            .saturating_add(other.successful_compilations);
+        self.compile_rejections = self
+            .compile_rejections
+            .saturating_add(other.compile_rejections);
+        self.total_compile_time_ns = self
+            .total_compile_time_ns
+            .saturating_add(other.total_compile_time_ns);
+        self.generated_code_bytes = self
+            .generated_code_bytes
+            .saturating_add(other.generated_code_bytes);
+        self.compiled_entries = self.compiled_entries.saturating_add(other.compiled_entries);
+        self.bailouts = self.bailouts.saturating_add(other.bailouts);
+        self.property_guard_hits = self
+            .property_guard_hits
+            .saturating_add(other.property_guard_hits);
+        self.property_guard_misses = self
+            .property_guard_misses
+            .saturating_add(other.property_guard_misses);
+        self.property_bailouts = self
+            .property_bailouts
+            .saturating_add(other.property_bailouts);
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct Report {
     baseline_version: u32,
@@ -183,6 +228,8 @@ struct Report {
     total: usize,
     improvements: Vec<String>,
     regressions: Vec<String>,
+    jit_diagnostic_samples: Vec<JitDiagnostics>,
+    jit_diagnostics: JitDiagnostics,
     shapes: Vec<ShapeResult>,
 }
 
@@ -237,6 +284,7 @@ fn parse_measurements(output: &str) -> Vec<Measurement> {
 struct BenchmarkRun {
     passes: u32,
     measurements: Vec<Measurement>,
+    jit_diagnostics: JitDiagnostics,
 }
 
 fn run_benchmarks() -> BenchmarkRun {
@@ -273,9 +321,29 @@ fn run_benchmarks() -> BenchmarkRun {
         .as_string()
         .expect("benchmark output is a string")
         .to_std_string_escaped();
+    #[cfg(feature = "baseline-jit")]
+    let jit_diagnostics = {
+        let diagnostics = runtime.baseline_jit_diagnostics();
+        JitDiagnostics {
+            enabled: true,
+            compile_requests: diagnostics.compile_requests,
+            successful_compilations: diagnostics.successful_compilations,
+            compile_rejections: diagnostics.compile_rejections,
+            total_compile_time_ns: diagnostics.total_compile_time_ns,
+            generated_code_bytes: diagnostics.generated_code_bytes,
+            compiled_entries: diagnostics.compiled_entries,
+            bailouts: diagnostics.bailouts,
+            property_guard_hits: diagnostics.property_guard_hits,
+            property_guard_misses: diagnostics.property_guard_misses,
+            property_bailouts: diagnostics.property_bailouts,
+        }
+    };
+    #[cfg(not(feature = "baseline-jit"))]
+    let jit_diagnostics = JitDiagnostics::default();
     BenchmarkRun {
         passes,
         measurements: parse_measurements(&output),
+        jit_diagnostics,
     }
 }
 
@@ -383,6 +451,14 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
             "local".to_string()
         }
     });
+    let jit_diagnostic_samples = runs
+        .iter()
+        .map(|run| run.jit_diagnostics)
+        .collect::<Vec<_>>();
+    let mut jit_diagnostics = JitDiagnostics::default();
+    for diagnostics in &jit_diagnostic_samples {
+        jit_diagnostics.add_assign(*diagnostics);
+    }
     Report {
         baseline_version: baseline.version,
         baseline_profile: baseline.profile.clone(),
@@ -410,6 +486,8 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
         total: shapes.len(),
         improvements,
         regressions,
+        jit_diagnostic_samples,
+        jit_diagnostics,
         shapes,
     }
 }
@@ -441,6 +519,20 @@ fn print_report(report: &Report) {
             report.baseline_environment
         );
     }
+    println!(
+        "  baseline JIT: enabled={} compile={}/{} rejected={} time={}ns code={}B entries={} bailouts={} property(hit/miss/bailout)={}/{}/{}",
+        report.jit_diagnostics.enabled,
+        report.jit_diagnostics.successful_compilations,
+        report.jit_diagnostics.compile_requests,
+        report.jit_diagnostics.compile_rejections,
+        report.jit_diagnostics.total_compile_time_ns,
+        report.jit_diagnostics.generated_code_bytes,
+        report.jit_diagnostics.compiled_entries,
+        report.jit_diagnostics.bailouts,
+        report.jit_diagnostics.property_guard_hits,
+        report.jit_diagnostics.property_guard_misses,
+        report.jit_diagnostics.property_bailouts,
+    );
     println!(
         "  {:<26} {:>10} {:>10} {:>8} {:>9}  {:>9} {:>8}",
         "shape", "median", "range", "delta", "vs SM-int", "vs SM-jit", ""
@@ -604,6 +696,7 @@ fn report_classifies_drift_against_the_baseline() {
     };
     let run = BenchmarkRun {
         passes: 4,
+        jit_diagnostics: JitDiagnostics::default(),
         measurements: vec![
             measurement("faster", 70.0),
             measurement("slower", 130.0),
@@ -654,6 +747,16 @@ fn report_uses_the_median_and_preserves_each_sample() {
     };
     let run = |ns_per_op| BenchmarkRun {
         passes: 4,
+        jit_diagnostics: JitDiagnostics {
+            enabled: true,
+            compile_requests: 1,
+            successful_compilations: 1,
+            total_compile_time_ns: 7,
+            generated_code_bytes: 11,
+            compiled_entries: 2,
+            property_guard_hits: 3,
+            ..JitDiagnostics::default()
+        },
         measurements: vec![Measurement {
             id: "arith".to_string(),
             iterations: 1_000,
@@ -665,6 +768,11 @@ fn report_uses_the_median_and_preserves_each_sample() {
     let report = build_report(&baseline, &[run(120.0), run(80.0), run(100.0)]);
     let shape = &report.shapes[0];
     assert_eq!(report.measurement_runs, 3);
+    assert_eq!(report.jit_diagnostic_samples.len(), 3);
+    assert_eq!(report.jit_diagnostics.compile_requests, 3);
+    assert_eq!(report.jit_diagnostics.total_compile_time_ns, 21);
+    assert_eq!(report.jit_diagnostics.generated_code_bytes, 33);
+    assert_eq!(report.jit_diagnostics.property_guard_hits, 9);
     assert_eq!(shape.ns_per_op, 100.0);
     assert_eq!(shape.samples_ns_per_op, [120.0, 80.0, 100.0]);
     assert_eq!((shape.min_ns_per_op, shape.max_ns_per_op), (80.0, 120.0));
@@ -697,6 +805,7 @@ fn report_refuses_to_compare_across_iteration_counts() {
     };
     let run = BenchmarkRun {
         passes: 4,
+        jit_diagnostics: JitDiagnostics::default(),
         measurements: vec![Measurement {
             id: "arith".to_string(),
             iterations: 200,
@@ -733,6 +842,7 @@ fn report_refuses_to_compare_across_pass_counts() {
     };
     let run = BenchmarkRun {
         passes: 4,
+        jit_diagnostics: JitDiagnostics::default(),
         measurements: vec![Measurement {
             id: "arith".to_string(),
             iterations: 1000,

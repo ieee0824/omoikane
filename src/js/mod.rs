@@ -3838,6 +3838,12 @@ impl JsRuntime {
         self.host_state.borrow().console_logs.clone()
     }
 
+    /// Returns runtime-wide baseline-JIT counters for performance-gate tooling.
+    #[cfg(feature = "baseline-jit")]
+    pub const fn baseline_jit_diagnostics(&self) -> boa_engine::jit::ArithmeticJitDiagnostics {
+        self.context.arithmetic_jit_diagnostics()
+    }
+
     /// Evaluates JavaScript source code.
     ///
     /// Script errors are returned as `JsError`.
