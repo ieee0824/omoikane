@@ -36,6 +36,8 @@ jobs:
         run: cargo test --features baseline-jit --test jit_code_memory
       - name: Run Gate 3 baseline-lowering contract
         run: cargo test --features baseline-jit --test jit_baseline_lowering
+      - name: Run Gate 3 arithmetic native-execution contract
+        run: cargo test --features baseline-jit --test jit_arithmetic
       - run: cargo build
       # Re-run the JS benchmark with output shown: libtest swallows stdout for
       # passing tests, so the per-shape table and the drift classification would
