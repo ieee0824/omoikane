@@ -57,7 +57,7 @@ optimizing-tier bimodality.
 
 ## Result and dominant costs
 
-The checked-in `gate2-performance-snapshot.json` is the final five-process
+The checked-in `gate2-performance-snapshot.json` is the final five-run
 snapshot. Its median gap to the auxiliary SM-interpreter reference is 10.7x to
 33.8x; `prop-mono` is 13.2x and `arith` is 10.7x. The report marks its historical
 baseline comparison as non-comparable because this run used a shared host while

@@ -146,7 +146,7 @@ struct ShapeResult {
     id: String,
     description: String,
     ns_per_op: f64,
-    /// Per-process samples in execution order. `ns_per_op` is their median.
+    /// Fresh-runtime samples in execution order. `ns_per_op` is their median.
     samples_ns_per_op: Vec<f64>,
     min_ns_per_op: f64,
     max_ns_per_op: f64,
