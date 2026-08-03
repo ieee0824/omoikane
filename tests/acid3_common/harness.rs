@@ -278,6 +278,7 @@ pub struct Acid3Run {
 /// Fetches, parses, scripts, and drives the Acid3 page, returning an honest
 /// snapshot of the current engine behaviour. Never panics on engine failure.
 pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
+    eprintln!("[acid3-debug] start mode={mode:?}");
     EVALS_SINCE_GC.with(|count| count.set(0));
     let acid3_url = format!("{}/acid3.html", base_url.trim_end_matches('/'));
 
@@ -421,8 +422,11 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
     // Boa's generational collector retains allocation indexes across runtime
     // teardown. Finish the runtime first, then run a major collection so the
     // next independent runtime in the same process cannot observe stale state.
+    eprintln!("[acid3-debug] mode={mode:?} before runtime drop");
     drop(runtime);
+    eprintln!("[acid3-debug] mode={mode:?} after runtime drop");
     boa_gc::force_collect();
+    eprintln!("[acid3-debug] mode={mode:?} after force_collect");
     result
 }
 
