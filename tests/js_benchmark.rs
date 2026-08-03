@@ -51,7 +51,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use omoikane::dom::NodeHandle;
-use omoikane::js::{JsRuntime, SandboxConfig};
+use omoikane::js::{BaselineJitDiagnostics as JitDiagnostics, JsRuntime, SandboxConfig};
 use serde::{Deserialize, Serialize};
 
 const SHAPES_PATH: &str = "tests/js_benchmark/shapes.js";
@@ -206,51 +206,6 @@ struct ShapeResult {
     versus_jit: f64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-struct JitDiagnostics {
-    enabled: bool,
-    compile_requests: u64,
-    successful_compilations: u64,
-    compile_rejections: u64,
-    total_compile_time_ns: u64,
-    generated_code_bytes: u64,
-    compiled_entries: u64,
-    bailouts: u64,
-    property_guard_hits: u64,
-    property_guard_misses: u64,
-    property_bailouts: u64,
-}
-
-impl JitDiagnostics {
-    fn add_assign(&mut self, other: Self) {
-        self.enabled |= other.enabled;
-        self.compile_requests = self.compile_requests.saturating_add(other.compile_requests);
-        self.successful_compilations = self
-            .successful_compilations
-            .saturating_add(other.successful_compilations);
-        self.compile_rejections = self
-            .compile_rejections
-            .saturating_add(other.compile_rejections);
-        self.total_compile_time_ns = self
-            .total_compile_time_ns
-            .saturating_add(other.total_compile_time_ns);
-        self.generated_code_bytes = self
-            .generated_code_bytes
-            .saturating_add(other.generated_code_bytes);
-        self.compiled_entries = self.compiled_entries.saturating_add(other.compiled_entries);
-        self.bailouts = self.bailouts.saturating_add(other.bailouts);
-        self.property_guard_hits = self
-            .property_guard_hits
-            .saturating_add(other.property_guard_hits);
-        self.property_guard_misses = self
-            .property_guard_misses
-            .saturating_add(other.property_guard_misses);
-        self.property_bailouts = self
-            .property_bailouts
-            .saturating_add(other.property_bailouts);
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct Report {
     baseline_version: u32,
@@ -372,22 +327,7 @@ fn run_benchmarks() -> BenchmarkRun {
         .expect("benchmark output is a string")
         .to_std_string_escaped();
     #[cfg(feature = "baseline-jit")]
-    let jit_diagnostics = {
-        let diagnostics = runtime.baseline_jit_diagnostics();
-        JitDiagnostics {
-            enabled: true,
-            compile_requests: diagnostics.compile_requests,
-            successful_compilations: diagnostics.successful_compilations,
-            compile_rejections: diagnostics.compile_rejections,
-            total_compile_time_ns: diagnostics.total_compile_time_ns,
-            generated_code_bytes: diagnostics.generated_code_bytes,
-            compiled_entries: diagnostics.compiled_entries,
-            bailouts: diagnostics.bailouts,
-            property_guard_hits: diagnostics.property_guard_hits,
-            property_guard_misses: diagnostics.property_guard_misses,
-            property_bailouts: diagnostics.property_bailouts,
-        }
-    };
+    let jit_diagnostics = runtime.baseline_jit_diagnostics();
     #[cfg(not(feature = "baseline-jit"))]
     let jit_diagnostics = JitDiagnostics::default();
     BenchmarkRun {
@@ -507,7 +447,7 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
         .collect::<Vec<_>>();
     let mut jit_diagnostics = JitDiagnostics::default();
     for diagnostics in &jit_diagnostic_samples {
-        jit_diagnostics.add_assign(*diagnostics);
+        jit_diagnostics.saturating_add_assign(*diagnostics);
     }
     Report {
         baseline_version: baseline.version,
@@ -728,11 +668,15 @@ fn gate3_snapshots_preserve_matched_samples_and_native_diagnostics() {
                 .as_array()
                 .expect("shape samples");
             assert_eq!(samples.len(), 5, "{path}");
-            assert!(samples.iter().all(|sample| {
-                sample
-                    .as_f64()
-                    .is_some_and(|value| value.is_finite() && value > 0.0)
-            }));
+            assert!(
+                samples.iter().all(|sample| {
+                    sample
+                        .as_f64()
+                        .is_some_and(|value| value.is_finite() && value > 0.0)
+                }),
+                "{path}: invalid samples for {}",
+                shape["id"]
+            );
         }
 
         let diagnostics = &snapshot["jit_diagnostics"];

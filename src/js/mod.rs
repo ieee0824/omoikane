@@ -2738,10 +2738,11 @@ impl Default for SandboxConfig {
 }
 
 /// Omoikane-owned snapshot of baseline-JIT counters for performance tooling.
-#[cfg(feature = "baseline-jit")]
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct BaselineJitDiagnostics {
+    /// Whether the baseline-JIT feature produced this snapshot.
+    pub enabled: bool,
     /// Hot loops submitted to the emitter.
     pub compile_requests: u64,
     /// Requests that installed generated code.
@@ -2762,6 +2763,38 @@ pub struct BaselineJitDiagnostics {
     pub property_guard_misses: u64,
     /// Property-enabled entries that resumed the interpreter.
     pub property_bailouts: u64,
+}
+
+impl BaselineJitDiagnostics {
+    /// Saturating aggregation used by multi-runtime performance reports.
+    #[doc(hidden)]
+    pub fn saturating_add_assign(&mut self, other: Self) {
+        self.enabled |= other.enabled;
+        self.compile_requests = self.compile_requests.saturating_add(other.compile_requests);
+        self.successful_compilations = self
+            .successful_compilations
+            .saturating_add(other.successful_compilations);
+        self.compile_rejections = self
+            .compile_rejections
+            .saturating_add(other.compile_rejections);
+        self.total_compile_time_ns = self
+            .total_compile_time_ns
+            .saturating_add(other.total_compile_time_ns);
+        self.generated_code_bytes = self
+            .generated_code_bytes
+            .saturating_add(other.generated_code_bytes);
+        self.compiled_entries = self.compiled_entries.saturating_add(other.compiled_entries);
+        self.bailouts = self.bailouts.saturating_add(other.bailouts);
+        self.property_guard_hits = self
+            .property_guard_hits
+            .saturating_add(other.property_guard_hits);
+        self.property_guard_misses = self
+            .property_guard_misses
+            .saturating_add(other.property_guard_misses);
+        self.property_bailouts = self
+            .property_bailouts
+            .saturating_add(other.property_bailouts);
+    }
 }
 
 pub struct JsRuntime {
@@ -3871,6 +3904,7 @@ impl JsRuntime {
     pub fn baseline_jit_diagnostics(&self) -> BaselineJitDiagnostics {
         let diagnostics = self.context.arithmetic_jit_diagnostics();
         BaselineJitDiagnostics {
+            enabled: true,
             compile_requests: diagnostics.compile_requests,
             successful_compilations: diagnostics.successful_compilations,
             compile_rejections: diagnostics.compile_rejections,
