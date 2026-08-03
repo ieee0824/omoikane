@@ -85,7 +85,7 @@ pub enum ShapingDirection {
 ///
 /// Shaping can fold multiple grapheme clusters into one glyph, so callers
 /// must derive spacing from source clusters rather than shaped glyph count.
-pub fn grapheme_spacing_boundaries(text: &str) -> usize {
+pub(crate) fn grapheme_spacing_boundaries(text: &str) -> usize {
     text.graphemes(true)
         .filter(|cluster| {
             cluster
