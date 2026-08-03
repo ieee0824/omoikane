@@ -51,12 +51,56 @@ use std::fs;
 use std::path::PathBuf;
 
 use omoikane::dom::NodeHandle;
-use omoikane::js::{JsRuntime, SandboxConfig};
+use omoikane::js::{BaselineJitDiagnostics as JitDiagnostics, JsRuntime, SandboxConfig};
 use serde::{Deserialize, Serialize};
 
 const SHAPES_PATH: &str = "tests/js_benchmark/shapes.js";
 const BASELINE_PATH: &str = "tests/js_benchmark/baseline.json";
 const GATE2_SNAPSHOT_PATH: &str = "docs/jit/gate2-performance-snapshot.json";
+const GATE3_SNAPSHOTS: &[(&str, bool, &str)] = &[
+    (
+        "docs/jit/gate3-performance-linux-local-jit-off.json",
+        false,
+        "linux",
+    ),
+    (
+        "docs/jit/gate3-performance-linux-local-jit-on.json",
+        true,
+        "linux",
+    ),
+    (
+        "docs/jit/gate3-performance-ubuntu-jit-off.json",
+        false,
+        "linux",
+    ),
+    (
+        "docs/jit/gate3-performance-ubuntu-jit-on.json",
+        true,
+        "linux",
+    ),
+    (
+        "docs/jit/gate3-performance-macos-intel-jit-off.json",
+        false,
+        "macos",
+    ),
+    (
+        "docs/jit/gate3-performance-macos-intel-jit-on.json",
+        true,
+        "macos",
+    ),
+];
+const JIT_DIAGNOSTIC_COUNTERS: &[&str] = &[
+    "compile_requests",
+    "successful_compilations",
+    "compile_rejections",
+    "total_compile_time_ns",
+    "generated_code_bytes",
+    "compiled_entries",
+    "bailouts",
+    "property_guard_hits",
+    "property_guard_misses",
+    "property_bailouts",
+];
 
 /// How far a measurement may drift from the baseline before it is called an
 /// improvement or a regression.
@@ -183,6 +227,8 @@ struct Report {
     total: usize,
     improvements: Vec<String>,
     regressions: Vec<String>,
+    jit_diagnostic_samples: Vec<JitDiagnostics>,
+    jit_diagnostics: JitDiagnostics,
     shapes: Vec<ShapeResult>,
 }
 
@@ -210,8 +256,14 @@ fn measurement_run_count() -> usize {
 }
 
 fn load_baseline() -> Baseline {
-    serde_json::from_slice(&fs::read(BASELINE_PATH).expect("read benchmark baseline"))
-        .expect("parse benchmark baseline")
+    serde_json::from_slice(
+        &fs::read(manifest_path(BASELINE_PATH)).expect("read benchmark baseline"),
+    )
+    .expect("parse benchmark baseline")
+}
+
+fn manifest_path(path: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
 /// Parses the `name|iterations|elapsed_ms|ns_per_op` lines the benchmark emits.
@@ -237,10 +289,11 @@ fn parse_measurements(output: &str) -> Vec<Measurement> {
 struct BenchmarkRun {
     passes: u32,
     measurements: Vec<Measurement>,
+    jit_diagnostics: JitDiagnostics,
 }
 
 fn run_benchmarks() -> BenchmarkRun {
-    let source = fs::read_to_string(SHAPES_PATH).expect("read benchmark shapes");
+    let source = fs::read_to_string(manifest_path(SHAPES_PATH)).expect("read benchmark shapes");
     // The benchmark intentionally executes tens of millions of loop
     // iterations across its four passes. Keep the production default strict,
     // but give this measurement harness an explicit budget large enough for
@@ -273,9 +326,14 @@ fn run_benchmarks() -> BenchmarkRun {
         .as_string()
         .expect("benchmark output is a string")
         .to_std_string_escaped();
+    #[cfg(feature = "baseline-jit")]
+    let jit_diagnostics = runtime.baseline_jit_diagnostics();
+    #[cfg(not(feature = "baseline-jit"))]
+    let jit_diagnostics = JitDiagnostics::default();
     BenchmarkRun {
         passes,
         measurements: parse_measurements(&output),
+        jit_diagnostics,
     }
 }
 
@@ -383,6 +441,14 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
             "local".to_string()
         }
     });
+    let jit_diagnostic_samples = runs
+        .iter()
+        .map(|run| run.jit_diagnostics)
+        .collect::<Vec<_>>();
+    let mut jit_diagnostics = JitDiagnostics::default();
+    for diagnostics in &jit_diagnostic_samples {
+        jit_diagnostics.saturating_add_assign(*diagnostics);
+    }
     Report {
         baseline_version: baseline.version,
         baseline_profile: baseline.profile.clone(),
@@ -410,6 +476,8 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
         total: shapes.len(),
         improvements,
         regressions,
+        jit_diagnostic_samples,
+        jit_diagnostics,
         shapes,
     }
 }
@@ -441,6 +509,20 @@ fn print_report(report: &Report) {
             report.baseline_environment
         );
     }
+    println!(
+        "  baseline JIT: enabled={} requests={} compiled={} rejected={} time={}ns code={}B entries={} bailouts={} property(hit/miss/bailout)={}/{}/{}",
+        report.jit_diagnostics.enabled,
+        report.jit_diagnostics.compile_requests,
+        report.jit_diagnostics.successful_compilations,
+        report.jit_diagnostics.compile_rejections,
+        report.jit_diagnostics.total_compile_time_ns,
+        report.jit_diagnostics.generated_code_bytes,
+        report.jit_diagnostics.compiled_entries,
+        report.jit_diagnostics.bailouts,
+        report.jit_diagnostics.property_guard_hits,
+        report.jit_diagnostics.property_guard_misses,
+        report.jit_diagnostics.property_bailouts,
+    );
     println!(
         "  {:<26} {:>10} {:>10} {:>8} {:>9}  {:>9} {:>8}",
         "shape", "median", "range", "delta", "vs SM-int", "vs SM-jit", ""
@@ -531,7 +613,7 @@ fn baseline_shapes_are_unique_and_well_formed() {
 #[test]
 fn gate2_snapshot_preserves_five_finite_samples_for_every_shape() {
     let snapshot: serde_json::Value = serde_json::from_slice(
-        &fs::read(GATE2_SNAPSHOT_PATH).expect("read Gate 2 performance snapshot"),
+        &fs::read(manifest_path(GATE2_SNAPSHOT_PATH)).expect("read Gate 2 performance snapshot"),
     )
     .expect("parse Gate 2 performance snapshot");
     assert_eq!(snapshot["measurement_runs"], 5);
@@ -549,6 +631,92 @@ fn gate2_snapshot_preserves_five_finite_samples_for_every_shape() {
                 .as_f64()
                 .is_some_and(|value| value.is_finite() && value > 0.0)
         }));
+    }
+}
+
+#[test]
+fn gate3_snapshots_preserve_matched_samples_and_native_diagnostics() {
+    let baseline = load_baseline();
+    let expected_ids = baseline
+        .shapes
+        .iter()
+        .map(|shape| shape.id.as_str())
+        .collect::<HashSet<_>>();
+    for &(path, jit_enabled, target_os) in GATE3_SNAPSHOTS {
+        let snapshot: serde_json::Value = serde_json::from_slice(
+            &fs::read(manifest_path(path)).unwrap_or_else(|error| panic!("read {path}: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("parse {path}: {error}"));
+        assert_eq!(snapshot["measurement_runs"], 5, "{path}");
+        assert_eq!(snapshot["measured_passes"], 4, "{path}");
+        assert_eq!(snapshot["target_arch"], "x86_64", "{path}");
+        assert_eq!(snapshot["target_os"], target_os, "{path}");
+        assert_eq!(
+            snapshot["jit_diagnostics"]["enabled"], jit_enabled,
+            "{path}"
+        );
+
+        let shapes = snapshot["shapes"].as_array().expect("snapshot shapes");
+        assert_eq!(shapes.len(), expected_ids.len(), "{path}");
+        let actual_ids = shapes
+            .iter()
+            .map(|shape| shape["id"].as_str().expect("shape id"))
+            .collect::<HashSet<_>>();
+        assert_eq!(actual_ids, expected_ids, "{path}");
+        for shape in shapes {
+            let samples = shape["samples_ns_per_op"]
+                .as_array()
+                .expect("shape samples");
+            assert_eq!(samples.len(), 5, "{path}");
+            assert!(
+                samples.iter().all(|sample| {
+                    sample
+                        .as_f64()
+                        .is_some_and(|value| value.is_finite() && value > 0.0)
+                }),
+                "{path}: invalid samples for {}",
+                shape["id"]
+            );
+        }
+
+        let diagnostics = &snapshot["jit_diagnostics"];
+        let diagnostic_samples = snapshot["jit_diagnostic_samples"]
+            .as_array()
+            .expect("JIT diagnostic samples");
+        assert_eq!(diagnostic_samples.len(), 5, "{path}");
+        assert!(
+            diagnostic_samples
+                .iter()
+                .all(|sample| sample["enabled"] == jit_enabled)
+        );
+        for &field in JIT_DIAGNOSTIC_COUNTERS {
+            let sample_total = diagnostic_samples
+                .iter()
+                .map(|sample| sample[field].as_u64().expect("diagnostic counter"))
+                .sum::<u64>();
+            assert_eq!(diagnostics[field], sample_total, "{path}: {field}");
+        }
+        if jit_enabled {
+            assert!(
+                diagnostics["successful_compilations"].as_u64().unwrap_or(0) > 0,
+                "{path}"
+            );
+            assert!(
+                diagnostics["generated_code_bytes"].as_u64().unwrap_or(0) > 0,
+                "{path}"
+            );
+            assert!(
+                diagnostics["property_guard_hits"].as_u64().unwrap_or(0) > 0,
+                "{path}"
+            );
+            assert_eq!(diagnostics["bailouts"], 0, "{path}");
+            assert_eq!(diagnostics["property_guard_misses"], 0, "{path}");
+            assert_eq!(diagnostics["property_bailouts"], 0, "{path}");
+        } else {
+            for &field in JIT_DIAGNOSTIC_COUNTERS {
+                assert_eq!(diagnostics[field], 0, "{path}: {field}");
+            }
+        }
     }
 }
 
@@ -604,6 +772,7 @@ fn report_classifies_drift_against_the_baseline() {
     };
     let run = BenchmarkRun {
         passes: 4,
+        jit_diagnostics: JitDiagnostics::default(),
         measurements: vec![
             measurement("faster", 70.0),
             measurement("slower", 130.0),
@@ -654,6 +823,16 @@ fn report_uses_the_median_and_preserves_each_sample() {
     };
     let run = |ns_per_op| BenchmarkRun {
         passes: 4,
+        jit_diagnostics: JitDiagnostics {
+            enabled: true,
+            compile_requests: 1,
+            successful_compilations: 1,
+            total_compile_time_ns: 7,
+            generated_code_bytes: 11,
+            compiled_entries: 2,
+            property_guard_hits: 3,
+            ..JitDiagnostics::default()
+        },
         measurements: vec![Measurement {
             id: "arith".to_string(),
             iterations: 1_000,
@@ -665,6 +844,11 @@ fn report_uses_the_median_and_preserves_each_sample() {
     let report = build_report(&baseline, &[run(120.0), run(80.0), run(100.0)]);
     let shape = &report.shapes[0];
     assert_eq!(report.measurement_runs, 3);
+    assert_eq!(report.jit_diagnostic_samples.len(), 3);
+    assert_eq!(report.jit_diagnostics.compile_requests, 3);
+    assert_eq!(report.jit_diagnostics.total_compile_time_ns, 21);
+    assert_eq!(report.jit_diagnostics.generated_code_bytes, 33);
+    assert_eq!(report.jit_diagnostics.property_guard_hits, 9);
     assert_eq!(shape.ns_per_op, 100.0);
     assert_eq!(shape.samples_ns_per_op, [120.0, 80.0, 100.0]);
     assert_eq!((shape.min_ns_per_op, shape.max_ns_per_op), (80.0, 120.0));
@@ -697,6 +881,7 @@ fn report_refuses_to_compare_across_iteration_counts() {
     };
     let run = BenchmarkRun {
         passes: 4,
+        jit_diagnostics: JitDiagnostics::default(),
         measurements: vec![Measurement {
             id: "arith".to_string(),
             iterations: 200,
@@ -733,6 +918,7 @@ fn report_refuses_to_compare_across_pass_counts() {
     };
     let run = BenchmarkRun {
         passes: 4,
+        jit_diagnostics: JitDiagnostics::default(),
         measurements: vec![Measurement {
             id: "arith".to_string(),
             iterations: 1000,

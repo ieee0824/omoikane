@@ -2737,6 +2737,66 @@ impl Default for SandboxConfig {
     }
 }
 
+/// Omoikane-owned snapshot of baseline-JIT counters for performance tooling.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct BaselineJitDiagnostics {
+    /// Whether the baseline-JIT feature produced this snapshot.
+    pub enabled: bool,
+    /// Hot loops submitted to the emitter.
+    pub compile_requests: u64,
+    /// Requests that installed generated code.
+    pub successful_compilations: u64,
+    /// Requests rejected as unsupported or invalid.
+    pub compile_rejections: u64,
+    /// Nanoseconds spent verifying and emitting compile requests.
+    pub total_compile_time_ns: u64,
+    /// Executable bytes emitted by successful requests.
+    pub generated_code_bytes: u64,
+    /// Calls that entered generated machine code.
+    pub compiled_entries: u64,
+    /// Calls that resumed the interpreter.
+    pub bailouts: u64,
+    /// Native entries whose property guards matched.
+    pub property_guard_hits: u64,
+    /// Native entries rejected by a property guard.
+    pub property_guard_misses: u64,
+    /// Property-enabled entries that resumed the interpreter.
+    pub property_bailouts: u64,
+}
+
+impl BaselineJitDiagnostics {
+    /// Saturating aggregation used by multi-runtime performance reports.
+    #[doc(hidden)]
+    pub fn saturating_add_assign(&mut self, other: Self) {
+        self.enabled |= other.enabled;
+        self.compile_requests = self.compile_requests.saturating_add(other.compile_requests);
+        self.successful_compilations = self
+            .successful_compilations
+            .saturating_add(other.successful_compilations);
+        self.compile_rejections = self
+            .compile_rejections
+            .saturating_add(other.compile_rejections);
+        self.total_compile_time_ns = self
+            .total_compile_time_ns
+            .saturating_add(other.total_compile_time_ns);
+        self.generated_code_bytes = self
+            .generated_code_bytes
+            .saturating_add(other.generated_code_bytes);
+        self.compiled_entries = self.compiled_entries.saturating_add(other.compiled_entries);
+        self.bailouts = self.bailouts.saturating_add(other.bailouts);
+        self.property_guard_hits = self
+            .property_guard_hits
+            .saturating_add(other.property_guard_hits);
+        self.property_guard_misses = self
+            .property_guard_misses
+            .saturating_add(other.property_guard_misses);
+        self.property_bailouts = self
+            .property_bailouts
+            .saturating_add(other.property_bailouts);
+    }
+}
+
 pub struct JsRuntime {
     // The provider must be dropped before `host_state` so it never traces a
     // freed host allocation during teardown.
@@ -3836,6 +3896,26 @@ impl JsRuntime {
     /// Returns the console log buffer captured from `console.log`.
     pub fn console_logs(&self) -> Vec<String> {
         self.host_state.borrow().console_logs.clone()
+    }
+
+    /// Returns runtime-wide baseline-JIT counters for performance-gate tooling.
+    #[cfg(feature = "baseline-jit")]
+    #[doc(hidden)]
+    pub fn baseline_jit_diagnostics(&self) -> BaselineJitDiagnostics {
+        let diagnostics = self.context.arithmetic_jit_diagnostics();
+        BaselineJitDiagnostics {
+            enabled: true,
+            compile_requests: diagnostics.compile_requests,
+            successful_compilations: diagnostics.successful_compilations,
+            compile_rejections: diagnostics.compile_rejections,
+            total_compile_time_ns: diagnostics.total_compile_time_ns,
+            generated_code_bytes: diagnostics.generated_code_bytes,
+            compiled_entries: diagnostics.compiled_entries,
+            bailouts: diagnostics.bailouts,
+            property_guard_hits: diagnostics.property_guard_hits,
+            property_guard_misses: diagnostics.property_guard_misses,
+            property_bailouts: diagnostics.property_bailouts,
+        }
     }
 
     /// Evaluates JavaScript source code.
