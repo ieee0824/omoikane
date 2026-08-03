@@ -7,9 +7,9 @@ decision. It does not enable JIT code in production.
 
 Build once, keep the machine otherwise idle, and pin the test process to one
 CPU. The harness runs the same 11 workloads, iteration counts, and four timed
-passes used by `tests/js_benchmark/baseline.json`. Five independent runtime
-processes are reduced by the per-shape median; every raw sample and its range is
-retained in the JSON report.
+passes used by `tests/js_benchmark/baseline.json`. Five runs, each with a fresh
+`JsRuntime` in the test process, are reduced by the per-shape median; every raw
+sample and its range is retained in the JSON report.
 
 ```sh
 cargo test --test js_benchmark --no-run
@@ -22,8 +22,8 @@ taskset -c 0 cargo test --test js_benchmark \
 ```
 
 `OMOIKANE_JS_BENCH_RUNS` accepts 1 through 9. CI deliberately keeps the default
-of one process so ordinary pull requests do not become several minutes slower;
-the five-process command is the release/gate protocol. Reports identify the
+of one run so ordinary pull requests do not become several minutes slower; the
+five-run command is the release/gate protocol. Reports identify the
 revision, environment label, target, profile, pass count, sample count, raw
 samples, median, and range. The harness rejects an iteration/pass mismatch and
 rejects non-positive or non-finite timings.

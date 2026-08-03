@@ -5,7 +5,7 @@
   "reference_engine": "SpiderMonkey (Firefox 153.0.1; minimum of 5 independent processes)",
   "target_arch": "x86_64",
   "target_os": "linux",
-  "environment": "idle two-core container used for baseline v6",
+  "environment": "Omoikane timing baseline inherited from v6 idle two-core container; Firefox 153.0.1 references recorded separately on x86_64 Linux",
   "measurement_runs": 5,
   "shapes": [
     {

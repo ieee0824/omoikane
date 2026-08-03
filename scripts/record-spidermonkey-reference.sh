@@ -71,6 +71,9 @@ if [[ "$show_samples" == 1 ]]; then
 fi
 
 awk -F'|' -v runs="$runs" '
+  function is_positive_number(value) {
+    return value ~ /^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/ && value + 0 > 0
+  }
   BEGIN {
     shape_list = "arith prop-mono prop-mega call closure-alloc object-alloc string-concat array primitive-string-property primitive-string-method proto-method"
     shape_count = split(shape_list, shape_ids, " ")
@@ -89,6 +92,11 @@ awk -F'|' -v runs="$runs" '
     shape = $3
     if ((mode != "interpreter" && mode != "jit") || run < 1 || run > runs || !(shape in expected)) {
       print "unexpected benchmark identity: " mode "|" run "|" shape > "/dev/stderr"
+      invalid = 1
+      next
+    }
+    if ($4 !~ /^[1-9][0-9]*$/ || !is_positive_number($5) || !is_positive_number($6)) {
+      print "invalid benchmark measurement: " $0 > "/dev/stderr"
       invalid = 1
       next
     }
