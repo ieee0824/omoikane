@@ -421,8 +421,11 @@ pub struct FragmentStyle {
     pub writing_mode: Option<String>,
     /// Resolved inline base direction (`ltr` or `rtl`).
     pub direction: Option<String>,
-    /// Resolved bidi mode, reserved for future bidi-aware paint ordering.
+    /// Resolved CSS bidi mode used while constructing the line paragraph.
     pub unicode_bidi: Option<String>,
+    /// UAX#9 embedding level resolved for this fragment as part of its line.
+    /// Paint uses this instead of resolving adjacent fragments independently.
+    pub resolved_bidi_level: Option<u8>,
 }
 
 impl FragmentStyle {
@@ -464,6 +467,7 @@ impl FragmentStyle {
             writing_mode: normalize_lower("writing-mode"),
             direction: normalize_lower("direction"),
             unicode_bidi: normalize_lower("unicode-bidi"),
+            resolved_bidi_level: None,
         }
     }
 }

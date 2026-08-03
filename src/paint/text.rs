@@ -744,6 +744,17 @@ fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
         return Cow::Borrowed(text);
     }
 
+    if let Some(level) = style.resolved_bidi_level {
+        if level % 2 == 0 {
+            return Cow::Borrowed(text);
+        }
+        let mut visual = String::with_capacity(text.len());
+        for cluster in text.graphemes(true).rev() {
+            visual.push_str(cluster);
+        }
+        return Cow::Owned(visual);
+    }
+
     let explicit_level = if style.direction.as_deref() == Some("rtl") {
         Level::rtl()
     } else {
@@ -1841,5 +1852,19 @@ mod bidi_tests {
         assert!(is_invisible_shaping_control('\u{200c}'));
         assert!(is_invisible_shaping_control('\u{200d}'));
         assert!(!is_invisible_shaping_control('\u{301}'));
+    }
+
+    #[test]
+    fn line_resolved_level_drives_fragment_paint_order() {
+        let odd = FragmentStyle {
+            direction: Some("ltr".to_string()),
+            unicode_bidi: Some("normal".to_string()),
+            resolved_bidi_level: Some(1),
+            ..FragmentStyle::default()
+        };
+        assert_eq!(bidi_visual_text("אב", &odd), "בא");
+
+        let even = FragmentStyle { resolved_bidi_level: Some(2), ..odd };
+        assert_eq!(bidi_visual_text("אב", &even), "אב");
     }
 }

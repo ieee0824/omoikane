@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
@@ -2212,19 +2213,7 @@ fn push_line(
         fragment.rect.x += offset_x;
     }
 
-    // The shaping/line-breaking pass emits fragments in DOM order.  For a
-    // horizontal RTL inline formatting context, mirror each fragment inside
-    // the aligned line box so the first logical run occupies inline-start
-    // (the physical right edge) while keeping DOM order stable for hit-test
-    // and inspection code.  Vertical writing uses its own transpose and
-    // deliberately reaches this helper with `direction_rtl == false`.
-    if direction_rtl {
-        let line_left = x + offset_x;
-        for fragment in fragments.iter_mut() {
-            fragment.rect.x =
-                line_left + width - (fragment.rect.x - line_left) - fragment.rect.width;
-        }
-    }
+    resolve_line_bidi_geometry(fragments, x + offset_x, direction_rtl);
 
     let baseline = fragments
         .iter()
@@ -2287,6 +2276,106 @@ fn push_line(
         baseline: y + baseline,
         fragments: std::mem::take(fragments),
     });
+}
+
+/// Resolves adjacent inline fragments as one UAX#9 line while retaining the
+/// fragment vector's logical DOM order.  Only physical origins are reordered;
+/// paint consumes the resolved level to order scalars inside each fragment.
+fn resolve_line_bidi_geometry(
+    fragments: &mut [InlineFragment],
+    line_start: f32,
+    direction_rtl: bool,
+) {
+    if fragments.is_empty() {
+        return;
+    }
+    let needs_bidi = direction_rtl || fragments.iter().any(|fragment| {
+        let explicit_mode = !matches!(
+            fragment.style.unicode_bidi.as_deref(),
+            None | Some("normal")
+        );
+        explicit_mode
+            || fragment.text().is_some_and(|text| {
+                text.chars().any(|ch| {
+                    matches!(
+                        bidi_class(ch),
+                        BidiClass::R
+                            | BidiClass::AL
+                            | BidiClass::AN
+                            | BidiClass::RLE
+                            | BidiClass::RLI
+                            | BidiClass::RLO
+                            | BidiClass::FSI
+                    )
+                })
+            })
+    });
+    if !needs_bidi {
+        return;
+    }
+
+    let mut bidi_source = String::new();
+    let mut content_offsets = Vec::with_capacity(fragments.len());
+    let mut ordering_offsets = Vec::with_capacity(fragments.len());
+    for fragment in fragments.iter() {
+        let (prefix, suffix) = bidi_controls(&fragment.style);
+        let fragment_start = bidi_source.len();
+        bidi_source.push_str(prefix);
+        let start = bidi_source.len();
+        match &fragment.content {
+            InlineFragmentContent::Text(text) if !text.is_empty() => bidi_source.push_str(text),
+            _ => bidi_source.push('\u{fffc}'),
+        }
+        let end = bidi_source.len();
+        bidi_source.push_str(suffix);
+        content_offsets.push(start..end);
+        ordering_offsets.push(if prefix.is_empty() { start } else { fragment_start });
+    }
+
+    let paragraph_level = if direction_rtl { Level::rtl() } else { Level::ltr() };
+    let bidi = BidiInfo::new(&bidi_source, Some(paragraph_level));
+    let Some(paragraph) = bidi.paragraphs.first() else {
+        return;
+    };
+    let (resolved_levels, _) = bidi.visual_runs(paragraph, paragraph.range.clone());
+    let fragment_levels: Vec<Level> = ordering_offsets
+        .iter()
+        .map(|offset| resolved_levels.get(*offset).copied().unwrap_or(paragraph_level))
+        .collect();
+    let homogeneous_levels: Vec<Option<Level>> = content_offsets
+        .iter()
+        .map(|range| {
+            let first = resolved_levels.get(range.start).copied()?;
+            resolved_levels[range.clone()]
+                .iter()
+                .all(|level| *level == first)
+                .then_some(first)
+        })
+        .collect();
+    let visual_order = BidiInfo::reorder_visual(&fragment_levels);
+
+    let mut cursor = line_start;
+    for logical_index in visual_order {
+        let fragment = &mut fragments[logical_index];
+        fragment.rect.x = cursor;
+        fragment.style.resolved_bidi_level =
+            homogeneous_levels[logical_index].map(|level| level.number());
+        cursor += fragment.rect.width;
+    }
+}
+
+fn bidi_controls(style: &FragmentStyle) -> (&'static str, &'static str) {
+    let rtl = style.direction.as_deref() == Some("rtl");
+    match style.unicode_bidi.as_deref() {
+        Some("embed") => (if rtl { "\u{202b}" } else { "\u{202a}" }, "\u{202c}"),
+        Some("bidi-override") => (if rtl { "\u{202e}" } else { "\u{202d}" }, "\u{202c}"),
+        Some("isolate") => (if rtl { "\u{2067}" } else { "\u{2066}" }, "\u{2069}"),
+        Some("isolate-override") => {
+            (if rtl { "\u{2067}\u{202e}" } else { "\u{2066}\u{202d}" }, "\u{202c}\u{2069}")
+        },
+        Some("plaintext") => ("\u{2068}", "\u{2069}"),
+        _ => ("", ""),
+    }
 }
 
 // ── Text measurement ────────────────────────────────────────────────────────
