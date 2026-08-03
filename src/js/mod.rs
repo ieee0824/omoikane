@@ -9718,7 +9718,13 @@ fn schedule_timer_from_js(
     };
     let payload = bind_timer_payload_to_current_realm(context, payload);
 
-    let owner_document_id = active_document_id();
+    // Resolve ownership from the executing Context Realm first. Promise jobs
+    // run after the host task's module-document guard has been restored, so
+    // relying on the thread-local owner alone would leave timers created by a
+    // child callback unowned and uncancellable when its iframe is retired.
+    let owner_document_id = current_iframe_realm(context)
+        .map(|(_, document_id)| document_id)
+        .or_else(active_document_id);
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         let owner_is_live = owner_document_id
