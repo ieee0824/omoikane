@@ -8,8 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
-    Font, FontFamilyKey, FontStyle, FontWeight, ShapingDirection, is_zero_advance_character,
-    load_default_text_fonts,
+    Font, FontFamilyKey, FontStyle, FontWeight, ShapingDirection, grapheme_spacing_boundaries,
+    is_zero_advance_character, load_default_text_fonts, shape_text_with_fallback,
 };
 use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
@@ -2408,32 +2408,15 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                 );
                 // Shaped paint inserts spacing between extended grapheme
                 // clusters, not between the scalars that form one cluster.
-                let cluster_count = text
-                    .graphemes(true)
-                    .filter(|cluster| {
-                        cluster.chars().any(|ch| !is_zero_advance_character(ch))
-                    })
-                    .count();
-                let spacing = if cluster_count > 1 {
-                    metrics.letter_spacing * (cluster_count - 1) as f32
-                } else {
-                    0.0
-                };
+                let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
                 return base + spacing;
             }
         }
 
         // Fallback to approximation when no font is available
-        let char_count = text
-            .chars()
-            .filter(|ch| !is_zero_advance_character(*ch))
-            .count();
+        let char_count = text.chars().filter(|ch| !is_zero_advance_character(*ch)).count();
         let base = char_count as f32 * metrics.average_advance;
-        let spacing = if char_count > 1 {
-            metrics.letter_spacing * (char_count - 1) as f32
-        } else {
-            0.0
-        };
+        let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
         base + spacing
     })
 }
@@ -2448,14 +2431,29 @@ fn measure_text_width_with_fallback(
     primary: Option<&Font>,
     fonts: &[Arc<Font>],
 ) -> f32 {
+    let direction = if text.chars().any(|ch| {
+        matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN)
+    }) {
+        ShapingDirection::RightToLeft
+    } else {
+        ShapingDirection::LeftToRight
+    };
+    let mut run_fonts = Vec::with_capacity(fonts.len() + usize::from(primary.is_some()));
+    if let Some(primary) = primary {
+        run_fonts.push(primary);
+    }
+    run_fonts.extend(fonts.iter().map(Arc::as_ref));
+    if !run_fonts.is_empty()
+        && let Ok(runs) = shape_text_with_fallback(&run_fonts, text, font_size, direction)
+    {
+        return runs
+            .iter()
+            .flat_map(|run| &run.glyphs)
+            .map(|glyph| glyph.x_advance.abs())
+            .sum();
+    }
+
     if let Some(font) = select_layout_run_font(primary, fonts, text) {
-        let direction = if text.chars().any(|ch| {
-            matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN)
-        }) {
-            ShapingDirection::RightToLeft
-        } else {
-            ShapingDirection::LeftToRight
-        };
         if let Ok(glyphs) = font.shape_text(text, font_size, direction) {
             return glyphs.iter().map(|glyph| glyph.x_advance.abs()).sum();
         }

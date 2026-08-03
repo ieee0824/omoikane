@@ -8907,25 +8907,24 @@ fn form_control_text_measure_matches_painter_advance_model() {
 
 #[test]
 fn opentype_shaped_paint_uses_the_layout_advance_model() {
-    use crate::font::{ShapingDirection, load_default_text_fonts};
+    use crate::font::{
+        ShapingDirection, grapheme_spacing_boundaries, load_default_text_fonts,
+    };
     use super::text::paint_shaped_horizontal_text;
 
     let fonts = load_default_text_fonts();
-    let Some(font) = fonts.iter().find(|font| "بب".chars().all(|ch| font.has_glyph(ch))) else {
+    let text = "لا";
+    let Some(font) = fonts.iter().find(|font| text.chars().all(|ch| font.has_glyph(ch))) else {
         eprintln!("Skipping shaped paint test: no Arabic font available");
         return;
     };
     let font_size = 32.0;
     let letter_spacing = 2.0;
     let shaped = font
-        .shape_text("بب", font_size, ShapingDirection::RightToLeft)
+        .shape_text(text, font_size, ShapingDirection::RightToLeft)
         .unwrap();
-    let cluster_boundaries = shaped
-        .windows(2)
-        .filter(|pair| pair[0].cluster != pair[1].cluster)
-        .count();
     let expected = shaped.iter().map(|glyph| glyph.x_advance.abs()).sum::<f32>()
-        + cluster_boundaries as f32 * letter_spacing;
+        + grapheme_spacing_boundaries(text) as f32 * letter_spacing;
 
     let mut canvas = Canvas::new(120, 50);
     let style = FragmentStyle {
@@ -8936,7 +8935,7 @@ fn opentype_shaped_paint_uses_the_layout_advance_model() {
     let painted_advance = paint_shaped_horizontal_text(
         &mut canvas,
         Rect { x: 0.0, y: 0.0, width: 120.0, height: 50.0 },
-        "بب",
+        text,
         font_size,
         35.0,
         &[font],
@@ -8948,6 +8947,42 @@ fn opentype_shaped_paint_uses_the_layout_advance_model() {
     .unwrap();
     assert!((painted_advance - expected).abs() < 0.001);
     assert!(canvas.pixels().chunks_exact(4).any(|pixel| pixel[3] > 0));
+}
+
+#[test]
+fn shaped_paint_does_not_space_after_non_advancing_leading_cluster() {
+    use crate::font::{ShapingDirection, load_default_text_fonts};
+    use super::text::paint_shaped_horizontal_text;
+
+    let fonts = load_default_text_fonts();
+    let text = "\u{301}A";
+    let Some((font, shaped)) = fonts.iter().find_map(|font| {
+        let shaped = font
+            .shape_text(text, 32.0, ShapingDirection::LeftToRight)
+            .ok()?;
+        (shaped.iter().all(|glyph| glyph.glyph_id != 0)
+            && shaped.windows(2).any(|pair| pair[0].cluster != pair[1].cluster))
+        .then_some((font, shaped))
+    }) else {
+        eprintln!("Skipping leading-mark spacing test: no suitable font available");
+        return;
+    };
+    let expected = shaped.iter().map(|glyph| glyph.x_advance.abs()).sum::<f32>();
+    let mut canvas = Canvas::new(120, 50);
+    let painted_advance = paint_shaped_horizontal_text(
+        &mut canvas,
+        Rect { x: 0.0, y: 0.0, width: 120.0, height: 50.0 },
+        text,
+        32.0,
+        35.0,
+        &[font],
+        &FragmentStyle::default(),
+        Color::rgb(0, 0, 0),
+        None,
+        5.0,
+    )
+    .unwrap();
+    assert!((painted_advance - expected).abs() < 0.001);
 }
 
 #[test]

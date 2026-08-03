@@ -17,6 +17,18 @@ fn shaping_controls_have_zero_advance_policy() {
 }
 
 #[test]
+fn letter_spacing_boundaries_follow_extended_grapheme_clusters() {
+    assert_eq!(grapheme_spacing_boundaries("e\u{301}"), 0);
+    assert_eq!(grapheme_spacing_boundaries("👩‍💻"), 0);
+    assert_eq!(grapheme_spacing_boundaries("👩‍💻a"), 1);
+    assert_eq!(grapheme_spacing_boundaries("لا"), 1);
+    assert_eq!(
+        grapheme_spacing_cluster_starts("\u{301}AB"),
+        vec!["\u{301}".len(), "\u{301}A".len()]
+    );
+}
+
+#[test]
 fn opentype_shaping_applies_arabic_context_and_ligatures() {
     let Some(path) = find_test_font() else {
         eprintln!("Skipping OpenType shaping test: no system font available");
@@ -40,6 +52,156 @@ fn opentype_shaping_applies_arabic_context_and_ligatures() {
     let lam_alef = font.shape_text("لا", 32.0, ShapingDirection::RightToLeft).unwrap();
     assert!(lam_alef.len() < 2, "lam-alef should shape into a ligature");
     assert!(lam_alef.iter().all(|glyph| glyph.x_advance >= 0.0));
+}
+
+#[test]
+fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
+    let primary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/acid3/font.ttf");
+    let Ok(primary) = Font::load_from_file(&primary_path) else {
+        eprintln!("Skipping cluster fallback test: fixture font unavailable");
+        return;
+    };
+    let Some(fallback_path) = find_test_font() else {
+        eprintln!("Skipping cluster fallback test: no system font available");
+        return;
+    };
+    let fallback = Font::load_from_file(std::path::Path::new(&fallback_path)).unwrap();
+    let Some(primary_base) = ['A', 'e', 'a']
+        .into_iter()
+        .find(|ch| primary.has_glyph(*ch))
+    else {
+        eprintln!("Skipping cluster fallback test: fixture has no test base glyph");
+        return;
+    };
+
+    // Pick a multi-scalar cluster using production's shaping-based support
+    // check. A cmap-only mark probe does not model synthesized or attached
+    // marks reliably and made the old fixed expectation host-dependent.
+    let fallback_cluster = ['α', 'β', 'Ж', 'й', 'क', 'ب', 'ש']
+        .into_iter()
+        .flat_map(|base| ['\u{301}', '\u{308}', '\u{327}'].map(|mark| format!("{base}{mark}")))
+        .find(|cluster| {
+            !cluster_supported_by_font(
+                &primary,
+                cluster,
+                24.0,
+                ShapingDirection::LeftToRight,
+            ) && cluster_supported_by_font(
+                &fallback,
+                cluster,
+                24.0,
+                ShapingDirection::LeftToRight,
+            )
+        });
+    let Some(fallback_cluster) = fallback_cluster else {
+        eprintln!("Skipping cluster fallback test: no deterministic fallback cluster available");
+        return;
+    };
+
+    let text = format!("{fallback_cluster}{primary_base}");
+    let runs = shape_text_with_fallback(
+        &[&primary, &fallback],
+        &text,
+        24.0,
+        ShapingDirection::LeftToRight,
+    )
+    .unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].font_index, 1);
+    assert_eq!(&text[runs[0].text_range.clone()], fallback_cluster);
+    assert_eq!(runs[1].font_index, 0);
+    assert_eq!(&text[runs[1].text_range.clone()], primary_base.to_string());
+    assert_eq!(runs[0].text_range.end, runs[1].text_range.start);
+    let mut grapheme_boundaries = text
+        .grapheme_indices(true)
+        .map(|(start, _)| start)
+        .collect::<Vec<_>>();
+    grapheme_boundaries.push(text.len());
+    assert!(
+        runs.iter().all(|run| {
+            grapheme_boundaries.contains(&run.text_range.start)
+                && grapheme_boundaries.contains(&run.text_range.end)
+        }),
+        "font-run boundaries must coincide with grapheme boundaries"
+    );
+    assert!(runs.iter().all(|run| {
+        run.glyphs
+            .iter()
+            .all(|glyph| run.text_range.contains(&glyph.cluster))
+    }));
+}
+
+#[test]
+fn fallback_shaping_keeps_primary_supported_text_in_one_run() {
+    let primary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/acid3/font.ttf");
+    let Ok(primary) = Font::load_from_file(&primary_path) else {
+        eprintln!("Skipping primary shaping test: fixture font unavailable");
+        return;
+    };
+    let Some(text) = ["abc", "ABC", "123"].into_iter().find(|text| {
+        primary
+            .shape_text(text, 24.0, ShapingDirection::LeftToRight)
+            .is_ok_and(|glyphs| glyphs.iter().all(|glyph| glyph.glyph_id != 0))
+    }) else {
+        eprintln!("Skipping primary shaping test: fixture has no supported sample");
+        return;
+    };
+
+    let runs = shape_text_with_fallback(
+        &[&primary],
+        text,
+        24.0,
+        ShapingDirection::LeftToRight,
+    )
+    .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].font_index, 0);
+    assert_eq!(runs[0].text_range, 0..text.len());
+}
+
+#[test]
+fn fallback_runs_never_split_variation_or_zwj_graphemes() {
+    let primary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/acid3/font.ttf");
+    let Ok(primary) = Font::load_from_file(&primary_path) else {
+        eprintln!("Skipping cluster boundary test: fixture font unavailable");
+        return;
+    };
+    let mut fonts = vec![primary];
+    if let Some(path) = find_test_font()
+        && let Ok(fallback) = Font::load_from_file(std::path::Path::new(&path))
+    {
+        fonts.push(fallback);
+    }
+    let font_refs = fonts.iter().collect::<Vec<_>>();
+
+    for text in ["A\u{fe0f}B", "👩‍💻A"] {
+        let runs = shape_text_with_fallback(
+            &font_refs,
+            text,
+            24.0,
+            ShapingDirection::LeftToRight,
+        )
+        .unwrap();
+        let mut boundaries = text
+            .grapheme_indices(true)
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        boundaries.push(text.len());
+        assert_eq!(runs.first().map(|run| run.text_range.start), Some(0));
+        assert_eq!(runs.last().map(|run| run.text_range.end), Some(text.len()));
+        assert!(runs.windows(2).all(|pair| pair[0].text_range.end == pair[1].text_range.start));
+        assert!(runs.iter().all(|run| {
+            boundaries.contains(&run.text_range.start)
+                && boundaries.contains(&run.text_range.end)
+                && run
+                    .glyphs
+                    .iter()
+                    .all(|glyph| run.text_range.contains(&glyph.cluster))
+        }));
+    }
 }
 
 /// Try to find a system font for testing.

@@ -5,6 +5,7 @@
 
 use ab_glyph::{Font as AbGlyphFont, FontVec, GlyphId, ScaleFont};
 use rustybuzz::{Direction, Face, UnicodeBuffer};
+use unicode_segmentation::UnicodeSegmentation;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -78,6 +79,112 @@ pub enum ShapingDirection {
     RightToLeft,
     TopToBottom,
     BottomToTop,
+}
+
+/// Number of CSS letter-spacing boundaries in a source text run.
+///
+/// Shaping can fold multiple grapheme clusters into one glyph, so callers
+/// must derive spacing from source clusters rather than shaped glyph count.
+pub(crate) fn grapheme_spacing_boundaries(text: &str) -> usize {
+    grapheme_spacing_cluster_starts(text).len().saturating_sub(1)
+}
+
+/// Byte offsets of source grapheme clusters that participate in CSS spacing.
+pub(crate) fn grapheme_spacing_cluster_starts(text: &str) -> Vec<usize> {
+    text.grapheme_indices(true)
+        .filter_map(|(start, cluster)| {
+            cluster
+                .chars()
+                .any(|ch| !is_zero_advance_character(ch))
+                .then_some(start)
+        })
+        .collect()
+}
+
+/// A shaped span whose complete grapheme clusters use one selected font.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ShapedRun {
+    pub font_index: usize,
+    pub text_range: std::ops::Range<usize>,
+    pub glyphs: Vec<ShapedGlyph>,
+}
+
+/// Selects fallback fonts at extended grapheme-cluster boundaries and shapes
+/// adjacent clusters that chose the same font as one contextual run.
+pub(crate) fn shape_text_with_fallback(
+    fonts: &[&Font],
+    text: &str,
+    size_px: f32,
+    direction: ShapingDirection,
+) -> Result<Vec<ShapedRun>, FontError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    if fonts.is_empty() {
+        return Err(FontError::Other("No fonts available for shaping".to_string()));
+    }
+
+    // Most runs are fully covered by the primary font. Shape them once and
+    // avoid probing and shaping every grapheme cluster independently.
+    let primary_glyphs = fonts[0].shape_text(text, size_px, direction);
+    if let Ok(primary_glyphs) = primary_glyphs
+        && primary_glyphs.iter().all(|glyph| glyph.glyph_id != 0)
+    {
+        return Ok(vec![ShapedRun {
+            font_index: 0,
+            text_range: 0..text.len(),
+            glyphs: primary_glyphs,
+        }]);
+    }
+
+    let mut selections = Vec::<(usize, std::ops::Range<usize>)>::new();
+    for (start, cluster) in text.grapheme_indices(true) {
+        let end = start + cluster.len();
+        let font_index = fonts
+            .iter()
+            .position(|font| cluster_supported_by_font(font, cluster, size_px, direction))
+            .or_else(|| {
+                fonts
+                    .iter()
+                    .position(|font| font.shape_text(cluster, size_px, direction).is_ok())
+            })
+            .ok_or_else(|| FontError::Other("No usable font available for shaping".to_string()))?;
+        if let Some((previous_font, range)) = selections.last_mut()
+            && *previous_font == font_index
+        {
+            range.end = end;
+        } else {
+            selections.push((font_index, start..end));
+        }
+    }
+
+    let mut runs = Vec::with_capacity(selections.len());
+    for (font_index, range) in selections {
+        let mut glyphs = fonts[font_index].shape_text(&text[range.clone()], size_px, direction)?;
+        for glyph in &mut glyphs {
+            glyph.cluster += range.start;
+        }
+        runs.push(ShapedRun { font_index, text_range: range, glyphs });
+    }
+    if matches!(direction, ShapingDirection::RightToLeft | ShapingDirection::BottomToTop) {
+        runs.reverse();
+    }
+    Ok(runs)
+}
+
+fn cluster_supported_by_font(
+    font: &Font,
+    cluster: &str,
+    size_px: f32,
+    direction: ShapingDirection,
+) -> bool {
+    if !cluster.chars().all(|ch| {
+        ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch)
+    }) {
+        return false;
+    }
+    font.shape_text(cluster, size_px, direction)
+        .is_ok_and(|glyphs| glyphs.iter().all(|glyph| glyph.glyph_id != 0))
 }
 
 /// Font representation wrapping `ab_glyph::FontVec`.
