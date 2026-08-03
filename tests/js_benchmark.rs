@@ -89,6 +89,18 @@ const GATE3_SNAPSHOTS: &[(&str, bool, &str)] = &[
         "macos",
     ),
 ];
+const JIT_DIAGNOSTIC_COUNTERS: &[&str] = &[
+    "compile_requests",
+    "successful_compilations",
+    "compile_rejections",
+    "total_compile_time_ns",
+    "generated_code_bytes",
+    "compiled_entries",
+    "bailouts",
+    "property_guard_hits",
+    "property_guard_misses",
+    "property_bailouts",
+];
 
 /// How far a measurement may drift from the baseline before it is called an
 /// improvement or a regression.
@@ -727,18 +739,7 @@ fn gate3_snapshots_preserve_matched_samples_and_native_diagnostics() {
                 .iter()
                 .all(|sample| sample["enabled"] == jit_enabled)
         );
-        for field in [
-            "compile_requests",
-            "successful_compilations",
-            "compile_rejections",
-            "total_compile_time_ns",
-            "generated_code_bytes",
-            "compiled_entries",
-            "bailouts",
-            "property_guard_hits",
-            "property_guard_misses",
-            "property_bailouts",
-        ] {
+        for &field in JIT_DIAGNOSTIC_COUNTERS {
             let sample_total = diagnostic_samples
                 .iter()
                 .map(|sample| sample[field].as_u64().expect("diagnostic counter"))
@@ -762,8 +763,9 @@ fn gate3_snapshots_preserve_matched_samples_and_native_diagnostics() {
             assert_eq!(diagnostics["property_guard_misses"], 0, "{path}");
             assert_eq!(diagnostics["property_bailouts"], 0, "{path}");
         } else {
-            assert_eq!(diagnostics["compile_requests"], 0, "{path}");
-            assert_eq!(diagnostics["generated_code_bytes"], 0, "{path}");
+            for &field in JIT_DIAGNOSTIC_COUNTERS {
+                assert_eq!(diagnostics[field], 0, "{path}: {field}");
+            }
         }
     }
 }
