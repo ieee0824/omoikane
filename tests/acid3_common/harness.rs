@@ -315,7 +315,9 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
     let script_errors = runtime.execute_document_scripts(Some(&base));
     acid3_debug_log(&format!("mode={mode:?} after scripts"));
 
+    acid3_debug_log(&format!("mode={mode:?} before update typeof"));
     let update_typeof = eval_string(&mut runtime, "typeof update").unwrap_or_default();
+    acid3_debug_log(&format!("mode={mode:?} after update typeof"));
 
     let mut drive_errors = Vec::new();
     let mut iterations = 0usize;
@@ -328,9 +330,11 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             if let Err(e) = runtime.wire_inline_event_handlers() {
                 drive_errors.push(format!("wire inline handlers: {e}"));
             }
+            acid3_debug_log(&format!("mode={mode:?} before fire load"));
             if let Err(e) = runtime.fire_load() {
                 drive_errors.push(format!("fire load: {e}"));
             }
+            acid3_debug_log(&format!("mode={mode:?} after fire load"));
             // Advance virtual time so setTimeout(update, delay) tasks fire.
             // Cap: 60 virtual seconds at the page's 10ms delay = 6000 ticks.
             let delay_ms = 10u64;
@@ -376,6 +380,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             if let Err(e) = runtime.tick(0) {
                 drive_errors.push(format!("initial resource tasks: {e}"));
             }
+            acid3_debug_log(&format!("mode={mode:?} after initial tick"));
             // Invoke update() directly, once per subtest, bypassing setTimeout.
             let total = read_int(&mut runtime, "tests.length").unwrap_or(0);
             // Budget: one call per test plus a bounded retry allowance.
@@ -419,6 +424,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
         }
     }
 
+    acid3_debug_log(&format!("mode={mode:?} before result total"));
     let result = Acid3Run {
         mode,
         page_status,
@@ -436,6 +442,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
         log: eval_string(&mut runtime, "typeof log !== 'undefined' ? String(log) : null"),
         iterations,
     };
+    acid3_debug_log(&format!("mode={mode:?} after result"));
 
     // Boa's generational collector retains allocation indexes across runtime
     // teardown. Finish the runtime first, then run a major collection so the
