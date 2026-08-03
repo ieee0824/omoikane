@@ -7248,6 +7248,26 @@
     }
   }
 
+  // Text-control selectionchange is distinct from the Document Selection
+  // event: it targets the input/textarea and bubbles through that control's
+  // owner Document. Coalesce changes made by one script task, matching the
+  // DOM manipulation task boundary used by document selectionchange.
+  const textControlSelectionChangeQueued = new WeakSet();
+
+  function queueTextControlSelectionChange(control) {
+    if (!control || textControlSelectionChangeQueued.has(control)) return;
+    textControlSelectionChangeQueued.add(control);
+    const deliver = () => {
+      textControlSelectionChangeQueued.delete(control);
+      control.dispatchEvent(new Event("selectionchange", { bubbles: true }));
+    };
+    if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+      __omoikane_queue_dom_manipulation_task(deliver);
+    } else {
+      setTimeout(deliver, 0);
+    }
+  }
+
   function syncTextControlNativeState(control, focused = undefined) {
     if (!isTextControl(control)) return;
     ensureTextControlSelection(control);
@@ -7264,6 +7284,10 @@
   }
 
   function setTextControlSelection(control, start, end, direction) {
+    ensureTextControlSelection(control);
+    const previousStart = control.__selectionStart;
+    const previousEnd = control.__selectionEnd;
+    const previousDirection = control.__selectionDirection;
     const length = String(control.value).length;
     let normalizedEnd = Math.min(Math.max(Number(end) || 0, 0), length);
     let normalizedStart = Math.min(Math.max(Number(start) || 0, 0), normalizedEnd);
@@ -7273,6 +7297,10 @@
     control.__selectionEnd = normalizedEnd;
     control.__selectionDirection = normalizedDirection;
     syncTextControlNativeState(control);
+    if (previousStart !== normalizedStart || previousEnd !== normalizedEnd ||
+        previousDirection !== normalizedDirection) {
+      queueTextControlSelectionChange(control);
+    }
   }
 
   function setTextControlSelectionRange(control, start, end, direction) {

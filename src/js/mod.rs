@@ -17214,6 +17214,73 @@ mod tests {
     }
 
     #[test]
+    fn text_control_selectionchange_bubbles_and_stays_with_owner_document() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><input id="field" value="abcdef"><textarea id="area">hello</textarea><iframe id="frame"></iframe></body></html>"#,
+        );
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime.take_task_errors().is_empty(),
+            "initial iframe resource load must not raise a task error"
+        );
+        runtime
+            .eval(
+                r#"(() => {
+                    const field = document.getElementById("field");
+                    const area = document.getElementById("area");
+                    const childDocument = document.getElementById("frame").contentDocument;
+                    const childField = childDocument.createElement("input");
+                    childDocument.body.appendChild(childField);
+                    const events = [];
+                    document.addEventListener("selectionchange", event => {
+                        events.push(`document:${event.target.tagName}`);
+                    });
+                    field.addEventListener("selectionchange", () => {
+                        events.push(`field:${field.selectionStart}/${field.selectionEnd}/${field.selectionDirection}`);
+                    });
+                    area.addEventListener("selectionchange", () => {
+                        events.push(`area:${area.selectionStart}/${area.selectionEnd}/${area.selectionDirection}`);
+                    });
+                    childField.addEventListener("selectionchange", () => {
+                        events.push(`child:${childField.selectionStart}/${childField.selectionEnd}/${childField.selectionDirection}`);
+                    });
+
+                    field.setSelectionRange(1, 4, "backward");
+                    // Repeating the same state must not enqueue a duplicate.
+                    field.setSelectionRange(1, 4, "backward");
+                    area.select();
+                    // A reversed range collapses to the supplied end offset,
+                    // while preserving the requested direction.
+                    area.setSelectionRange(4, 2, "forward");
+                    childField.value = "child";
+                    childField.setSelectionRange(1, 3, "forward");
+                    globalThis.__textControlSelectionState = { events, field, area, childField };
+                    return [events.length, field.selectionStart, field.selectionEnd,
+                        field.selectionDirection, area.selectionStart, area.selectionEnd,
+                        area.selectionDirection, childField.selectionStart,
+                        childField.selectionEnd, childField.selectionDirection].join("|");
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[__textControlSelectionState.events.length, __textControlSelectionState.field.selectionStart].join('|')"),
+            "0|1"
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "__textControlSelectionState.events.join('|')"),
+            "field:1/4/backward|document:INPUT|area:2/2/forward|document:TEXTAREA|child:1/3/forward"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[__textControlSelectionState.field.selectionStart, __textControlSelectionState.field.selectionEnd, __textControlSelectionState.field.selectionDirection, __textControlSelectionState.area.selectionStart, __textControlSelectionState.area.selectionEnd, __textControlSelectionState.area.selectionDirection, __textControlSelectionState.childField.selectionStart, __textControlSelectionState.childField.selectionEnd, __textControlSelectionState.childField.selectionDirection].join('|')",
+            ),
+            "1|4|backward|2|2|forward|1|3|forward"
+        );
+    }
+
+    #[test]
     fn iframe_navigation_drops_old_focus_and_selection_state() {
         let mut runtime = runtime_from_html(
             r#"<html><body><button id="top">top</button><iframe id="frame"></iframe></body></html>"#,
