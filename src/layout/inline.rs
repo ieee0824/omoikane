@@ -8,7 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
-    Font, FontFamilyKey, FontStyle, FontWeight, is_zero_advance_character, load_default_text_fonts,
+    Font, FontFamilyKey, FontStyle, FontWeight, ShapingDirection, is_zero_advance_character,
+    load_default_text_fonts,
 };
 use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
@@ -2405,12 +2406,16 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                     primary,
                     &context.system_fonts,
                 );
-                let char_count = text
-                    .chars()
-                    .filter(|ch| !is_zero_advance_character(*ch))
+                // Shaped paint inserts spacing between extended grapheme
+                // clusters, not between the scalars that form one cluster.
+                let cluster_count = text
+                    .graphemes(true)
+                    .filter(|cluster| {
+                        cluster.chars().any(|ch| !is_zero_advance_character(ch))
+                    })
                     .count();
-                let spacing = if char_count > 1 {
-                    metrics.letter_spacing * (char_count - 1) as f32
+                let spacing = if cluster_count > 1 {
+                    metrics.letter_spacing * (cluster_count - 1) as f32
                 } else {
                     0.0
                 };
@@ -2443,6 +2448,19 @@ fn measure_text_width_with_fallback(
     primary: Option<&Font>,
     fonts: &[Arc<Font>],
 ) -> f32 {
+    if let Some(font) = select_layout_run_font(primary, fonts, text) {
+        let direction = if text.chars().any(|ch| {
+            matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN)
+        }) {
+            ShapingDirection::RightToLeft
+        } else {
+            ShapingDirection::LeftToRight
+        };
+        if let Ok(glyphs) = font.shape_text(text, font_size, direction) {
+            return glyphs.iter().map(|glyph| glyph.x_advance.abs()).sum();
+        }
+    }
+
     let mut width = 0.0;
     let mut previous: Option<(char, *const Font)> = None;
 
@@ -2467,6 +2485,21 @@ fn measure_text_width_with_fallback(
     }
 
     width
+}
+
+fn select_layout_run_font<'a>(
+    primary: Option<&'a Font>,
+    fonts: &'a [Arc<Font>],
+    text: &str,
+) -> Option<&'a Font> {
+    let supports_run = |font: &Font| {
+        text.chars().all(|ch| {
+            ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch)
+        })
+    };
+    primary
+        .filter(|font| supports_run(font))
+        .or_else(|| fonts.iter().map(Arc::as_ref).find(|font| supports_run(font)))
 }
 
 fn select_layout_font<'a>(

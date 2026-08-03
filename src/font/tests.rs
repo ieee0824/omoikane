@@ -16,6 +16,32 @@ fn shaping_controls_have_zero_advance_policy() {
     assert!(!is_zero_advance_character('\u{1f600}'));
 }
 
+#[test]
+fn opentype_shaping_applies_arabic_context_and_ligatures() {
+    let Some(path) = find_test_font() else {
+        eprintln!("Skipping OpenType shaping test: no system font available");
+        return;
+    };
+    let font = Font::load_from_file(std::path::Path::new(&path)).unwrap();
+    if !"سلامب".chars().all(|ch| font.has_glyph(ch)) {
+        eprintln!("Skipping OpenType shaping test: test font has no Arabic glyphs");
+        return;
+    }
+
+    let isolated = font.shape_text("ب", 32.0, ShapingDirection::RightToLeft).unwrap();
+    let contextual = font.shape_text("بب", 32.0, ShapingDirection::RightToLeft).unwrap();
+    assert_eq!(isolated.len(), 1);
+    assert_eq!(contextual.len(), 2);
+    assert!(
+        contextual.iter().any(|glyph| glyph.glyph_id != isolated[0].glyph_id),
+        "Arabic joining must select contextual glyph forms"
+    );
+
+    let lam_alef = font.shape_text("لا", 32.0, ShapingDirection::RightToLeft).unwrap();
+    assert!(lam_alef.len() < 2, "lam-alef should shape into a ligature");
+    assert!(lam_alef.iter().all(|glyph| glyph.x_advance >= 0.0));
+}
+
 /// Try to find a system font for testing.
 /// Returns path if found, otherwise None.
 fn find_test_font() -> Option<String> {
