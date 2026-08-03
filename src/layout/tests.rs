@@ -5522,6 +5522,26 @@ fn letter_spacing_increases_text_width() {
     );
 }
 
+#[test]
+fn zero_width_shaping_controls_do_not_change_inline_advance() {
+    let mut metrics = FontMetrics::from_font_size(16.0);
+    metrics.letter_spacing = 2.0;
+
+    let base = super::measure_text_width("e", metrics);
+    let composed = super::measure_text_width("e\u{301}", metrics);
+    let paired = super::measure_text_width("e\u{301}f", metrics);
+    let unmarked = super::measure_text_width("ef", metrics);
+    let emoji = super::measure_text_width("\u{1f600}", metrics);
+    let emoji_with_selector = super::measure_text_width("\u{1f600}\u{fe0f}", metrics);
+
+    assert!((composed - base).abs() < 0.01, "combining mark added advance");
+    assert!((paired - unmarked).abs() < 0.01, "combining mark changed spacing");
+    assert!(
+        (emoji_with_selector - emoji).abs() < 0.01,
+        "variation selector added advance"
+    );
+}
+
 // ---- list-style layout tests ----
 
 fn build_ul_with_items(item_count: usize) -> (NodeHandle, NodeHandle, Vec<NodeHandle>) {

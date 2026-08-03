@@ -2,6 +2,20 @@
 
 use super::*;
 
+#[test]
+fn shaping_controls_have_zero_advance_policy() {
+    for ch in [
+        '\u{0301}', '\u{1ab0}', '\u{20dd}', '\u{fe0f}', '\u{200c}', '\u{200d}', '\u{e0100}',
+    ] {
+        assert!(
+            is_zero_advance_character(ch),
+            "{ch:?} should be zero-advance"
+        );
+    }
+    assert!(!is_zero_advance_character('A'));
+    assert!(!is_zero_advance_character('\u{1f600}'));
+}
+
 /// Try to find a system font for testing.
 /// Returns path if found, otherwise None.
 fn find_test_font() -> Option<String> {
