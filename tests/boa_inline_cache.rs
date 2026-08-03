@@ -63,3 +63,89 @@ fn warm_call_site_survives_prototype_reindex() {
          the wrong method after the prototype was reindexed (got {after:?})"
     );
 }
+
+#[test]
+fn shape_transitions_keep_own_prototype_and_accessor_semantics() {
+    let mut rt = JsRuntime::new().expect("runtime should build");
+    rt.eval(
+        r#"
+        (() => {
+          const prototype = { value: 4 };
+          const receiver = Object.create(prototype);
+          const read = () => receiver.value;
+          const write = value => { receiver.value = value; return receiver.value; };
+
+          const fromPrototype = read();
+          const ownValue = write(9);
+          delete receiver.value;
+          prototype.value = 12;
+          const afterPrototypeMutation = read();
+
+          const accessor = { _value: 2 };
+          Object.defineProperty(accessor, 'value', {
+            configurable: true,
+            get() { return this._value; },
+            set(value) { this._value = value; },
+          });
+          const accessorBefore = accessor.value;
+          accessor.value = 7;
+
+          globalThis.__shapeTransitionResult = {
+            values: [fromPrototype, ownValue, afterPrototypeMutation],
+            accessor: [accessorBefore, accessor.value],
+          };
+        })();
+        "#,
+    )
+    .expect("shape transition fixture should evaluate without throwing");
+
+    let result = rt
+        .eval("JSON.stringify(globalThis.__shapeTransitionResult)")
+        .expect("shape transition result should serialize")
+        .as_string()
+        .expect("shape transition result should be a string")
+        .to_std_string_escaped();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).expect("valid shape result JSON"),
+        serde_json::json!({
+            "values": [4, 9, 12],
+            "accessor": [2, 7]
+        })
+    );
+}
+
+#[test]
+fn shared_shape_branches_do_not_cross_contaminate_property_reads() {
+    let mut rt = JsRuntime::new().expect("runtime should build");
+    rt.eval(
+        r#"
+        (() => {
+          const left = { value: 1 };
+          const right = { value: 2 };
+          const read = object => object.value;
+          const warm = [read(left), read(right), read(left), read(right)];
+          left.extra = 3;
+          right.other = 4;
+          globalThis.__sharedShapeResult = [
+            warm,
+            read(left),
+            read(right),
+            left.extra,
+            right.other,
+          ];
+        })();
+        "#,
+    )
+    .expect("shape branch fixture should evaluate without throwing");
+
+    let result = rt
+        .eval("JSON.stringify(globalThis.__sharedShapeResult)")
+        .expect("shape branch result should serialize")
+        .as_string()
+        .expect("shape branch result should be a string")
+        .to_std_string_escaped();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).expect("valid shape branch JSON"),
+        serde_json::json!([[1, 2, 1, 2], 1, 2, 3, 4])
+    );
+}

@@ -29,6 +29,8 @@ jobs:
           sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core
       - name: Run all tests (including ignored)
         run: cargo test -- --include-ignored
+      - name: Run Gate 2 differential harness
+        run: cargo test --features jit-differential --test jit_differential
       - run: cargo build
       # Re-run the JS benchmark with output shown: libtest swallows stdout for
       # passing tests, so the per-shape table and the drift classification would
