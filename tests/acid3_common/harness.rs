@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use std::cell::Cell;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, OpenOptions, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +22,19 @@ use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
 
 const EVALS_PER_GC: usize = 512;
+
+fn acid3_debug_log(message: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(".artifacts")
+        .join("js-benchmark")
+        .join("acid3-debug.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{message}");
+    }
+}
 
 thread_local! {
     static EVALS_SINCE_GC: Cell<usize> = const { Cell::new(0) };
@@ -278,6 +291,7 @@ pub struct Acid3Run {
 /// Fetches, parses, scripts, and drives the Acid3 page, returning an honest
 /// snapshot of the current engine behaviour. Never panics on engine failure.
 pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
+    acid3_debug_log(&format!("start mode={mode:?}"));
     eprintln!("[acid3-debug] start mode={mode:?}");
     EVALS_SINCE_GC.with(|count| count.set(0));
     let acid3_url = format!("{}/acid3.html", base_url.trim_end_matches('/'));
@@ -291,11 +305,14 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
 
     // 2. Parse + build runtime.
     let document = TreeBuilder::parse(&html).document();
+    acid3_debug_log(&format!("mode={mode:?} before runtime create"));
     let base: Url = acid3_url.parse().expect("parse base url");
     let mut runtime = JsRuntime::with_document(document).expect("create runtime");
+    acid3_debug_log(&format!("mode={mode:?} after runtime create"));
 
     // 3. Execute all inline / external <script>s (fires DOMContentLoaded).
     let script_errors = runtime.execute_document_scripts(Some(&base));
+    acid3_debug_log(&format!("mode={mode:?} after scripts"));
 
     let update_typeof = eval_string(&mut runtime, "typeof update").unwrap_or_default();
 
@@ -423,10 +440,13 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
     // teardown. Finish the runtime first, then run a major collection so the
     // next independent runtime in the same process cannot observe stale state.
     eprintln!("[acid3-debug] mode={mode:?} before runtime drop");
+    acid3_debug_log(&format!("mode={mode:?} before runtime drop"));
     drop(runtime);
     eprintln!("[acid3-debug] mode={mode:?} after runtime drop");
+    acid3_debug_log(&format!("mode={mode:?} after runtime drop"));
     boa_gc::force_collect();
     eprintln!("[acid3-debug] mode={mode:?} after force_collect");
+    acid3_debug_log(&format!("mode={mode:?} after force_collect"));
     result
 }
 
