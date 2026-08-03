@@ -65,6 +65,25 @@ pub struct Font {
     inner: FontVec,
 }
 
+/// Returns whether a code point is a shaping control or combining mark that
+/// must not advance the inline cursor on its own.  `ab_glyph` exposes glyph
+/// metrics one scalar at a time, so these code points need an explicit zero
+/// advance policy until a full OpenType shaping pass is available.
+pub(crate) fn is_zero_advance_character(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x0300..=0x036f // Combining Diacritical Marks
+            | 0x1ab0..=0x1aff // Combining Diacritical Marks Extended
+            | 0x1dc0..=0x1dff // Combining Diacritical Marks Supplement
+            | 0x20d0..=0x20ff // Combining Diacritical Marks for Symbols
+            | 0xfe00..=0xfe0f // Variation Selectors
+            | 0xfe20..=0xfe2f // Combining Half Marks
+            | 0xe0100..=0xe01ef // Variation Selectors Supplement
+            | 0x200c // Zero Width Non-Joiner
+            | 0x200d // Zero Width Joiner
+    )
+}
+
 impl Font {
     /// Load a font from a file path.
     pub fn load_from_file(path: &Path) -> Result<Self, FontError> {

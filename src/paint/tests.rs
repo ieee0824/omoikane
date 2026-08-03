@@ -204,6 +204,18 @@ fn cjk_preference_covers_japanese_and_fullwidth_blocks() {
 }
 
 #[test]
+fn shaping_controls_have_no_paint_advance() {
+    let fonts = load_text_fonts();
+    if fonts.is_empty() {
+        return;
+    }
+    for ch in ['\u{0301}', '\u{fe0f}', '\u{200c}', '\u{200d}', '\u{e0100}'] {
+        let (_, _, advance) = rasterize_with_fallback(&fonts, ch, 20.0);
+        assert_eq!(advance, 0.0, "{ch:?} must not move the paint cursor");
+    }
+}
+
+#[test]
 fn fills_rectangles_on_canvas() {
     let mut canvas = Canvas::new(4, 4);
     canvas.fill_rect(

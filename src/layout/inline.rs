@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, load_default_text_fonts};
+use crate::font::{
+    Font, FontFamilyKey, FontStyle, FontWeight, is_zero_advance_character, load_default_text_fonts,
+};
 use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
@@ -2333,7 +2335,10 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                     primary,
                     &context.system_fonts,
                 );
-                let char_count = text.chars().count();
+                let char_count = text
+                    .chars()
+                    .filter(|ch| !is_zero_advance_character(*ch))
+                    .count();
                 let spacing = if char_count > 1 {
                     metrics.letter_spacing * (char_count - 1) as f32
                 } else {
@@ -2344,7 +2349,10 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
         }
 
         // Fallback to approximation when no font is available
-        let char_count = text.chars().count();
+        let char_count = text
+            .chars()
+            .filter(|ch| !is_zero_advance_character(*ch))
+            .count();
         let base = char_count as f32 * metrics.average_advance;
         let spacing = if char_count > 1 {
             metrics.letter_spacing * (char_count - 1) as f32
@@ -2374,15 +2382,18 @@ fn measure_text_width_with_fallback(
         };
         let font_id = std::ptr::from_ref(font);
 
-        if let Some((prev_char, prev_font)) = previous
+        if !is_zero_advance_character(ch)
+            && let Some((prev_char, prev_font)) = previous
             && prev_font == font_id
         {
             width += font.glyph_kerning(prev_char, ch, font_size);
         }
 
-        let advance = font.glyph_advance(ch, font_size);
-        width += if advance > 0.0 { advance } else { 0.0 };
-        previous = Some((ch, font_id));
+        if !is_zero_advance_character(ch) {
+            let advance = font.glyph_advance(ch, font_size);
+            width += if advance > 0.0 { advance } else { 0.0 };
+            previous = Some((ch, font_id));
+        }
     }
 
     width
