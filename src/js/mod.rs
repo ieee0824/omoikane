@@ -30,24 +30,24 @@ use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
 use crate::accessibility::{AccessibilityRenderState, AccessibilitySnapshotState};
 use crate::css::{
-    AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
-    parse_scope_prelude, parse_selector_list,
+    AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver,
+    matches_selector, parse_scope_prelude, parse_selector_list,
 };
 use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disabled};
-use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::http::cors::{
-    CredentialsMode, Origin as CorsOrigin, PreflightCache, RedirectMode, RequestMode,
-    ResponseType, exposed_response_headers,
+    CredentialsMode, Origin as CorsOrigin, PreflightCache, RedirectMode, RequestMode, ResponseType,
+    exposed_response_headers,
 };
+use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
-mod storage;
-mod event_loop;
 mod csp;
-pub use storage::StorageManager;
-use storage::StorageOrigin;
+mod event_loop;
+mod storage;
 use csp::{CspPolicy, CspViolation, ResourceType};
 use event_loop::{EventLoop, Task};
+pub use storage::StorageManager;
+use storage::StorageOrigin;
 
 /// Most page-script task errors retained per drain. See
 /// [`JsRuntime::record_task_error`].
@@ -187,11 +187,9 @@ fn wall_clock_timeout_error() -> JsError {
 }
 
 fn is_wall_clock_timeout(error: &JsError) -> bool {
-    error
-        .as_native()
-        .is_some_and(|error| {
-            error.is_runtime_limit() && error.message() == WALL_CLOCK_TIMEOUT_MESSAGE
-        })
+    error.as_native().is_some_and(|error| {
+        error.is_runtime_limit() && error.message() == WALL_CLOCK_TIMEOUT_MESSAGE
+    })
 }
 
 /// Wraps a Boa async evaluation with a cooperative wall-clock deadline.
@@ -505,11 +503,7 @@ impl HttpModuleLoader {
         if !keys.insert((document_id, blocked_uri.clone())) {
             return;
         }
-        violations.push((
-            document_id,
-            "script-src".to_string(),
-            blocked_uri,
-        ));
+        violations.push((document_id, "script-src".to_string(), blocked_uri));
     }
 
     fn take_csp_violations(&self) -> Vec<(usize, String, String)> {
@@ -559,7 +553,10 @@ enum TimerPayload {
 /// browsing-history ownership outside the ECMAScript embedding layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavigationRequest {
-    Navigate { url: String, replace: bool },
+    Navigate {
+        url: String,
+        replace: bool,
+    },
     /// A form submission whose encoded payload must be fetched as a document.
     FormSubmit {
         url: String,
@@ -573,7 +570,9 @@ pub enum NavigationRequest {
         state_json: String,
     },
     Reload,
-    Traverse { delta: i32 },
+    Traverse {
+        delta: i32,
+    },
 }
 
 /// Kind of blocking Window modal dialog requested by page script.
@@ -628,7 +627,10 @@ impl std::fmt::Display for JavaScriptDialogError {
         match self {
             Self::NoPendingDialog => write!(f, "no JavaScript dialog is pending"),
             Self::StaleDialog { expected, actual } => {
-                write!(f, "stale JavaScript dialog id {actual}; expected {expected}")
+                write!(
+                    f,
+                    "stale JavaScript dialog id {actual}; expected {expected}"
+                )
             }
             Self::EvaluationCancelled => write!(f, "JavaScript dialog evaluation was cancelled"),
         }
@@ -1183,7 +1185,9 @@ fn geolocation_json_number(value: f64) -> String {
 }
 
 fn geolocation_json_optional(value: Option<f64>) -> String {
-    value.map(geolocation_json_number).unwrap_or_else(|| "null".to_string())
+    value
+        .map(geolocation_json_number)
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn geolocation_position_json(position: &GeolocationPositionData) -> String {
@@ -1566,7 +1570,8 @@ impl HostState {
 
     fn set_main_base_url(&mut self, url: crate::http::Url) {
         self.base_url = Some(url.clone());
-        self.document_base_urls.insert(self.document.identity(), url);
+        self.document_base_urls
+            .insert(self.document.identity(), url);
     }
 
     /// Queue loads for iframe and data-bearing object descendants when a
@@ -1839,11 +1844,13 @@ impl HostState {
         );
         let document_url = child_url
             .clone()
-            .or_else(|| match resolve_resource_ref(&resource, self.base_url.as_ref()) {
-                Some(ResolvedResource::Url(url)) => Some(url.to_string()),
-                Some(ResolvedResource::Data { .. }) => Some(resource.clone()),
-                None => None,
-            })
+            .or_else(
+                || match resolve_resource_ref(&resource, self.base_url.as_ref()) {
+                    Some(ResolvedResource::Url(url)) => Some(url.to_string()),
+                    Some(ResolvedResource::Data { .. }) => Some(resource.clone()),
+                    None => None,
+                },
+            )
             .or_else(|| self.base_url.as_ref().map(ToString::to_string))
             .unwrap_or_else(|| "about:blank".to_string());
         self.iframe_documents.insert(
@@ -2410,7 +2417,12 @@ impl HostState {
             for (scope, css) in adopted_stylesheets {
                 let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
                 if let Some((scope_root, order)) = scope {
-                    resolver.add_scoped_stylesheet_in_order(Origin::Author, sheet, scope_root, order);
+                    resolver.add_scoped_stylesheet_in_order(
+                        Origin::Author,
+                        sheet,
+                        scope_root,
+                        order,
+                    );
                 } else {
                     resolver.add_stylesheet(Origin::Author, sheet);
                 }
@@ -2815,7 +2827,9 @@ impl JsRuntime {
         Self::with_document_sandbox_and_url(document, sandbox, "http://localhost/")
     }
 
-    pub(crate) fn sandbox_timeout(&self) -> Duration { self.sandbox.timeout }
+    pub(crate) fn sandbox_timeout(&self) -> Duration {
+        self.sandbox.timeout
+    }
 
     fn with_document_sandbox_and_url(
         document: NodeHandle,
@@ -2853,9 +2867,8 @@ impl JsRuntime {
             .host_hooks(Rc::new(BrowserHostHooks))
             .build()?;
 
-        let host_roots_provider = unsafe {
-            RootProvider::register(std::ptr::NonNull::from(&*host_state.borrow()))
-        };
+        let host_roots_provider =
+            unsafe { RootProvider::register(std::ptr::NonNull::from(&*host_state.borrow())) };
 
         let mut runtime = Self {
             _host_roots_provider: host_roots_provider,
@@ -2896,11 +2909,7 @@ impl JsRuntime {
     /// JavaScript global.  Same-origin frames receive a controlled reference
     /// to the top-level global for legacy `parent`/`top` access; opaque or
     /// sandboxed frames receive a null-prototype object instead.
-    fn ensure_iframe_realm(
-        &mut self,
-        iframe_id: usize,
-        document_id: usize,
-    ) -> JsResult<Realm> {
+    fn ensure_iframe_realm(&mut self, iframe_id: usize, document_id: usize) -> JsResult<Realm> {
         if let Some(realm) = self
             .host_state
             .borrow()
@@ -2927,12 +2936,13 @@ impl JsRuntime {
                 .copied()
                 .unwrap_or_default();
             let child_origin = state.document_origins.get(&document_id).cloned().flatten();
-            let owner_document = owner_document_for_node(
-                &state
-                    .get_node(iframe_id)
-                    .ok_or_else(|| JsNativeError::reference().with_message("iframe is detached"))?,
-            )
-            .ok_or_else(|| JsNativeError::reference().with_message("iframe owner is detached"))?;
+            let owner_document =
+                owner_document_for_node(&state.get_node(iframe_id).ok_or_else(|| {
+                    JsNativeError::reference().with_message("iframe is detached")
+                })?)
+                .ok_or_else(|| {
+                    JsNativeError::reference().with_message("iframe owner is detached")
+                })?;
             let owner_origin = state
                 .document_origins
                 .get(&owner_document.identity())
@@ -2946,7 +2956,11 @@ impl JsRuntime {
             let same_origin = (!sandbox.active || sandbox.allow_same_origin)
                 && child_origin.is_some()
                 && child_origin == owner_origin;
-            (entry.document_url.clone(), same_origin, owner_document.identity())
+            (
+                entry.document_url.clone(),
+                same_origin,
+                owner_document.identity(),
+            )
         };
 
         let top_global: JsValue = self.context.global_object().into();
@@ -3022,7 +3036,12 @@ impl JsRuntime {
                 parent.clone()
             };
             let global = self.context.global_object();
-            global.set(js_string!("parent"), parent.clone(), true, &mut self.context)?;
+            global.set(
+                js_string!("parent"),
+                parent.clone(),
+                true,
+                &mut self.context,
+            )?;
             global.set(js_string!("top"), top, true, &mut self.context)?;
             Ok::<(), JsError>(())
         })();
@@ -3037,7 +3056,9 @@ impl JsRuntime {
             .iframe_documents
             .get_mut(&iframe_id)
             .filter(|entry| entry.document.identity() == document_id)
-            .ok_or_else(|| JsNativeError::reference().with_message("iframe document was replaced"))?;
+            .ok_or_else(|| {
+                JsNativeError::reference().with_message("iframe document was replaced")
+            })?;
         entry.realm = Some(realm.clone());
         Ok(realm)
     }
@@ -3070,10 +3091,14 @@ impl JsRuntime {
     /// created it. Navigation removes the `IframeDocument` entry, making any
     /// queued callback from the previous generation inert.
     fn iframe_realm_is_live(&self, document_id: usize, realm: &Realm) -> bool {
-        self.host_state.borrow().iframe_documents.values().any(|entry| {
-            entry.document.identity() == document_id
-                && entry.realm.as_ref().is_some_and(|active| active == realm)
-        })
+        self.host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .any(|entry| {
+                entry.document.identity() == document_id
+                    && entry.realm.as_ref().is_some_and(|active| active == realm)
+            })
     }
 
     /// Returns the live child Realm for `document_id`, creating it when a
@@ -3167,7 +3192,13 @@ impl JsRuntime {
     ) {
         let realm = match self.realm_for_document(document_id) {
             Ok(realm) => realm,
-            Err(error) => return (Err(error.to_string()), std::time::Duration::ZERO, std::time::Duration::ZERO),
+            Err(error) => {
+                return (
+                    Err(error.to_string()),
+                    std::time::Duration::ZERO,
+                    std::time::Duration::ZERO,
+                );
+            }
         };
         if document_id != self.document().identity() && realm.is_none() {
             return (
@@ -3226,11 +3257,7 @@ impl JsRuntime {
     fn accessibility_node_identity(value: f64) -> Option<usize> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         let maximum = MAX_SAFE_INTEGER.min(usize::MAX as f64);
-        if value.is_finite()
-            && value >= 0.0
-            && value.fract() == 0.0
-            && value <= maximum
-        {
+        if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= maximum {
             Some(value as usize)
         } else {
             None
@@ -3384,8 +3411,7 @@ impl JsRuntime {
             if matches!(
                 resolver.computed_property(&element, "display"),
                 Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
-            )
-            {
+            ) {
                 return AccessibilityRenderState::NotRendered;
             }
             current = element.assigned_slot().or_else(|| {
@@ -3440,18 +3466,22 @@ impl JsRuntime {
         }
         terminate_shared_worker_connections(&self.host_state);
         terminate_worklet_runtime(&self.host_state);
-        self.host_state
-            .borrow_mut()
-            .worker_owner_objects
-            .clear();
+        self.host_state.borrow_mut().worker_owner_objects.clear();
     }
 
     fn advance_worker_clocks(&mut self, elapsed_ms: u64) {
         let workers: Vec<_> = self.host_state.borrow().workers.values().cloned().collect();
         for entry in workers {
             let worker = entry.borrow_mut();
-            if worker.terminated || worker.runtime.host_state.borrow().worker_terminated { continue; }
-            worker.runtime.host_state.borrow_mut().event_loop.advance(elapsed_ms);
+            if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
+                continue;
+            }
+            worker
+                .runtime
+                .host_state
+                .borrow_mut()
+                .event_loop
+                .advance(elapsed_ms);
         }
     }
 
@@ -3471,13 +3501,7 @@ impl JsRuntime {
     }
 
     fn run_worker_background_tasks(&mut self) {
-        let worker_ids: Vec<_> = self
-            .host_state
-            .borrow()
-            .workers
-            .keys()
-            .copied()
-            .collect();
+        let worker_ids: Vec<_> = self.host_state.borrow().workers.keys().copied().collect();
         for worker_id in worker_ids {
             let Some(entry) = self.host_state.borrow_mut().workers.remove(&worker_id) else {
                 continue;
@@ -3520,16 +3544,20 @@ impl JsRuntime {
             // records callback failures in the worker runtime, while a rejected
             // microtask can be returned directly by `run_until_idle`.
             if let Err(error) = result {
-                owner_state
-                    .borrow_mut()
-                    .event_loop
-                    .enqueue_worker_error(worker_id, None, owner_realm.clone(), error.to_string());
+                owner_state.borrow_mut().event_loop.enqueue_worker_error(
+                    worker_id,
+                    None,
+                    owner_realm.clone(),
+                    error.to_string(),
+                );
             }
             for error in errors {
-                owner_state
-                    .borrow_mut()
-                    .event_loop
-                    .enqueue_worker_error(worker_id, None, owner_realm.clone(), error);
+                owner_state.borrow_mut().event_loop.enqueue_worker_error(
+                    worker_id,
+                    None,
+                    owner_realm.clone(),
+                    error,
+                );
             }
         }
     }
@@ -3600,7 +3628,8 @@ impl JsRuntime {
             let _ = runtime.run_until_idle();
             let _ = runtime.take_task_errors();
         }
-        SHARED_WORKER_REGISTRY.with(|registry| prune_shared_worker_registry(&mut registry.borrow_mut()));
+        SHARED_WORKER_REGISTRY
+            .with(|registry| prune_shared_worker_registry(&mut registry.borrow_mut()));
     }
 
     /// Returns the top-level Window scroll offset in CSS pixels.
@@ -3638,7 +3667,8 @@ impl JsRuntime {
         let document_id = state.document.identity();
         let state = &mut *state;
         let layout = &state.adjusted_layout_cache.as_ref()?.root;
-        let resolver = state.document_styles
+        let resolver = state
+            .document_styles
             .get_mut(&document_id)
             .and_then(|entry| entry.resolver.as_mut())?;
         crate::paint::hit_test_layout(layout, resolver, viewport, x, y)
@@ -3797,9 +3827,7 @@ impl JsRuntime {
         let result = self.with_active_host_value(|context| {
             let function = context.eval(Source::from_bytes(function_source))?;
             let callable = function.as_callable().ok_or_else(|| {
-                JsError::from(
-                    JsNativeError::typ().with_message("CDP serializer is not callable"),
-                )
+                JsError::from(JsNativeError::typ().with_message("CDP serializer is not callable"))
             })?;
             callable.call(&JsValue::undefined(), &[value], context)
         });
@@ -3840,6 +3868,7 @@ impl JsRuntime {
 
     /// Returns runtime-wide baseline-JIT counters for performance-gate tooling.
     #[cfg(feature = "baseline-jit")]
+    #[doc(hidden)]
     pub fn baseline_jit_diagnostics(&self) -> boa_engine::jit::ArithmeticJitDiagnostics {
         self.context.arithmetic_jit_diagnostics()
     }
@@ -3898,8 +3927,8 @@ impl JsRuntime {
     }
 
     fn run_jobs_for_document(&mut self, document_id: Option<usize>) -> JsResult<()> {
-        let _document = document_id
-            .map(|document_id| activate_module_document(&self.host_state, document_id));
+        let _document =
+            document_id.map(|document_id| activate_module_document(&self.host_state, document_id));
         self.run_jobs()
     }
 
@@ -3911,11 +3940,8 @@ impl JsRuntime {
         document: NodeHandle,
     ) -> JsResult<JsValue> {
         let policy = self.host_state.borrow().csp_policy_for_document(&document);
-        self.module_loader.set_csp_policy_for_module_graph(
-            document.identity(),
-            url,
-            policy,
-        );
+        self.module_loader
+            .set_csp_policy_for_module_graph(document.identity(), url, policy);
         let source = source.to_owned();
         let url = url.to_owned();
         let document_id = document.identity();
@@ -3950,9 +3976,7 @@ impl JsRuntime {
         base_url: Option<crate::http::Url>,
     ) -> OwnedPageTask {
         if let Some(base) = &base_url {
-            self.host_state
-                .borrow_mut()
-                .set_main_base_url(base.clone());
+            self.host_state.borrow_mut().set_main_base_url(base.clone());
         }
         let _ = self.eval("__omoikane_install_window_named_properties()");
         let _ = self.eval("document.__readyState = 'loading'");
@@ -4093,10 +4117,8 @@ impl JsRuntime {
             let mut errors = Vec::new();
             for source in sources {
                 if task_cancelled.get() {
-                    return self.complete_page_task_with_error(
-                        generation,
-                        PageTaskError::Cancelled,
-                    );
+                    return self
+                        .complete_page_task_with_error(generation, PageTaskError::Cancelled);
                 }
                 let (source, label, script_node_id, module_url) = match source {
                     PageTaskSource::Classic {
@@ -4140,17 +4162,13 @@ impl JsRuntime {
                     self.host_state.borrow_mut().write_insertion_ref = None;
                 }
                 let Some(evaluation_result) = evaluation_result else {
-                    return self.complete_page_task_with_error(
-                        generation,
-                        PageTaskError::Cancelled,
-                    );
+                    return self
+                        .complete_page_task_with_error(generation, PageTaskError::Cancelled);
                 };
                 if let Err(error) = evaluation_result {
                     if is_wall_clock_timeout(&error) {
-                        return self.complete_page_task_with_error(
-                            generation,
-                            PageTaskError::TimedOut,
-                        );
+                        return self
+                            .complete_page_task_with_error(generation, PageTaskError::TimedOut);
                     }
                     errors.push(format!("[script: {label}] {error}"));
                 }
@@ -4164,24 +4182,21 @@ impl JsRuntime {
                     self.run_until_idle_async().await?;
                     self.run_animation_frame_async(0).await.map(|_| ())
                 });
-                std::future::poll_fn(|context| if task_cancelled.get() {
-                    Poll::Ready(None)
-                } else {
-                    page_work.as_mut().poll(context).map(Some)
-                }).await
+                std::future::poll_fn(|context| {
+                    if task_cancelled.get() {
+                        Poll::Ready(None)
+                    } else {
+                        page_work.as_mut().poll(context).map(Some)
+                    }
+                })
+                .await
             };
             let Some(page_work_result) = page_work_result else {
-                return self.complete_page_task_with_error(
-                    generation,
-                    PageTaskError::Cancelled,
-                );
+                return self.complete_page_task_with_error(generation, PageTaskError::Cancelled);
             };
             if let Err(error) = page_work_result {
                 if is_wall_clock_timeout(&error) {
-                    return self.complete_page_task_with_error(
-                        generation,
-                        PageTaskError::TimedOut,
-                    );
+                    return self.complete_page_task_with_error(generation, PageTaskError::TimedOut);
                 }
                 errors.push(format!("[page callbacks] {error}"));
             }
@@ -4271,11 +4286,8 @@ impl JsRuntime {
         std::time::Duration,
     ) {
         let policy = self.host_state.borrow().csp_policy_for_document(&document);
-        self.module_loader.set_csp_policy_for_module_graph(
-            document.identity(),
-            url,
-            policy,
-        );
+        self.module_loader
+            .set_csp_policy_for_module_graph(document.identity(), url, policy);
         let parse_start = std::time::Instant::now();
         let module = match Module::parse(
             Source::from_reader(source.as_bytes(), Some(Path::new(url))),
@@ -4293,8 +4305,7 @@ impl JsRuntime {
         };
         let parse_elapsed = parse_start.elapsed();
         let execute_start = std::time::Instant::now();
-        let _module_document =
-            activate_module_document(&self.host_state, document.identity());
+        let _module_document = activate_module_document(&self.host_state, document.identity());
         let promise = self.with_active_host_value(|context| module.load_link_evaluate(context));
         let result =
             self.run_jobs()
@@ -4346,8 +4357,12 @@ impl JsRuntime {
     /// best-effort: a runtime may be in the middle of teardown, in which case
     /// there are no page objects left to notify.
     fn notify_permission_change(&mut self, name: &str, state: &str) {
-        let Ok(name) = serde_json::to_string(name) else { return };
-        let Ok(state) = serde_json::to_string(state) else { return };
+        let Ok(name) = serde_json::to_string(name) else {
+            return;
+        };
+        let Ok(state) = serde_json::to_string(state) else {
+            return;
+        };
         let source = format!(
             "if (typeof globalThis.__omoikane_permission_changed === 'function') {{ globalThis.__omoikane_permission_changed({name}, {state}); }}"
         );
@@ -4372,7 +4387,11 @@ impl JsRuntime {
             }
         };
         if changed {
-            let mapped = if permission == "default" { "prompt" } else { permission };
+            let mapped = if permission == "default" {
+                "prompt"
+            } else {
+                permission
+            };
             self.notify_permission_change("notifications", mapped);
         }
         Ok(())
@@ -4418,7 +4437,8 @@ impl JsRuntime {
             return;
         }
         if !position.timestamp_ms.is_finite() || position.timestamp_ms < 0.0 {
-            position.timestamp_ms = state.performance_time_origin + state.event_loop.now_ms() as f64;
+            position.timestamp_ms =
+                state.performance_time_origin + state.event_loop.now_ms() as f64;
         }
         state.geolocation_position = Some(position);
         let request_ids: Vec<_> = state
@@ -4509,8 +4529,7 @@ impl JsRuntime {
             };
             let task_document_id = match &task {
                 Task::Timer {
-                    owner_document_id,
-                    ..
+                    owner_document_id, ..
                 } => *owner_document_id,
                 _ => None,
             };
@@ -4548,8 +4567,7 @@ impl JsRuntime {
             let Some((_, task)) = task else { break };
             let task_document_id = match &task {
                 Task::Timer {
-                    owner_document_id,
-                    ..
+                    owner_document_id, ..
                 } => *owner_document_id,
                 _ => None,
             };
@@ -4558,9 +4576,7 @@ impl JsRuntime {
                     payload: TimerPayload::Source(source),
                     owner_document_id: Some(document_id),
                 } => {
-                    let result = self
-                        .eval_async_for_document(&source, document_id)
-                        .await;
+                    let result = self.eval_async_for_document(&source, document_id).await;
                     if let Err(error) = result {
                         if is_wall_clock_timeout(&error) {
                             return Err(error);
@@ -4588,11 +4604,7 @@ impl JsRuntime {
                         let this = JsValue::undefined();
                         let host_state = Rc::clone(&self.host_state);
                         let future = ActiveHostFuture {
-                            future: Box::pin(callable.call_async(
-                                &this,
-                                &args,
-                                &mut self.context,
-                            )),
+                            future: Box::pin(callable.call_async(&this, &args, &mut self.context)),
                             host_state: Rc::clone(&host_state),
                         };
                         let result = if let Some(document_id) = owner_document_id {
@@ -4616,9 +4628,7 @@ impl JsRuntime {
                 Task::Timer {
                     payload: TimerPayload::ResourceLoad { node_id },
                     ..
-                }
-                    if self.is_dynamic_script_resource(node_id) =>
-                {
+                } if self.is_dynamic_script_resource(node_id) => {
                     self.run_dynamic_script_resource_async(node_id).await?;
                 }
                 Task::PostedMessage { port, data } => {
@@ -4660,11 +4670,7 @@ impl JsRuntime {
             })
     }
 
-    async fn run_posted_message_async(
-        &mut self,
-        port: JsValue,
-        data: JsValue,
-    ) -> JsResult<()> {
+    async fn run_posted_message_async(&mut self, port: JsValue, data: JsValue) -> JsResult<()> {
         if let Err(error) = self.install_posted_message_values(port, data) {
             let cleanup_result = self.clear_posted_message_values();
             self.record_error_from("posted message cleanup", cleanup_result);
@@ -4742,7 +4748,8 @@ impl JsRuntime {
             // the task was queued.  Closing drops queued messages silently.
             return Ok(());
         };
-        if let Err(error) = self.install_broadcast_channel_values(channel, channel_id, data, origin) {
+        if let Err(error) = self.install_broadcast_channel_values(channel, channel_id, data, origin)
+        {
             self.record_task_error(format!("[broadcast channel setup] {error}"));
             let cleanup_result = self.clear_broadcast_channel_values();
             self.record_error_from("broadcast channel cleanup", cleanup_result);
@@ -4899,12 +4906,9 @@ impl JsRuntime {
         let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
         let Some((effective_url, source)) = fetched else {
             self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
-            let dispatch = dispatch_resource_timing_script(
-                "error", node_id, &timing_name, false, elapsed_ms,
-            );
-            let result = self
-                .eval_async_for_document(&dispatch, document_id)
-                .await;
+            let dispatch =
+                dispatch_resource_timing_script("error", node_id, &timing_name, false, elapsed_ms);
+            let result = self.eval_async_for_document(&dispatch, document_id).await;
             if let Err(error) = result {
                 if is_wall_clock_timeout(&error) {
                     return Err(error);
@@ -4926,11 +4930,13 @@ impl JsRuntime {
                 effective_url.clone(),
             );
             let dispatch = dispatch_resource_timing_script(
-                "error", node_id, &effective_url, redirected, elapsed_ms,
+                "error",
+                node_id,
+                &effective_url,
+                redirected,
+                elapsed_ms,
             );
-            let result = self
-                .eval_async_for_document(&dispatch, document_id)
-                .await;
+            let result = self.eval_async_for_document(&dispatch, document_id).await;
             if let Err(error) = result {
                 if is_wall_clock_timeout(&error) {
                     return Err(error);
@@ -4954,8 +4960,8 @@ impl JsRuntime {
         }
         let result = match kind {
             ScriptKind::Module => {
-                let module_document = document_root_for_node(&script_node)
-                    .unwrap_or_else(|| self.document());
+                let module_document =
+                    document_root_for_node(&script_node).unwrap_or_else(|| self.document());
                 self.eval_module_async(
                     &source,
                     &module_script_url(&src, base_url.as_ref(), false),
@@ -4976,7 +4982,11 @@ impl JsRuntime {
         let dispatched = self
             .eval_async_for_document(
                 &dispatch_resource_timing_script(
-                    "load", node_id, &effective_url, redirected, elapsed_ms,
+                    "load",
+                    node_id,
+                    &effective_url,
+                    redirected,
+                    elapsed_ms,
                 ),
                 document_id,
             )
@@ -5042,14 +5052,18 @@ impl JsRuntime {
     }
 
     fn has_pending_css_transition_work(&self) -> bool {
-        self.host_state.borrow().document_styles.values().any(|entry| {
-            entry.dirty
-                || entry.needs_full_sample
-                || entry
-                    .resolver
-                    .as_ref()
-                    .is_some_and(StyleResolver::has_running_transitions)
-        })
+        self.host_state
+            .borrow()
+            .document_styles
+            .values()
+            .any(|entry| {
+                entry.dirty
+                    || entry.needs_full_sample
+                    || entry
+                        .resolver
+                        .as_ref()
+                        .is_some_and(StyleResolver::has_running_transitions)
+            })
     }
 
     /// Runs one rendering opportunity and invokes its animation-frame callbacks.
@@ -5112,11 +5126,7 @@ impl JsRuntime {
                             .with_message("animation frame callback is not callable"),
                     )
                 })?;
-                callable.call(
-                    &JsValue::undefined(),
-                    &[JsValue::from(timestamp)],
-                    context,
-                )?;
+                callable.call(&JsValue::undefined(), &[JsValue::from(timestamp)], context)?;
                 Ok(())
             });
             if let Some(old_realm) = old_realm {
@@ -5171,12 +5181,20 @@ impl JsRuntime {
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
         }
-        let (timestamp, callback_ids) = self.host_state.borrow_mut().event_loop.begin_animation_frame();
+        let (timestamp, callback_ids) = self
+            .host_state
+            .borrow_mut()
+            .event_loop
+            .begin_animation_frame();
         let mut callbacks_run = 0;
         let mut first_error = None;
         let mut first_jobs_error = None;
         for id in callback_ids {
-            let callback = self.host_state.borrow_mut().event_loop.take_animation_frame_callback(id);
+            let callback = self
+                .host_state
+                .borrow_mut()
+                .event_loop
+                .take_animation_frame_callback(id);
             let Some(callback) = callback else { continue };
             let event_loop::AnimationFrameCallback {
                 callback,
@@ -5194,11 +5212,7 @@ impl JsRuntime {
                 let this = JsValue::undefined();
                 let host_state = Rc::clone(&self.host_state);
                 let future = ActiveHostFuture {
-                    future: Box::pin(callable.call_async(
-                        &this,
-                        &args,
-                        &mut self.context,
-                    )),
+                    future: Box::pin(callable.call_async(&this, &args, &mut self.context)),
                     host_state: Rc::clone(&host_state),
                 };
                 if let Some(document_id) = document_id {
@@ -5216,13 +5230,19 @@ impl JsRuntime {
                         .map(|_| ())
                 }
             } else {
-                Err(JsNativeError::typ().with_message("animation frame callback is not callable").into())
+                Err(JsNativeError::typ()
+                    .with_message("animation frame callback is not callable")
+                    .into())
             };
             if let Some(old_realm) = old_realm {
                 self.context.enter_realm(old_realm);
             }
             callbacks_run += 1;
-            if let Err(error) = result && first_error.is_none() { first_error = Some(error); }
+            if let Err(error) = result
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
             if document_id.is_some()
                 && let Err(error) = self.run_jobs_for_document(document_id)
                 && first_jobs_error.is_none()
@@ -5231,8 +5251,12 @@ impl JsRuntime {
             }
         }
         let jobs_result = self.run_jobs();
-        if let Some(error) = first_error { return Err(error); }
-        if let Some(error) = first_jobs_error { return Err(error); }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        if let Some(error) = first_jobs_error {
+            return Err(error);
+        }
         jobs_result?;
         self.update_css_transitions()?;
         self.run_until_idle_async().await?;
@@ -5273,8 +5297,7 @@ impl JsRuntime {
 
     fn has_pending_scroll_steps(&self) -> bool {
         let state = self.host_state.borrow();
-        !state.pending_scroll_targets.is_empty()
-            || !state.scroll_offsets_before_layout.is_empty()
+        !state.pending_scroll_targets.is_empty() || !state.scroll_offsets_before_layout.is_empty()
     }
 
     /// Drives a bounded number of rendering opportunities until no callback is pending.
@@ -5282,11 +5305,7 @@ impl JsRuntime {
     /// Callback errors are logged when script diagnostics are enabled and do
     /// not prevent later frames from settling, matching the render pipeline's
     /// best-effort timer pump.
-    pub fn run_animation_frames(
-        &mut self,
-        max_frames: usize,
-        frame_interval_ms: u64,
-    ) -> usize {
+    pub fn run_animation_frames(&mut self, max_frames: usize, frame_interval_ms: u64) -> usize {
         let mut callbacks_run = 0;
         for _ in 0..max_frames {
             if !self.has_pending_animation_frames() && !self.has_pending_scroll_steps() {
@@ -5350,8 +5369,7 @@ impl JsRuntime {
                 let is_timer = matches!(task, Task::Timer { .. });
                 let task_document_id = match &task {
                     Task::Timer {
-                        owner_document_id,
-                        ..
+                        owner_document_id, ..
                     } => *owner_document_id,
                     _ => None,
                 };
@@ -5436,7 +5454,10 @@ impl JsRuntime {
             }
             Task::Geolocation { request_id } => self.run_geolocation_delivery(request_id, false),
             Task::Navigation(request) => {
-                self.host_state.borrow_mut().navigation_requests.push_back(request);
+                self.host_state
+                    .borrow_mut()
+                    .navigation_requests
+                    .push_back(request);
                 Ok(())
             }
             Task::PostedMessage { port, data } => {
@@ -5447,7 +5468,7 @@ impl JsRuntime {
                     return Ok(());
                 }
                 let result = self.eval(
-                "if (!__omoikane_posted_message_port._closed) { \
+                    "if (!__omoikane_posted_message_port._closed) { \
                  if (typeof __omoikane_posted_message_port._acceptMessage === 'function') { \
                    __omoikane_posted_message_port._acceptMessage(__omoikane_posted_message_data); \
                  } else { \
@@ -5467,28 +5488,23 @@ impl JsRuntime {
                 data,
                 origin,
             } => self.run_broadcast_channel_message(channel_id, data, origin),
-            Task::WorkerMessage { worker_id, data } => {
-                self.run_worker_message(worker_id, data)
-            }
+            Task::WorkerMessage { worker_id, data } => self.run_worker_message(worker_id, data),
             Task::WorkerOwnerMessage {
                 worker_id,
                 owner,
                 realm,
                 data,
-            } => {
-                self.run_worker_owner_message(worker_id, owner, realm, data)
-            }
+            } => self.run_worker_owner_message(worker_id, owner, realm, data),
             Task::WorkerError {
                 worker_id,
                 owner,
                 realm,
                 message,
-            } => {
-                self.run_worker_error(worker_id, owner, realm, message)
-            }
-            Task::SharedWorkerMessage { connection_id, data } => {
-                self.run_shared_worker_message(connection_id, data)
-            }
+            } => self.run_worker_error(worker_id, owner, realm, message),
+            Task::SharedWorkerMessage {
+                connection_id,
+                data,
+            } => self.run_shared_worker_message(connection_id, data),
             Task::SharedWorkerOwnerMessage {
                 connection_id,
                 port,
@@ -5526,7 +5542,9 @@ impl JsRuntime {
                     message: "User denied Geolocation.".to_string(),
                 }
             } else if fresh_position {
-                GeolocationOutcome::Success(state.geolocation_position.clone().expect("fresh position"))
+                GeolocationOutcome::Success(
+                    state.geolocation_position.clone().expect("fresh position"),
+                )
             } else if timed_out || timeout_ms == Some(0) {
                 GeolocationOutcome::Error {
                     code: 3,
@@ -5538,13 +5556,14 @@ impl JsRuntime {
                     message: "Unable to determine the user's location.".to_string(),
                 }
             };
-            let timeout_timer_id = state
-                .geolocation_requests
-                .get_mut(&request_id)
-                .and_then(|request| {
-                    request.pending = false;
-                    request.timeout_timer_id.take()
-                });
+            let timeout_timer_id =
+                state
+                    .geolocation_requests
+                    .get_mut(&request_id)
+                    .and_then(|request| {
+                        request.pending = false;
+                        request.timeout_timer_id.take()
+                    });
             if watch_id.is_none() {
                 state.geolocation_requests.remove(&request_id);
             }
@@ -5552,7 +5571,10 @@ impl JsRuntime {
         };
 
         if let Some(timer_id) = timeout_timer_id {
-            self.host_state.borrow_mut().event_loop.clear_timer(timer_id);
+            self.host_state
+                .borrow_mut()
+                .event_loop
+                .clear_timer(timer_id);
         }
         let payload = match &outcome {
             GeolocationOutcome::Success(position) => geolocation_position_json(position),
@@ -5608,7 +5630,12 @@ impl JsRuntime {
             "__omoikane_geolocation_error_code",
             "__omoikane_geolocation_error_message",
         ] {
-            let _ = global.set(js_string!(name), JsValue::undefined(), true, &mut self.context);
+            let _ = global.set(
+                js_string!(name),
+                JsValue::undefined(),
+                true,
+                &mut self.context,
+            );
         }
         self.record_error_from("geolocation", result);
         Ok(())
@@ -5617,7 +5644,9 @@ impl JsRuntime {
     fn run_worker_message(&mut self, worker_id: u64, data: String) -> JsResult<()> {
         let owner_origin = host_state_origin(&self.host_state.borrow());
         let entry = self.host_state.borrow_mut().workers.remove(&worker_id);
-        let Some(entry) = entry else { return Ok(()); };
+        let Some(entry) = entry else {
+            return Ok(());
+        };
         let mut worker = entry.borrow_mut();
         if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
             self.host_state
@@ -5650,19 +5679,17 @@ impl JsRuntime {
                     errors.push(format!("[worker message jobs] {error}"));
                 }
             }
-            let owner_realm = runtime
-                .host_state
-                .borrow()
-                .worker_owner_realm
-                .clone();
+            let owner_realm = runtime.host_state.borrow().worker_owner_realm.clone();
             let terminated = runtime.is_terminated_worker();
             (errors, owner_realm, terminated)
         };
         for error in errors {
-            owner_state
-                .borrow_mut()
-                .event_loop
-                .enqueue_worker_error(worker_id, None, owner_realm.clone(), error);
+            owner_state.borrow_mut().event_loop.enqueue_worker_error(
+                worker_id,
+                None,
+                owner_realm.clone(),
+                error,
+            );
         }
         drop(worker);
         if !terminated {
@@ -5723,7 +5750,15 @@ impl JsRuntime {
                 .borrow()
                 .workers
                 .get(&worker_id)
-                .and_then(|entry| entry.borrow().runtime.host_state.borrow().worker_owner_realm.clone())
+                .and_then(|entry| {
+                    entry
+                        .borrow()
+                        .runtime
+                        .host_state
+                        .borrow()
+                        .worker_owner_realm
+                        .clone()
+                })
         });
         let owner_object = owner.or_else(|| {
             self.host_state
@@ -5732,7 +5767,9 @@ impl JsRuntime {
                 .get(&worker_id)
                 .and_then(|entry| entry.borrow().owner_object.clone())
         });
-        let Some(owner_object) = owner_object else { return Ok(()); };
+        let Some(owner_object) = owner_object else {
+            return Ok(());
+        };
         let old_realm = owner_realm.map(|realm| self.context.enter_realm(realm));
         if let Err(error) = self.install_worker_owner_values(owner_object, message) {
             self.record_task_error(format!("[worker error setup] {error}"));
@@ -5833,7 +5870,12 @@ impl JsRuntime {
             "__omoikane_shared_worker_owner_wire",
             "__omoikane_shared_worker_owner_origin",
         ] {
-            let _ = global.set(js_string!(name), JsValue::undefined(), true, &mut self.context);
+            let _ = global.set(
+                js_string!(name),
+                JsValue::undefined(),
+                true,
+                &mut self.context,
+            );
         }
         self.record_error_from("shared worker owner message", result);
         Ok(())
@@ -5875,15 +5917,35 @@ impl JsRuntime {
 
     fn install_worker_owner_values(&mut self, owner: JsValue, data: String) -> JsResult<()> {
         let global = self.context.global_object();
-        global.set(js_string!("__omoikane_worker_owner"), owner, true, &mut self.context)?;
-        global.set(js_string!("__omoikane_worker_owner_wire"), JsValue::from(js_string!(data)), true, &mut self.context)?;
+        global.set(
+            js_string!("__omoikane_worker_owner"),
+            owner,
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_worker_owner_wire"),
+            JsValue::from(js_string!(data)),
+            true,
+            &mut self.context,
+        )?;
         Ok(())
     }
 
     fn clear_worker_owner_values(&mut self) -> JsResult<()> {
         let global = self.context.global_object();
-        global.set(js_string!("__omoikane_worker_owner"), JsValue::undefined(), true, &mut self.context)?;
-        global.set(js_string!("__omoikane_worker_owner_wire"), JsValue::undefined(), true, &mut self.context)?;
+        global.set(
+            js_string!("__omoikane_worker_owner"),
+            JsValue::undefined(),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
+            js_string!("__omoikane_worker_owner_wire"),
+            JsValue::undefined(),
+            true,
+            &mut self.context,
+        )?;
         Ok(())
     }
 
@@ -6053,8 +6115,7 @@ impl JsRuntime {
                 let mut dispatch_load = should_dispatch;
                 let mut dispatch_timing: Option<(String, bool, f64)> = None;
                 if let Some((script_node, src, kind, base_url, document_id)) = dynamic_script {
-                    let _script_document =
-                        activate_module_document(&self.host_state, document_id);
+                    let _script_document = activate_module_document(&self.host_state, document_id);
                     let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
                     if kind == ScriptKind::NotExecutable {
                         if log_scripts {
@@ -6069,8 +6130,7 @@ impl JsRuntime {
                         if log_scripts {
                             eprintln!("[omoikane][script] blocked dynamic {src} by iframe sandbox");
                         }
-                        let timing_name =
-                            resource_reference_timing_name(&src, base_url.as_ref());
+                        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
                         let dispatched = self.eval_in_document_realm(
                             dispatch_document_id,
                             &dispatch_resource_timing_script(
@@ -6130,7 +6190,11 @@ impl JsRuntime {
                                 let dispatched = self.eval_in_document_realm(
                                     dispatch_document_id,
                                     &dispatch_resource_timing_script(
-                                        "error", node_id, &timing_name, false, elapsed_ms,
+                                        "error",
+                                        node_id,
+                                        &timing_name,
+                                        false,
+                                        elapsed_ms,
                                     ),
                                 );
                                 self.record_error_from(&src, dispatched);
@@ -6156,7 +6220,11 @@ impl JsRuntime {
                                 let dispatched = self.eval_in_document_realm(
                                     dispatch_document_id,
                                     &dispatch_resource_timing_script(
-                                        "error", node_id, &effective_url, redirected, elapsed_ms,
+                                        "error",
+                                        node_id,
+                                        &effective_url,
+                                        redirected,
+                                        elapsed_ms,
                                     ),
                                 );
                                 self.record_error_from(&src, dispatched);
@@ -6169,8 +6237,8 @@ impl JsRuntime {
                                 );
                                 dispatch_timing = Some((effective_url, redirected, elapsed_ms));
                                 let result = match kind {
-                                    ScriptKind::Module => self
-                                        .eval_module_in_document_realm_timed(
+                                    ScriptKind::Module => {
+                                        self.eval_module_in_document_realm_timed(
                                             dispatch_document_id,
                                             script_node.identity(),
                                             &source,
@@ -6178,7 +6246,8 @@ impl JsRuntime {
                                             document_root_for_node(&script_node)
                                                 .unwrap_or_else(|| self.document()),
                                         )
-                                        .0,
+                                        .0
+                                    }
                                     _ => self
                                         .eval_script_in_document_realm(
                                             dispatch_document_id,
@@ -6202,12 +6271,16 @@ impl JsRuntime {
                     }
                 }
                 if dispatch_load {
-                    let (timing_name, redirected, elapsed_ms) = dispatch_timing
-                        .unwrap_or_else(|| (String::new(), false, 0.0));
+                    let (timing_name, redirected, elapsed_ms) =
+                        dispatch_timing.unwrap_or_else(|| (String::new(), false, 0.0));
                     let dispatched = self.eval_in_document_realm(
                         dispatch_document_id,
                         &dispatch_resource_timing_script(
-                            "load", node_id, &timing_name, redirected, elapsed_ms,
+                            "load",
+                            node_id,
+                            &timing_name,
+                            redirected,
+                            elapsed_ms,
                         ),
                     );
                     self.record_error_from("resource load", dispatched);
@@ -6292,9 +6365,7 @@ impl JsRuntime {
         // (e.g. an `<iframe src="empty.html">` whose contentDocument is accessed
         // during the timer loop) can be resolved.
         if let Some(base) = base_url {
-            self.host_state
-                .borrow_mut()
-                .set_main_base_url(base.clone());
+            self.host_state.borrow_mut().set_main_base_url(base.clone());
         }
         let _ = self.eval("__omoikane_install_window_named_properties()");
         let _ = self.eval("document.__readyState = 'loading'");
@@ -6359,11 +6430,7 @@ impl JsRuntime {
                 let fetch_start = std::time::Instant::now();
                 let fetched = {
                     let mut state = self.host_state.borrow_mut();
-                    fetch_script_resource_with_client(
-                        &src_url,
-                        base_url,
-                        &mut state.http_client,
-                    )
+                    fetch_script_resource_with_client(&src_url, base_url, &mut state.http_client)
                 };
                 match fetched {
                     Some((effective_url, code)) => {
@@ -6375,11 +6442,8 @@ impl JsRuntime {
                             );
                             continue;
                         }
-                        let redirected = resource_reference_was_redirected(
-                            &src_url,
-                            &effective_url,
-                            base_url,
-                        );
+                        let redirected =
+                            resource_reference_was_redirected(&src_url, &effective_url, base_url);
                         let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
                         let _ = self.eval(&format!(
                             "__omoikane_record_resource_timing({}, 'script', 200, false, {redirected}, {elapsed_ms})",
@@ -6708,10 +6772,7 @@ fn resource_reference_was_redirected(
     }
 }
 
-fn resource_reference_timing_name(
-    requested: &str,
-    base_url: Option<&crate::http::Url>,
-) -> String {
+fn resource_reference_timing_name(requested: &str, base_url: Option<&crate::http::Url>) -> String {
     match resolve_resource_ref(requested, base_url) {
         Some(ResolvedResource::Url(url)) => url,
         _ => requested.to_string(),
@@ -6766,10 +6827,7 @@ fn prune_broadcast_channel_registry(registry: &mut Vec<BroadcastChannelRegistrat
     registry.retain(|entry| entry.host_state.strong_count() > 0);
 }
 
-fn unregister_broadcast_channel(
-    state: &Rc<RefCell<HostState>>,
-    channel_id: u64,
-) {
+fn unregister_broadcast_channel(state: &Rc<RefCell<HostState>>, channel_id: u64) {
     BROADCAST_CHANNEL_REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
         registry.retain(|entry| {
@@ -6809,11 +6867,7 @@ fn register_broadcast_channel(
 /// the sender's same-origin/name group.  The sender endpoint itself is
 /// deliberately excluded, while another endpoint in the same runtime still
 /// receives the message just like an endpoint in another runtime.
-fn post_broadcast_channel(
-    sender_state: &Rc<RefCell<HostState>>,
-    channel_id: u64,
-    data: String,
-) {
+fn post_broadcast_channel(sender_state: &Rc<RefCell<HostState>>, channel_id: u64, data: String) {
     let Some(metadata) = sender_state
         .borrow()
         .broadcast_channel_metadata
@@ -6904,9 +6958,7 @@ fn shared_worker_entry_for_connection(
     })
 }
 
-fn shared_worker_entry_for_key(
-    key: &SharedWorkerKey,
-) -> Option<Rc<RefCell<SharedWorkerRuntime>>> {
+fn shared_worker_entry_for_key(key: &SharedWorkerKey) -> Option<Rc<RefCell<SharedWorkerRuntime>>> {
     SHARED_WORKER_REGISTRY.with(|registry| {
         registry
             .borrow()
@@ -6917,12 +6969,7 @@ fn shared_worker_entry_for_key(
 }
 
 fn terminate_shared_worker_connections(state: &Rc<RefCell<HostState>>) {
-    let connection_ids: Vec<_> = state
-        .borrow()
-        .shared_worker_ports
-        .keys()
-        .copied()
-        .collect();
+    let connection_ids: Vec<_> = state.borrow().shared_worker_ports.keys().copied().collect();
     for connection_id in connection_ids {
         if let Some(entry) = shared_worker_entry_for_connection(connection_id) {
             if let Some(connection) = entry.borrow_mut().connections.get_mut(&connection_id) {
@@ -6940,7 +6987,9 @@ fn terminate_shared_worker_connections(state: &Rc<RefCell<HostState>>) {
 /// when navigation drops the page while a module task is pending.
 fn terminate_worklet_runtime(state: &Rc<RefCell<HostState>>) {
     let runtime = state.borrow_mut().worklet_runtime.take();
-    let Some(runtime) = runtime else { return; };
+    let Some(runtime) = runtime else {
+        return;
+    };
     let child_state = Rc::clone(&runtime.borrow().host_state);
     let mut child_state = child_state.borrow_mut();
     child_state.worklet_terminated = true;
@@ -6970,9 +7019,9 @@ fn resolve_worker_url(
             .get(..8)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
     {
-        requested
-            .parse::<crate::http::Url>()
-            .map_err(|_| JsError::from(JsNativeError::syntax().with_message("Invalid Worker URL")))?
+        requested.parse::<crate::http::Url>().map_err(|_| {
+            JsError::from(JsNativeError::syntax().with_message("Invalid Worker URL"))
+        })?
     } else {
         let base = base_url.ok_or_else(|| {
             JsError::from(JsNativeError::error().with_message("Worker URL cannot be resolved"))
@@ -7005,8 +7054,7 @@ fn requires_public_fetch(url: &crate::http::Url, base_url: Option<&crate::http::
 /// failure), matching how browsers refuse to run non-script `data:` sources.
 #[cfg(test)]
 fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option<String> {
-    fetch_script_resource_with_client(src, base_url, &mut Client::new())
-        .map(|(_, source)| source)
+    fetch_script_resource_with_client(src, base_url, &mut Client::new()).map(|(_, source)| source)
 }
 
 /// Fetches an external script and retains the response's effective URL.
@@ -8019,10 +8067,8 @@ fn open_javascript_dialog_native(
             }
         };
         let suspension = context.suspend_native_call()?;
-        state.borrow_mut().pending_javascript_dialog = Some(PendingJavaScriptDialog {
-            dialog,
-            suspension,
-        });
+        state.borrow_mut().pending_javascript_dialog =
+            Some(PendingJavaScriptDialog { dialog, suspension });
         Ok(JsValue::undefined())
     })
 }
@@ -8052,9 +8098,7 @@ fn notification_permission_native(
     _args: &[JsValue],
     _context: &mut Context,
 ) -> JsResult<JsValue> {
-    with_host_state(|state| {
-        Ok(js_string!(state.borrow().notification_permission.as_str()).into())
-    })
+    with_host_state(|state| Ok(js_string!(state.borrow().notification_permission.as_str()).into()))
 }
 
 fn notification_request_permission_native(
@@ -8077,9 +8121,7 @@ fn geolocation_permission_native(
     _args: &[JsValue],
     _context: &mut Context,
 ) -> JsResult<JsValue> {
-    with_host_state(|state| {
-        Ok(JsValue::from(state.borrow().geolocation_permission_granted))
-    })
+    with_host_state(|state| Ok(JsValue::from(state.borrow().geolocation_permission_granted)))
 }
 
 fn is_secure_context_url(url: &str) -> bool {
@@ -8147,22 +8189,14 @@ fn host_is_secure_context(state: &HostState) -> bool {
     is_secure_context_url(&state.location_href)
 }
 
-fn is_secure_context_native(
-    _: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn is_secure_context_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     with_host_state(|state| {
         let state = state.borrow();
         Ok(JsValue::from(host_is_secure_context(&state)))
     })
 }
 
-fn clipboard_read_text_native(
-    _: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn clipboard_read_text_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     with_host_state(|state| {
         let state = state.borrow();
         if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
@@ -8172,11 +8206,7 @@ fn clipboard_read_text_native(
     })
 }
 
-fn clipboard_permission_native(
-    _: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn clipboard_permission_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     with_host_state(|state| Ok(JsValue::from(state.borrow().clipboard_permission_granted)))
 }
 
@@ -8201,7 +8231,9 @@ fn geolocation_duration_argument(
     default: Option<u64>,
     context: &mut Context,
 ) -> JsResult<Option<u64>> {
-    let Some(value) = value else { return Ok(default); };
+    let Some(value) = value else {
+        return Ok(default);
+    };
     let value = value.to_number(context)?;
     if value.is_nan() || value < 0.0 {
         return Err(JsNativeError::range()
@@ -8249,7 +8281,9 @@ fn schedule_geolocation_request(state: &mut HostState, request_id: u64) {
     else {
         return;
     };
-    if pending { return; }
+    if pending {
+        return;
+    }
 
     let fresh_position = geolocation_position_age_ms(state)
         .is_some_and(|age| maximum_age_ms.is_none_or(|maximum_age| age <= maximum_age));
@@ -8347,7 +8381,9 @@ fn geolocation_clear_watch_native(
         let request_ids: Vec<_> = state
             .geolocation_requests
             .iter()
-            .filter_map(|(request_id, request)| (request.watch_id == Some(watch_id)).then_some(*request_id))
+            .filter_map(|(request_id, request)| {
+                (request.watch_id == Some(watch_id)).then_some(*request_id)
+            })
             .collect();
         for request_id in request_ids {
             if let Some(request) = state.geolocation_requests.remove(&request_id)
@@ -8377,13 +8413,13 @@ fn crypto_random_native(
     }
     let mut bytes = vec![0; length as usize];
     getrandom::fill(&mut bytes).map_err(|error| {
-        JsError::from(JsNativeError::error().with_message(format!(
-            "secure random generation failed: {error}"
-        )))
+        JsError::from(
+            JsNativeError::error()
+                .with_message(format!("secure random generation failed: {error}")),
+        )
     })?;
-    let json = serde_json::to_string(&bytes).map_err(|error| {
-        JsError::from(JsNativeError::error().with_message(error.to_string()))
-    })?;
+    let json = serde_json::to_string(&bytes)
+        .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
     Ok(js_string!(json).into())
 }
 
@@ -8397,9 +8433,7 @@ fn crypto_digest_native(
     let algorithm = string_argument(args.first(), "", context)?;
     let encoded = string_argument(args.get(1), "[]", context)?;
     let bytes: Vec<u8> = serde_json::from_str(&encoded).map_err(|error| {
-        JsError::from(
-            JsNativeError::typ().with_message(format!("invalid digest input: {error}")),
-        )
+        JsError::from(JsNativeError::typ().with_message(format!("invalid digest input: {error}")))
     })?;
     let digest = match algorithm.as_str() {
         "SHA-1" => sha1::Sha1::digest(&bytes).to_vec(),
@@ -8412,9 +8446,8 @@ fn crypto_digest_native(
             ));
         }
     };
-    let json = serde_json::to_string(&digest).map_err(|error| {
-        JsError::from(JsNativeError::error().with_message(error.to_string()))
-    })?;
+    let json = serde_json::to_string(&digest)
+        .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
     Ok(js_string!(json).into())
 }
 
@@ -8435,9 +8468,7 @@ fn crypto_hmac_native(
     let key_json = string_argument(args.get(1), "[]", context)?;
     let data_json = string_argument(args.get(2), "[]", context)?;
     let key: Vec<u8> = serde_json::from_str(&key_json).map_err(|error| {
-        JsError::from(
-            JsNativeError::typ().with_message(format!("invalid HMAC key data: {error}")),
-        )
+        JsError::from(JsNativeError::typ().with_message(format!("invalid HMAC key data: {error}")))
     })?;
     let data: Vec<u8> = serde_json::from_str(&data_json).map_err(|error| {
         JsError::from(
@@ -8480,9 +8511,8 @@ fn crypto_hmac_native(
             ));
         }
     };
-    let json = serde_json::to_string(&digest).map_err(|error| {
-        JsError::from(JsNativeError::error().with_message(error.to_string()))
-    })?;
+    let json = serde_json::to_string(&digest)
+        .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
     Ok(js_string!(json).into())
 }
 
@@ -8562,7 +8592,12 @@ fn storage_get_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let (local, _, manager, session, origin) = storage_arguments(args, context)?;
-    let key = args.get(2).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let key = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     Ok(manager
         .get(session, &origin, local, &key)
         .map(|value| JsValue::from(js_string!(value)))
@@ -8575,8 +8610,18 @@ fn storage_set_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let (local, _, manager, session, origin) = storage_arguments(args, context)?;
-    let key = args.get(2).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
-    let value = args.get(3).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let key = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let value = args
+        .get(3)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     Ok(manager
         .set(session, &origin, local, key, value)
         .map(|old| JsValue::from(js_string!(old)))
@@ -8589,7 +8634,12 @@ fn storage_remove_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let (local, _, manager, session, origin) = storage_arguments(args, context)?;
-    let key = args.get(2).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+    let key = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     Ok(manager
         .remove(session, &origin, local, &key)
         .map(|old| JsValue::from(js_string!(old)))
@@ -8698,15 +8748,16 @@ fn cache_storage_native(
             "delete-entry" => {
                 let id = serde_json::from_str::<u64>(&payload).map_err(|error| {
                     JsError::from(
-                        JsNativeError::typ().with_message(format!("invalid Cache entry id: {error}")),
+                        JsNativeError::typ()
+                            .with_message(format!("invalid Cache entry id: {error}")),
                     )
                 })?;
                 serde_json::json!(manager.cache_delete_entry(&origin, &name, id))
             }
             _ => {
-                return Err(JsError::from(
-                    JsNativeError::typ().with_message(format!("unknown Cache Storage operation: {operation}")),
-                ));
+                return Err(JsError::from(JsNativeError::typ().with_message(format!(
+                    "unknown Cache Storage operation: {operation}"
+                ))));
             }
         };
         let encoded = serde_json::to_string(&output).map_err(|error| {
@@ -8727,7 +8778,12 @@ fn cache_storage_native(
 /// keep computed-style resolution synchronous and side-effect free.
 fn collect_inline_stylesheets(
     document: &NodeHandle,
-) -> Vec<(NodeHandle, Option<(NodeHandle, usize)>, Option<NodeHandle>, String)> {
+) -> Vec<(
+    NodeHandle,
+    Option<(NodeHandle, usize)>,
+    Option<NodeHandle>,
+    String,
+)> {
     fn walk(
         node: &NodeHandle,
         scope: Option<&(NodeHandle, usize)>,
@@ -8754,8 +8810,7 @@ fn collect_inline_stylesheets(
                         // A style element directly in a shadow tree has no
                         // element parent; CSS Scoping defines its implicit
                         // scope root as the shadow host.
-                        scope
-                            .and_then(|(root, _)| root.shadow_host())
+                        scope.and_then(|(root, _)| root.shadow_host())
                     }
                 });
                 out.push((node.clone(), scope.cloned(), implicit_scope_root, css));
@@ -9218,8 +9273,14 @@ fn compute_image_fragment_metrics(fragments: Vec<InlineFragmentGeometry>) -> Lay
         rect.y -= fragment.scroll.1;
         client_rects.push(rect);
     }
-    let min_x = client_rects.iter().map(|rect| rect.x).fold(f32::INFINITY, f32::min);
-    let min_y = client_rects.iter().map(|rect| rect.y).fold(f32::INFINITY, f32::min);
+    let min_x = client_rects
+        .iter()
+        .map(|rect| rect.x)
+        .fold(f32::INFINITY, f32::min);
+    let min_y = client_rects
+        .iter()
+        .map(|rect| rect.y)
+        .fold(f32::INFINITY, f32::min);
     let max_x = client_rects
         .iter()
         .map(|rect| rect.x + rect.width)
@@ -9294,7 +9355,9 @@ fn computed_style_native(
                         .document_styles
                         .get_mut(&document_id)
                         .and_then(|entry| entry.resolver.as_mut())
-                        .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
+                        .and_then(|resolver| {
+                            crate::layout::layout_tree(&document, resolver, viewport)
+                        });
                 }
             }
             match state
@@ -9323,7 +9386,9 @@ fn is_rendered_for_focus_native(
     let node_id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
-        let Some(node) = node else { return Ok(JsValue::from(false)); };
+        let Some(node) = node else {
+            return Ok(JsValue::from(false));
+        };
         if node.node_type() != NodeType::Element {
             return Ok(JsValue::from(false));
         }
@@ -9341,19 +9406,22 @@ fn is_rendered_for_focus_native(
                 .get_mut(&document_id)
                 .and_then(|entry| entry.resolver.as_mut())
                 .map(|resolver| resolver.computed_style(&element));
-            let Some(style) = style else { return Ok(JsValue::from(false)); };
-            if matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")) {
+            let Some(style) = style else {
+                return Ok(JsValue::from(false));
+            };
+            if matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none"))
+            {
                 return Ok(JsValue::from(false));
             }
-            current = element
-                .assigned_slot()
-                .or_else(|| element.parent_node().and_then(|parent| {
+            current = element.assigned_slot().or_else(|| {
+                element.parent_node().and_then(|parent| {
                     if parent.node_type() == NodeType::Element {
                         Some(parent)
                     } else {
                         parent.shadow_host()
                     }
-                }));
+                })
+            });
         }
 
         let style = state
@@ -9432,22 +9500,30 @@ fn layout_metrics_native(
                 if let Some(root) = state.layout_root.as_ref() {
                     let mut fragments = Vec::new();
                     if let Some((layout, transform)) = find_layout_box_with_transform(
-                        root, &node, AffineTransform::identity(), &mut fragments,
+                        root,
+                        &node,
+                        AffineTransform::identity(),
+                        &mut fragments,
                     ) {
                         metrics = compute_transformed_layout_metrics(layout, transform);
                     } else {
                         metrics = compute_image_fragment_metrics(fragments);
                     }
 
-                    if is_main_document && let Some(painted_root) = state
-                        .adjusted_layout_cache
-                        .as_ref()
-                        .map(|cache| &cache.root)
+                    if is_main_document
+                        && let Some(painted_root) = state
+                            .adjusted_layout_cache
+                            .as_ref()
+                            .map(|cache| &cache.root)
                     {
                         let mut painted_fragments = Vec::new();
-                        let painted = if let Some((layout, transform)) = find_layout_box_with_transform(
-                            &painted_root, &node, AffineTransform::identity(), &mut painted_fragments,
-                        ) {
+                        let painted = if let Some((layout, transform)) =
+                            find_layout_box_with_transform(
+                                &painted_root,
+                                &node,
+                                AffineTransform::identity(),
+                                &mut painted_fragments,
+                            ) {
                             compute_transformed_layout_metrics(layout, transform)
                         } else {
                             compute_image_fragment_metrics(painted_fragments)
@@ -9523,11 +9599,7 @@ fn set_element_scroll_native(
 }
 
 /// Returns the top-level Window scroll offset as a JSON object.
-fn window_scroll_offset_native(
-    _: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn window_scroll_offset_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     with_host_state(|state| {
         let (x, y) = {
             let mut state = state.borrow_mut();
@@ -9564,7 +9636,11 @@ fn set_timeout_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     schedule_timer_from_js(args, context, false)
 }
 
-fn call_event_listener_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn call_event_listener_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let listener = args.first().cloned().unwrap_or_default();
     let this = args.get(1).cloned().unwrap_or_default();
     let event = args.get(2).cloned().unwrap_or_default();
@@ -9581,7 +9657,9 @@ fn call_event_listener_native(_: &JsValue, args: &[JsValue], context: &mut Conte
         callback.clone()
     };
     context.call_with_native_continuation(
-        &callback, &this, &[event],
+        &callback,
+        &this,
+        &[event],
         NativeCallContinuation::from_copy_closure_with_captures(|result, (), _| result, ()),
     )
 }
@@ -9608,10 +9686,7 @@ fn clear_timer_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 /// context is executing one. Top-level tasks retain the historical payload
 /// shape; child tasks carry their Document identity so stale navigation tasks
 /// can be ignored when they eventually reach the event loop.
-fn bind_timer_payload_to_current_realm(
-    context: &Context,
-    payload: TimerPayload,
-) -> TimerPayload {
+fn bind_timer_payload_to_current_realm(context: &Context, payload: TimerPayload) -> TimerPayload {
     let realm = context.realm().clone();
     let document_id = ACTIVE_HOST_STATE.with(|slot| {
         let state = slot.borrow().clone()?;
@@ -9676,13 +9751,12 @@ fn request_animation_frame_native(
         let (realm, document_id) = binding
             .map(|(realm, document_id)| (Some(realm), Some(document_id)))
             .unwrap_or((None, owner_document_id));
-        let owner_is_live = document_id
-            .is_none_or(|document_id| state.borrow().nodes.contains_key(&document_id));
-        let id = state.borrow_mut().event_loop.schedule_animation_frame_with_realm(
-            callback,
-            realm,
-            document_id,
-        );
+        let owner_is_live =
+            document_id.is_none_or(|document_id| state.borrow().nodes.contains_key(&document_id));
+        let id = state
+            .borrow_mut()
+            .event_loop
+            .schedule_animation_frame_with_realm(callback, realm, document_id);
         if !owner_is_live {
             state.borrow_mut().event_loop.cancel_animation_frame(id);
         }
@@ -9702,10 +9776,7 @@ fn cancel_animation_frame_native(
         .to_u32(context)
         .unwrap_or(0) as u64;
     with_host_state(|state| {
-        state
-            .borrow_mut()
-            .event_loop
-            .cancel_animation_frame(id);
+        state.borrow_mut().event_loop.cancel_animation_frame(id);
         Ok(JsValue::undefined())
     })
 }
@@ -9746,8 +9817,8 @@ fn schedule_timer_from_js(
         .or_else(active_document_id);
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let owner_is_live = owner_document_id
-            .is_none_or(|document_id| state.nodes.contains_key(&document_id));
+        let owner_is_live =
+            owner_document_id.is_none_or(|document_id| state.nodes.contains_key(&document_id));
         let id = state
             .event_loop
             .schedule_timer(payload, delay_ms, repeat, owner_document_id);
@@ -9810,8 +9881,12 @@ fn create_element_ns_native(
         }
         _ => None,
     };
-    let qualified_name = args.get(1).cloned().unwrap_or_default()
-        .to_string(context)?.to_std_string_escaped();
+    let qualified_name = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     with_host_state(|state| {
         let node = if namespace.as_deref() == Some(HTML_NAMESPACE) {
             NodeHandle::html_element_ns(qualified_name, HTML_NAMESPACE)
@@ -10143,22 +10218,32 @@ fn attribute_records_native(
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     let records = with_host_state(|state| {
-        Ok(state.borrow().get_node(node_id)
-            .and_then(|node| node.attribute_records()).unwrap_or_default())
+        Ok(state
+            .borrow()
+            .get_node(node_id)
+            .and_then(|node| node.attribute_records())
+            .unwrap_or_default())
     })?;
     let mut rows = Vec::with_capacity(records.len());
     for (qualified_name, namespace_uri, local_name, value) in records {
         let namespace = namespace_uri
             .map(|namespace| js_string!(namespace.as_str()).into())
             .unwrap_or_else(JsValue::null);
-        rows.push(JsValue::from(boa_engine::object::builtins::JsArray::from_iter([
-            js_string!(qualified_name.as_str()).into(),
-            namespace,
-            js_string!(local_name.as_str()).into(),
-            js_string!(value.as_str()).into(),
-        ], context)));
+        rows.push(JsValue::from(
+            boa_engine::object::builtins::JsArray::from_iter(
+                [
+                    js_string!(qualified_name.as_str()).into(),
+                    namespace,
+                    js_string!(local_name.as_str()).into(),
+                    js_string!(value.as_str()).into(),
+                ],
+                context,
+            ),
+        ));
     }
-    Ok(JsValue::from(boa_engine::object::builtins::JsArray::from_iter(rows, context)))
+    Ok(JsValue::from(
+        boa_engine::object::builtins::JsArray::from_iter(rows, context),
+    ))
 }
 
 fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -10236,26 +10321,16 @@ fn scope_rules_valid(rules: &[crate::css::Rule]) -> bool {
     rules.iter().all(|rule| match rule {
         crate::css::Rule::At(at_rule) if at_rule.name.eq_ignore_ascii_case("scope") => {
             parse_scope_prelude(&at_rule.prelude).is_some()
-                && at_rule
-                    .block
-                    .as_deref()
-                    .is_some_and(scope_rules_valid)
+                && at_rule.block.as_deref().is_some_and(scope_rules_valid)
         }
-        crate::css::Rule::At(at_rule) => at_rule
-            .block
-            .as_deref()
-            .is_none_or(scope_rules_valid),
+        crate::css::Rule::At(at_rule) => at_rule.block.as_deref().is_none_or(scope_rules_valid),
         _ => true,
     })
 }
 
 /// Evaluates the two-argument form of `CSS.supports()` against the same parser
 /// and supported-property table used by style resolution.
-fn css_supports_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn css_supports_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let property = args
         .first()
         .cloned()
@@ -10331,11 +10406,7 @@ fn normalize_style_value_native(
         .unwrap_or_else(JsValue::null))
 }
 
-fn take_transition_events_native(
-    _: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn take_transition_events_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     with_host_state(|state| {
         let events = {
             let mut state = state.borrow_mut();
@@ -10376,12 +10447,9 @@ fn sample_css_transition_styles_native(
         let mut state = state.borrow_mut();
         for document in documents {
             let document_id = document.identity();
-            let full_sample = state
-                .document_styles
-                .get(&document_id)
-                .is_none_or(|entry| {
-                    entry.dirty || entry.needs_full_sample || entry.resolver.is_none()
-                });
+            let full_sample = state.document_styles.get(&document_id).is_none_or(|entry| {
+                entry.dirty || entry.needs_full_sample || entry.resolver.is_none()
+            });
             state.ensure_style_resolver(&document);
             let running_node_ids = state
                 .document_styles
@@ -10404,7 +10472,10 @@ fn sample_css_transition_styles_native(
                     })
                     .collect()
             };
-            let active_node_ids = elements.iter().map(NodeHandle::identity).collect::<HashSet<_>>();
+            let active_node_ids = elements
+                .iter()
+                .map(NodeHandle::identity)
+                .collect::<HashSet<_>>();
             if let Some(resolver) = state
                 .document_styles
                 .get_mut(&document_id)
@@ -10419,9 +10490,7 @@ fn sample_css_transition_styles_native(
                     resolver.cancel_detached_transitions(&active_node_ids);
                 }
             }
-            if full_sample
-                && let Some(entry) = state.document_styles.get_mut(&document_id)
-            {
+            if full_sample && let Some(entry) = state.document_styles.get_mut(&document_id) {
                 entry.needs_full_sample = false;
             }
         }
@@ -10465,11 +10534,7 @@ fn css_supports_condition_native(
 /// Evaluates a media query list against the runtime's current viewport. This
 /// deliberately reuses the `@media` parser/evaluator so CSS and script-visible
 /// feature detection cannot disagree.
-fn match_media_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn match_media_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let query = args
         .first()
         .cloned()
@@ -10480,12 +10545,7 @@ fn match_media_native(
         let viewport = state.borrow().viewport;
         let matches = crate::css::parse_media_query_list(&query).is_some_and(|queries| {
             queries.iter().any(|query| {
-                crate::css::evaluate_media_query(
-                    query,
-                    viewport.width,
-                    viewport.height,
-                    false,
-                )
+                crate::css::evaluate_media_query(query, viewport.width, viewport.height, false)
             })
         });
         Ok(JsValue::from(matches))
@@ -10561,14 +10621,28 @@ fn set_attribute_ns_native(
         }
         _ => None,
     };
-    let qualified_name = args.get(2).cloned().unwrap_or_default()
-        .to_string(context)?.to_std_string_escaped();
-    let local_name = args.get(3).cloned().unwrap_or_default()
-        .to_string(context)?.to_std_string_escaped();
-    let value = args.get(4).cloned().unwrap_or_default()
-        .to_string(context)?.to_std_string_escaped();
+    let qualified_name = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let local_name = args
+        .get(3)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let value = args
+        .get(4)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     with_host_state(|state| {
-        let node = state.borrow().get_node(node_id)
+        let node = state
+            .borrow()
+            .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.set_xml_attribute_ns(qualified_name, namespace, local_name, value);
         state.borrow_mut().invalidate_style_cache_for_node(&node);
@@ -10608,12 +10682,9 @@ fn get_option_selected_native(
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
-        let node = state
-            .borrow()
-            .get_node(node_id)
-            .ok_or_else(|| {
-                JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
-            })?;
+        let node = state.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
         if node.tag_name().as_deref() != Some("option") {
             return Err(JsNativeError::typ()
                 .with_message("Illegal invocation")
@@ -10631,12 +10702,9 @@ fn set_option_selected_native(
     let node_id = parse_node_id(args.first(), context)?;
     let selected = args.get(1).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
-        let node = state
-            .borrow()
-            .get_node(node_id)
-            .ok_or_else(|| {
-                JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
-            })?;
+        let node = state.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
         if node.tag_name().as_deref() != Some("option") {
             return Err(JsNativeError::typ()
                 .with_message("Illegal invocation")
@@ -10708,7 +10776,10 @@ fn string_argument(
 /// path (`fetch(url, { body: "a=1" })`) exactly as before.
 ///
 /// `null` and `undefined` mean "no body" and yield `None`.
-fn body_bytes_argument(value: Option<&JsValue>, context: &mut Context) -> JsResult<Option<Vec<u8>>> {
+fn body_bytes_argument(
+    value: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<Option<Vec<u8>>> {
     let Some(value) = value.filter(|value| !value.is_null_or_undefined()) else {
         return Ok(None);
     };
@@ -10726,7 +10797,8 @@ fn body_bytes_argument(value: Option<&JsValue>, context: &mut Context) -> JsResu
             .and_then(|buffer| JsArrayBuffer::from_object(buffer.clone()).ok())
             .ok_or_else(|| {
                 JsError::from(
-                    JsNativeError::typ().with_message("request body is not backed by an ArrayBuffer"),
+                    JsNativeError::typ()
+                        .with_message("request body is not backed by an ArrayBuffer"),
                 )
             })?;
         let data = buffer.data().ok_or_else(|| {
@@ -10804,10 +10876,7 @@ fn queue_file_reading_task_native(
         },
     );
     with_host_state(|state| {
-        state
-            .borrow_mut()
-            .event_loop
-            .enqueue_file_reading(payload);
+        state.borrow_mut().event_loop.enqueue_file_reading(payload);
         Ok(JsValue::undefined())
     })
 }
@@ -10922,16 +10991,14 @@ fn enqueue_posted_message_native(
     })
 }
 
-fn broadcast_channel_id_argument(
-    value: Option<&JsValue>,
-    context: &mut Context,
-) -> JsResult<u64> {
+fn broadcast_channel_id_argument(value: Option<&JsValue>, context: &mut Context) -> JsResult<u64> {
     let value = value.cloned().unwrap_or_default();
     if let Some(string) = value.as_string() {
-        return string
-            .to_std_string_escaped()
-            .parse::<u64>()
-            .map_err(|_| JsNativeError::typ().with_message("invalid BroadcastChannel id").into());
+        return string.to_std_string_escaped().parse::<u64>().map_err(|_| {
+            JsNativeError::typ()
+                .with_message("invalid BroadcastChannel id")
+                .into()
+        });
     }
     let number = value.to_number(context)?;
     if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
@@ -11075,12 +11142,15 @@ fn shared_worker_bind_port_native(
             .shared_worker_ports
             .insert(connection_id, port.clone());
         for data in pending {
-            owner_state.borrow_mut().event_loop.enqueue_shared_worker_owner_message(
-                connection_id,
-                port.clone(),
-                data,
-                origin.clone(),
-            );
+            owner_state
+                .borrow_mut()
+                .event_loop
+                .enqueue_shared_worker_owner_message(
+                    connection_id,
+                    port.clone(),
+                    data,
+                    origin.clone(),
+                );
         }
         if let Some(message) = startup_error {
             // SharedWorker startup failures are reported asynchronously on the
@@ -11141,12 +11211,7 @@ fn shared_worker_port_post_native(
                 owner_state
                     .borrow_mut()
                     .event_loop
-                    .enqueue_shared_worker_owner_message(
-                        connection_id,
-                        owner_port,
-                        data,
-                        origin,
-                    );
+                    .enqueue_shared_worker_owner_message(connection_id, owner_port, data, origin);
             }
         } else {
             // The call originated in a page realm.  Ensure the connection is
@@ -11186,12 +11251,18 @@ fn shared_worker_port_close_native(
     let connection_id = worker_id_argument(args, context)?;
     with_host_state(|state| {
         let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
-            state.borrow_mut().shared_worker_ports.remove(&connection_id);
+            state
+                .borrow_mut()
+                .shared_worker_ports
+                .remove(&connection_id);
             return Ok(JsValue::undefined());
         };
         let mut shared = entry.borrow_mut();
         let Some(connection) = shared.connections.get_mut(&connection_id) else {
-            state.borrow_mut().shared_worker_ports.remove(&connection_id);
+            state
+                .borrow_mut()
+                .shared_worker_ports
+                .remove(&connection_id);
             return Ok(JsValue::undefined());
         };
         if state.borrow().shared_worker_id.is_none()
@@ -11205,7 +11276,10 @@ fn shared_worker_port_close_native(
         connection.closed = true;
         connection.owner_port = None;
         connection.pending_to_owner.clear();
-        state.borrow_mut().shared_worker_ports.remove(&connection_id);
+        state
+            .borrow_mut()
+            .shared_worker_ports
+            .remove(&connection_id);
         Ok(JsValue::undefined())
     })
 }
@@ -11245,11 +11319,7 @@ fn worklet_error_name(error: &str) -> &'static str {
     "OperationError"
 }
 
-fn create_worklet_native(
-    _: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn create_worklet_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     let id = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let id = state.next_worklet_id;
@@ -11445,7 +11515,12 @@ fn worklet_add_module_native(
             result
         };
         if let Err(error) = evaluation {
-            return Ok(worklet_status(false, worklet_error_name(&error), &error, false));
+            return Ok(worklet_status(
+                false,
+                worklet_error_name(&error),
+                &error,
+                false,
+            ));
         }
         runtime_handle
             .borrow()
@@ -11582,8 +11657,12 @@ fn create_shared_worker_for_owner_state(
     } else {
         let source = {
             let mut state = owner_state.borrow_mut();
-            fetch_script_resource_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
-                .map(|(_, source)| source)
+            fetch_script_resource_with_client(
+                requested_url,
+                base_url.as_ref(),
+                &mut state.http_client,
+            )
+            .map(|(_, source)| source)
         };
         let shared_id = next_shared_worker_id();
         let mut runtime = JsRuntime::with_document_url_and_storage(
@@ -11599,7 +11678,9 @@ fn create_shared_worker_for_owner_state(
         ))?;
         let startup_error = match source {
             Some(source) => runtime.eval(&source).err().map(|error| error.to_string()),
-            None => Some(format!("failed to fetch SharedWorker script: {requested_url}")),
+            None => Some(format!(
+                "failed to fetch SharedWorker script: {requested_url}"
+            )),
         };
         if startup_error.is_some() {
             runtime.host_state.borrow_mut().worker_terminated = true;
@@ -11639,11 +11720,7 @@ fn create_shared_worker_for_owner_state(
     Ok(connection_id)
 }
 
-fn create_worker_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn create_worker_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = string_argument(args.first(), "", context)?;
     with_host_state(|state| {
         create_worker_for_owner_state(Rc::clone(state), &url)
@@ -11654,10 +11731,11 @@ fn create_worker_native(
 fn worker_id_argument(args: &[JsValue], context: &mut Context) -> JsResult<u64> {
     let value = args.first().cloned().unwrap_or_default();
     if let Some(string) = value.as_string() {
-        return string
-            .to_std_string_escaped()
-            .parse::<u64>()
-            .map_err(|_| JsNativeError::typ().with_message("invalid worker id").into());
+        return string.to_std_string_escaped().parse::<u64>().map_err(|_| {
+            JsNativeError::typ()
+                .with_message("invalid worker id")
+                .into()
+        });
     }
     let number = value.to_number(context)?;
     if !number.is_finite()
@@ -11725,7 +11803,10 @@ fn create_worker_for_owner_state(
         startup_error: None,
         terminated: false,
     }));
-    owner_state.borrow_mut().workers.insert(worker_id, Rc::clone(&entry));
+    owner_state
+        .borrow_mut()
+        .workers
+        .insert(worker_id, Rc::clone(&entry));
     let startup_error = match source {
         Some(source) => {
             // Keep the entry out of the owner map while evaluating worker
@@ -11777,7 +11858,13 @@ fn create_worker_for_owner_state(
     {
         let mut worker = entry.borrow_mut();
         worker.startup_error = startup_error;
-        let queued = std::mem::take(&mut worker.runtime.host_state.borrow_mut().worker_startup_outgoing);
+        let queued = std::mem::take(
+            &mut worker
+                .runtime
+                .host_state
+                .borrow_mut()
+                .worker_startup_outgoing,
+        );
         worker.outgoing.extend(queued);
     }
     Ok(worker_id)
@@ -11793,7 +11880,9 @@ fn bind_worker_owner_native(
     let owner_realm = Some(context.realm().clone());
     with_host_state(|state| {
         let entry = state.borrow().workers.get(&id).cloned();
-        let Some(entry) = entry else { return Ok(JsValue::undefined()); };
+        let Some(entry) = entry else {
+            return Ok(JsValue::undefined());
+        };
         state
             .borrow_mut()
             .worker_owner_objects
@@ -11806,7 +11895,13 @@ fn bind_worker_owner_native(
             worker_state.worker_owner_object = Some(owner_object.clone());
             worker_state.worker_owner_realm = owner_realm.clone();
         }
-        let startup_queued = std::mem::take(&mut worker.runtime.host_state.borrow_mut().worker_startup_outgoing);
+        let startup_queued = std::mem::take(
+            &mut worker
+                .runtime
+                .host_state
+                .borrow_mut()
+                .worker_startup_outgoing,
+        );
         worker.outgoing.extend(startup_queued);
         let queued = std::mem::take(&mut worker.outgoing);
         for data in queued {
@@ -11818,15 +11913,12 @@ fn bind_worker_owner_native(
             );
         }
         if let Some(message) = worker.startup_error.take() {
-            state
-                .borrow_mut()
-                .event_loop
-                .enqueue_worker_error(
-                    id,
-                    Some(owner_object.clone()),
-                    owner_realm.clone(),
-                    message,
-                );
+            state.borrow_mut().event_loop.enqueue_worker_error(
+                id,
+                Some(owner_object.clone()),
+                owner_realm.clone(),
+                message,
+            );
         }
         if worker.terminated {
             let mut state = state.borrow_mut();
@@ -11851,12 +11943,17 @@ fn worker_post_message_native(
         .to_std_string_escaped();
     with_host_state(|state| {
         let entry = state.borrow().workers.get(&id).cloned();
-        let Some(entry) = entry else { return Ok(JsValue::undefined()); };
+        let Some(entry) = entry else {
+            return Ok(JsValue::undefined());
+        };
         let worker = entry.borrow();
         if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
             return Ok(JsValue::undefined());
         }
-        state.borrow_mut().event_loop.enqueue_worker_message(id, data);
+        state
+            .borrow_mut()
+            .event_loop
+            .enqueue_worker_message(id, data);
         Ok(JsValue::undefined())
     })
 }
@@ -11905,15 +12002,25 @@ fn worker_owner_post_message_native(
                 state_ref.worker_owner_realm.clone(),
             )
         };
-        let Some(owner) = owner else { return Ok(JsValue::undefined()); };
-        let Some(id) = id else { return Ok(JsValue::undefined()); };
-        if state.borrow().worker_terminated { return Ok(JsValue::undefined()); }
+        let Some(owner) = owner else {
+            return Ok(JsValue::undefined());
+        };
+        let Some(id) = id else {
+            return Ok(JsValue::undefined());
+        };
+        if state.borrow().worker_terminated {
+            return Ok(JsValue::undefined());
+        }
         if !owner_bound {
             state.borrow_mut().worker_startup_outgoing.push_back(data);
             return Ok(JsValue::undefined());
         }
-        if state.borrow().worker_terminated { return Ok(JsValue::undefined()); }
-        let Some(owner_object) = owner_object else { return Ok(JsValue::undefined()); };
+        if state.borrow().worker_terminated {
+            return Ok(JsValue::undefined());
+        }
+        let Some(owner_object) = owner_object else {
+            return Ok(JsValue::undefined());
+        };
         owner.borrow_mut().event_loop.enqueue_worker_owner_message(
             id,
             owner_object,
@@ -11958,20 +12065,30 @@ fn worker_close_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<
     })
 }
 
-fn canvas_commit_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
-    let width = args.get(1).cloned().unwrap_or_default().to_number(context)? as u32;
-    let height = args.get(2).cloned().unwrap_or_default().to_number(context)? as u32;
+fn canvas_commit_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
+    let width = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as u32;
+    let height = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as u32;
     let pixels = body_bytes_argument(args.get(3), context)?.unwrap_or_default();
     with_host_state(|state| {
         let Some(node) = state.borrow().get_node(id) else {
             return Ok(JsValue::from(false));
         };
-        Ok(JsValue::from(crate::canvas::commit(&node, width, height, pixels)))
+        Ok(JsValue::from(crate::canvas::commit(
+            &node, width, height, pixels,
+        )))
     })
 }
 
@@ -11980,17 +12097,25 @@ fn canvas_data_url_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     Ok(js_string!(crate::canvas::png_data_url(id).unwrap_or_else(|| "data:,".into())).into())
 }
 
-fn canvas_png_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let width_number = args.first().cloned().unwrap_or_default().to_number(context)?;
-    let height_number = args.get(1).cloned().unwrap_or_default().to_number(context)?;
+fn canvas_png_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let width_number = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)?;
+    let height_number = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)?;
     if !width_number.is_finite()
         || !height_number.is_finite()
         || width_number.fract() != 0.0
@@ -12022,7 +12147,11 @@ fn canvas_image_source_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as usize;
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as usize;
     with_host_state(|state| {
         let Some(node) = state.borrow().get_node(id) else {
             return Ok(JsValue::null());
@@ -12061,25 +12190,39 @@ fn websocket_connect_native(
                 .with_message("WebSocket connection blocked by CSP connect-src")
                 .into());
         }
-        let origin = state.base_url.as_ref().map(|url| format!("{}://{}", url.scheme(), url.authority()));
+        let origin = state
+            .base_url
+            .as_ref()
+            .map(|url| format!("{}://{}", url.scheme(), url.authority()));
         let client = crate::realtime::WebSocketClient::connect(&url, &protocols, origin.as_deref())
             .map_err(|error| JsError::from(JsNativeError::error().with_message(error)))?;
         let protocol = client.protocol().to_string();
-        let mut reader = client.try_clone()
+        let mut reader = client
+            .try_clone()
             .map_err(|error| JsError::from(JsNativeError::error().with_message(error)))?;
         let (sender, incoming) = channel();
-        thread::spawn(move || loop {
-            match reader.read_message() {
-                Ok(message) => {
-                    let closed = matches!(message, crate::realtime::WebSocketMessage::Close { .. });
-                    if sender.send(WebSocketReadResult::Message(message)).is_err() || closed { break; }
+        thread::spawn(move || {
+            loop {
+                match reader.read_message() {
+                    Ok(message) => {
+                        let closed =
+                            matches!(message, crate::realtime::WebSocketMessage::Close { .. });
+                        if sender.send(WebSocketReadResult::Message(message)).is_err() || closed {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(WebSocketReadResult::Error(error));
+                        break;
+                    }
                 }
-                Err(error) => { let _ = sender.send(WebSocketReadResult::Error(error)); break; }
             }
         });
         let id = state.next_websocket_id;
         state.next_websocket_id = state.next_websocket_id.saturating_add(1);
-        state.websocket_clients.insert(id, WebSocketConnection { client, incoming });
+        state
+            .websocket_clients
+            .insert(id, WebSocketConnection { client, incoming });
         Ok(serde_json::json!({"id": id, "protocol": protocol}).to_string())
     })?;
     Ok(js_string!(payload).into())
@@ -12090,17 +12233,27 @@ fn websocket_send_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as u64;
     let encoded = string_argument(args.get(1), "", context)?;
     let binary = args.get(2).is_some_and(JsValue::to_boolean);
-    let payload = base64::engine::general_purpose::STANDARD.decode(encoded)
-        .map_err(|_| JsError::from(JsNativeError::typ().with_message("invalid WebSocket payload")))?;
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| {
+            JsError::from(JsNativeError::typ().with_message("invalid WebSocket payload"))
+        })?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         let connection = state.websocket_clients.get_mut(&id).ok_or_else(|| {
             JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
         })?;
-        connection.client.send(payload, binary).map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
+        connection
+            .client
+            .send(payload, binary)
+            .map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
         Ok(JsValue::undefined())
     })
 }
@@ -12110,7 +12263,11 @@ fn websocket_poll_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as u64;
     with_host_state(|state| {
         let state = state.borrow();
         let connection = state.websocket_clients.get(&id).ok_or_else(|| {
@@ -12131,14 +12288,29 @@ fn websocket_close_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let id = args.first().cloned().unwrap_or_default().to_number(context)? as u64;
-    let code = args.get(1).cloned().unwrap_or_else(|| JsValue::from(1000)).to_number(context)? as u16;
+    let id = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as u64;
+    let code = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| JsValue::from(1000))
+        .to_number(context)? as u16;
     let reason = string_argument(args.get(2), "", context)?;
     with_host_state(|state| {
-        let mut connection = state.borrow_mut().websocket_clients.remove(&id).ok_or_else(|| {
-            JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
-        })?;
-        connection.client.close(code, &reason).map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
+        let mut connection = state
+            .borrow_mut()
+            .websocket_clients
+            .remove(&id)
+            .ok_or_else(|| {
+                JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
+            })?;
+        connection
+            .client
+            .close(code, &reason)
+            .map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
         Ok(JsValue::undefined())
     })
 }
@@ -12153,7 +12325,8 @@ fn event_source_fetch_native(
     let with_credentials = args.get(2).is_some_and(JsValue::to_boolean);
     let body = with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let parsed = url.parse::<crate::http::Url>()
+        let parsed = url
+            .parse::<crate::http::Url>()
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
         let document = state.document.clone();
         if !state
@@ -12165,16 +12338,35 @@ fn event_source_fetch_native(
                 .with_message("EventSource connection blocked by CSP connect-src")
                 .into());
         }
-        let origin = state.base_url.as_ref().map(CorsOrigin::from_url).unwrap_or_else(CorsOrigin::opaque);
+        let origin = state
+            .base_url
+            .as_ref()
+            .map(CorsOrigin::from_url)
+            .unwrap_or_else(CorsOrigin::opaque);
         let mut request = HttpRequest::new(Method::Get, parsed);
         request.set_header("Accept", "text/event-stream");
-        if !last_event_id.is_empty() { request.set_header("Last-Event-ID", last_event_id); }
-        let HostState { http_client, cors_preflight_cache, .. } = &mut *state;
+        if !last_event_id.is_empty() {
+            request.set_header("Last-Event-ID", last_event_id);
+        }
+        let HostState {
+            http_client,
+            cors_preflight_cache,
+            ..
+        } = &mut *state;
         let fetched = crate::http::cors::fetch(
-            http_client, request, &origin, RequestMode::Cors,
-            if with_credentials { CredentialsMode::Include } else { CredentialsMode::SameOrigin },
-            RedirectMode::Follow, cors_preflight_cache,
-        ).map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
+            http_client,
+            request,
+            &origin,
+            RequestMode::Cors,
+            if with_credentials {
+                CredentialsMode::Include
+            } else {
+                CredentialsMode::SameOrigin
+            },
+            RedirectMode::Follow,
+            cors_preflight_cache,
+        )
+        .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
         if let Some(effective_url) = fetched.response.effective_url()
             && !state
                 .csp_policy_for_document(&document)
@@ -12187,11 +12379,18 @@ fn event_source_fetch_native(
                 .into());
         }
         if fetched.response.status_code() != 200 {
-            return Err(JsNativeError::error().with_message("EventSource response must be HTTP 200").into());
+            return Err(JsNativeError::error()
+                .with_message("EventSource response must be HTTP 200")
+                .into());
         }
         let content_type = fetched.response.header("content-type").unwrap_or_default();
-        if !content_type.to_ascii_lowercase().starts_with("text/event-stream") {
-            return Err(JsNativeError::error().with_message("EventSource response must be text/event-stream").into());
+        if !content_type
+            .to_ascii_lowercase()
+            .starts_with("text/event-stream")
+        {
+            return Err(JsNativeError::error()
+                .with_message("EventSource response must be text/event-stream")
+                .into());
         }
         Ok(String::from_utf8_lossy(fetched.response.body()).into_owned())
     })?;
@@ -12232,9 +12431,9 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         .to_string(context)?
         .to_std_string_escaped();
     let headers: Vec<(String, String)> = serde_json::from_str(&headers_json).map_err(|error| {
-        JsError::from(JsNativeError::typ().with_message(format!(
-            "invalid request headers: {error}"
-        )))
+        JsError::from(
+            JsNativeError::typ().with_message(format!("invalid request headers: {error}")),
+        )
     })?;
     let body = body_bytes_argument(args.get(3), context)?;
     let mode = match string_argument(args.get(4), "cors", context)?.as_str() {
@@ -12282,9 +12481,9 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
 
     let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let parsed_url = url.parse::<crate::http::Url>().map_err(|error| {
-            JsError::from(JsNativeError::typ().with_message(error.to_string()))
-        })?;
+        let parsed_url = url
+            .parse::<crate::http::Url>()
+            .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
         let normalized_url = parsed_url.to_string();
         let document = state.document.clone();
         if !state
@@ -12329,7 +12528,9 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
                 return Ok(r#"{"__omoikane_timeout":true}"#.to_string());
             }
             Err(error) => {
-                return Err(JsError::from(JsNativeError::error().with_message(error.to_string())).into());
+                return Err(
+                    JsError::from(JsNativeError::error().with_message(error.to_string())).into(),
+                );
             }
         };
         if let Some(effective_url) = fetched.response.effective_url()
@@ -12419,10 +12620,10 @@ fn csp_violations_native(
             .filter(|violation| violation.document_id == document_id)
             .cloned()
             .collect::<Vec<_>>();
-        Ok(js_string!(
-            serde_json::to_string(&violations).unwrap_or_else(|_| "[]".to_string())
+        Ok(
+            js_string!(serde_json::to_string(&violations).unwrap_or_else(|_| "[]".to_string()))
+                .into(),
         )
-        .into())
     })
 }
 
@@ -13091,7 +13292,8 @@ fn node_is_html_element_native(
     let id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let state = state.borrow();
-        let node = state.get_node(id)
+        let node = state
+            .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         Ok(JsValue::from(node.is_html_element()))
     })
@@ -13231,10 +13433,16 @@ fn remove_attribute_ns_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
-    let qualified_name = args.get(1).cloned().unwrap_or_default()
-        .to_string(context)?.to_std_string_escaped();
+    let qualified_name = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     with_host_state(|state| {
-        let node = state.borrow().get_node(id)
+        let node = state
+            .borrow()
+            .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.remove_xml_attribute(&qualified_name);
         state.borrow_mut().invalidate_style_cache_for_node(&node);
@@ -13294,11 +13502,7 @@ fn template_content_native(
     })
 }
 
-fn attach_shadow_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn attach_shadow_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
     let mode = if args.get(1).is_some_and(JsValue::to_boolean) {
         ShadowRootMode::Closed
@@ -13319,11 +13523,7 @@ fn attach_shadow_native(
     })
 }
 
-fn shadow_root_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn shadow_root_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let root = state
@@ -13334,11 +13534,7 @@ fn shadow_root_native(
     })
 }
 
-fn shadow_host_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn shadow_host_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let host = state
@@ -13349,11 +13545,7 @@ fn shadow_host_native(
     })
 }
 
-fn shadow_mode_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn shadow_mode_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let mode = state
@@ -13368,11 +13560,7 @@ fn shadow_mode_native(
     })
 }
 
-fn assigned_slot_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn assigned_slot_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let slot = state
@@ -13457,11 +13645,7 @@ fn create_document_native(
 /// complete detached tree in this runtime's node/style registries.  A null
 /// result means the input is not well-formed; DOMParser turns that into the
 /// script-visible `parsererror` document instead of exposing parser internals.
-fn parse_xml_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn parse_xml_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let source = args
         .first()
         .cloned()
@@ -13842,11 +14026,7 @@ fn schedule_navigation_native(
     })
 }
 
-fn submit_form_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
+fn submit_form_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let string_arg = |index: usize, context: &mut Context| -> JsResult<String> {
         Ok(args
             .get(index)
@@ -14348,8 +14528,19 @@ mod tests {
             .unwrap();
         boa_gc::force_collect();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("workerValues[0]").unwrap().as_number(), Some(42.0));
-        assert_eq!(runtime.eval("workerDocumentType").unwrap().as_string().unwrap().to_std_string_escaped(), "undefined");
+        assert_eq!(
+            runtime.eval("workerValues[0]").unwrap().as_number(),
+            Some(42.0)
+        );
+        assert_eq!(
+            runtime
+                .eval("workerDocumentType")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "undefined"
+        );
     }
 
     #[test]
@@ -14373,10 +14564,22 @@ mod tests {
             eval_str(&mut runtime, "workletProbe.result"),
             "1|checker,sync|object"
         );
-        assert_eq!(eval_str(&mut runtime, "typeof WorkletGlobalScope"), "function");
-        assert_eq!(eval_str(&mut runtime, "typeof CSS.paintWorklet.addModule"), "function");
-        assert_eq!(eval_str(&mut runtime, "typeof __omoikane_create_worklet"), "undefined");
-        assert_eq!(eval_str(&mut runtime, "typeof __omoikane_worklet_add_module"), "undefined");
+        assert_eq!(
+            eval_str(&mut runtime, "typeof WorkletGlobalScope"),
+            "function"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "typeof CSS.paintWorklet.addModule"),
+            "function"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "typeof __omoikane_create_worklet"),
+            "undefined"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "typeof __omoikane_worklet_add_module"),
+            "undefined"
+        );
     }
 
     #[test]
@@ -14400,7 +14603,10 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "workletProbe.join('|')"), "1|1|SyntaxError|InvalidStateError");
+        assert_eq!(
+            eval_str(&mut runtime, "workletProbe.join('|')"),
+            "1|1|SyntaxError|InvalidStateError"
+        );
     }
 
     #[test]
@@ -14444,7 +14650,10 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "workletError"), "InvalidModificationError");
+        assert_eq!(
+            eval_str(&mut runtime, "workletError"),
+            "InvalidModificationError"
+        );
     }
 
     #[test]
@@ -14462,7 +14671,10 @@ mod tests {
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "workletProbe.join('|')"), "micro");
         runtime.tick(0).unwrap();
-        assert_eq!(eval_str(&mut runtime, "CSS.paintWorklet.registeredNames.join(',')"), "micro,timer");
+        assert_eq!(
+            eval_str(&mut runtime, "CSS.paintWorklet.registeredNames.join(',')"),
+            "micro,timer"
+        );
     }
 
     #[test]
@@ -14507,12 +14719,32 @@ mod tests {
                 "globalThis.values = []; globalThis.worker = new SharedWorker('{source}', 'cross-runtime'); worker.port.onmessage = event => values.push(event.data);"
             ))
             .unwrap();
-        first_runtime.eval("worker.port.postMessage('first')").unwrap();
-        second_runtime.eval("worker.port.postMessage('second')").unwrap();
+        first_runtime
+            .eval("worker.port.postMessage('first')")
+            .unwrap();
+        second_runtime
+            .eval("worker.port.postMessage('second')")
+            .unwrap();
         first_runtime.run_until_idle().unwrap();
         second_runtime.run_until_idle().unwrap();
-        assert_eq!(first_runtime.eval("values[0]").unwrap().as_string().unwrap().to_std_string_escaped(), "first");
-        assert_eq!(second_runtime.eval("values[0]").unwrap().as_string().unwrap().to_std_string_escaped(), "second");
+        assert_eq!(
+            first_runtime
+                .eval("values[0]")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "first"
+        );
+        assert_eq!(
+            second_runtime
+                .eval("values[0]")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "second"
+        );
     }
 
     #[test]
@@ -14527,12 +14759,20 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("sharedWorkerErrors.length").unwrap().as_number(), Some(1.0));
-        assert!(runtime
-            .eval("sharedWorkerErrors[0].includes('shared boom')")
-            .unwrap()
-            .as_boolean()
-            .unwrap_or(false));
+        assert_eq!(
+            runtime
+                .eval("sharedWorkerErrors.length")
+                .unwrap()
+                .as_number(),
+            Some(1.0)
+        );
+        assert!(
+            runtime
+                .eval("sharedWorkerErrors[0].includes('shared boom')")
+                .unwrap()
+                .as_boolean()
+                .unwrap_or(false)
+        );
         assert_eq!(runtime.eval("3 * 7").unwrap().as_number(), Some(21.0));
     }
 
@@ -14662,22 +14902,40 @@ mod tests {
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(
-            eval_str(&mut runtime, "[swProbe.scope, swProbe.state, swProbe.found, swProbe.controller, swProbe.changes, swProbe.invalid].join('|')"),
+            eval_str(
+                &mut runtime,
+                "[swProbe.scope, swProbe.state, swProbe.found, swProbe.controller, swProbe.changes, swProbe.invalid].join('|')"
+            ),
             "https://service-worker.example.test/app/|activated|true|true|1|SecurityError",
         );
-        assert_eq!(eval_str(&mut runtime, "String(swProbe.updateUndefined)"), "true");
+        assert_eq!(
+            eval_str(&mut runtime, "String(swProbe.updateUndefined)"),
+            "true"
+        );
         runtime
             .eval(
                 "navigator.serviceWorker.register('/worker-v2.js', { scope: '/app/' }).then(registration => { swProbe.replaced = registration === swRegistration; });",
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "[swProbe.updateFound, swProbe.replaced].join('|')"), "1|true");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[swProbe.updateFound, swProbe.replaced].join('|')"
+            ),
+            "1|true"
+        );
         runtime
             .eval("navigator.serviceWorker.getRegistration('/app/page.html').then(registration => registration.unregister().then(result => globalThis.swUnregistered = result))")
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "String(swUnregistered) + '|' + (navigator.serviceWorker.controller === null)"), "true|true");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "String(swUnregistered) + '|' + (navigator.serviceWorker.controller === null)"
+            ),
+            "true|true"
+        );
     }
 
     #[test]
@@ -14755,15 +15013,48 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "String(webrtcProbe.surface)"), "true");
-        assert_eq!(eval_str(&mut runtime, "webrtcProbe.offerType + '|' + webrtcProbe.answerType"), "offer|answer");
-        assert_eq!(eval_str(&mut runtime, "webrtcProbe.remoteLabel + '|' + webrtcProbe.data"), "chat|hello");
-        assert_eq!(eval_str(&mut runtime, "webrtcProbe.signaling"), "stable|stable");
-        assert_eq!(eval_str(&mut runtime, "webrtcProbe.connected"), "connected|connected");
-        assert_eq!(eval_str(&mut runtime, "webrtcProbe.remoteReadyState"), "closed");
-        assert_eq!(eval_str(&mut runtime, "webrtcProbe.sendError"), "InvalidStateError");
-        assert_eq!(eval_str(&mut runtime, "webrtcProbe.events.join('|')"), "open|close");
-        assert_eq!(eval_str(&mut runtime, "JSON.parse(webrtcProbe.offerJSON).type"), "offer");
+        assert_eq!(
+            eval_str(&mut runtime, "String(webrtcProbe.surface)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "webrtcProbe.offerType + '|' + webrtcProbe.answerType"
+            ),
+            "offer|answer"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "webrtcProbe.remoteLabel + '|' + webrtcProbe.data"
+            ),
+            "chat|hello"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webrtcProbe.signaling"),
+            "stable|stable"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webrtcProbe.connected"),
+            "connected|connected"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webrtcProbe.remoteReadyState"),
+            "closed"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webrtcProbe.sendError"),
+            "InvalidStateError"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webrtcProbe.events.join('|')"),
+            "open|close"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.parse(webrtcProbe.offerJSON).type"),
+            "offer"
+        );
     }
 
     #[test]
@@ -14784,10 +15075,19 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "webrtcErrors.join('|')"), "InvalidStateError|InvalidStateError");
+        assert_eq!(
+            eval_str(&mut runtime, "webrtcErrors.join('|')"),
+            "InvalidStateError|InvalidStateError"
+        );
         assert_eq!(eval_str(&mut runtime, "rollbackState"), "stable|true");
-        assert_eq!(eval_str(&mut runtime, "candidateJSON"), r#"{"candidate":"","sdpMid":null,"sdpMLineIndex":null,"usernameFragment":null}"#);
-        assert_eq!(eval_str(&mut runtime, "descriptionJSON"), r#"{"type":"offer","sdp":"v=0"}"#);
+        assert_eq!(
+            eval_str(&mut runtime, "candidateJSON"),
+            r#"{"candidate":"","sdpMid":null,"sdpMLineIndex":null,"usernameFragment":null}"#
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "descriptionJSON"),
+            r#"{"type":"offer","sdp":"v=0"}"#
+        );
     }
 
     #[test]
@@ -14844,17 +15144,44 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.surface)"), "true");
-        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.adapter)"), "true");
+        assert_eq!(
+            eval_str(&mut runtime, "String(webgpuProbe.surface)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webgpuProbe.adapter)"),
+            "true"
+        );
         assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.device)"), "true");
-        assert_eq!(eval_str(&mut runtime, "webgpuProbe.info"), "deterministic|software|false");
-        assert_eq!(eval_str(&mut runtime, "webgpuProbe.labels"), "copy|unmapped");
+        assert_eq!(
+            eval_str(&mut runtime, "webgpuProbe.info"),
+            "deterministic|software|false"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webgpuProbe.labels"),
+            "copy|unmapped"
+        );
         assert_eq!(eval_str(&mut runtime, "webgpuProbe.bytes"), "1,2,3,4");
-        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.invalidRange)"), "true");
-        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.relativeMap)"), "8");
-        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.byteOffset)"), "true");
-        assert_eq!(eval_str(&mut runtime, "String(webgpuProbe.afterDestroy)"), "true");
-        assert_eq!(eval_str(&mut runtime, "webgpuProbe.lost"), "destroyed|Device was destroyed.");
+        assert_eq!(
+            eval_str(&mut runtime, "String(webgpuProbe.invalidRange)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webgpuProbe.relativeMap)"),
+            "8"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webgpuProbe.byteOffset)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webgpuProbe.afterDestroy)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webgpuProbe.lost"),
+            "destroyed|Device was destroyed."
+        );
     }
 
     #[test]
@@ -14881,9 +15208,18 @@ mod tests {
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "webgpuErrors.power"), "TypeError");
-        assert_eq!(eval_str(&mut runtime, "webgpuErrors.feature"), "NotSupportedError");
-        assert_eq!(eval_str(&mut runtime, "webgpuErrors.validation"), "GPUValidationError|GPUBuffer size must be a positive multiple of four within maxBufferSize.");
-        assert_eq!(eval_str(&mut runtime, "String(webgpuErrors.uncaptured)"), "1");
+        assert_eq!(
+            eval_str(&mut runtime, "webgpuErrors.feature"),
+            "NotSupportedError"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webgpuErrors.validation"),
+            "GPUValidationError|GPUBuffer size must be a positive multiple of four within maxBufferSize."
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webgpuErrors.uncaptured)"),
+            "1"
+        );
     }
 
     #[test]
@@ -14950,19 +15286,52 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.surface)"), "true");
-        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.eventTarget)"), "true");
-        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.readyEvents)"), "1");
-        assert_eq!(eval_str(&mut runtime, "webTransportProbe.ready"), "https://wt-left.example.test/transport|https://wt-right.example.test/transport");
-        assert_eq!(eval_str(&mut runtime, "webTransportProbe.datagram"), "1,2,3");
-        assert_eq!(eval_str(&mut runtime, "webTransportProbe.bidi"), "true|true|4,5");
-        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.bidiDone)"), "true");
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportProbe.surface)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportProbe.eventTarget)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportProbe.readyEvents)"),
+            "1"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportProbe.ready"),
+            "https://wt-left.example.test/transport|https://wt-right.example.test/transport"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportProbe.datagram"),
+            "1,2,3"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportProbe.bidi"),
+            "true|true|4,5"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportProbe.bidiDone)"),
+            "true"
+        );
         assert_eq!(eval_str(&mut runtime, "webTransportProbe.uni"), "7,8");
-        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.uniDone)"), "true");
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportProbe.uniDone)"),
+            "true"
+        );
         assert_eq!(eval_str(&mut runtime, "webTransportProbe.close"), "42|done");
-        assert_eq!(eval_str(&mut runtime, "webTransportProbe.peerClose"), "42|done");
-        assert_eq!(eval_str(&mut runtime, "String(webTransportProbe.closeEvents)"), "1");
-        assert_eq!(eval_str(&mut runtime, "webTransportProbe.errors.length"), "0");
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportProbe.peerClose"),
+            "42|done"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportProbe.closeEvents)"),
+            "1"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportProbe.errors.length"),
+            "0"
+        );
     }
 
     #[test]
@@ -15014,20 +15383,61 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "webTransportValidation.errors.join('|')"), "SecurityError|TypeError|TypeError|TypeError");
-        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.first)"), "true");
-        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.second)"), "false");
-        assert_eq!(eval_str(&mut runtime, "webTransportValidation.close"), "9|closed");
-        assert_eq!(eval_str(&mut runtime, "webTransportValidation.writeError"), "InvalidStateError");
-        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.datagramErrorSet)"), "true");
-        assert_eq!(eval_str(&mut runtime, "webTransportValidation.datagramErrorName"), "WebTransportError");
-        assert_eq!(eval_str(&mut runtime, "webTransportValidation.datagramError"), "");
-        runtime.eval("reader.read().then(() => webTransportValidation.drained = true)").unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportValidation.errors.join('|')"),
+            "SecurityError|TypeError|TypeError|TypeError"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportValidation.first)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportValidation.second)"),
+            "false"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportValidation.close"),
+            "9|closed"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportValidation.writeError"),
+            "InvalidStateError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "String(webTransportValidation.datagramErrorSet)"
+            ),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportValidation.datagramErrorName"),
+            "WebTransportError"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportValidation.datagramError"),
+            ""
+        );
+        runtime
+            .eval("reader.read().then(() => webTransportValidation.drained = true)")
+            .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.drained)"), "true");
-        assert_eq!(eval_str(&mut runtime, "String(webTransportValidation.second)"), "true");
-        assert_eq!(eval_str(&mut runtime, "webTransportValidation.streamError"), "WebTransportError");
-        assert_eq!(eval_str(&mut runtime, "webTransportValidation.streamReason"), "0");
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportValidation.drained)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(webTransportValidation.second)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportValidation.streamError"),
+            "WebTransportError"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "webTransportValidation.streamReason"),
+            "0"
+        );
     }
 
     #[test]
@@ -15066,7 +15476,10 @@ mod tests {
             .unwrap();
         runtime.run_until_idle().unwrap();
         let values = runtime.eval("JSON.stringify(workerValues)").unwrap();
-        assert_eq!(values.as_string().unwrap().to_std_string_escaped(), "[\"first\",\"first-micro\",\"second\",\"second-micro\"]");
+        assert_eq!(
+            values.as_string().unwrap().to_std_string_escaped(),
+            "[\"first\",\"first-micro\",\"second\",\"second-micro\"]"
+        );
     }
 
     #[test]
@@ -15082,7 +15495,10 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(1.0));
+        assert_eq!(
+            runtime.eval("workerValues.length").unwrap().as_number(),
+            Some(1.0)
+        );
         assert!(runtime
             .eval("workerValues[0].objectProto && workerValues[0].mapProto && workerValues[0].dateProto && workerValues[0].selfCycle && workerValues[0].mapCycle")
             .unwrap()
@@ -15103,12 +15519,17 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(1.0));
-        assert!(runtime
-            .eval("Object.values(workerValues[0]).every(Boolean)")
-            .unwrap()
-            .as_boolean()
-            .unwrap_or(false));
+        assert_eq!(
+            runtime.eval("workerValues.length").unwrap().as_number(),
+            Some(1.0)
+        );
+        assert!(
+            runtime
+                .eval("Object.values(workerValues[0]).every(Boolean)")
+                .unwrap()
+                .as_boolean()
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -15124,7 +15545,10 @@ mod tests {
             .unwrap();
         assert_eq!(runtime.host_state.borrow().workers.len(), 0);
         runtime.tick(10).unwrap();
-        assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(0.0));
+        assert_eq!(
+            runtime.eval("workerValues.length").unwrap().as_number(),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -15140,8 +15564,19 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"before failure\"]");
-        assert_eq!(runtime.eval("workerErrors.length").unwrap().as_number(), Some(1.0));
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(workerValues)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[\"before failure\"]"
+        );
+        assert_eq!(
+            runtime.eval("workerErrors.length").unwrap().as_number(),
+            Some(1.0)
+        );
         assert_eq!(runtime.host_state.borrow().workers.len(), 0);
         assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
     }
@@ -15157,12 +15592,17 @@ mod tests {
             )
             .unwrap();
         runtime.tick(1).unwrap();
-        assert_eq!(runtime.eval("workerErrors.length").unwrap().as_number(), Some(1.0));
-        assert!(runtime
-            .eval("workerErrors[0].includes('timer boom')")
-            .unwrap()
-            .as_boolean()
-            .unwrap_or(false));
+        assert_eq!(
+            runtime.eval("workerErrors.length").unwrap().as_number(),
+            Some(1.0)
+        );
+        assert!(
+            runtime
+                .eval("workerErrors[0].includes('timer boom')")
+                .unwrap()
+                .as_boolean()
+                .unwrap_or(false)
+        );
         assert_eq!(runtime.eval("6 * 7").unwrap().as_number(), Some(42.0));
     }
 
@@ -15177,7 +15617,15 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"before\"]");
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(workerValues)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[\"before\"]"
+        );
         assert_eq!(runtime.host_state.borrow().workers.len(), 0);
     }
 
@@ -15194,8 +15642,19 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"startup\"]");
-        assert_eq!(runtime.eval("workerErrors.length").unwrap().as_number(), Some(1.0));
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(workerValues)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[\"startup\"]"
+        );
+        assert_eq!(
+            runtime.eval("workerErrors.length").unwrap().as_number(),
+            Some(1.0)
+        );
         assert_eq!(runtime.host_state.borrow().workers.len(), 0);
     }
 
@@ -15215,9 +15674,33 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("workerIdType").unwrap().as_string().unwrap().to_std_string_escaped(), "string");
-        assert_eq!(runtime.eval("workerIdValue").unwrap().as_string().unwrap().to_std_string_escaped(), "9007199254740993");
-        assert_eq!(runtime.eval("workerValues[0]").unwrap().as_string().unwrap().to_std_string_escaped(), "exact");
+        assert_eq!(
+            runtime
+                .eval("workerIdType")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "string"
+        );
+        assert_eq!(
+            runtime
+                .eval("workerIdValue")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "9007199254740993"
+        );
+        assert_eq!(
+            runtime
+                .eval("workerValues[0]")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "exact"
+        );
     }
 
     #[test]
@@ -15255,8 +15738,24 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("ownerTransferError").unwrap().as_string().unwrap().to_std_string_escaped(), "DataCloneError");
-        assert_eq!(runtime.eval("JSON.stringify(workerValues)").unwrap().as_string().unwrap().to_std_string_escaped(), "[\"DataCloneError\"]");
+        assert_eq!(
+            runtime
+                .eval("ownerTransferError")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "DataCloneError"
+        );
+        assert_eq!(
+            runtime
+                .eval("JSON.stringify(workerValues)")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "[\"DataCloneError\"]"
+        );
     }
 
     #[test]
@@ -15272,7 +15771,10 @@ mod tests {
             .unwrap();
         runtime.terminate_workers();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.eval("workerValues.length").unwrap().as_number(), Some(0.0));
+        assert_eq!(
+            runtime.eval("workerValues.length").unwrap().as_number(),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -15289,10 +15791,7 @@ mod tests {
 
         boa_gc::force_collect();
         let mut next_runtime = JsRuntime::new().unwrap();
-        assert_eq!(
-            next_runtime.eval("1 + 1").unwrap().as_number(),
-            Some(2.0)
-        );
+        assert_eq!(next_runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
     }
 
     fn poll_until_dialog<F>(
@@ -15467,11 +15966,9 @@ mod tests {
             timeout: Duration::from_millis(2),
             max_loop_iterations: u64::MAX,
         };
-        let runtime = JsRuntime::with_document_and_sandbox(
-            crate::dom::NodeHandle::document(),
-            sandbox,
-        )
-        .unwrap();
+        let runtime =
+            JsRuntime::with_document_and_sandbox(crate::dom::NodeHandle::document(), sandbox)
+                .unwrap();
         let mut task = Box::pin(runtime.into_page_task(
             19,
             vec![PageTaskSource::Classic {
@@ -15490,7 +15987,10 @@ mod tests {
         };
         assert_eq!(completed.generation, 19);
         assert_eq!(completed.result, Err(PageTaskError::TimedOut));
-        assert_eq!(completed.runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+        assert_eq!(
+            completed.runtime.eval("1 + 1").unwrap().as_number(),
+            Some(2.0)
+        );
     }
 
     #[test]
@@ -15499,11 +15999,9 @@ mod tests {
             timeout: Duration::from_millis(2),
             max_loop_iterations: u64::MAX,
         };
-        let runtime = JsRuntime::with_document_and_sandbox(
-            crate::dom::NodeHandle::document(),
-            sandbox,
-        )
-        .unwrap();
+        let runtime =
+            JsRuntime::with_document_and_sandbox(crate::dom::NodeHandle::document(), sandbox)
+                .unwrap();
         let mut task = Box::pin(runtime.into_page_task(
             20,
             vec![PageTaskSource::Classic {
@@ -15606,9 +16104,14 @@ mod tests {
                 asyncCallbackLog.push('frame-before'); alert('frame'); asyncCallbackLog.push('frame-after');
             });
         "#;
-        let mut task = Box::pin(runtime.into_page_task(14, vec![PageTaskSource::Classic {
-            source: source.to_string(), label: "callbacks".to_string(), script_node_id: None,
-        }]));
+        let mut task = Box::pin(runtime.into_page_task(
+            14,
+            vec![PageTaskSource::Classic {
+                source: source.to_string(),
+                label: "callbacks".to_string(),
+                script_node_id: None,
+            }],
+        ));
         let controller = task.dialog_controller();
         let waker: &'static std::task::Waker = std::task::Waker::noop();
         let mut context = FutureContext::from_waker(waker);
@@ -15621,12 +16124,21 @@ mod tests {
             controller.handle(dialog.id, true, None).unwrap();
         }
         let mut completed = loop {
-            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) { break completed; }
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
         };
         assert_eq!(completed.result, Ok(Vec::new()));
-        assert_eq!(completed.runtime.eval("asyncCallbackLog.join(',')").unwrap()
-            .as_string().unwrap().to_std_string_escaped(),
-            "event-before,event-after,event-second,returned:false,throw:listener failure:true,timer-before,timer-after,frame-before,frame-after");
+        assert_eq!(
+            completed
+                .runtime
+                .eval("asyncCallbackLog.join(',')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "event-before,event-after,event-second,returned:false,throw:listener failure:true,timer-before,timer-after,frame-before,frame-after"
+        );
     }
 
     #[test]
@@ -15766,7 +16278,11 @@ mod tests {
             "port,data"
         );
         let errors = runtime.take_task_errors();
-        assert_eq!(errors.len(), 1, "expected one cleanup error, got {errors:?}");
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected one cleanup error, got {errors:?}"
+        );
         assert!(
             errors[0].contains("posted message cleanup")
                 && errors[0].contains("blocked port cleanup"),
@@ -15806,11 +16322,16 @@ mod tests {
             Some(true)
         );
         let errors = runtime.take_task_errors();
-        assert_eq!(errors.len(), 2, "expected install and cleanup errors, got {errors:?}");
+        assert_eq!(
+            errors.len(),
+            2,
+            "expected install and cleanup errors, got {errors:?}"
+        );
         assert!(
             errors
                 .iter()
-                .all(|error| error.contains("posted message") && error.contains("blocked port install")),
+                .all(|error| error.contains("posted message")
+                    && error.contains("blocked port install")),
             "the install error must be reported: {errors:?}"
         );
     }
@@ -15857,7 +16378,11 @@ mod tests {
             Some(true)
         );
         let errors = completed.runtime.take_task_errors();
-        assert_eq!(errors.len(), 2, "expected install and cleanup errors, got {errors:?}");
+        assert_eq!(
+            errors.len(),
+            2,
+            "expected install and cleanup errors, got {errors:?}"
+        );
         assert!(
             errors.iter().all(|error| {
                 error.contains("posted message") && error.contains("blocked async port install")
@@ -16028,8 +16553,14 @@ mod tests {
         };
         assert_eq!(completed.result, Err(PageTaskError::Cancelled));
         assert_eq!(controller.pending(), None);
-        assert!(completed.runtime.eval("timerBefore === true && typeof timerAfter === 'undefined'")
-            .unwrap().as_boolean().unwrap());
+        assert!(
+            completed
+                .runtime
+                .eval("timerBefore === true && typeof timerAfter === 'undefined'")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -16427,12 +16958,11 @@ mod tests {
         assert!(script_result.is_err());
         assert_eq!(runtime.pending_javascript_dialog(), None);
 
-        let (module_result, ..) =
-            runtime.eval_module_timed(
-                "alert('module script')",
-                "https://example.test/a.js",
-                runtime.document(),
-            );
+        let (module_result, ..) = runtime.eval_module_timed(
+            "alert('module script')",
+            "https://example.test/a.js",
+            runtime.document(),
+        );
         assert!(module_result.is_err());
         assert_eq!(runtime.pending_javascript_dialog(), None);
 
@@ -16478,17 +17008,13 @@ mod tests {
         let confirm_undefined = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
         assert_eq!(confirm_undefined.kind, JavaScriptDialogKind::Confirm);
         assert_eq!(confirm_undefined.message, "");
-        controller
-            .handle(confirm_undefined.id, true, None)
-            .unwrap();
+        controller.handle(confirm_undefined.id, true, None).unwrap();
 
         let prompt_undefined = poll_until_dialog(evaluation.as_mut(), &controller, &mut cx);
         assert_eq!(prompt_undefined.kind, JavaScriptDialogKind::Prompt);
         assert_eq!(prompt_undefined.message, "");
         assert_eq!(prompt_undefined.default_prompt.as_deref(), Some(""));
-        controller
-            .handle(prompt_undefined.id, true, None)
-            .unwrap();
+        controller.handle(prompt_undefined.id, true, None).unwrap();
 
         assert_eq!(
             poll_until_ready(evaluation.as_mut(), &mut cx)
@@ -16534,9 +17060,9 @@ mod tests {
             )
             .unwrap();
 
-        let mut evaluation = Box::pin(runtime.eval_async(
-            "const answer = suspendHostCall(); markAfterHostCall(); answer + 1",
-        ));
+        let mut evaluation = Box::pin(
+            runtime.eval_async("const answer = suspendHostCall(); markAfterHostCall(); answer + 1"),
+        );
         let waker: &'static Waker = Waker::noop();
         let mut cx = FutureContext::from_waker(waker);
 
@@ -16627,7 +17153,9 @@ mod tests {
     #[test]
     fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
         let mut runtime = JsRuntime::new().unwrap();
-        let result = eval_str(&mut runtime, r#"(() => {
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
           const canvas=document.createElement('canvas'); canvas.width=6; canvas.height=4;
           const ctx=canvas.getContext('2d');
           ctx.fillStyle='#ff0000'; ctx.fillRect(0,0,2,2);
@@ -16640,29 +17168,43 @@ mod tests {
           globalThis.canvasWidth=ctx.measureText('abcd').width;
           globalThis.copyPixel=Array.from(copy.getContext('2d').getImageData(0,0,1,1).data).join(',');
           return [p.slice(0,4),p.slice(8,12),p.slice(48,52),p.slice(92,96)].map(x=>Array.from(x).join(',')).join('|');
-        })()"#);
+        })()"#,
+        );
         assert_eq!(result, "255,0,0,255|0,0,255,255|0,255,0,255|9,8,7,255");
         assert_eq!(eval_str(&mut runtime, "copyPixel"), "255,0,0,255");
         assert_eq!(eval_str(&mut runtime, "String(canvasWidth)"), "24");
         let data_url = eval_str(&mut runtime, "canvasUrl");
-        let png = base64::engine::general_purpose::STANDARD.decode(data_url.split_once(',').unwrap().1).unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(data_url.split_once(',').unwrap().1)
+            .unwrap();
         let image = crate::paint::Image::decode_png(&png).unwrap();
         assert_eq!((image.width(), image.height()), (6, 4));
         runtime.eval("globalThis.canvas = document.createElement('canvas'); canvas.width=2; globalThis.c=canvas.getContext('2d'); c.fillRect(0,0,1,1); canvas.width=2;").unwrap();
-        assert_eq!(eval_str(&mut runtime, "Array.from(c.getImageData(0,0,1,1).data).join(',')"), "0,0,0,0");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "Array.from(c.getImageData(0,0,1,1).data).join(',')"
+            ),
+            "0,0,0,0"
+        );
 
         let mut source = crate::paint::Canvas::new(1, 1);
         source.set_pixel(0, 0, crate::paint::Color::rgb(12, 34, 56));
         let encoded = base64::engine::general_purpose::STANDARD.encode(source.encode_png());
-        let script = format!(r#"(() => {{
+        let script = format!(
+            r#"(() => {{
           const image=document.createElement('img');
           image.src='data:image/png;base64,{encoded}';
           const target=document.createElement('canvas'); target.width=1; target.height=1;
           target.getContext('2d').drawImage(image,0,0);
           return Array.from(target.getContext('2d').getImageData(0,0,1,1).data).join(',');
-        }})()"#);
+        }})()"#
+        );
         assert_eq!(eval_str(&mut runtime, &script), "12,34,56,255");
-        assert_eq!(eval_str(&mut runtime, r#"(() => {
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(() => {
           const target=document.createElement('canvas'); target.width=5; target.height=5;
           const context=target.getContext('2d');
           context.beginPath(); context.rect(0,0,5,5); context.rect(1,1,3,3); context.clip('evenodd');
@@ -16671,13 +17213,18 @@ mod tests {
           const hole=context.getImageData(2,2,1,1).data;
           let error=''; try { context.getImageData(0,0,0,1); } catch (value) { error=value.name; }
           return [outer[0],outer[3],hole[3],error].join(',');
-        })()"#), "255,255,0,IndexSizeError");
+        })()"#
+            ),
+            "255,255,0,IndexSizeError"
+        );
     }
 
     #[test]
     fn webgl_canvas_context_state_resources_and_loss_boundary() {
         let mut runtime = JsRuntime::new().unwrap();
-        let result = eval_str(&mut runtime, r#"(() => {
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
           const canvas = document.createElement('canvas');
           canvas.width = 2; canvas.height = 1;
           const gl = canvas.getContext('webgl');
@@ -16736,7 +17283,8 @@ mod tests {
             clear, dataViewReadback, boundsError, viewport, stringParameter, invalidEnum, bufferSize, resizeKeepsContext, viewportSurvivesResize,
             attributeResizeKeepsContext, linked, uniformLocation, ownership, repeatedDelete,
             constantsImmutable, lost, restored].join('|');
-        })()"#);
+        })()"#,
+        );
         assert_eq!(
             result,
             "function|true|true|true|255,64,128,255|true|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true|true"
@@ -16750,7 +17298,10 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
-            let key = request.lines().find_map(|line| line.strip_prefix("Sec-WebSocket-Key: ")).unwrap();
+            let key = request
+                .lines()
+                .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+                .unwrap();
             write!(stream, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", crate::cdp::websocket_accept_key(key)).unwrap();
             let mut bytes = Vec::new();
             let message = loop {
@@ -16758,16 +17309,23 @@ mod tests {
                 stream.read_exact(&mut byte).unwrap();
                 bytes.push(byte[0]);
                 if let Ok((frame, consumed)) = crate::cdp::WebSocketFrame::decode(&bytes)
-                    && consumed == bytes.len() { break frame; }
+                    && consumed == bytes.len()
+                {
+                    break frame;
+                }
             };
             assert_eq!(message.payload, b"hello");
-            stream.write_all(&crate::cdp::WebSocketFrame::text("hello").encode(false)).unwrap();
+            stream
+                .write_all(&crate::cdp::WebSocketFrame::text("hello").encode(false))
+                .unwrap();
             let mut close = Vec::new();
             loop {
                 let mut byte = [0u8; 1];
                 stream.read_exact(&mut byte).unwrap();
                 close.push(byte[0]);
-                if crate::cdp::WebSocketFrame::decode(&close).is_ok() { break; }
+                if crate::cdp::WebSocketFrame::decode(&close).is_ok() {
+                    break;
+                }
             }
         });
         let mut runtime = JsRuntime::new().unwrap();
@@ -16781,8 +17339,14 @@ mod tests {
         "#)).unwrap();
         runtime.tick(0).unwrap();
         runtime.run_timers(1_000, 1, 2_000);
-        assert_eq!(eval_str(&mut runtime, "realtimeLog.join('|')"), "open|timer|message:hello|close:1000");
-        assert_eq!(eval_str(&mut runtime, "messageOrigin"), format!("ws://{address}"));
+        assert_eq!(
+            eval_str(&mut runtime, "realtimeLog.join('|')"),
+            "open|timer|message:hello|close:1000"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "messageOrigin"),
+            format!("ws://{address}")
+        );
         server.join().unwrap();
     }
 
@@ -16796,7 +17360,9 @@ mod tests {
                 let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
                 let request_lower = request.to_ascii_lowercase();
                 assert!(request_lower.contains("accept: text/event-stream"));
-                if attempt == 1 { assert!(request_lower.contains("last-event-id: 7")); }
+                if attempt == 1 {
+                    assert!(request_lower.contains("last-event-id: 7"));
+                }
                 let body = if attempt == 0 {
                     "id: 7\nevent: update\ndata: one\ndata: two\nretry: 1\n\n"
                 } else {
@@ -16807,7 +17373,9 @@ mod tests {
         });
         let mut runtime = JsRuntime::new().unwrap();
         runtime.set_base_url(format!("http://{address}/page").parse().unwrap());
-        runtime.eval(&format!(r#"
+        runtime
+            .eval(&format!(
+                r#"
             globalThis.sseLog = [];
             const source = new EventSource("http://{address}/events");
             source.onerror = () => sseLog.push("error");
@@ -16816,13 +17384,21 @@ mod tests {
               sseLog.push(event.data + ":" + event.lastEventId);
               if (sseLog.length === 2) source.close();
             }});
-        "#)).unwrap();
+        "#
+            ))
+            .unwrap();
         runtime.run_jobs().unwrap();
         runtime.run_until_idle().unwrap();
         runtime.run_timers(20, 1, 100);
-        assert_eq!(eval_str(&mut runtime, "sseLog.join('|')"), "one\ntwo:7|done:8");
+        assert_eq!(
+            eval_str(&mut runtime, "sseLog.join('|')"),
+            "one\ntwo:7|done:8"
+        );
         assert_eq!(eval_str(&mut runtime, "String(source.readyState)"), "2");
-        assert_eq!(eval_str(&mut runtime, "sseOrigin"), format!("http://{address}"));
+        assert_eq!(
+            eval_str(&mut runtime, "sseOrigin"),
+            format!("http://{address}")
+        );
         server.join().unwrap();
     }
 
@@ -17142,10 +17718,7 @@ mod tests {
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "selectionEvents"), "1");
         assert_eq!(eval_str(&mut runtime, "selectionBubbles"), "1");
-        assert_eq!(
-            eval_str(&mut runtime, "getSelection().toString()"),
-            "Hel"
-        );
+        assert_eq!(eval_str(&mut runtime, "getSelection().toString()"), "Hel");
     }
 
     #[test]
@@ -17276,7 +17849,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            eval_str(&mut runtime, "[__textControlSelectionState.events.length, __textControlSelectionState.field.selectionStart].join('|')"),
+            eval_str(
+                &mut runtime,
+                "[__textControlSelectionState.events.length, __textControlSelectionState.field.selectionStart].join('|')"
+            ),
             "0|1"
         );
         runtime.run_until_idle().unwrap();
@@ -17382,7 +17958,10 @@ mod tests {
         // its own old target, but it must never be delivered to the replacement
         // Document. The replacement remains selection-empty after navigation.
         assert_eq!(
-            eval_str(&mut runtime, "__issue558NewDocument.getSelection().rangeCount"),
+            eval_str(
+                &mut runtime,
+                "__issue558NewDocument.getSelection().rangeCount"
+            ),
             "0"
         );
         assert_eq!(eval_str(&mut runtime, "__issue558NewEvents()"), "0");
@@ -17523,7 +18102,10 @@ mod tests {
                    catch (error) { missingWriteArgument = error instanceof TypeError; }"#,
             )
             .unwrap();
-        assert_eq!(eval_str(&mut writer, "String(missingWriteArgument)"), "true");
+        assert_eq!(
+            eval_str(&mut writer, "String(missingWriteArgument)"),
+            "true"
+        );
         writer.eval("navigator.clipboard.writeText('')").unwrap();
         writer.run_jobs().unwrap();
         writer
@@ -17646,32 +18228,25 @@ mod tests {
             eval_str(&mut insecure, "[isSecureContext, denied].join('|')"),
             "false|NotAllowedError"
         );
-        let mut loopback = JsRuntime::with_document_and_url(
-            default_document(),
-            "http://127.0.0.2/loopback",
-        )
-        .unwrap();
+        let mut loopback =
+            JsRuntime::with_document_and_url(default_document(), "http://127.0.0.2/loopback")
+                .unwrap();
         assert!(eval_str(&mut loopback, "String(isSecureContext)") == "true");
-        let mut ipv6_loopback = JsRuntime::with_document_and_url(
-            default_document(),
-            "http://[::1]/loopback",
-        )
-        .unwrap();
-        assert_eq!(eval_str(&mut ipv6_loopback, "String(isSecureContext)"), "true");
-        let mut ipv6_loopback_fragment = JsRuntime::with_document_and_url(
-            default_document(),
-            "http://[::1]#fragment",
-        )
-        .unwrap();
+        let mut ipv6_loopback =
+            JsRuntime::with_document_and_url(default_document(), "http://[::1]/loopback").unwrap();
+        assert_eq!(
+            eval_str(&mut ipv6_loopback, "String(isSecureContext)"),
+            "true"
+        );
+        let mut ipv6_loopback_fragment =
+            JsRuntime::with_document_and_url(default_document(), "http://[::1]#fragment").unwrap();
         assert_eq!(
             eval_str(&mut ipv6_loopback_fragment, "String(isSecureContext)"),
             "true"
         );
-        let mut ipv6_invalid_port = JsRuntime::with_document_and_url(
-            default_document(),
-            "http://[::1]:evil/loopback",
-        )
-        .unwrap();
+        let mut ipv6_invalid_port =
+            JsRuntime::with_document_and_url(default_document(), "http://[::1]:evil/loopback")
+                .unwrap();
         assert_eq!(
             eval_str(&mut ipv6_invalid_port, "String(isSecureContext)"),
             "false"
@@ -18794,7 +19369,9 @@ mod tests {
 
     #[test]
     fn drag_event_exposes_data_transfer_and_html_drag_handlers() {
-        let mut runtime = runtime_from_html("<html><body><div id='source'>source</div><div id='target'></div></body></html>");
+        let mut runtime = runtime_from_html(
+            "<html><body><div id='source'>source</div><div id='target'></div></body></html>",
+        );
         let value = runtime
             .eval(
                 r#"(() => {
@@ -19082,21 +19659,39 @@ mod tests {
 
     #[test]
     fn form_data_preserves_order_duplicates_and_mutation_semantics() {
-        let mut runtime = runtime_from_html(r#"<form id="f"><input name="a" value="one"><input name="a" value="two"><input name="off" value="x" disabled><input type="checkbox" name="unchecked"><input type="checkbox" name="checked" value="yes" checked><textarea name="note">line1
-line2</textarea><select name="choice"><option value="x">X</option><option value="y" selected>Y</option></select><select name="fallback"><option value="disabled" disabled>Disabled</option><option value="usable">Usable</option></select></form>"#);
+        let mut runtime = runtime_from_html(
+            r#"<form id="f"><input name="a" value="one"><input name="a" value="two"><input name="off" value="x" disabled><input type="checkbox" name="unchecked"><input type="checkbox" name="checked" value="yes" checked><textarea name="note">line1
+line2</textarea><select name="choice"><option value="x">X</option><option value="y" selected>Y</option></select><select name="fallback"><option value="disabled" disabled>Disabled</option><option value="usable">Usable</option></select></form>"#,
+        );
         assert!(runtime.eval(r#"(() => { const data = new FormData(document.getElementById("f")); const initial = JSON.stringify([...data]); data.set("a", "changed"); data.append("a", "last"); data.delete("checked"); return initial === JSON.stringify([["a","one"],["a","two"],["checked","yes"],["note","line1\nline2"],["choice","y"],["fallback","usable"]]) && data.get("a") === "changed" && data.getAll("a").join(",") === "changed,last" && !data.has("checked") && data.get("missing") === null; })()"#).unwrap().as_boolean().unwrap());
     }
 
     #[test]
     fn form_submission_encodes_get_post_and_submitter() {
-        let mut runtime = runtime_from_html(r#"<form id="getForm" action="/search?old=1#result"><input name="q" value="hello world"><input name="symbol" value="a*b"><button id="go" name="source" value="button">Go</button></form><form id="postForm" action="/save" method="post" enctype="text/plain"><textarea name="note">a
-b</textarea></form>"#);
+        let mut runtime = runtime_from_html(
+            r#"<form id="getForm" action="/search?old=1#result"><input name="q" value="hello world"><input name="symbol" value="a*b"><button id="go" name="source" value="button">Go</button></form><form id="postForm" action="/save" method="post" enctype="text/plain"><textarea name="note">a
+b</textarea></form>"#,
+        );
         runtime.eval(r#"document.getElementById("go").click(); document.getElementById("postForm").submit()"#).unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.take_navigation_requests(), vec![
-            NavigationRequest::FormSubmit { url: "http://localhost/search?q=hello+world&symbol=a*b&source=button#result".to_string(), method: "GET".to_string(), body: None, content_type: None },
-            NavigationRequest::FormSubmit { url: "http://localhost/save".to_string(), method: "POST".to_string(), body: Some(b"note=a\r\nb\r\n".to_vec()), content_type: Some("text/plain".to_string()) },
-        ]);
+        assert_eq!(
+            runtime.take_navigation_requests(),
+            vec![
+                NavigationRequest::FormSubmit {
+                    url: "http://localhost/search?q=hello+world&symbol=a*b&source=button#result"
+                        .to_string(),
+                    method: "GET".to_string(),
+                    body: None,
+                    content_type: None
+                },
+                NavigationRequest::FormSubmit {
+                    url: "http://localhost/save".to_string(),
+                    method: "POST".to_string(),
+                    body: Some(b"note=a\r\nb\r\n".to_vec()),
+                    content_type: Some("text/plain".to_string())
+                },
+            ]
+        );
     }
 
     #[test]
@@ -19112,12 +19707,14 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
 
         let requests = runtime.take_navigation_requests();
-        let [NavigationRequest::FormSubmit {
-            url,
-            method,
-            body: Some(body),
-            content_type: Some(content_type),
-        }] = requests.as_slice()
+        let [
+            NavigationRequest::FormSubmit {
+                url,
+                method,
+                body: Some(body),
+                content_type: Some(content_type),
+            },
+        ] = requests.as_slice()
         else {
             panic!("expected one multipart form submission, got {requests:?}");
         };
@@ -19139,10 +19736,26 @@ b</textarea></form>"#);
 
     #[test]
     fn request_submit_and_enter_dispatch_cancelable_submit_events() {
-        let mut runtime = runtime_from_html(r#"<form id="f" action="/send"><input id="text" name="q" value="ok"><button id="send" name="via" value="enter">Send</button></form>"#);
-        assert_eq!(eval_str(&mut runtime, r#"(() => { const seen = []; const f = document.getElementById("f"), send = document.getElementById("send"), text = document.getElementById("text"); f.addEventListener("submit", event => { seen.push(event.submitter && event.submitter.id); if (seen.length === 1) event.preventDefault(); }); f.requestSubmit(send); text.focus(); __omoikane_dispatch_keyboard_input("keydown", { key: "Enter" }); return seen.join(","); })()"#), "send,send");
+        let mut runtime = runtime_from_html(
+            r#"<form id="f" action="/send"><input id="text" name="q" value="ok"><button id="send" name="via" value="enter">Send</button></form>"#,
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(() => { const seen = []; const f = document.getElementById("f"), send = document.getElementById("send"), text = document.getElementById("text"); f.addEventListener("submit", event => { seen.push(event.submitter && event.submitter.id); if (seen.length === 1) event.preventDefault(); }); f.requestSubmit(send); text.focus(); __omoikane_dispatch_keyboard_input("keydown", { key: "Enter" }); return seen.join(","); })()"#
+            ),
+            "send,send"
+        );
         runtime.run_until_idle().unwrap();
-        assert_eq!(runtime.take_navigation_requests(), vec![NavigationRequest::FormSubmit { url: "http://localhost/send?q=ok&via=enter".to_string(), method: "GET".to_string(), body: None, content_type: None }]);
+        assert_eq!(
+            runtime.take_navigation_requests(),
+            vec![NavigationRequest::FormSubmit {
+                url: "http://localhost/send?q=ok&via=enter".to_string(),
+                method: "GET".to_string(),
+                body: None,
+                content_type: None
+            }]
+        );
     }
 
     #[test]
@@ -19159,15 +19772,17 @@ b</textarea></form>"#);
         )
         .unwrap();
 
-        assert!(runtime
-            .eval(
-                r#"location.href === "https://example.com/dir/page.html?q=1#top" &&
+        assert!(
+            runtime
+                .eval(
+                    r#"location.href === "https://example.com/dir/page.html?q=1#top" &&
                    document.URL === location.href &&
                    new Request("asset.json").url === "https://example.com/dir/asset.json""#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -19214,9 +19829,10 @@ b</textarea></form>"#);
     #[test]
     fn mutated_event_listener_objects_are_skipped_without_stopping_dispatch() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const target = document.createElement("div");
                     const missing = { handleEvent() {} };
                     const nonCallable = { handleEvent() {} };
@@ -19232,10 +19848,11 @@ b</textarea></form>"#);
                     second.dispatchEvent(new Event("ready"));
                     return calls.join(",") === "after-missing,after-non-callable";
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -19393,19 +20010,19 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_jobs().unwrap();
-        assert!(runtime
-            .eval(
-                r#"fetchBodyChecks instanceof Promise"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval(r#"fetchBodyChecks instanceof Promise"#,)
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
         runtime.run_jobs().unwrap();
-        assert!(runtime
-            .eval(
-                r#"fetchBodyChecks.then(value => globalThis.fetchBodyCheckResult = value)"#,
-            )
-            .is_ok());
+        assert!(
+            runtime
+                .eval(r#"fetchBodyChecks.then(value => globalThis.fetchBodyCheckResult = value)"#,)
+                .is_ok()
+        );
         runtime.run_jobs().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "fetchBodyCheckResult.blobText"),
@@ -19530,7 +20147,11 @@ b</textarea></form>"#);
             let request = read_http_request(&mut stream);
             let request = String::from_utf8(request).unwrap();
             assert!(request.starts_with("POST /submit HTTP/1.1\r\n"));
-            assert!(request.to_ascii_lowercase().contains("x-client: omoikane\r\n"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-client: omoikane\r\n")
+            );
             assert!(request.ends_with("\r\n\r\nname=miku"));
             let body = b"created";
             write!(
@@ -19567,19 +20188,21 @@ b</textarea></form>"#);
         runtime.run_jobs().unwrap();
         handle.join().unwrap();
 
-        assert!(runtime
-            .eval(&format!(
-                r#"fetchMetadata.status === 201 &&
+        assert!(
+            runtime
+                .eval(&format!(
+                    r#"fetchMetadata.status === 201 &&
                     fetchMetadata.statusText === "Created" &&
                     fetchMetadata.reply === "accepted" &&
                     fetchMetadata.url === "http://127.0.0.1:{}/submit" &&
                     fetchMetadata.redirected === false &&
                     fetchMetadata.body === "created""#,
-                address.port()
-            ))
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                    address.port()
+                ))
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -19600,9 +20223,7 @@ b</textarea></form>"#);
             let second_request = String::from_utf8(read_http_request(&mut second)).unwrap();
             assert!(second_request.starts_with("GET /final HTTP/1.1\r\n"));
             second
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone")
                 .unwrap();
         });
 
@@ -19639,9 +20260,7 @@ b</textarea></form>"#);
             let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
             assert!(request.starts_with("GET / HTTP/1.1\r\n"));
             stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .unwrap();
         });
 
@@ -19719,9 +20338,7 @@ b</textarea></form>"#);
             assert!(second_request.starts_with("GET /profile HTTP/1.1\r\n"));
             assert!(second_request.contains("Cookie: session=miku\r\n"));
             second
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .unwrap();
         });
 
@@ -19748,7 +20365,10 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
-        assert_eq!(runtime.eval("cookieXhr.status").unwrap().as_number(), Some(200.0));
+        assert_eq!(
+            runtime.eval("cookieXhr.status").unwrap().as_number(),
+            Some(200.0)
+        );
     }
 
     #[test]
@@ -20113,7 +20733,11 @@ b</textarea></form>"#);
             let request = read_http_request(&mut stream);
             let request = String::from_utf8(request).unwrap();
             assert!(request.starts_with("PUT /api/item HTTP/1.1\r\n"));
-            assert!(request.to_ascii_lowercase().contains("x-requested-with: omoikane\r\n"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-requested-with: omoikane\r\n")
+            );
             assert!(request.ends_with("\r\n\r\nupdated"));
             let body = b"accepted";
             write!(
@@ -20141,9 +20765,10 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
-        assert!(runtime
-            .eval(&format!(
-                r#"semanticXhr.status === 202 &&
+        assert!(
+            runtime
+                .eval(&format!(
+                    r#"semanticXhr.status === 202 &&
                     semanticXhr.statusText === "Accepted" &&
                     semanticXhr.responseText === "accepted" &&
                     semanticXhr.responseURL === "http://127.0.0.1:{}/api/item" &&
@@ -20153,11 +20778,12 @@ b</textarea></form>"#);
                     semanticXhr.getAllResponseHeaders().includes("x-result: saved\r\n") &&
                     !semanticXhr.getAllResponseHeaders().includes("set-cookie") &&
                     xhrStates.join(",") === "1,2,3,4""#,
-                address.port()
-            ))
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                    address.port()
+                ))
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -20253,24 +20879,29 @@ b</textarea></form>"#);
         let state = runtime
             .eval(r#"JSON.stringify([timeoutEvents, timeoutXhr.readyState, timeoutXhr.status, timeoutXhr.responseText])"#)
             .unwrap();
-        assert!(runtime
-            .eval(
-                r#"timeoutEvents.join("|") ===
+        assert!(
+            runtime
+                .eval(
+                    r#"timeoutEvents.join("|") ===
                   "loadstart:0:0:true|timeout:0:0:true|loadend:0:0:true" &&
                 timeoutXhr.readyState === XMLHttpRequest.DONE &&
                 timeoutXhr.status === 0 && timeoutXhr.responseText === """#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap_or(false), "state={}", state.display());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap_or(false),
+            "state={}",
+            state.display()
+        );
     }
 
     #[test]
     fn xml_http_request_timeout_uses_unsigned_long_conversion() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const xhr = new XMLHttpRequest();
                     xhr.timeout = Infinity;
                     const infinity = xhr.timeout === 0;
@@ -20281,10 +20912,11 @@ b</textarea></form>"#);
                     xhr.timeout = 1.9;
                     return infinity && negative && wrapped && xhr.timeout === 1;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -20419,15 +21051,17 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         handle.join().unwrap();
 
-        assert!(runtime
-            .eval(&format!(
-                r#"JSON.stringify(httpBinary) ===
+        assert!(
+            runtime
+                .eval(&format!(
+                    r#"JSON.stringify(httpBinary) ===
                   '[200,4,[0,255,1,128],"http://127.0.0.1:{}/binary"]'"#,
-                address.port()
-            ))
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                    address.port()
+                ))
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -20585,7 +21219,10 @@ b</textarea></form>"#);
             }
         };
         assert_eq!(completed.result, Err(PageTaskError::TimedOut));
-        assert_eq!(completed.runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+        assert_eq!(
+            completed.runtime.eval("1 + 1").unwrap().as_number(),
+            Some(2.0)
+        );
     }
 
     #[test]
@@ -20621,7 +21258,10 @@ b</textarea></form>"#);
             }
         };
         assert_eq!(completed.result, Err(PageTaskError::TimedOut));
-        assert_eq!(completed.runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+        assert_eq!(
+            completed.runtime.eval("1 + 1").unwrap().as_number(),
+            Some(2.0)
+        );
     }
 
     #[test]
@@ -20971,7 +21611,10 @@ b</textarea></form>"#);
                 ].join('|');
             })()"#,
         );
-        assert_eq!(actual, "true|true|true|true|true|flat|visible|normal|auto|preserve-3d|hidden|multiply|isolate");
+        assert_eq!(
+            actual,
+            "true|true|true|true|true|flat|visible|normal|auto|preserve-3d|hidden|multiply|isolate"
+        );
     }
 
     #[test]
@@ -21852,16 +22495,15 @@ b</textarea></form>"#);
             </body></html>"#,
         )
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            document,
-            "https://example.test/index.html",
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/index.html").unwrap();
         runtime.install_csp_policy(&["script-src 'none'; style-src 'none'".to_string()]);
 
-        assert!(runtime
-            .execute_document_scripts(Some(&"https://example.test/index.html".parse().unwrap()))
-            .is_empty());
+        assert!(
+            runtime
+                .execute_document_scripts(Some(&"https://example.test/index.html".parse().unwrap()))
+                .is_empty()
+        );
         assert_eq!(
             eval_str(&mut runtime, "typeof globalThis.cspInlineRan"),
             "undefined"
@@ -21886,7 +22528,10 @@ b</textarea></form>"#);
             &mut runtime,
             "document.cspViolations.map(v => v.effectiveDirective + ':' + v.resourceType).sort().join(',')",
         );
-        assert_eq!(violations, "script-src:script,style-src:style,style-src:style");
+        assert_eq!(
+            violations,
+            "script-src:script,style-src:style,style-src:style"
+        );
     }
 
     #[test]
@@ -21902,20 +22547,19 @@ b</textarea></form>"#);
             </body></html>"#,
         )
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            document,
-            "https://example.test/index.html",
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/index.html").unwrap();
         // The response policy is ANDed with the parser-initial meta policy.
         // Both policies allow inline execution, but the response still limits
         // script URLs to this origin.
         runtime.install_csp_policy(&[
             "script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'".to_string(),
         ]);
-        assert!(runtime
-            .execute_document_scripts(Some(&"https://example.test/index.html".parse().unwrap()))
-            .is_empty());
+        assert!(
+            runtime
+                .execute_document_scripts(Some(&"https://example.test/index.html".parse().unwrap()))
+                .is_empty()
+        );
         assert_eq!(eval_str(&mut runtime, "String(cspInlineRan)"), "true");
         assert_eq!(
             eval_str(
@@ -21990,9 +22634,11 @@ b</textarea></form>"#);
             state.document_security_origins.get(&child.identity()),
             Some(DocumentSecurityOrigin::Opaque(_))
         ));
-        assert!(!state
-            .csp_policy_for_document(child)
-            .allows_reference(ResourceType::Script, "https://example.test/app.js"));
+        assert!(
+            !state
+                .csp_policy_for_document(child)
+                .allows_reference(ResourceType::Script, "https://example.test/app.js")
+        );
     }
 
     #[test]
@@ -22012,8 +22658,17 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_until_idle().unwrap();
 
-        assert_eq!(eval_str(&mut runtime, "String(frame.contentDocument.cspViolations.length)"), "1");
-        assert_eq!(eval_str(&mut runtime, "typeof globalThis.blankRan"), "undefined");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "String(frame.contentDocument.cspViolations.length)"
+            ),
+            "1"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "typeof globalThis.blankRan"),
+            "undefined"
+        );
     }
 
     #[test]
@@ -22037,7 +22692,10 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "String(fetchRejected)"), "true");
-        assert_eq!(eval_str(&mut runtime, "xhrEvents.join(',')"), "error,loadend");
+        assert_eq!(
+            eval_str(&mut runtime, "xhrEvents.join(',')"),
+            "error,loadend"
+        );
         assert_eq!(eval_str(&mut runtime, "String(ws.readyState)"), "3");
         assert_eq!(
             eval_str(
@@ -22835,9 +23493,10 @@ b</textarea></form>"#);
     #[test]
     fn fallback_slot_signaling_ignores_non_html_slot_elements() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const host = document.createElement("div");
                   const root = host.attachShadow({ mode: "open" });
                   const svgSlot = document.createElementNS(
@@ -22886,10 +23545,11 @@ b</textarea></form>"#);
                     nullSlotChanges === 0 && xmlSlotChanges === 0 &&
                     xhtmlSlotChanges === 0;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
         runtime.run_jobs().unwrap();
         assert_eq!(
             runtime
@@ -23516,7 +24176,10 @@ b</textarea></form>"#);
             .unwrap()
             .to_number(&mut runtime.context)
             .unwrap();
-        assert_eq!(count, 1.0, "disconnect should cancel the pending observation");
+        assert_eq!(
+            count, 1.0,
+            "disconnect should cancel the pending observation"
+        );
     }
 
     #[test]
@@ -23550,17 +24213,22 @@ b</textarea></form>"#);
             .eval("document.getElementById('box').style.width = '120px'")
             .unwrap();
         runtime.run_jobs().unwrap();
-        assert!(runtime
-            .eval("resizeEntries.length === 2 && resizeEntries[1].contentWidth === 120")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("resizeEntries.length === 2 && resizeEntries[1].contentWidth === 120")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
 
         runtime
             .eval("document.getElementById('box').style.width = '120px'")
             .unwrap();
         runtime.run_jobs().unwrap();
-        assert_eq!(runtime.eval("resizeEntries.length").unwrap().as_number(), Some(2.0));
+        assert_eq!(
+            runtime.eval("resizeEntries.length").unwrap().as_number(),
+            Some(2.0)
+        );
     }
 
     #[test]
@@ -23604,7 +24272,8 @@ b</textarea></form>"#);
 
     #[test]
     fn intersection_observer_take_records_drains_before_callback() {
-        let mut runtime = runtime_from_html(r#"<div id="box" style="width:10px;height:10px"></div>"#);
+        let mut runtime =
+            runtime_from_html(r#"<div id="box" style="width:10px;height:10px"></div>"#);
         runtime
             .eval(
                 r#"globalThis.intersectionCallbacks = 0;
@@ -23615,19 +24284,22 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_jobs().unwrap();
-        assert!(runtime
-            .eval("takenIntersections.length === 1 && intersectionCallbacks === 0")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("takenIntersections.length === 1 && intersectionCallbacks === 0")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn intersection_observer_normalizes_options_and_rejects_invalid_values() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const observer = new IntersectionObserver(() => {}, {
                     rootMargin: '10px 5%', threshold: [1, 0.5, 0, 0.5]
                   });
@@ -23640,10 +24312,11 @@ b</textarea></form>"#);
                   return observer.rootMargin === '10px 5% 10px 5%' &&
                     observer.thresholds.join(',') === '0,0.5,1' && badMargin && badThreshold;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -23783,9 +24456,10 @@ b</textarea></form>"#);
         )
         .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const rule = document.styleSheets[0].cssRules[0];
                     return rule instanceof CSSSupportsRule &&
                         rule.conditionText === "(display: grid)" &&
@@ -23795,10 +24469,11 @@ b</textarea></form>"#);
                         document.styleSheets[0].cssRules[1] instanceof CSSSupportsRule &&
                         document.styleSheets[0].cssRules[1].matches === true;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -23808,9 +24483,10 @@ b</textarea></form>"#);
         )
         .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const implicit = document.styleSheets[0].cssRules[0];
                     const bounded = document.styleSheets[0].cssRules[1];
                     const commented = document.styleSheets[0].cssRules[2];
@@ -23827,10 +24503,11 @@ b</textarea></form>"#);
                         commented.start === ".commented" &&
                         limitOnly.start === null && limitOnly.end === ".limit";
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -23840,18 +24517,20 @@ b</textarea></form>"#);
         )
         .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const scope = document.styleSheets[0].cssRules[0];
                     scope.insertRule('#target { width: 33px; }', scope.cssRules.length);
                     return getComputedStyle(document.getElementById('target')).width === '33px' &&
                         scope.cssRules.length === 2;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
         assert_eq!(
             eval_str(
                 &mut runtime,
@@ -23859,22 +24538,25 @@ b</textarea></form>"#);
             ),
             "#target"
         );
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const scope = document.styleSheets[0].cssRules[0];
                     scope.cssRules[1].selectorText = '#target';
                     scope.deleteRule(0);
                     return scope.cssRules.length === 1 &&
                         getComputedStyle(document.getElementById('target')).width === '33px';
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
-        assert!(runtime
-            .eval(
-                r#"(() => {
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     try {
                         document.styleSheets[0].insertRule('@scope (.broken) trailing { p {} }', 0);
                         return false;
@@ -23882,10 +24564,11 @@ b</textarea></form>"#);
                         return error instanceof DOMException && error.name === 'SyntaxError';
                     }
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -23895,9 +24578,10 @@ b</textarea></form>"#);
         )
         .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const card = document.createElement('section');
                     const scopedStyle = document.createElement('style');
                     scopedStyle.textContent = '@scope { p { color: red; } }';
@@ -23909,23 +24593,26 @@ b</textarea></form>"#);
                     globalThis.__scopeCard = card;
                     return getComputedStyle(paragraph).color === 'rgb(255, 0, 0)';
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
-        assert!(runtime
-            .eval(
-                r#"(() => {
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     __scopeCard.remove();
                     const detached = getComputedStyle(__scopeParagraph).color;
                     document.body.appendChild(__scopeCard);
                     return detached !== 'rgb(255, 0, 0)' &&
                         getComputedStyle(__scopeParagraph).color === 'rgb(255, 0, 0)';
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
         assert!(runtime
             .eval(
                 r#"(() => {
@@ -23950,9 +24637,10 @@ b</textarea></form>"#);
         )
         .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     const named = document.styleSheets[0].cssRules[0];
                     const unnamed = document.styleSheets[0].cssRules[1];
                     return named instanceof CSSContainerRule &&
@@ -23966,10 +24654,11 @@ b</textarea></form>"#);
                         unnamed.containerName === "" &&
                         unnamed.containerQuery === "(inline-size > 10px)";
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -24064,11 +24753,13 @@ b</textarea></form>"#);
         .document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
         runtime.execute_document_scripts(None);
-        assert!(runtime
-            .eval("theme === document.getElementById('theme')")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("theme === document.getElementById('theme')")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
         assert_eq!(
             eval_num(&mut runtime, "var log = []; log.push(1); log.length"),
             1.0
@@ -24204,7 +24895,10 @@ b</textarea></form>"#);
 
         assert_eq!(eval_num(&mut runtime, "document.styleSheets.length"), 1.0);
         assert_eq!(
-            eval_str(&mut runtime, "getComputedStyle(document.getElementById('target')).display"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).display"
+            ),
             "none"
         );
     }
@@ -24246,7 +24940,10 @@ b</textarea></form>"#);
             ":is(.after, .missing)"
         );
         assert_eq!(
-            eval_str(&mut runtime, "getComputedStyle(document.querySelector('div')).color"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).color"
+            ),
             "rgb(255, 0, 0)"
         );
 
@@ -24288,7 +24985,10 @@ b</textarea></form>"#);
             ".target"
         );
         assert_eq!(
-            eval_str(&mut runtime, "getComputedStyle(document.querySelector('div')).width"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).width"
+            ),
             "2px"
         );
 
@@ -24557,15 +25257,24 @@ b</textarea></form>"#);
             "target|1|target"
         );
         assert_eq!(
-            eval_str(&mut runtime, "getComputedStyle(document.getElementById('target')).width"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).width"
+            ),
             "20px"
         );
         assert_eq!(
-            eval_str(&mut runtime, "getComputedStyle(document.getElementById('target')).color"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).color"
+            ),
             "rgb(255, 0, 0)"
         );
         assert_eq!(
-            eval_str(&mut runtime, "getComputedStyle(document.getElementById('target')).height"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).height"
+            ),
             "30px"
         );
     }
@@ -24595,11 +25304,17 @@ b</textarea></form>"#);
             "scope|true|1"
         );
         assert_eq!(
-            eval_str(&mut runtime, "getComputedStyle(document.getElementById('scope')).width"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('scope')).width"
+            ),
             "20px"
         );
         assert_eq!(
-            eval_str(&mut runtime, "getComputedStyle(document.getElementById('scope')).height"),
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('scope')).height"
+            ),
             "30px"
         );
         assert_eq!(
@@ -24834,7 +25549,9 @@ b</textarea></form>"#);
     #[test]
     fn node_identity_methods_follow_web_idl_and_private_identity() {
         let mut runtime = JsRuntime::new().unwrap();
-        let actual = eval_str(&mut runtime, r#"(() => {
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
           const same = Node.prototype.isSameNode;
           const equal = Node.prototype.isEqualNode;
           const left = document.createElement("section");
@@ -24863,15 +25580,20 @@ b</textarea></form>"#);
           Object.setPrototypeOf(right, null);
           checks.push(same.call(left, left), same.call(left, right), equal.call(left, right));
           return checks.join("|");
-        })()"#);
-        assert_eq!(actual,
-            "undefined|1|1|TypeError|TypeError|false|false|false|false|TypeError|TypeError|TypeError|TypeError|TypeError|true|false|true");
+        })()"#,
+        );
+        assert_eq!(
+            actual,
+            "undefined|1|1|TypeError|TypeError|false|false|false|false|TypeError|TypeError|TypeError|TypeError|TypeError|true|false|true"
+        );
     }
 
     #[test]
     fn is_equal_node_compares_element_data_attributes_and_children() {
         let mut runtime = JsRuntime::new().unwrap();
-        let actual = eval_str(&mut runtime, r#"(() => {
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
           const make = ({ ens = "urn:element", eqn = "p:root", ans = "urn:attribute",
                           aqn = "a:kind", value = "value", reverseAttrs = false,
                           reverseChildren = false } = {}) => {
@@ -24899,7 +25621,8 @@ b</textarea></form>"#);
             left.isEqualNode(make({ value: "other" })),
             left.isEqualNode(make({ reverseChildren: true }))
           ].join("|");
-        })()"#);
+        })()"#,
+        );
         assert_eq!(actual, "true|false|false|false|false|false|false|false");
     }
 
@@ -24950,7 +25673,10 @@ b</textarea></form>"#);
     #[test]
     fn node_equality_preserves_namespaces_through_parser_clone_and_import() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime.eval(r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
           const htmlNamespace = "http://www.w3.org/1999/xhtml";
           const namespaced = document.createElementNS("urn:element", "p:Root");
           namespaced.setAttributeNS("urn:attribute", "a:Mixed", "value");
@@ -24988,7 +25714,12 @@ b</textarea></form>"#);
             overwritten.getAttributeNS("urn:attribute", "Mixed") === "value" &&
             overwritten.isEqualNode(overwrittenEquivalent) &&
             upperHtml.cloneNode().tagName === "DIV";
-        })()"#).unwrap().as_boolean().unwrap());
+        })()"#
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -25127,9 +25858,10 @@ b</textarea></form>"#);
         let errors = runtime.execute_document_scripts(None);
         assert!(errors.is_empty(), "unexpected script errors: {errors:?}");
 
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const template = document.getElementById("tpl");
                   const inside = template.content.querySelector(".inside");
                   return template instanceof HTMLTemplateElement &&
@@ -25146,18 +25878,20 @@ b</textarea></form>"#);
                     template.innerHTML.includes('class="inside"') &&
                     globalThis.templateScriptRan === undefined;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn dynamic_template_inner_html_and_deep_clone_use_independent_contents() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const template = document.createElement("template");
                   template.innerHTML = '<span data-kind="original">one</span>';
                   document.body.appendChild(template);
@@ -25177,18 +25911,20 @@ b</textarea></form>"#);
                     template.childNodes.length === 0 &&
                     originalSpan.isConnected === false;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn template_content_script_insertions_adopt_inert_owner_document() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const template = document.createElement("template");
                   const content = template.content;
                   const inserted = document.createElement("span");
@@ -25208,20 +25944,21 @@ b</textarea></form>"#);
                     nestedContent.ownerDocument === content.ownerDocument &&
                     nestedInserted.ownerDocument === nestedContent.ownerDocument;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn open_shadow_root_preserves_tree_boundaries_and_composed_connectivity() {
-        let mut runtime = runtime_from_html(
-            r#"<div id="host"><span id="light">light</span></div>"#,
-        );
-        assert!(runtime
-            .eval(
-                r##"(() => {
+        let mut runtime =
+            runtime_from_html(r#"<div id="host"><span id="light">light</span></div>"#);
+        assert!(
+            runtime
+                .eval(
+                    r##"(() => {
                   const host = document.getElementById("host");
                   const root = host.attachShadow({ mode: "open" });
                   root.innerHTML = '<span id="inside">shadow</span>';
@@ -25254,18 +25991,20 @@ b</textarea></form>"#);
                     root.innerHTML.includes('id="inside"') &&
                     clone.shadowRoot === null;
                 })()"##,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn closed_shadow_root_and_invalid_hosts_follow_attach_shadow_errors() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const host = document.createElement("section");
                   document.body.appendChild(host);
                   const root = host.attachShadow({ mode: "closed" });
@@ -25288,10 +26027,11 @@ b</textarea></form>"#);
                     invalidMode === "TypeError" &&
                     constructor === "TypeError";
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -25406,11 +26146,7 @@ b</textarea></form>"#);
                 .to_string(&mut runtime.context)
                 .unwrap()
                 .to_std_string_escaped();
-            assert_eq!(
-                result,
-                "21px||||22px|22px|23px",
-                "shadow mode: {mode}"
-            );
+            assert_eq!(result, "21px||||22px|22px|23px", "shadow mode: {mode}");
         }
     }
 
@@ -25442,9 +26178,10 @@ b</textarea></form>"#);
     #[test]
     fn html_slot_element_assigns_named_default_and_fallback_nodes_dynamically() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const host = document.createElement("div");
                   const title = document.createElement("h1");
                   title.slot = "title";
@@ -25487,10 +26224,11 @@ b</textarea></form>"#);
                     fallback.length === 1 && fallback[0].tagName === "EM" &&
                     illegalConstructor;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -25536,9 +26274,10 @@ b</textarea></form>"#);
     #[test]
     fn assigned_slot_hides_closed_roots_and_slotchange_is_microtask_coalesced() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const openHost = document.createElement("div");
                   document.body.appendChild(openHost);
                   const root = openHost.attachShadow({ mode: "open" });
@@ -25561,10 +26300,11 @@ b</textarea></form>"#);
                     closedRoot.firstChild.assignedNodes()[0] === closedChild &&
                     closedChild.assignedSlot === null && slotChanges === 0;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
         runtime.run_jobs().unwrap();
         assert_eq!(
             runtime
@@ -25579,9 +26319,10 @@ b</textarea></form>"#);
     #[test]
     fn fallback_mutations_signal_nested_slots_and_onslotchange() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r##"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r##"(() => {
                   const host = document.createElement("div");
                   const root = host.attachShadow({ mode: "open" });
                   root.innerHTML = "<slot id='outer'><slot id='inner'></slot></slot>";
@@ -25596,10 +26337,11 @@ b</textarea></form>"#);
                   inner.appendChild(document.createElement("span"));
                   return outerSlotChanges === 0 && innerSlotChanges === 0;
                 })()"##,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
         runtime.run_jobs().unwrap();
         let result = runtime
             .eval("outerSlotChanges + '|' + innerSlotChanges")
@@ -25670,7 +26412,6 @@ b</textarea></form>"#);
                 "true\ntrue\n0\n0"
             )
         );
-
     }
 
     #[test]
@@ -25707,9 +26448,10 @@ b</textarea></form>"#);
     #[test]
     fn closed_shadow_event_paths_hide_internals_from_outside_listeners() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const host = document.createElement("div");
                   document.body.appendChild(host);
                   const root = host.attachShadow({ mode: "closed" });
@@ -25738,10 +26480,11 @@ b</textarea></form>"#);
                     externalPath.length === externalPathAfterMutation.length &&
                     externalPath.every((node, index) => node === externalPathAfterMutation[index]);
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -25875,11 +26618,13 @@ b</textarea></form>"#);
             .as_boolean()
             .unwrap());
         runtime.run_jobs().unwrap();
-        assert!(runtime
-            .eval("customElementWhenDefinedResolved")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("customElementWhenDefinedResolved")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -25887,9 +26632,10 @@ b</textarea></form>"#);
         let mut runtime = runtime_from_html(
             r#"<x-upgrade id="first"><x-upgrade id="nested"></x-upgrade></x-upgrade><x-host id="host"></x-host>"#,
         );
-        assert!(runtime
-            .eval(
-                r##"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r##"(() => {
                   const order = [];
                   class UpgradeElement extends HTMLElement {
                     constructor() {
@@ -25920,20 +26666,21 @@ b</textarea></form>"#);
                     shadowElement instanceof ShadowElement &&
                     shadowElement.shadowRoot instanceof ShadowRoot;
                 })()"##,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn failed_custom_elements_are_not_retried_and_iframe_registry_is_isolated() {
-        let mut runtime = runtime_from_html(
-            r#"<x-fails id="candidate"></x-fails><iframe id="frame"></iframe>"#,
-        );
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        let mut runtime =
+            runtime_from_html(r#"<x-fails id="candidate"></x-fails><iframe id="frame"></iframe>"#);
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   let attempts = 0;
                   class FailingElement extends HTMLElement {
                     constructor() {
@@ -25968,10 +26715,11 @@ b</textarea></form>"#);
                     !(beforeDefinition instanceof TopElement) &&
                     afterDefinition instanceof ChildElement;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -25979,9 +26727,10 @@ b</textarea></form>"#);
         let mut runtime = runtime_from_html(
             r#"<x-lifecycle id="candidate" data-value="one" ignored="no"></x-lifecycle>"#,
         );
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const calls = [];
                   class LifecycleElement extends HTMLElement {
                     static get observedAttributes() { return ["data-value"]; }
@@ -26012,18 +26761,20 @@ b</textarea></form>"#);
                     "connected",
                   ].join("|");
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn custom_element_subtree_reactions_follow_tree_order_and_inner_html_removal() {
         let mut runtime = JsRuntime::new().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const calls = [];
                   class TreeElement extends HTMLElement {
                     connectedCallback() { calls.push("connect:" + this.id); }
@@ -26044,10 +26795,11 @@ b</textarea></form>"#);
                     "disconnect:outer", "disconnect:inner",
                   ].join("|");
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -26055,9 +26807,10 @@ b</textarea></form>"#);
         let mut runtime = runtime_from_html(
             r#"<x-throws id="first"></x-throws><x-throws id="second"></x-throws><x-constructor-fails></x-constructor-fails>"#,
         );
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const connected = [];
                   let failedLifecycle = 0;
                   class ThrowingElement extends HTMLElement {
@@ -26085,10 +26838,11 @@ b</textarea></form>"#);
                     document.getElementById("first").__customElementCallbackErrors.length === 1 &&
                     failed.__customElementState === "failed" && failedLifecycle === 0;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -26447,7 +27201,9 @@ b</textarea></form>"#);
         );
         assert!(
             runtime
-                .eval("document.getElementById('target').getRootNode({ composed: true }) === document")
+                .eval(
+                    "document.getElementById('target').getRootNode({ composed: true }) === document"
+                )
                 .unwrap()
                 .as_boolean()
                 .unwrap()
@@ -26909,9 +27665,10 @@ b</textarea></form>"#);
     fn storage_methods_follow_webidl_string_conversion_and_ordering() {
         let doc = NodeHandle::document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                     localStorage.clear();
                     localStorage.setItem(1, null);
                     localStorage.setItem(undefined, 42);
@@ -26931,19 +27688,18 @@ b</textarea></form>"#);
                     localStorage.clear();
                     return ordered && stable && removed && localStorage.length === 0;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn indexeddb_open_upgrade_transaction_and_clone_isolation() {
-        let mut runtime = JsRuntime::with_document_and_url(
-            default_document(),
-            "https://indexeddb.example.test/",
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(default_document(), "https://indexeddb.example.test/")
+                .unwrap();
         runtime
             .eval(
                 r#"globalThis.idbProbe = { events: [], value: null, count: -1, error: '' };
@@ -26971,7 +27727,10 @@ b</textarea></form>"#);
                    };"#,
             )
             .unwrap();
-        assert_eq!(runtime.eval("idbProbe.events.length").unwrap().as_number(), Some(0.0));
+        assert_eq!(
+            runtime.eval("idbProbe.events.length").unwrap().as_number(),
+            Some(0.0)
+        );
         runtime.run_until_idle().unwrap();
         assert_eq!(
             eval_str(&mut runtime, "idbProbe.events.join('|')"),
@@ -26994,7 +27753,13 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "idbSecond.value + '|' + idbSecond.names + '|' + idbSecond.rejected"), "first|books|TypeError");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "idbSecond.value + '|' + idbSecond.names + '|' + idbSecond.rejected"
+            ),
+            "first|books|TypeError"
+        );
     }
 
     #[test]
@@ -27024,7 +27789,10 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(
-            eval_str(&mut runtime, "idbEdge.objectStore + '|' + idbEdge.index + '|' + idbEdge.boxed"),
+            eval_str(
+                &mut runtime,
+                "idbEdge.objectStore + '|' + idbEdge.index + '|' + idbEdge.boxed"
+            ),
             "NotSupportedError|NotSupportedError|ok",
         );
     }
@@ -27035,23 +27803,39 @@ b</textarea></form>"#);
         let first_session = storage.create_session();
         let second_session = storage.create_session();
         let mut first = JsRuntime::with_document_url_and_storage(
-            default_document(), "https://example.com/first", storage.clone(), first_session,
-        ).unwrap();
+            default_document(),
+            "https://example.com/first",
+            storage.clone(),
+            first_session,
+        )
+        .unwrap();
         first.eval("localStorage.setItem('shared', 'local'); sessionStorage.setItem('shared', 'session-a')").unwrap();
 
         let mut same_origin = JsRuntime::with_document_url_and_storage(
-            default_document(), "https://example.com:443/second", storage.clone(), first_session,
-        ).unwrap();
+            default_document(),
+            "https://example.com:443/second",
+            storage.clone(),
+            first_session,
+        )
+        .unwrap();
         assert!(same_origin.eval("localStorage.getItem('shared') === 'local' && sessionStorage.getItem('shared') === 'session-a'").unwrap().as_boolean().unwrap());
 
         let mut other_session = JsRuntime::with_document_url_and_storage(
-            default_document(), "https://example.com/third", storage.clone(), second_session,
-        ).unwrap();
+            default_document(),
+            "https://example.com/third",
+            storage.clone(),
+            second_session,
+        )
+        .unwrap();
         assert!(other_session.eval("localStorage.getItem('shared') === 'local' && sessionStorage.getItem('shared') === null").unwrap().as_boolean().unwrap());
 
         let mut other_origin = JsRuntime::with_document_url_and_storage(
-            default_document(), "https://other.example/", storage, first_session,
-        ).unwrap();
+            default_document(),
+            "https://other.example/",
+            storage,
+            first_session,
+        )
+        .unwrap();
         assert!(other_origin.eval("localStorage.getItem('shared') === null && sessionStorage.getItem('shared') === null").unwrap().as_boolean().unwrap());
     }
 
@@ -27059,11 +27843,15 @@ b</textarea></form>"#);
     fn same_origin_iframe_shares_storage_and_receives_storage_event() {
         let document = crate::html::TreeBuilder::parse(
             "<html><body><iframe id='frame'></iframe></body></html>",
-        ).document();
-        let mut runtime = JsRuntime::with_document_and_url(document, "https://example.com/").unwrap();
+        )
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.com/").unwrap();
 
-        assert!(runtime.eval(
-            r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                 const frame = document.querySelector('#frame');
                 const child = frame.contentWindow;
                 let observed = null;
@@ -27076,12 +27864,17 @@ b</textarea></form>"#);
                 return child.localStorage.getItem('shared') === 'yes' &&
                     observed === 'shared||yes|https://example.com/|true';
             })()"#,
-        ).unwrap().as_boolean().unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn opaque_origin_storage_access_throws_security_error() {
-        let mut runtime = JsRuntime::with_document_and_url(default_document(), "about:blank").unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(default_document(), "about:blank").unwrap();
         assert!(runtime.eval(
             "(() => { try { return localStorage.length; } catch (error) { return error instanceof DOMException && error.name === 'SecurityError'; } })()",
         ).unwrap().as_boolean().unwrap());
@@ -27092,7 +27885,8 @@ b</textarea></form>"#);
         let document = crate::html::TreeBuilder::parse(
             "<html><body><iframe id='outer' src='data:text/html,%3Chtml%3E%3Cbody%3E%3C/body%3E%3C/html%3E'></iframe></body></html>",
         ).document();
-        let mut runtime = JsRuntime::with_document_and_url(document, "https://example.com/").unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.com/").unwrap();
 
         assert!(
             runtime
@@ -27152,28 +27946,28 @@ b</textarea></form>"#);
     #[test]
     fn performance_now_is_monotonic_and_has_epoch_time_origin() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
-        assert!(runtime
-            .eval(
-                "(() => { const first = performance.now(); const second = performance.now(); \
+        assert!(
+            runtime
+                .eval(
+                    "(() => { const first = performance.now(); const second = performance.now(); \
                  return Number.isFinite(performance.timeOrigin) && performance.timeOrigin > 0 && \
                  first >= 0 && second >= first && \
                  Math.abs(Date.now() - (performance.timeOrigin + second)) < 1000 && \
                  Object.getOwnPropertyDescriptor(performance, 'timeOrigin').writable === false && \
                  (() => { const origin = performance.timeOrigin; performance.timeOrigin = 0; \
                    return performance.timeOrigin === origin; })(); })()"
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn performance_navigation_and_resource_timing_entries_have_lifecycle_semantics() {
-        let mut runtime = JsRuntime::with_document_and_url(
-            default_document(),
-            "https://example.test/index.html",
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(default_document(), "https://example.test/index.html")
+                .unwrap();
         assert!(runtime
             .eval(
                 r#"(() => {
@@ -27211,33 +28005,37 @@ b</textarea></form>"#);
             .unwrap()
             .as_boolean()
             .unwrap());
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   performance.clearResourceTimings();
                   return performance.getEntriesByType("resource").length === 0 &&
                     performance.getEntriesByType("navigation").length === 1 &&
                     performance.getEntriesByName("survivor", "mark").length === 1;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
         runtime.fire_dom_content_loaded().unwrap();
         runtime.fire_load().unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const entry = performance.getEntriesByType("navigation")[0];
                   return entry.domInteractive >= 0 &&
                     entry.domContentLoadedEventStart <= entry.domContentLoadedEventEnd &&
                     entry.domContentLoadedEventEnd <= entry.domComplete &&
                     entry.loadEventStart <= entry.loadEventEnd;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -27253,7 +28051,10 @@ b</textarea></form>"#);
             .unwrap();
         runtime.fire_dom_content_loaded().unwrap();
         runtime.fire_load().unwrap();
-        assert_eq!(eval_str(&mut runtime, "lifecycleEvents.join(',')"), "dcl,load");
+        assert_eq!(
+            eval_str(&mut runtime, "lifecycleEvents.join(',')"),
+            "dcl,load"
+        );
     }
 
     #[test]
@@ -27393,9 +28194,10 @@ b</textarea></form>"#);
     #[test]
     fn performance_resource_timing_buffer_count_resets_after_clear() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   performance.clearResourceTimings();
                   performance.setResourceTimingBufferSize(1);
                   performance.mark("before");
@@ -27408,18 +28210,20 @@ b</textarea></form>"#);
                   return full && performance.getEntriesByType("resource").length === 1 &&
                     performance.getEntriesByType("mark").length === 2;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
     fn performance_resource_timing_link_finishes_when_rel_follows_href() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   performance.clearResourceTimings();
                   const stylesheetHref = "data:text/css,body%7Bcolor%3Ared%7D";
                   const stylesheet = document.createElement("link");
@@ -27436,10 +28240,11 @@ b</textarea></form>"#);
                     performance.getEntriesByName(stylesheetHref).length === 1 &&
                     performance.getEntriesByName(preloadHref).length === 1;
                 })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -27519,18 +28324,24 @@ b</textarea></form>"#);
             .parse()
             .unwrap();
         let errors = runtime.execute_document_scripts(Some(&base));
-        assert_eq!(errors.len(), 1, "expected one missing-script error: {errors:?}");
-        assert!(runtime
-            .eval(&format!(
-                r#"(() => {{
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected one missing-script error: {errors:?}"
+        );
+        assert!(
+            runtime
+                .eval(&format!(
+                    r#"(() => {{
                   const entry = performance.getEntriesByName("{effective}")[0];
                   return entry && entry.entryType === "resource" &&
                     entry.initiatorType === "script" && entry.responseStatus === 0;
                 }})()"#,
-            ))
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                ))
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -27564,16 +28375,19 @@ b</textarea></form>"#);
     #[test]
     fn user_timing_records_orders_and_clears_entries() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
-        assert!(runtime
-            .eval(
-                r#"(() => {
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
                   const late = performance.mark("same", { startTime: 20, detail: { id: 1 } });
                   const early = performance.mark("same", { startTime: 10 });
                   const measure = performance.measure("span", "early-missing");
                   return false;
                 })()"#
-            )
-            .is_err(), "an unknown mark must throw");
+                )
+                .is_err(),
+            "an unknown mark must throw"
+        );
 
         assert!(runtime
             .eval(
@@ -27678,24 +28492,28 @@ b</textarea></form>"#);
                 })()"#,
             )
             .unwrap();
-        assert!(runtime
-            .eval("observerDeliveries.length === 0")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("observerDeliveries.length === 0")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
 
         runtime.run_jobs().unwrap();
-        assert!(runtime
-            .eval(
-                r#"observerDeliveries.length === 1 &&
+        assert!(
+            runtime
+                .eval(
+                    r#"observerDeliveries.length === 1 &&
                    observerDeliveries[0].observerMatches && observerDeliveries[0].listType &&
                    observerDeliveries[0].all.join(",") === "early:mark,middle:measure,late:mark" &&
                    observerDeliveries[0].marks.join(",") === "early,late" &&
                    observerDeliveries[0].named === 1"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -27725,11 +28543,13 @@ b</textarea></form>"#);
             "before,taken"
         );
         runtime.run_jobs().unwrap();
-        assert!(runtime
-            .eval("bufferedDeliveries.length === 0")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("bufferedDeliveries.length === 0")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
 
         runtime
             .eval(
@@ -27739,11 +28559,15 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_jobs().unwrap();
-        assert!(runtime
-            .eval("bufferedDeliveries.length === 0 && bufferedObserver.takeRecords().length === 0")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval(
+                    "bufferedDeliveries.length === 0 && bufferedObserver.takeRecords().length === 0"
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -27826,17 +28650,37 @@ b</textarea></form>"#);
             "loadstart,durationchange,loadedmetadata,loadeddata,canplay,load,play,playing"
         );
         assert_eq!(eval_str(&mut runtime, "playResult"), "resolved");
-        assert_eq!(eval_str(&mut runtime, "String(video instanceof HTMLVideoElement)"), "true");
-        assert_eq!(eval_str(&mut runtime, "String(audio instanceof HTMLAudioElement)"), "true");
-        assert_eq!(eval_str(&mut runtime, "String(audio instanceof HTMLMediaElement)"), "true");
+        assert_eq!(
+            eval_str(&mut runtime, "String(video instanceof HTMLVideoElement)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(audio instanceof HTMLAudioElement)"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(audio instanceof HTMLMediaElement)"),
+            "true"
+        );
         assert_eq!(eval_num(&mut runtime, "video.readyState"), 4.0);
         assert_eq!(eval_num(&mut runtime, "video.networkState"), 1.0);
         assert_eq!(eval_num(&mut runtime, "video.duration"), 1.0);
-        assert_eq!(eval_str(&mut runtime, "video.canPlayType('audio/mpeg')"), "probably");
-        runtime.eval("video.width = 3.5; video.height = -2.5;").unwrap();
-        assert_eq!(eval_str(&mut runtime, "[video.width, video.height].join('|')"), "3|0");
         assert_eq!(
-            eval_str(&mut runtime, "(() => { try { new MediaError(4); return 'constructible'; } catch (error) { return error.name; } })()"),
+            eval_str(&mut runtime, "video.canPlayType('audio/mpeg')"),
+            "probably"
+        );
+        runtime
+            .eval("video.width = 3.5; video.height = -2.5;")
+            .unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[video.width, video.height].join('|')"),
+            "3|0"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { new MediaError(4); return 'constructible'; } catch (error) { return error.name; } })()"
+            ),
             "TypeError"
         );
 
@@ -27846,7 +28690,13 @@ b</textarea></form>"#);
             eval_str(&mut runtime, "mediaEvents.slice(-2).join(',')"),
             "timeupdate,ended"
         );
-        assert_eq!(eval_str(&mut runtime, "String(video.paused) + '|' + String(video.ended)"), "true|true");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "String(video.paused) + '|' + String(video.ended)"
+            ),
+            "true|true"
+        );
         assert_eq!(eval_num(&mut runtime, "video.currentTime"), 1.0);
         runtime
             .eval(
@@ -27855,7 +28705,13 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_num(&mut runtime, "video.currentTime"), 0.25);
-        assert_eq!(eval_str(&mut runtime, "[video.volume, video.muted, video.controls].join('|')"), "0.5|true|true");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[video.volume, video.muted, video.controls].join('|')"
+            ),
+            "0.5|true|true"
+        );
 
         runtime
             .eval(
@@ -27871,7 +28727,10 @@ b</textarea></form>"#);
         runtime.run_until_idle().unwrap();
         runtime.eval("pauseProbe.pause()").unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "pauseEvents.join(',')"), "play,pause");
+        assert_eq!(
+            eval_str(&mut runtime, "pauseEvents.join(',')"),
+            "play,pause"
+        );
         assert_eq!(eval_str(&mut runtime, "String(pauseProbe.paused)"), "true");
 
         runtime
@@ -27883,16 +28742,24 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        runtime.eval("seekProbe.currentTime = seekProbe.duration").unwrap();
+        runtime
+            .eval("seekProbe.currentTime = seekProbe.duration")
+            .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(
-            eval_str(&mut runtime, "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"),
+            eval_str(
+                &mut runtime,
+                "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"
+            ),
             "true|true|1"
         );
         runtime.eval("seekProbe.play()").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(
-            eval_str(&mut runtime, "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"),
+            eval_str(
+                &mut runtime,
+                "[seekProbe.paused, seekProbe.ended, seekProbe.currentTime].join('|')"
+            ),
             "false|false|0"
         );
 
@@ -27927,7 +28794,10 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "emptyPlayResult"), "NotSupportedError");
+        assert_eq!(
+            eval_str(&mut runtime, "emptyPlayResult"),
+            "NotSupportedError"
+        );
         assert_eq!(eval_num(&mut runtime, "empty.error.code"), 4.0);
 
         runtime
@@ -27939,12 +28809,18 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "String(attributeProbe.muted)"), "true");
+        assert_eq!(
+            eval_str(&mut runtime, "String(attributeProbe.muted)"),
+            "true"
+        );
         assert_eq!(eval_num(&mut runtime, "attributeProbe.readyState"), 4.0);
         runtime
             .eval("video.setAttribute('width', '-5'); video.setAttribute('height', '-2');")
             .unwrap();
-        assert_eq!(eval_str(&mut runtime, "[video.width, video.height].join('|')"), "0|0");
+        assert_eq!(
+            eval_str(&mut runtime, "[video.width, video.height].join('|')"),
+            "0|0"
+        );
 
         runtime
             .eval(
@@ -28009,35 +28885,121 @@ b</textarea></form>"#);
             .unwrap();
         assert_eq!(eval_num(&mut runtime, "context.sampleRate"), 48000.0);
         assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
-        assert_eq!(eval_str(&mut runtime, "typeof __omoikane_event_loop_now"), "undefined");
-        assert_eq!(eval_str(&mut runtime, "String(gain instanceof GainNode) + '|' + String(oscillator instanceof OscillatorNode)"), "true|true");
-        assert_eq!(eval_str(&mut runtime, "String(gain.connect(gain.gain))"), "undefined");
+        assert_eq!(
+            eval_str(&mut runtime, "typeof __omoikane_event_loop_now"),
+            "undefined"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "String(gain instanceof GainNode) + '|' + String(oscillator instanceof OscillatorNode)"
+            ),
+            "true|true"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "String(gain.connect(gain.gain))"),
+            "undefined"
+        );
         assert!((eval_num(&mut runtime, "gain.gain.__valueAt(0.5)") - 0.5).abs() < 1e-9);
         runtime.eval("globalThis.targetGain = context.createGain(); targetGain.gain.setValueAtTime(1, 0); targetGain.gain.setTargetAtTime(0, 0, 1);").unwrap();
-        assert!((eval_num(&mut runtime, "targetGain.gain.__valueAt(0.5)") - (-0.5f64).exp()).abs() < 1e-9);
-        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.gain.setValueAtTime(0.5, -1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.gain.setTargetAtTime(0.5, -1, 0.1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.gain.exponentialRampToValueAtTime(0, 1); return 'allowed'; } catch (error) { return String(error instanceof RangeError) + '|' + error.name; } })()"), "true|RangeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { const param = context.createGain().gain; param.setValueAtTime(-1, 1); try { param.exponentialRampToValueAtTime(1, 2); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
-        runtime.eval("context.resume(); oscillator.start(); oscillator.stop(0.02);").unwrap();
-        assert_eq!(eval_str(&mut runtime, "(() => { try { oscillator.stop(0.03); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidStateError");
+        assert!(
+            (eval_num(&mut runtime, "targetGain.gain.__valueAt(0.5)") - (-0.5f64).exp()).abs()
+                < 1e-9
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { gain.gain.setValueAtTime(0.5, -1); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "RangeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { gain.gain.setTargetAtTime(0.5, -1, 0.1); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "RangeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { gain.gain.exponentialRampToValueAtTime(0, 1); return 'allowed'; } catch (error) { return String(error instanceof RangeError) + '|' + error.name; } })()"
+            ),
+            "true|RangeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const param = context.createGain().gain; param.setValueAtTime(-1, 1); try { param.exponentialRampToValueAtTime(1, 2); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "RangeError"
+        );
+        runtime
+            .eval("context.resume(); oscillator.start(); oscillator.stop(0.02);")
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { oscillator.stop(0.03); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "InvalidStateError"
+        );
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "context.state"), "running");
-        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\"]");
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(stateEvents)"),
+            "[\"running\"]"
+        );
         runtime.run_timers(100, 10, 100);
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "audioEvents.includes('ended')"), "true");
+        assert_eq!(
+            eval_str(&mut runtime, "audioEvents.includes('ended')"),
+            "true"
+        );
         assert!(eval_num(&mut runtime, "context.currentTime") > 0.0);
         assert!(eval_num(&mut runtime, "gain.gain.value") >= 0.25);
-        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, NaN); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { gain.connect(context.destination, 0, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { const other = new AudioContext(); const node = context.createGain(); node.context = other; try { node.connect(other.destination); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
-        assert_eq!(eval_str(&mut runtime, "(() => { const source = context.createGain(); const destination = context.createGain(); source.connect(destination, 0, 0); source.connect(destination, 0, 0); source.disconnect(destination, 0, 0); try { source.disconnect(destination, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
-        assert_eq!(eval_str(&mut runtime, "(() => { const source = context.createGain(); const destination = context.createGain(); source.connect(destination); source.disconnect(0); try { source.disconnect(destination); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidAccessError");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { gain.connect(context.destination, 0, NaN); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "IndexSizeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { gain.connect(context.destination, 0, 1); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "IndexSizeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const other = new AudioContext(); const node = context.createGain(); node.context = other; try { node.connect(other.destination); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "InvalidAccessError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const source = context.createGain(); const destination = context.createGain(); source.connect(destination, 0, 0); source.connect(destination, 0, 0); source.disconnect(destination, 0, 0); try { source.disconnect(destination, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "InvalidAccessError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const source = context.createGain(); const destination = context.createGain(); source.connect(destination); source.disconnect(0); try { source.disconnect(destination); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "InvalidAccessError"
+        );
         runtime.eval("context.suspend();").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "context.state"), "suspended");
-        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\"]");
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(stateEvents)"),
+            "[\"running\",\"suspended\"]"
+        );
         runtime
             .eval(
                 "globalThis.pausedEvents = []; globalThis.pausedOscillator = context.createOscillator(); pausedOscillator.onended = () => pausedEvents.push('ended'); pausedOscillator.start(); pausedOscillator.stop(0.05);",
@@ -28045,27 +29007,99 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_timers(100, 10, 100);
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "false");
+        assert_eq!(
+            eval_str(&mut runtime, "pausedEvents.includes('ended')"),
+            "false"
+        );
         runtime.eval("context.resume();").unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\",\"running\"]");
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(stateEvents)"),
+            "[\"running\",\"suspended\",\"running\"]"
+        );
         runtime.run_timers(100, 10, 100);
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "pausedEvents.includes('ended')"), "true");
-        assert_eq!(eval_str(&mut runtime, "(() => { const candidate = context.createOscillator(); try { candidate.start(-1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { const candidate = context.createOscillator(); candidate.start(); try { candidate.stop(NaN); } catch (error) { if (error.name !== 'TypeError') return error.name; } try { candidate.stop(0.02); return 'allowed'; } catch (error) { return error.name; } })()"), "allowed");
-        assert_eq!(eval_str(&mut runtime, "(() => { const candidate = context.createOscillator(); candidate.start(); try { candidate.stop(-1); return 'allowed'; } catch (error) { return error.name; } })()"), "RangeError");
+        assert_eq!(
+            eval_str(&mut runtime, "pausedEvents.includes('ended')"),
+            "true"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const candidate = context.createOscillator(); try { candidate.start(-1); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "RangeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const candidate = context.createOscillator(); candidate.start(); try { candidate.stop(NaN); } catch (error) { if (error.name !== 'TypeError') return error.name; } try { candidate.stop(0.02); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "allowed"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const candidate = context.createOscillator(); candidate.start(); try { candidate.stop(-1); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "RangeError"
+        );
         runtime.eval("context.close();").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "context.state"), "closed");
-        assert_eq!(eval_str(&mut runtime, "JSON.stringify(stateEvents)"), "[\"running\",\"suspended\",\"running\",\"closed\"]");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { context.createGain(); return 'allowed'; } catch (error) { return error.name; } })()"), "InvalidStateError");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioContext({ sampleRate: 0 }); return 'allowed'; } catch (error) { return error.name; } })()"), "NotSupportedError");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioNode(); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { new AudioDestinationNode(context); return 'constructible'; } catch (error) { return error.name; } })()"), "TypeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { new GainNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { new OscillatorNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "TypeError");
-        assert_eq!(eval_str(&mut runtime, "[Object.getOwnPropertyDescriptor(gain, 'gain').writable, Object.getOwnPropertyDescriptor(oscillator, 'frequency').writable, Object.getOwnPropertyDescriptor(oscillator, 'detune').writable, Object.getOwnPropertyDescriptor(gain, 'numberOfInputs').writable, Object.getOwnPropertyDescriptor(gain.gain, 'defaultValue').writable, Object.getOwnPropertyDescriptor(context, 'sampleRate').writable, Object.getOwnPropertyDescriptor(context, 'baseLatency').writable, Object.getOwnPropertyDescriptor(context, 'outputLatency').writable].join('|')"), "false|false|false|false|false|false|false|false");
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(stateEvents)"),
+            "[\"running\",\"suspended\",\"running\",\"closed\"]"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { context.createGain(); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "InvalidStateError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { new AudioContext({ sampleRate: 0 }); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "NotSupportedError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { new AudioNode(); return 'constructible'; } catch (error) { return error.name; } })()"
+            ),
+            "TypeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { new AudioDestinationNode(context); return 'constructible'; } catch (error) { return error.name; } })()"
+            ),
+            "TypeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { new GainNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "TypeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { new OscillatorNode(context, 1); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "TypeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[Object.getOwnPropertyDescriptor(gain, 'gain').writable, Object.getOwnPropertyDescriptor(oscillator, 'frequency').writable, Object.getOwnPropertyDescriptor(oscillator, 'detune').writable, Object.getOwnPropertyDescriptor(gain, 'numberOfInputs').writable, Object.getOwnPropertyDescriptor(gain.gain, 'defaultValue').writable, Object.getOwnPropertyDescriptor(context, 'sampleRate').writable, Object.getOwnPropertyDescriptor(context, 'baseLatency').writable, Object.getOwnPropertyDescriptor(context, 'outputLatency').writable].join('|')"
+            ),
+            "false|false|false|false|false|false|false|false"
+        );
         runtime
             .eval(
                 "globalThis.throwingContext = new AudioContext(); globalThis.throwingResult = 'pending'; throwingContext.onstatechange = () => { throw new Error('statechange'); }; throwingContext.resume().then(() => throwingResult = 'resolved', error => throwingResult = 'rejected:' + error.name);",
@@ -28104,26 +29138,61 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show");
-        assert_eq!(eval_str(&mut runtime, "[notification.title, notification.body, notification.tag, notification.silent, notification.data.value, notification.actions[0].action, String('__notificationClosed' in notification), String(Object.keys(notification).some(name => name === 'onshow'))].join('|')"), "Hello|World|tag|false|7|open|false|false");
-        runtime.eval("__omoikane_dispatch_notification_click(notification)").unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "notificationEvents.join(',')"),
+            "show"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[notification.title, notification.body, notification.tag, notification.silent, notification.data.value, notification.actions[0].action, String('__notificationClosed' in notification), String(Object.keys(notification).some(name => name === 'onshow'))].join('|')"
+            ),
+            "Hello|World|tag|false|7|open|false|false"
+        );
+        runtime
+            .eval("__omoikane_dispatch_notification_click(notification)")
+            .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click");
-        runtime.eval("notification.close(); notification.close();").unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "notificationEvents.join(',')"),
+            "show,click"
+        );
+        runtime
+            .eval("notification.close(); notification.close();")
+            .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "notificationEvents.join(',')"), "show,click,close");
+        assert_eq!(
+            eval_str(&mut runtime, "notificationEvents.join(',')"),
+            "show,click,close"
+        );
         runtime.set_notification_permission("denied").unwrap();
-        assert_eq!(eval_str(&mut runtime, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"
+            ),
+            "NotAllowedError"
+        );
 
-        let mut insecure = JsRuntime::with_document_and_url(default_document(), "http://example.com/").unwrap();
+        let mut insecure =
+            JsRuntime::with_document_and_url(default_document(), "http://example.com/").unwrap();
         insecure.set_notification_permission("granted").unwrap();
         assert_eq!(eval_str(&mut insecure, "String(isSecureContext)"), "false");
-        assert_eq!(eval_str(&mut insecure, "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"), "NotAllowedError");
+        assert_eq!(
+            eval_str(
+                &mut insecure,
+                "(() => { try { new Notification('blocked'); return 'constructible'; } catch (error) { return error.name; } })()"
+            ),
+            "NotAllowedError"
+        );
         insecure
             .eval("globalThis.insecurePermission = 'pending'; Notification.requestPermission().then(value => insecurePermission = value, error => insecurePermission = error.name);")
             .unwrap();
         insecure.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut insecure, "insecurePermission"), "NotAllowedError");
+        assert_eq!(
+            eval_str(&mut insecure, "insecurePermission"),
+            "NotAllowedError"
+        );
     }
 
     #[test]
@@ -28176,7 +29245,10 @@ b</textarea></form>"#);
 
         runtime.set_notification_permission("granted").unwrap();
         runtime.run_jobs().unwrap();
-        assert_eq!(eval_str(&mut runtime, "permissionChanges.join('|')"), "notifications:granted|listener");
+        assert_eq!(
+            eval_str(&mut runtime, "permissionChanges.join('|')"),
+            "notifications:granted|listener"
+        );
         runtime.set_notification_permission("granted").unwrap();
         runtime.run_jobs().unwrap();
         assert_eq!(eval_str(&mut runtime, "permissionChanges.length"), "2");
@@ -28184,7 +29256,13 @@ b</textarea></form>"#);
         runtime.set_geolocation_permission(false);
         runtime.set_clipboard_permission(false);
         runtime.run_jobs().unwrap();
-        assert_eq!(eval_str(&mut runtime, "[geolocationStatus.state, clipboardStatus.state, clipboardWriteStatus.state].join('|')"), "denied|denied|denied");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[geolocationStatus.state, clipboardStatus.state, clipboardWriteStatus.state].join('|')"
+            ),
+            "denied|denied|denied"
+        );
 
         runtime.set_notification_permission("default").unwrap();
         runtime.run_jobs().unwrap();
@@ -28192,7 +29270,13 @@ b</textarea></form>"#);
             .eval("globalThis.requestResult = 'pending'; Notification.requestPermission().then(value => requestResult = value);")
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "requestResult + '|' + notificationStatus.state"), "denied|denied");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "requestResult + '|' + notificationStatus.state"
+            ),
+            "denied|denied"
+        );
         assert_eq!(eval_str(&mut runtime, "permissionChanges.length"), "6");
 
         // A page cannot forge a granted transition by invoking the bridge
@@ -28201,7 +29285,13 @@ b</textarea></form>"#);
             .eval("__omoikane_permission_changed('clipboard-read', 'granted');")
             .unwrap();
         runtime.run_jobs().unwrap();
-        assert_eq!(eval_str(&mut runtime, "clipboardStatus.state + '|' + permissionChanges.length"), "denied|6");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "clipboardStatus.state + '|' + permissionChanges.length"
+            ),
+            "denied|6"
+        );
 
         runtime
             .eval(
@@ -28212,7 +29302,10 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_jobs().unwrap();
-        assert_eq!(eval_str(&mut runtime, "invalidPermission + '|' + invalidDescriptor"), "NotSupportedError|TypeError");
+        assert_eq!(
+            eval_str(&mut runtime, "invalidPermission + '|' + invalidDescriptor"),
+            "NotSupportedError|TypeError"
+        );
 
         // A document teardown invalidates all retained statuses and drops
         // their listeners before a later host transition can enqueue a change.
@@ -28278,14 +29371,41 @@ b</textarea></form>"#);
             .unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "pixel"), "255,0,0,255");
-        assert_eq!(eval_str(&mut runtime, "[offscreen.width, offscreen.height, bitmap.width, bitmap.height, offscreenContext instanceof OffscreenCanvasRenderingContext2D].join('|')"), "2|1|2|1|true");
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[offscreen.width, offscreen.height, bitmap.width, bitmap.height, offscreenContext instanceof OffscreenCanvasRenderingContext2D].join('|')"
+            ),
+            "2|1|2|1|true"
+        );
         assert!(eval_str(&mut runtime, "blobResult").starts_with("image/png|"));
         assert_eq!(eval_str(&mut runtime, "emptyBlobResult"), "image/png|0");
         assert_eq!(eval_str(&mut runtime, "cropResult"), "1|1");
-        assert_eq!(eval_str(&mut runtime, "cropZeroError + '|' + cropBoundsError"), "IndexSizeError|IndexSizeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { bitmap.close(); return [bitmap.width, bitmap.height, (() => { try { target.getContext('2d').drawImage(bitmap, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()]; })().join('|')"), "0|0|InvalidStateError");
-        assert_eq!(eval_str(&mut runtime, "(() => { try { new OffscreenCanvas(-1, 1); return 'allowed'; } catch (error) { return error.name; } })()"), "IndexSizeError");
-        assert_eq!(eval_str(&mut runtime, "(() => { const canvas = new OffscreenCanvas(1, 1); canvas.getContext('2d'); return String(canvas.getContext('webgl')); })()"), "null");
+        assert_eq!(
+            eval_str(&mut runtime, "cropZeroError + '|' + cropBoundsError"),
+            "IndexSizeError|IndexSizeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { bitmap.close(); return [bitmap.width, bitmap.height, (() => { try { target.getContext('2d').drawImage(bitmap, 0, 0); return 'allowed'; } catch (error) { return error.name; } })()]; })().join('|')"
+            ),
+            "0|0|InvalidStateError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { try { new OffscreenCanvas(-1, 1); return 'allowed'; } catch (error) { return error.name; } })()"
+            ),
+            "IndexSizeError"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const canvas = new OffscreenCanvas(1, 1); canvas.getContext('2d'); return String(canvas.getContext('webgl')); })()"
+            ),
+            "null"
+        );
     }
 
     #[test]
@@ -28325,7 +29445,9 @@ b</textarea></form>"#);
             eval_str(&mut runtime, "JSON.stringify(geoEvents.slice(-1))"),
             r#"[["first",36]]"#
         );
-        runtime.eval("navigator.geolocation.clearWatch(first)").unwrap();
+        runtime
+            .eval("navigator.geolocation.clearWatch(first)")
+            .unwrap();
         runtime.set_geolocation_position(GeolocationPositionData::new(37.0, 141.0, 6.0));
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "geoEvents.length"), "3");
@@ -28341,7 +29463,10 @@ b</textarea></form>"#);
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "JSON.stringify(geoError)"), r#"[1,"User denied Geolocation."]"#);
+        assert_eq!(
+            eval_str(&mut runtime, "JSON.stringify(geoError)"),
+            r#"[1,"User denied Geolocation."]"#
+        );
 
         runtime.set_geolocation_permission(true);
         runtime.clear_geolocation_position();
@@ -28450,11 +29575,13 @@ b</textarea></form>"#);
 
         assert_eq!(runtime.eval("rafCalled").unwrap().as_boolean(), Some(false));
         assert_eq!(runtime.run_animation_frame(16).unwrap(), 1);
-        assert!(runtime
-            .eval("rafCalled && rafTimestamp === 16")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("rafCalled && rafTimestamp === 16")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -28535,17 +29662,26 @@ b</textarea></form>"#);
             .unwrap();
 
         runtime.run_animation_frame(250).unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(10.0)
+        );
         let first_sample_generation = runtime.host_state.borrow().layout_generation;
 
         runtime.run_animation_frame(250).unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(10.0)
+        );
         assert_eq!(
             runtime.host_state.borrow().layout_generation,
             first_sample_generation,
             "opacity sampling must retain the cached layout tree"
         );
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.5");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            "0.5"
+        );
     }
 
     #[test]
@@ -28570,11 +29706,17 @@ b</textarea></form>"#);
             .unwrap();
 
         runtime.run_animation_frame(250).unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(10.0)
+        );
         let first_sample_generation = runtime.host_state.borrow().layout_generation;
 
         runtime.run_animation_frame(250).unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(10.0)
+        );
         assert_eq!(
             runtime.host_state.borrow().layout_generation,
             first_sample_generation,
@@ -28620,7 +29762,10 @@ b</textarea></form>"#);
         );
 
         runtime.eval("document.body.appendChild(detached)").unwrap();
-        assert_eq!(runtime.eval("detached.offsetWidth").unwrap().as_number(), Some(30.0));
+        assert_eq!(
+            runtime.eval("detached.offsetWidth").unwrap().as_number(),
+            Some(30.0)
+        );
         assert!(
             runtime.host_state.borrow().layout_generation > initial_generation,
             "inserting the detached element must invalidate and rebuild layout"
@@ -28642,11 +29787,15 @@ b</textarea></form>"#);
                 .as_number(),
             Some(10.0)
         );
-        let initial_resolver_generation =
-            runtime.host_state.borrow().style_resolver_generation;
+        let initial_resolver_generation = runtime.host_state.borrow().style_resolver_generation;
 
-        runtime.eval("target.setAttribute('class', 'active')").unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(30.0));
+        runtime
+            .eval("target.setAttribute('class', 'active')")
+            .unwrap();
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(30.0)
+        );
         assert_eq!(
             runtime.host_state.borrow().style_resolver_generation,
             initial_resolver_generation,
@@ -28654,7 +29803,10 @@ b</textarea></form>"#);
         );
 
         runtime.eval("target.style.width = '40px'").unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(40.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(40.0)
+        );
         assert_eq!(
             runtime.host_state.borrow().style_resolver_generation,
             initial_resolver_generation,
@@ -28668,10 +29820,12 @@ b</textarea></form>"#);
                    'div { width: 10px; } .active { width: 50px; }';",
             )
             .unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(50.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(50.0)
+        );
         assert!(
-            runtime.host_state.borrow().style_resolver_generation
-                > initial_resolver_generation,
+            runtime.host_state.borrow().style_resolver_generation > initial_resolver_generation,
             "style element content mutation must rebuild parsed stylesheets"
         );
     }
@@ -28687,18 +29841,27 @@ b</textarea></form>"#);
         runtime
             .eval("globalThis.target = document.getElementById('target')")
             .unwrap();
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.3");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            "0.3"
+        );
         let initial_generation = runtime.host_state.borrow().style_resolver_generation;
 
         runtime
             .eval("document.querySelector('style').firstChild.data = '.active { opacity: 0.4; }'")
             .unwrap();
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.4");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            "0.4"
+        );
         let text_generation = runtime.host_state.borrow().style_resolver_generation;
         assert!(text_generation > initial_generation);
 
         runtime.eval("document.head.textContent = ''").unwrap();
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            ""
+        );
         assert!(runtime.host_state.borrow().style_resolver_generation > text_generation);
     }
 
@@ -28720,11 +29883,17 @@ b</textarea></form>"#);
             .unwrap();
 
         runtime.run_animation_frame(250).unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(15.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(15.0)
+        );
         let first_sample_generation = runtime.host_state.borrow().layout_generation;
 
         runtime.run_animation_frame(250).unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(20.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(20.0)
+        );
         assert!(
             runtime.host_state.borrow().layout_generation > first_sample_generation,
             "width sampling must invalidate cached layout geometry"
@@ -28821,7 +29990,10 @@ b</textarea></form>"#);
             eval_str(&mut runtime, "getComputedStyle(target).width"),
             "calc(5px + 25%)"
         );
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(55.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(55.0)
+        );
     }
 
     #[test]
@@ -28845,7 +30017,10 @@ b</textarea></form>"#);
             .unwrap();
 
         assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(target).opacity"), "0.5");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).opacity"),
+            "0.5"
+        );
     }
 
     #[test]
@@ -28881,7 +30056,10 @@ b</textarea></form>"#);
             eval_str(&mut runtime, "transitionEvents.join('|')"),
             "transitionrun:opacity:0:|transitionstart:opacity:0:|transitionend:opacity:1:"
         );
-        assert_eq!(eval_str(&mut runtime, "getComputedStyle(transitionTarget).opacity"), "1");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(transitionTarget).opacity"),
+            "1"
+        );
     }
 
     #[test]
@@ -28990,10 +30168,7 @@ b</textarea></form>"#);
 
     #[test]
     fn css_transitions_run_concurrently_on_multiple_elements() {
-        let document = crate::html::TreeBuilder::parse(
-            r#"<html><body></body></html>"#,
-        )
-        .document();
+        let document = crate::html::TreeBuilder::parse(r#"<html><body></body></html>"#).document();
         let mut runtime = JsRuntime::with_document(document).unwrap();
         runtime
             .eval(
@@ -29055,7 +30230,10 @@ b</textarea></form>"#);
             .unwrap();
 
         assert_eq!(runtime.run_animation_frame(16).unwrap(), 1);
-        assert_eq!(runtime.eval("frameTimestamps.length").unwrap().as_number(), Some(1.0));
+        assert_eq!(
+            runtime.eval("frameTimestamps.length").unwrap().as_number(),
+            Some(1.0)
+        );
         assert_eq!(runtime.run_animation_frame(16).unwrap(), 1);
         assert!(runtime
             .eval("frameTimestamps.length === 2 && frameTimestamps[0] === 16 && frameTimestamps[1] === 32")
@@ -29126,7 +30304,10 @@ b</textarea></form>"#);
         assert_eq!(runtime.run_timers(1, 1, 1), 1);
         assert_eq!(eval_str(&mut runtime, "timerOrder.join(',')"), "first");
         assert_eq!(runtime.run_timers(1, 1, 1), 1);
-        assert_eq!(eval_str(&mut runtime, "timerOrder.join(',')"), "first,second");
+        assert_eq!(
+            eval_str(&mut runtime, "timerOrder.join(',')"),
+            "first,second"
+        );
     }
 
     #[test]
@@ -29145,7 +30326,10 @@ b</textarea></form>"#);
 
         assert!(runtime.take_navigation_requests().is_empty());
         runtime.tick(0).unwrap();
-        assert_eq!(eval_str(&mut runtime, "eventLoopOrder.join(',')"), "timer,microtask");
+        assert_eq!(
+            eval_str(&mut runtime, "eventLoopOrder.join(',')"),
+            "timer,microtask"
+        );
         assert_eq!(
             runtime.take_navigation_requests(),
             vec![NavigationRequest::Navigate {
@@ -29425,7 +30609,11 @@ b</textarea></form>"#);
             "a task queued after a failing script must still run"
         );
         let errors = runtime.take_task_errors();
-        assert_eq!(errors.len(), 1, "expected one recorded error, got {errors:?}");
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected one recorded error, got {errors:?}"
+        );
         assert!(
             errors[0].contains("dynamic script") && errors[0].contains("boom"),
             "the swallowed error must be reported: {errors:?}"
@@ -29462,7 +30650,11 @@ b</textarea></form>"#);
             "a script that never arrived must fire error, not load"
         );
         let errors = runtime.take_task_errors();
-        assert_eq!(errors.len(), 1, "expected one recorded error, got {errors:?}");
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected one recorded error, got {errors:?}"
+        );
         assert!(
             errors[0].contains("failed to fetch"),
             "a fetch failure must be reported: {errors:?}"
@@ -29492,7 +30684,11 @@ b</textarea></form>"#);
                 .unwrap()
         );
         let errors = runtime.take_task_errors();
-        assert_eq!(errors.len(), 1, "expected one recorded error, got {errors:?}");
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected one recorded error, got {errors:?}"
+        );
         assert!(
             errors[0].contains("timer") && errors[0].contains("timer boom"),
             "the swallowed error must be reported: {errors:?}"
@@ -30725,7 +31921,8 @@ b</textarea></form>"#);
 
     #[test]
     fn text_control_navigation_and_forward_delete_move_the_caret() {
-        let mut runtime = runtime_from_html(r#"<html><body><input id="field" value="abcd"></body></html>"#);
+        let mut runtime =
+            runtime_from_html(r#"<html><body><input id="field" value="abcd"></body></html>"#);
         assert!(runtime
             .eval(
                 r#"(() => {
@@ -31425,12 +32622,14 @@ b</textarea></form>"#);
         );
         runtime.eval("document.adoptedStyleSheets = []").unwrap();
         let document_id = runtime.host_state.borrow().document.identity();
-        assert!(runtime
-            .host_state
-            .borrow()
-            .adopted_stylesheets
-            .get(&document_id)
-            .is_none());
+        assert!(
+            runtime
+                .host_state
+                .borrow()
+                .adopted_stylesheets
+                .get(&document_id)
+                .is_none()
+        );
     }
 
     #[test]
@@ -32083,13 +33282,19 @@ b</textarea></form>"#);
         runtime.eval("scrollBy({ left: 25, top: 50 })").unwrap();
         runtime.eval("scroll({ top: 275 })").unwrap();
         runtime.run_animation_frame(16).unwrap();
-        assert_eq!(eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"), "75|275|2");
+        assert_eq!(
+            eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"),
+            "75|275|2"
+        );
 
         // An unchanged request emits no event; non-finite coordinates normalize to zero.
         runtime.eval("scrollTo({ left: 75, top: 275 })").unwrap();
         runtime.eval("scrollTo(NaN, Infinity)").unwrap();
         runtime.run_animation_frame(16).unwrap();
-        assert_eq!(eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"), "0|0|3");
+        assert_eq!(
+            eval_str(&mut runtime, "[scrollX,scrollY,scrollEvents].join('|')"),
+            "0|0|3"
+        );
 
         runtime.eval("scrollTo(1e9, 1e9)").unwrap();
         assert!(runtime
@@ -32108,12 +33313,20 @@ b</textarea></form>"#);
             .eval("globalThis.scrollEvents = 0; addEventListener('scroll', () => scrollEvents++); scrollTo(0, 350)")
             .unwrap();
         runtime.set_viewport(100.0, 300.0);
-        assert_eq!(eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"), "200|0");
+        assert_eq!(
+            eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"),
+            "200|0"
+        );
         runtime.run_animation_frame(16).unwrap();
         assert_eq!(eval_num(&mut runtime, "scrollEvents"), 1.0);
 
-        runtime.eval("document.body.style.height = '320px'").unwrap();
-        assert_eq!(eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"), "20|1");
+        runtime
+            .eval("document.body.style.height = '320px'")
+            .unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "[scrollY,scrollEvents].join('|')"),
+            "20|1"
+        );
         runtime.run_animation_frame(16).unwrap();
         assert_eq!(eval_num(&mut runtime, "scrollEvents"), 2.0);
     }
@@ -32928,9 +34141,7 @@ b</textarea></form>"#);
                 let (status, content_type, body) = routes
                     .iter()
                     .find(|(route, _, _)| route == &path)
-                    .map(|(_, content_type, body)| {
-                        ("200 OK", content_type.as_str(), body.as_str())
-                    })
+                    .map(|(_, content_type, body)| ("200 OK", content_type.as_str(), body.as_str()))
                     .unwrap_or(("404 Not Found", "text/plain", "not found"));
                 let response = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -32994,7 +34205,8 @@ b</textarea></form>"#);
                 } else if path.ends_with("/frames/relative.js") {
                     (
                         "text/javascript",
-                        "document.documentElement.setAttribute('data-relative-script','yes')".to_string(),
+                        "document.documentElement.setAttribute('data-relative-script','yes')"
+                            .to_string(),
                     )
                 } else {
                     ("text/plain", String::new())
@@ -33245,11 +34457,9 @@ b</textarea></form>"#);
             r#"<svg xmlns="http://www.w3.org/2000/svg"><text>svg</text></svg>"#,
         );
         let doc = TreeBuilder::parse("<html><body></body></html>").document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/index.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
+                .unwrap();
         assert_eq!(
             runtime
                 .eval(
@@ -33575,11 +34785,9 @@ b</textarea></form>"#);
         );
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         runtime
             .eval(
                 r#"globalThis.loads = 0;
@@ -33627,11 +34835,9 @@ b</textarea></form>"#);
         );
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         runtime
             .eval(
                 r#"globalThis.loads = 0;
@@ -33677,11 +34883,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="{url}"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         runtime
             .eval(
                 r#"globalThis.loads = 0;
@@ -33715,11 +34919,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/child.html" srcdoc=""></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         runtime
             .eval(
                 r#"globalThis.loads = 0;
@@ -33933,11 +35135,9 @@ b</textarea></form>"#);
             r#"<html><body><object id="o" data="http://127.0.0.1:{port}/first.html"></object></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         runtime
             .eval(
                 r#"globalThis.loads = 0;
@@ -33993,11 +35193,9 @@ b</textarea></form>"#);
             r#"<html><body><object id="o" data="{url}"></object></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         runtime
             .eval(
                 r#"globalThis.loads = 0;
@@ -34272,11 +35470,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/page.html"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         assert_eq!(
             runtime
@@ -34307,11 +35503,9 @@ b</textarea></form>"#);
         let doc = TreeBuilder::parse(&format!(
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/doc.xml"></iframe></body></html>"#
         )).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         assert_eq!(eval_string_value(&mut runtime,
             "var d=document.getElementById('f').contentDocument,c=d.documentElement.childNodes[0]; [d.doctype.nodeType,d.doctype.nodeName,d.doctype.name,d.doctype.systemId,d.documentElement.tagName,d.documentElement.namespaceURI,d.documentElement.getAttribute('A'),c.localName].join('|')"
         ).as_deref(), Some("10|Root|Root|urn:test|Root|urn:root|<A|Child"));
@@ -34324,11 +35518,9 @@ b</textarea></form>"#);
         let doc = TreeBuilder::parse(&format!(
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/bad.xml"></iframe></body></html>"#
         )).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         assert_eq!(runtime.eval("document.getElementById('f').contentDocument.getElementsByTagName('test').length").unwrap().as_number(), Some(0.0));
     }
 
@@ -34350,11 +35542,9 @@ b</textarea></form>"#);
         let doc = TreeBuilder::parse(&format!(
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/x.xhtml"></iframe></body></html>"#
         )).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         pump_zero_delay_tasks(&mut runtime);
         assert_eq!(runtime.eval("xmlNotice").unwrap().as_number(), Some(1.0));
 
@@ -34428,9 +35618,7 @@ b</textarea></form>"#);
             "data-child-timer",
         ] {
             assert_eq!(
-                child_root
-                    .get_attribute(attribute)
-                    .as_deref(),
+                child_root.get_attribute(attribute).as_deref(),
                 Some("yes"),
                 "child script state must stay in the child Document",
             );
@@ -34469,11 +35657,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/same.xhtml"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/index.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
+                .unwrap();
         pump_zero_delay_tasks(&mut runtime);
 
         let (child_root, iframe) = {
@@ -34518,11 +35704,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/dynamic.xhtml"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/index.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
+                .unwrap();
         pump_zero_delay_tasks(&mut runtime);
         pump_zero_delay_tasks(&mut runtime);
 
@@ -34559,11 +35743,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/frames/child.xhtml"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/index.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
+                .unwrap();
         pump_zero_delay_tasks(&mut runtime);
         pump_zero_delay_tasks(&mut runtime);
 
@@ -34600,11 +35782,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="outer" src="http://127.0.0.1:{port}/outer.xhtml"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/index.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
+                .unwrap();
         pump_zero_delay_tasks(&mut runtime);
 
         let outer_root = {
@@ -34711,11 +35891,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/child.xhtml"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         runtime
             .eval(
                 "globalThis.firstFired = 0; globalThis.queuedFired = 0; \
@@ -34746,12 +35924,12 @@ b</textarea></form>"#);
             other => panic!("expected a document-owned timer, got {other:?}"),
         };
         runtime.run_task(first_timer).unwrap();
-        runtime
-            .run_jobs_for_document(owner_document_id)
-            .unwrap();
+        runtime.run_jobs_for_document(owner_document_id).unwrap();
         assert_eq!(runtime.eval("firstFired").unwrap().as_number(), Some(1.0));
 
-        runtime.eval("document.getElementById('f').remove()").unwrap();
+        runtime
+            .eval("document.getElementById('f').remove()")
+            .unwrap();
         assert!(!runtime.has_pending_timers());
         assert!(!runtime.has_pending_animation_frames());
         runtime.tick(20).unwrap();
@@ -34782,11 +35960,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe src="http://127.0.0.1:{port}/child.xhtml"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         // The first pump loads the iframe and creates the Worker. Its startup
         // timer enters the nested runtime after that pump's clock advance, so
@@ -34803,9 +35979,8 @@ b</textarea></form>"#);
 
     #[test]
     fn iframe_sandbox_dom_token_list_is_live_and_reflected() {
-        let mut runtime = runtime_from_html(
-            r#"<html><body><iframe id="frame"></iframe></body></html>"#,
-        );
+        let mut runtime =
+            runtime_from_html(r#"<html><body><iframe id="frame"></iframe></body></html>"#);
         assert_eq!(
             eval_str(
                 &mut runtime,
@@ -34854,11 +36029,13 @@ b</textarea></form>"#);
         let mut runtime = runtime_from_html(
             r#"<html><body><object id="embedded" sandbox></object></body></html>"#,
         );
-        assert!(runtime
-            .eval("document.getElementById('embedded').contentDocument !== null")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("document.getElementById('embedded').contentDocument !== null")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
 
         let state = runtime.host_state.borrow();
         let object = state.document.query_selector("#embedded").unwrap();
@@ -34906,23 +36083,28 @@ b</textarea></form>"#);
             .unwrap();
 
         pump_zero_delay_tasks(&mut runtime);
-        assert!(runtime
-            .eval(
-                "blocked.contentDocument === null && scripts.contentDocument === null && \
+        assert!(
+            runtime
+                .eval(
+                    "blocked.contentDocument === null && scripts.contentDocument === null && \
                  same.contentDocument !== null && blocked.contentWindow.closed === false && \
                  (() => { try { blocked.contentWindow.document; return false; } \
                           catch (error) { return error.name === 'SecurityError'; } })()",
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
 
         let same_document_before_reload = {
             let state = runtime.host_state.borrow();
             for (id, script_ran) in [("blocked", false), ("scripts", true)] {
                 let iframe = state.document.query_selector(&format!("#{id}")).unwrap();
                 let document = &state.iframe_documents[&iframe.identity()].document;
-                assert_eq!(state.document_origins.get(&document.identity()), Some(&None));
+                assert_eq!(
+                    state.document_origins.get(&document.identity()),
+                    Some(&None)
+                );
                 assert_eq!(
                     state
                         .document_script_executions
@@ -34950,16 +36132,21 @@ b</textarea></form>"#);
             )
             .unwrap();
         pump_zero_delay_tasks(&mut runtime);
-        assert!(runtime
-            .eval("sameBeforeReload === true && same.contentDocument === null")
-            .unwrap()
-            .as_boolean()
-            .unwrap());
+        assert!(
+            runtime
+                .eval("sameBeforeReload === true && same.contentDocument === null")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
         let state = runtime.host_state.borrow();
         let iframe = state.document.query_selector("#same").unwrap();
         let document = &state.iframe_documents[&iframe.identity()].document;
         assert_ne!(document.identity(), same_document_before_reload);
-        assert_eq!(state.document_origins.get(&document.identity()), Some(&None));
+        assert_eq!(
+            state.document_origins.get(&document.identity()),
+            Some(&None)
+        );
         assert_eq!(
             state.document_script_executions.get(&document.identity()),
             Some(&1)
@@ -34977,11 +36164,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/x.xhtml"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         runtime
             .eval("document.getElementById('f').addEventListener('load', () => globalThis.xhtmlLoadCount = (globalThis.xhtmlLoadCount || 0) + 1)")
             .unwrap();
@@ -35014,11 +36199,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/empty.png"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         assert_eq!(
             runtime
                 .eval(
@@ -35044,11 +36227,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/empty.txt"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         assert_eq!(
             runtime
                 .eval(
@@ -35073,11 +36254,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="sub.html"></iframe></body></html>"#,
         )
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/index.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
+                .unwrap();
 
         assert_eq!(
             eval_string_value(
@@ -35104,11 +36283,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="child.html"></iframe></body></html>"#,
         )
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
         runtime.set_base_url(
             format!("http://127.0.0.1:{port}/base/index.html")
                 .parse()
@@ -35120,9 +36297,7 @@ b</textarea></form>"#);
                 &mut runtime,
                 "[document.getElementById('f').contentDocument.getElementById('base').textContent, document.getElementById('f').contentDocument.URL].join('|')"
             ),
-            Some(format!(
-                "override|http://127.0.0.1:{port}/base/child.html"
-            )),
+            Some(format!("override|http://127.0.0.1:{port}/base/child.html")),
             "set_base_url must override the top-level document URL for relative iframe src"
         );
     }
@@ -35182,8 +36357,8 @@ b</textarea></form>"#);
             "text/html",
             r#"<html><body><p id="leak">top base leaked</p></body></html>"#,
         );
-        let doc =
-            TreeBuilder::parse(r#"<html><body><iframe id="outer"></iframe></body></html>"#).document();
+        let doc = TreeBuilder::parse(r#"<html><body><iframe id="outer"></iframe></body></html>"#)
+            .document();
         let mut runtime = JsRuntime::with_document_and_url(
             doc,
             &format!("http://127.0.0.1:{port}/top/parent.html"),
@@ -35206,10 +36381,16 @@ b</textarea></form>"#);
                 .get(&outer_id)
                 .expect("data iframe document")
                 .document;
-            assert!(!state.document_base_urls.contains_key(&outer_document.identity()));
+            assert!(
+                !state
+                    .document_base_urls
+                    .contains_key(&outer_document.identity())
+            );
             (
                 outer_document.identity(),
-                outer_document.query_selector("#leaf").expect("nested iframe"),
+                outer_document
+                    .query_selector("#leaf")
+                    .expect("nested iframe"),
             )
         };
         let leaf_document = runtime
@@ -35219,7 +36400,11 @@ b</textarea></form>"#);
             .unwrap();
         let state = runtime.host_state.borrow();
         assert!(!state.document_base_urls.contains_key(&outer_document_id));
-        assert!(!state.document_base_urls.contains_key(&leaf_document.identity()));
+        assert!(
+            !state
+                .document_base_urls
+                .contains_key(&leaf_document.identity())
+        );
         assert!(leaf_document.query_selector("#leak").is_none());
     }
 
@@ -35343,11 +36528,9 @@ b</textarea></form>"#);
         );
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         // No src yet: an empty about:blank skeleton with no <p>.
         assert_eq!(
@@ -35520,11 +36703,9 @@ b</textarea></form>"#);
             spawn_static_http_server("text/html", r#"<html><body><p id="x">A</p></body></html>"#);
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         let base = runtime.host_state.borrow().nodes.len();
 
@@ -35584,11 +36765,9 @@ b</textarea></form>"#);
         ]);
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         assert_eq!(
             eval_string_value(
@@ -35644,15 +36823,11 @@ b</textarea></form>"#);
                 r#"<html><body><p id="replacement">replacement</p></body></html>"#,
             ),
         ]);
-        let doc = TreeBuilder::parse(
-            r#"<html><body><iframe id="outer"></iframe></body></html>"#,
-        )
-        .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let doc = TreeBuilder::parse(r#"<html><body><iframe id="outer"></iframe></body></html>"#)
+            .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         assert_eq!(
             eval_string_value(
@@ -35695,11 +36870,9 @@ b</textarea></form>"#);
         );
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         // First load, then a computed-style query to actually build the
         // sub-document's resolver (not just seed a dirty placeholder).
@@ -35803,11 +36976,9 @@ b</textarea></form>"#);
         );
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         assert_eq!(
             runtime
@@ -35839,13 +37010,23 @@ b</textarea></form>"#);
             Some("42|1|true|true"),
             "expandos, listeners, and configurable descriptors belong to the active Window"
         );
-        assert!(runtime
-            .eval("Object.defineProperty(savedWindow, 'fixed', { value: 1, configurable: false })")
-            .is_err());
-        assert!(runtime
-            .eval("Object.defineProperty(savedWindow, 'implicitlyFixed', { value: 1 })")
-            .is_err());
-        assert!(runtime.eval("Object.preventExtensions(savedWindow)").is_err());
+        assert!(
+            runtime
+                .eval(
+                    "Object.defineProperty(savedWindow, 'fixed', { value: 1, configurable: false })"
+                )
+                .is_err()
+        );
+        assert!(
+            runtime
+                .eval("Object.defineProperty(savedWindow, 'implicitlyFixed', { value: 1 })")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .eval("Object.preventExtensions(savedWindow)")
+                .is_err()
+        );
         assert_eq!(
             runtime
                 .eval("Object.isExtensible(savedWindow)")
@@ -35896,13 +37077,41 @@ b</textarea></form>"#);
     fn iframe_location_navigation_resolves_relative_to_caller_document() {
         use crate::html::TreeBuilder;
         let port = spawn_path_http_server(&[
-            ("/frame/child.html", "text/html", "<html><body>child</body></html>"),
-            ("/frame/assign-base.html", "text/html", "<html><body>assign base</body></html>"),
-            ("/frame/replace-base.html", "text/html", "<html><body>replace base</body></html>"),
-            ("/frame/history-base.html", "text/html", "<html><body>history base</body></html>"),
-            ("/caller/href.html", "text/html", "<html><body>href</body></html>"),
-            ("/caller/assign.html", "text/html", "<html><body>assign</body></html>"),
-            ("/caller/replace.html", "text/html", "<html><body>replace</body></html>"),
+            (
+                "/frame/child.html",
+                "text/html",
+                "<html><body>child</body></html>",
+            ),
+            (
+                "/frame/assign-base.html",
+                "text/html",
+                "<html><body>assign base</body></html>",
+            ),
+            (
+                "/frame/replace-base.html",
+                "text/html",
+                "<html><body>replace base</body></html>",
+            ),
+            (
+                "/frame/history-base.html",
+                "text/html",
+                "<html><body>history base</body></html>",
+            ),
+            (
+                "/caller/href.html",
+                "text/html",
+                "<html><body>href</body></html>",
+            ),
+            (
+                "/caller/assign.html",
+                "text/html",
+                "<html><body>assign</body></html>",
+            ),
+            (
+                "/caller/replace.html",
+                "text/html",
+                "<html><body>replace</body></html>",
+            ),
         ]);
         let doc = TreeBuilder::parse(
             r#"<html><body><iframe id="f" src="/frame/child.html"></iframe></body></html>"#,
@@ -36045,9 +37254,7 @@ b</textarea></form>"#);
                 })()"#
             )
             .as_deref(),
-            Some(
-                "SecurityError|SecurityError|SecurityError|SecurityError|SecurityError"
-            ),
+            Some("SecurityError|SecurityError|SecurityError|SecurityError|SecurityError"),
             "a saved History object must not bypass a later cross-origin boundary"
         );
 
@@ -36105,11 +37312,9 @@ b</textarea></form>"#);
         use crate::html::TreeBuilder;
         let port = spawn_static_http_server("text/html", "<html><body></body></html>");
         let doc = TreeBuilder::parse("<html><body></body></html>").document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         assert_eq!(
             eval_string_value(
@@ -36153,11 +37358,9 @@ b</textarea></form>"#);
         );
 
         let opaque_parent = TreeBuilder::parse("<html><body></body></html>").document();
-        let mut opaque_runtime = JsRuntime::with_document_and_url(
-            opaque_parent,
-            "data:text/html,<p>opaque creator</p>",
-        )
-        .unwrap();
+        let mut opaque_runtime =
+            JsRuntime::with_document_and_url(opaque_parent, "data:text/html,<p>opaque creator</p>")
+                .unwrap();
         assert_eq!(
             eval_string_value(
                 &mut opaque_runtime,
@@ -36204,9 +37407,7 @@ b</textarea></form>"#);
                 })()"#
             )
             .as_deref(),
-            Some(
-                "about:blank#fragment|true|true|about:blank?query#fragment|true"
-            ),
+            Some("about:blank#fragment|true|true|about:blank?query#fragment|true"),
             "about:blank query/fragment variants must retain URL and creator origin"
         );
     }
@@ -36264,11 +37465,9 @@ b</textarea></form>"#);
         );
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         runtime
             .eval(
@@ -36285,9 +37484,7 @@ b</textarea></form>"#);
                 &mut runtime,
                 "[proxy === f.contentWindow, proxy.history.length, proxy.document.URL, proxy.document !== blankDocument, proxy.marker === undefined].join('|')"
             ),
-            Some(format!(
-                "true|2|http://127.0.0.1:{port}/a.html|true|true"
-            ))
+            Some(format!("true|2|http://127.0.0.1:{port}/a.html|true|true"))
         );
 
         runtime
@@ -36302,9 +37499,7 @@ b</textarea></form>"#);
                 &mut runtime,
                 "[proxy.history.length, proxy.document.URL, bDocument !== aDocument, proxy.marker === undefined].join('|')"
             ),
-            Some(format!(
-                "2|http://127.0.0.1:{port}/b.html|true|true"
-            )),
+            Some(format!("2|http://127.0.0.1:{port}/b.html|true|true")),
             "replace must create a Window generation without appending history"
         );
 
@@ -36320,9 +37515,7 @@ b</textarea></form>"#);
                 &mut runtime,
                 "[proxy.history.length, proxy.document.URL, reloadedDocument !== bDocument, proxy.marker === undefined].join('|')"
             ),
-            Some(format!(
-                "2|http://127.0.0.1:{port}/b.html|true|true"
-            )),
+            Some(format!("2|http://127.0.0.1:{port}/b.html|true|true")),
             "reload must replace Document/Window state without adding an entry"
         );
 
@@ -36447,11 +37640,9 @@ b</textarea></form>"#);
         ]);
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         runtime
             .eval(
@@ -36461,9 +37652,7 @@ b</textarea></form>"#);
             )
             .unwrap();
         pump_zero_delay_tasks(&mut runtime);
-        runtime
-            .eval("f.setAttribute('src', '/b.html');")
-            .unwrap();
+        runtime.eval("f.setAttribute('src', '/b.html');").unwrap();
         pump_zero_delay_tasks(&mut runtime);
 
         assert_eq!(
@@ -36498,11 +37687,9 @@ b</textarea></form>"#);
         ]);
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         assert_eq!(
             eval_string_value(
@@ -36634,7 +37821,10 @@ b</textarea></form>"#);
         }
 
         let mut generation_runtime = pending_frame_runtime("about:blank");
-        generation_runtime.host_state.borrow_mut().next_iframe_generation = u64::MAX;
+        generation_runtime
+            .host_state
+            .borrow_mut()
+            .next_iframe_generation = u64::MAX;
         assert!(generation_runtime.eval("frame.contentDocument").is_err());
         {
             let state = generation_runtime.host_state.borrow();
@@ -36644,7 +37834,10 @@ b</textarea></form>"#);
         }
 
         let mut context_runtime = pending_frame_runtime("about:blank");
-        context_runtime.host_state.borrow_mut().next_iframe_context_id = u64::MAX;
+        context_runtime
+            .host_state
+            .borrow_mut()
+            .next_iframe_context_id = u64::MAX;
         assert!(context_runtime.eval("frame.contentWindow").is_err());
         {
             let state = context_runtime.host_state.borrow();
@@ -36740,8 +37933,16 @@ b</textarea></form>"#);
         assert!(!state.document_urls.contains_key(&inner_document_id));
         assert!(!state.document_base_urls.contains_key(&outer_document_id));
         assert!(!state.document_base_urls.contains_key(&inner_document_id));
-        assert!(!state.document_security_origins.contains_key(&outer_document_id));
-        assert!(!state.document_security_origins.contains_key(&inner_document_id));
+        assert!(
+            !state
+                .document_security_origins
+                .contains_key(&outer_document_id)
+        );
+        assert!(
+            !state
+                .document_security_origins
+                .contains_key(&inner_document_id)
+        );
     }
 
     /// Detaching an iframe destroys its active nested browsing context while
@@ -36801,11 +38002,9 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/initial.html"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         assert_eq!(
             eval_string_value(
@@ -36914,11 +38113,9 @@ b</textarea></form>"#);
         ]);
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            &format!("http://127.0.0.1:{port}/parent.html"),
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
+                .unwrap();
 
         runtime
             .eval(&format!(
@@ -37543,15 +38740,10 @@ b</textarea></form>"#);
     #[test]
     fn document_open_retires_nested_browsing_contexts_and_owned_tasks() {
         use crate::html::TreeBuilder;
-        let doc = TreeBuilder::parse(
-            r#"<html><body><iframe id="frame"></iframe></body></html>"#,
-        )
-        .document();
-        let mut runtime = JsRuntime::with_document_and_url(
-            doc,
-            "http://example.test/parent.html",
-        )
-        .unwrap();
+        let doc = TreeBuilder::parse(r#"<html><body><iframe id="frame"></iframe></body></html>"#)
+            .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, "http://example.test/parent.html").unwrap();
         runtime
             .eval(
                 "globalThis.frame = document.getElementById('frame'); \
@@ -39274,7 +40466,7 @@ b</textarea></form>"#);
         let mut runtime = scroll_runtime();
         runtime
             .eval(
-            r#"(() => {
+                r#"(() => {
                 const box = document.getElementById("hidden");
                 globalThis.scrollLog = [];
                 box.addEventListener("scroll", event => scrollLog.push(
@@ -39293,7 +40485,7 @@ b</textarea></form>"#);
                 box.scrollLeft = -1;
                 return scrollLog.length;
             })()"#,
-        )
+            )
             .unwrap();
         assert_eq!(eval_num(&mut runtime, "scrollLog.length"), 0.0);
         runtime.run_animation_frame(16).unwrap();
@@ -39476,7 +40668,9 @@ b</textarea></form>"#);
             })()"#,
         );
         assert_eq!(result, "3,54,3,24,20");
-        let hit = runtime.hit_test(5.0, 25.0).expect("nested sticky box must be hit");
+        let hit = runtime
+            .hit_test(5.0, 25.0)
+            .expect("nested sticky box must be hit");
         assert_eq!(hit.get_attribute("id").as_deref(), Some("sticky"));
     }
 
@@ -39506,9 +40700,14 @@ b</textarea></form>"#);
             ),
             "10,8,20,18"
         );
-        let hit = runtime.hit_test(11.0, 9.0).expect("transformed sticky box must be hit");
+        let hit = runtime
+            .hit_test(11.0, 9.0)
+            .expect("transformed sticky box must be hit");
         assert_eq!(hit.get_attribute("id").as_deref(), Some("sticky"));
-        assert!(runtime.hit_test(11.0, 47.0).is_none(), "overflow clip must remain active");
+        assert!(
+            runtime.hit_test(11.0, 47.0).is_none(),
+            "overflow clip must remain active"
+        );
     }
 
     #[test]
@@ -39524,9 +40723,21 @@ b</textarea></form>"#);
         );
         runtime.set_viewport(80.0, 80.0);
 
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('sticky').getBoundingClientRect().top"), 2.0);
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('sticky').getBoundingClientRect().top"
+            ),
+            2.0
+        );
         assert_eq!(runtime.host_state.borrow().adjusted_layout_builds, 1);
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('sticky').getBoundingClientRect().bottom"), 12.0);
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('sticky').getBoundingClientRect().bottom"
+            ),
+            12.0
+        );
         let _ = runtime.hit_test(1.0, 3.0);
         assert_eq!(
             runtime.host_state.borrow().adjusted_layout_builds,
@@ -39534,16 +40745,32 @@ b</textarea></form>"#);
             "repeated geometry and hit testing must share the adjusted tree"
         );
 
-        runtime.eval("document.getElementById('outer').scrollTop = 20").unwrap();
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('sticky').getBoundingClientRect().top"), 2.0);
+        runtime
+            .eval("document.getElementById('outer').scrollTop = 20")
+            .unwrap();
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('sticky').getBoundingClientRect().top"
+            ),
+            2.0
+        );
         assert_eq!(
             runtime.host_state.borrow().adjusted_layout_builds,
             2,
             "element scrolling must invalidate adjusted geometry"
         );
 
-        runtime.eval("document.getElementById('sticky').style.top = '6px'").unwrap();
-        assert_eq!(eval_num(&mut runtime, "document.getElementById('sticky').getBoundingClientRect().top"), 6.0);
+        runtime
+            .eval("document.getElementById('sticky').style.top = '6px'")
+            .unwrap();
+        assert_eq!(
+            eval_num(
+                &mut runtime,
+                "document.getElementById('sticky').getBoundingClientRect().top"
+            ),
+            6.0
+        );
         assert_eq!(
             runtime.host_state.borrow().adjusted_layout_builds,
             3,
@@ -39561,25 +40788,49 @@ b</textarea></form>"#);
         runtime
             .eval("globalThis.target = document.getElementById('target')")
             .unwrap();
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(10.0)
+        );
         let laid_out = runtime.render_generations();
-        assert!(laid_out.layout > initial.layout, "layout generation must advance on first reflow");
+        assert!(
+            laid_out.layout > initial.layout,
+            "layout generation must advance on first reflow"
+        );
         assert_eq!(laid_out.style, initial.style);
         assert_eq!(laid_out.paint, initial.paint);
 
         let _ = runtime.eval("target.getBoundingClientRect()").unwrap();
         let painted = runtime.render_generations();
-        assert_eq!(painted.paint, laid_out.paint, "building a clean paint cache is reusable");
+        assert_eq!(
+            painted.paint, laid_out.paint,
+            "building a clean paint cache is reusable"
+        );
 
         runtime.eval("target.style.opacity = '0.5'").unwrap();
         let invalidated = runtime.render_generations();
-        assert!(invalidated.style > painted.style, "style invalidation must advance its generation");
-        assert!(invalidated.paint > painted.paint, "style invalidation must invalidate adjusted paint geometry");
-        assert_eq!(invalidated.layout, painted.layout, "layout waits for the next geometry query");
+        assert!(
+            invalidated.style > painted.style,
+            "style invalidation must advance its generation"
+        );
+        assert!(
+            invalidated.paint > painted.paint,
+            "style invalidation must invalidate adjusted paint geometry"
+        );
+        assert_eq!(
+            invalidated.layout, painted.layout,
+            "layout waits for the next geometry query"
+        );
 
-        assert_eq!(runtime.eval("target.offsetWidth").unwrap().as_number(), Some(10.0));
+        assert_eq!(
+            runtime.eval("target.offsetWidth").unwrap().as_number(),
+            Some(10.0)
+        );
         let rebuilt = runtime.render_generations();
-        assert!(rebuilt.layout > invalidated.layout, "layout generation advances only when reflow runs");
+        assert!(
+            rebuilt.layout > invalidated.layout,
+            "layout generation advances only when reflow runs"
+        );
         assert_eq!(rebuilt.style, invalidated.style);
         let _ = runtime.eval("target.getBoundingClientRect()").unwrap();
         assert_eq!(runtime.render_generations().paint, invalidated.paint);
@@ -39858,7 +41109,10 @@ b</textarea></form>"#);
                 return opened + "|" + log.join("|") + "|" + dialog.open;
             })()"#,
         );
-        assert_eq!(result, "true:true:inside|close:false:false:accepted:before|false");
+        assert_eq!(
+            result,
+            "true:true:inside|close:false:false:accepted:before|false"
+        );
     }
 
     #[test]
@@ -40310,14 +41564,20 @@ b</textarea></form>"#);
                channel.port1.postMessage("third"); return ""; })()"#,
         );
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second|third");
+        assert_eq!(
+            eval_str(&mut runtime, "log.join('|')"),
+            "first|second|third"
+        );
         assert_eq!(runtime.take_task_errors().len(), 1);
         eval_str(
             &mut runtime,
             "(() => { channel.port2.close(); channel.port1.postMessage('third'); })()",
         );
         runtime.run_until_idle().unwrap();
-        assert_eq!(eval_str(&mut runtime, "log.join('|')"), "first|second|third");
+        assert_eq!(
+            eval_str(&mut runtime, "log.join('|')"),
+            "first|second|third"
+        );
     }
 
     #[test]
@@ -40384,21 +41644,15 @@ b</textarea></form>"#);
 
     #[test]
     fn broadcast_channel_delivers_same_origin_messages_asynchronously() {
-        let mut sender = JsRuntime::with_document_and_url(
-            default_document(),
-            "https://example.test/sender",
-        )
-        .unwrap();
-        let mut receiver = JsRuntime::with_document_and_url(
-            default_document(),
-            "https://example.test/receiver",
-        )
-        .unwrap();
-        let mut other_origin = JsRuntime::with_document_and_url(
-            default_document(),
-            "https://other.test/receiver",
-        )
-        .unwrap();
+        let mut sender =
+            JsRuntime::with_document_and_url(default_document(), "https://example.test/sender")
+                .unwrap();
+        let mut receiver =
+            JsRuntime::with_document_and_url(default_document(), "https://example.test/receiver")
+                .unwrap();
+        let mut other_origin =
+            JsRuntime::with_document_and_url(default_document(), "https://other.test/receiver")
+                .unwrap();
 
         eval_str(
             &mut sender,
@@ -40413,7 +41667,10 @@ b</textarea></form>"#);
             "(() => { globalThis.events = []; globalThis.channel = new BroadcastChannel('events'); channel.onmessage = event => events.push(event.data); })()",
         );
 
-        eval_str(&mut sender, "(() => { channel.postMessage({ value: 7 }); })()");
+        eval_str(
+            &mut sender,
+            "(() => { channel.postMessage({ value: 7 }); })()",
+        );
         assert_eq!(eval_str(&mut sender, "events.length"), "0");
         assert_eq!(eval_str(&mut receiver, "events.length"), "0");
 
@@ -40421,7 +41678,10 @@ b</textarea></form>"#);
         other_origin.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut sender, "events.length"), "0");
         assert_eq!(
-            eval_str(&mut receiver, "events[0].value + '|' + events[0].origin + '|' + events[0].proto"),
+            eval_str(
+                &mut receiver,
+                "events[0].value + '|' + events[0].origin + '|' + events[0].proto"
+            ),
             "7|https://example.test|true"
         );
         assert_eq!(eval_str(&mut other_origin, "events.length"), "0");
@@ -40429,16 +41689,12 @@ b</textarea></form>"#);
 
     #[test]
     fn broadcast_channel_close_cleans_registry_and_clone_errors_are_synchronous() {
-        let mut sender = JsRuntime::with_document_and_url(
-            default_document(),
-            "http://example.test/sender",
-        )
-        .unwrap();
-        let mut receiver = JsRuntime::with_document_and_url(
-            default_document(),
-            "http://example.test/receiver",
-        )
-        .unwrap();
+        let mut sender =
+            JsRuntime::with_document_and_url(default_document(), "http://example.test/sender")
+                .unwrap();
+        let mut receiver =
+            JsRuntime::with_document_and_url(default_document(), "http://example.test/receiver")
+                .unwrap();
 
         eval_str(
             &mut sender,
@@ -40458,7 +41714,10 @@ b</textarea></form>"#);
             &mut receiver,
             "(() => { globalThis.channel = new BroadcastChannel('close'); channel.onmessage = event => { globalThis.value = event.data; }; })()",
         );
-        eval_str(&mut sender, "(() => { channel.postMessage({ nested: { value: 3 } }); })()");
+        eval_str(
+            &mut sender,
+            "(() => { channel.postMessage({ nested: { value: 3 } }); })()",
+        );
         receiver.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut receiver, "value.nested.value"), "3");
         eval_str(&mut receiver, "(() => { channel.close(); })()");
@@ -40468,11 +41727,9 @@ b</textarea></form>"#);
 
     #[test]
     fn broadcast_channel_decode_failure_dispatches_messageerror_only() {
-        let mut runtime = JsRuntime::with_document_and_url(
-            default_document(),
-            "https://example.test/broadcast",
-        )
-        .unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(default_document(), "https://example.test/broadcast")
+                .unwrap();
         eval_str(
             &mut runtime,
             r#"(() => { globalThis.messages = 0; globalThis.errors = 0;
@@ -40548,8 +41805,17 @@ b</textarea></form>"#);
             "opened,put,matched"
         );
         assert_eq!(eval_str(&mut runtime, "cacheProbe.body"), "snapshot");
-        assert_eq!(eval_str(&mut runtime, "cacheProbe.ignoredSearch"), "snapshot");
-        assert_eq!(eval_str(&mut runtime, "cacheProbe.varied + ':' + cacheProbe.ignoredVary"), "true:snapshot");
+        assert_eq!(
+            eval_str(&mut runtime, "cacheProbe.ignoredSearch"),
+            "snapshot"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "cacheProbe.varied + ':' + cacheProbe.ignoredVary"
+            ),
+            "true:snapshot"
+        );
         assert_eq!(eval_str(&mut runtime, "cacheProbe.secondRead"), "snapshot");
         assert_eq!(
             eval_str(
@@ -40558,7 +41824,10 @@ b</textarea></form>"#);
             ),
             "true:true:true"
         );
-        eval_str(&mut runtime, "(() => { globalThis.cacheHas = undefined; caches.has('v1').then(value => { cacheHas = value; }); })()");
+        eval_str(
+            &mut runtime,
+            "(() => { globalThis.cacheHas = undefined; caches.has('v1').then(value => { cacheHas = value; }); })()",
+        );
         assert_eq!(eval_str(&mut runtime, "cacheHas === undefined"), "true");
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "cacheHas"), "true");
