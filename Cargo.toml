@@ -39,9 +39,11 @@ crc32fast = "1.5"
 # (ieee0824/boa#62), and the allocation-free interpreter frame/fallback contract
 # (ieee0824/boa#63), and the stable inline-cache state/telemetry contract
 # (ieee0824/boa#64), and the opt-in x86_64 baseline-JIT code-memory/ABI
-# substrate (ieee0824/boa#65). The merge commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "82572c24de5d8a49196700f6e982651edd671fab", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "82572c24de5d8a49196700f6e982651edd671fab" }
+# substrate (ieee0824/boa#65), and architecture-neutral baseline lowering,
+# fallback, and tiering diagnostics (ieee0824/boa#66). The merge commit contains
+# all listed fork changes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "210691aa58a775fc4a5bc3b69c59e66a377ed94d", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "210691aa58a775fc4a5bc3b69c59e66a377ed94d" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
