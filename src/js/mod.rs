@@ -17218,7 +17218,16 @@ mod tests {
         let mut runtime = runtime_from_html(
             r#"<html><body><button id="top">top</button><iframe id="frame"></iframe></body></html>"#,
         );
-        let result = eval_str(
+        // The initial empty iframe queues its resource load.  Complete that
+        // task before retaining the child Document so the navigation checks
+        // below operate on the live browsing context rather than a pending
+        // placeholder.
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime.take_task_errors().is_empty(),
+            "initial iframe resource load must not raise a task error"
+        );
+        let before = eval_str(
             &mut runtime,
             r#"(() => {
                 const frame = document.getElementById("frame");
@@ -17231,25 +17240,39 @@ mod tests {
                 const oldRange = oldDocument.createRange();
                 oldRange.selectNodeContents(oldText);
                 oldDocument.getSelection().addRange(oldRange);
-                let oldEvents = 0;
-                oldDocument.addEventListener("selectionchange", () => oldEvents++);
-
-                const before = [
+                const state = {
+                    frame,
+                    oldDocument,
+                    oldInput,
+                    oldEvents: 0,
+                };
+                oldDocument.addEventListener("selectionchange", () => state.oldEvents++);
+                state.before = [
                     document.activeElement === frame,
                     document.hasFocus(),
                     oldDocument.activeElement === oldInput,
                     oldDocument.hasFocus(),
                     oldDocument.getSelection().rangeCount,
                 ];
-
-                frame.src = "data:text/html,%3Chtml%3E%3Cbody%3Enew%3C/body%3E%3C/html%3E";
-                const newDocument = frame.contentDocument;
+                // Keep the replacement same-origin so its new Document is
+                // observable while checking that the old selection is gone.
+                frame.src = "about:blank";
+                globalThis.__issue558NavigationState = state;
+                return state.before.join("/");
+            })()"#,
+        );
+        runtime.tick(0).unwrap();
+        let after_navigation = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const state = globalThis.__issue558NavigationState;
+                const newDocument = state.frame.contentDocument;
                 let newEvents = 0;
                 newDocument.addEventListener("selectionchange", () => newEvents++);
                 const afterNavigation = [
-                    oldDocument !== newDocument,
+                    state.oldDocument !== newDocument,
                     document.activeElement === document.body,
-                    oldDocument.hasFocus(),
+                    state.oldDocument.hasFocus(),
                     newDocument.activeElement === newDocument.body,
                     newDocument.hasFocus(),
                     newDocument.getSelection().rangeCount,
@@ -17257,16 +17280,23 @@ mod tests {
                 ];
                 globalThis.__issue558NewDocument = newDocument;
                 globalThis.__issue558NewEvents = () => newEvents;
-                return [before.join("/"), afterNavigation.join("/"), oldEvents, newEvents].join("|");
+                return [afterNavigation.join("/"), state.oldEvents, newEvents].join("|");
             })()"#,
         );
-        runtime.run_until_idle().unwrap();
         assert_eq!(
-            result,
+            before,
+            // The initial state belongs to the child Document before
+            // navigation commits.
+            "true/true/true/true/1"
+        );
+        assert_eq!(
+            after_navigation,
             // Navigation keeps the iframe as the top document's active
             // element, while the old child Document loses system focus and
             // the replacement starts with its viewport/body active.
-            "true/true/true/true/1|true/false/false/true/false/0/|0|0"
+            // The old selectionchange may still be delivered to the retired
+            // Document, but it must never reach the replacement.
+            "true/false/false/true/false/0/|1|0"
         );
         // A queued selectionchange from the retired document may complete on
         // its own old target, but it must never be delivered to the replacement
