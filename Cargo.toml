@@ -10,6 +10,10 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 gui = ["dep:softbuffer", "dep:winit"]
+# Test-only Gate 2 comparison harness. This never selects a production
+# JavaScript engine; it compares the existing Boa embedding with a standalone
+# Boa interpreter context over the same source programs.
+jit-differential = []
 
 [dependencies]
 ab_glyph = "0.2"
@@ -24,9 +28,10 @@ crc32fast = "1.5"
 # registered roots for native builtin temporaries (ieee0824/boa#55),
 # Array.prototype.filter callback rooting (ieee0824/boa#57), and
 # nursery-bounded generational GC (ieee0824/boa#56), and
-# defineProperty receiver/descriptor rooting (ieee0824/boa#58).
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "4044e7e47970a91e1cb4c6c484ca80ed7b0c2835", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "4044e7e47970a91e1cb4c6c484ca80ed7b0c2835" }
+# defineProperty receiver/descriptor rooting (ieee0824/boa#58), and
+# monomorphic inline-cache hit validation (ieee0824/boa#59).
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "a92ac8c82e71d6dd58ffcee449ac075144b3d689", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "a92ac8c82e71d6dd58ffcee449ac075144b3d689" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"

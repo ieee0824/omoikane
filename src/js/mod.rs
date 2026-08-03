@@ -16404,6 +16404,142 @@ mod tests {
     }
 
     #[test]
+    fn selectionchange_stays_with_its_own_iframe_document() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><p id="top">top</p><iframe id="frame"></iframe></body></html>"#,
+        );
+        // runtime_from_html queues the connected iframe's initial resource
+        // load. Complete that navigation before retaining contentDocument so
+        // the selection callback below belongs to the live Document generation
+        // rather than a document that is about to be retired by the pending
+        // load task.
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime.take_task_errors().is_empty(),
+            "initial iframe resource load must not raise a task error"
+        );
+        runtime
+            .eval(
+                r#"(() => {
+                    const frame = document.getElementById("frame");
+                    const child = frame.contentDocument;
+                    const text = child.createTextNode("child");
+                    child.body.appendChild(text);
+                    const childRange = child.createRange();
+                    childRange.selectNodeContents(text);
+                    const parentSelection = document.getSelection();
+                    const childSelection = child.getSelection();
+                    const state = globalThis.__issue558SelectionState = {
+                        parentEvents: 0,
+                        parentWindowEvents: 0,
+                        childDocumentEvents: 0,
+                        childEvents: 0,
+                        crossDocumentError: "",
+                        parentSelection,
+                        childSelection,
+                    };
+                    document.addEventListener("selectionchange", () => state.parentEvents++);
+                    globalThis.addEventListener("selectionchange", () => state.parentWindowEvents++);
+                    child.addEventListener("selectionchange", () => state.childDocumentEvents++);
+                    // Selectionchange is dispatched on the child Document and
+                    // bubbles to that browsing context's WindowProxy. Register
+                    // at the WindowProxy so the listener is owned by the same
+                    // child browsing context as the queued delivery.
+                    child.defaultView.addEventListener("selectionchange", () => state.childEvents++);
+                    try { parentSelection.addRange(childRange); }
+                    catch (error) { state.crossDocumentError = error.name; }
+                    childSelection.addRange(childRange);
+                    return [state.parentEvents, state.parentWindowEvents,
+                        state.childDocumentEvents, state.childEvents,
+                        state.parentSelection.rangeCount,
+                        state.childSelection.rangeCount, state.crossDocumentError].join(',');
+                })()"#,
+            )
+            .unwrap();
+
+        // The child event is a DOM-manipulation task and must not run during
+        // the initiating script. It must also not bubble through the parent
+        // browsing context or alter the parent's Selection.
+        assert_eq!(
+            eval_str(&mut runtime, "__issue558SelectionState.childEvents"),
+            "0"
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[__issue558SelectionState.parentEvents, __issue558SelectionState.parentWindowEvents, __issue558SelectionState.childDocumentEvents, __issue558SelectionState.childEvents, __issue558SelectionState.parentSelection.rangeCount, __issue558SelectionState.childSelection.rangeCount, __issue558SelectionState.crossDocumentError].join(',')",
+            ),
+            "0,0,1,1,0,1,WrongDocumentError"
+        );
+    }
+
+    #[test]
+    fn iframe_navigation_drops_old_focus_and_selection_state() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><button id="top">top</button><iframe id="frame"></iframe></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const frame = document.getElementById("frame");
+                const oldDocument = frame.contentDocument;
+                const oldInput = oldDocument.createElement("input");
+                oldDocument.body.appendChild(oldInput);
+                oldInput.focus();
+                const oldText = oldDocument.createTextNode("old");
+                oldDocument.body.appendChild(oldText);
+                const oldRange = oldDocument.createRange();
+                oldRange.selectNodeContents(oldText);
+                oldDocument.getSelection().addRange(oldRange);
+                let oldEvents = 0;
+                oldDocument.addEventListener("selectionchange", () => oldEvents++);
+
+                const before = [
+                    document.activeElement === frame,
+                    document.hasFocus(),
+                    oldDocument.activeElement === oldInput,
+                    oldDocument.hasFocus(),
+                    oldDocument.getSelection().rangeCount,
+                ];
+
+                frame.src = "data:text/html,%3Chtml%3E%3Cbody%3Enew%3C/body%3E%3C/html%3E";
+                const newDocument = frame.contentDocument;
+                let newEvents = 0;
+                newDocument.addEventListener("selectionchange", () => newEvents++);
+                const afterNavigation = [
+                    oldDocument !== newDocument,
+                    document.activeElement === document.body,
+                    oldDocument.hasFocus(),
+                    newDocument.activeElement === newDocument.body,
+                    newDocument.hasFocus(),
+                    newDocument.getSelection().rangeCount,
+                    newDocument.getSelection().toString(),
+                ];
+                globalThis.__issue558NewDocument = newDocument;
+                globalThis.__issue558NewEvents = () => newEvents;
+                return [before.join("/"), afterNavigation.join("/"), oldEvents, newEvents].join("|");
+            })()"#,
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            result,
+            // Navigation keeps the iframe as the top document's active
+            // element, while the old child Document loses system focus and
+            // the replacement starts with its viewport/body active.
+            "true/true/true/true/1|true/false/false/true/false/0/|0|0"
+        );
+        // A queued selectionchange from the retired document may complete on
+        // its own old target, but it must never be delivered to the replacement
+        // Document. The replacement remains selection-empty after navigation.
+        assert_eq!(
+            eval_str(&mut runtime, "__issue558NewDocument.getSelection().rangeCount"),
+            "0"
+        );
+        assert_eq!(eval_str(&mut runtime, "__issue558NewEvents()"), "0");
+    }
+
+    #[test]
     fn supports_event_listeners_bubbling_and_capture() {
         let mut runtime = JsRuntime::with_document(sample_document()).unwrap();
         runtime
