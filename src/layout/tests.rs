@@ -1155,6 +1155,80 @@ fn inline_content_honors_text_align_right() {
 }
 
 #[test]
+fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let start = NodeHandle::element("p");
+    let end = NodeHandle::element("p");
+    let start_first = NodeHandle::element("span");
+    let start_second = NodeHandle::element("span");
+    let end_first = NodeHandle::element("span");
+    let end_second = NodeHandle::element("span");
+    start_first.append_child(NodeHandle::text("A"));
+    start_second.append_child(NodeHandle::text("B"));
+    end_first.append_child(NodeHandle::text("A"));
+    end_second.append_child(NodeHandle::text("B"));
+    start.append_child(start_first);
+    start.append_child(start_second);
+    end.append_child(end_first);
+    end.append_child(end_second);
+    document.append_child(body.clone());
+    body.append_child(start.clone());
+    body.append_child(end.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("p { direction: rtl; width: 100px; font-size: 10px; }").unwrap(),
+    );
+    start.set_attribute("style", "text-align: start");
+    end.set_attribute("style", "text-align: end");
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let start_box = find_layout_box(&layout, &start).unwrap();
+    let end_box = find_layout_box(&layout, &end).unwrap();
+    let start_line = &start_box.lines[0];
+    let end_line = &end_box.lines[0];
+    let start_a = start_line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    let start_b = start_line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("B"))
+        .unwrap();
+    let end_a = end_line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    let end_b = end_line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("B"))
+        .unwrap();
+
+    // DOM order remains A then B, while RTL inline-start places A at the
+    // physical right edge.  Logical `end` reverses only the line alignment;
+    // the run order remains RTL in both cases.
+    assert!(start_a.rect.x > start_b.rect.x);
+    assert!(start_line.rect.x > end_line.rect.x);
+    assert!(end_a.rect.x > end_b.rect.x);
+}
+
+#[test]
 fn generated_before_and_after_content_participate_in_inline_layout() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

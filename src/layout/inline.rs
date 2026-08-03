@@ -21,6 +21,12 @@ use super::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TextAlign {
+    /// The logical inline-start edge.  It resolves to the physical left or
+    /// right edge according to the containing block's `direction`.
+    Start,
+    /// The logical inline-end edge.  It resolves to the physical edge
+    /// opposite [`TextAlign::Start`].
+    End,
     Left,
     Right,
     Center,
@@ -28,13 +34,22 @@ pub(super) enum TextAlign {
 
 pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
     match style.get("text-align") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("start") => {
+            TextAlign::Start
+        }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("end") => {
+            TextAlign::End
+        }
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("right") => {
             TextAlign::Right
         }
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
             TextAlign::Center
         }
-        _ => TextAlign::Left,
+        // `start` is the CSS initial value.  Keeping it logical means that a
+        // block with `direction: rtl` naturally starts at its right edge even
+        // when no explicit text-align declaration is present.
+        _ => TextAlign::Start,
     }
 }
 
@@ -48,6 +63,7 @@ pub(super) fn layout_inline_nodes(
     available_width: f32,
     align: TextAlign,
     strut_line_height: f32,
+    direction_rtl: bool,
 ) -> Vec<LineBox> {
     let mut segments = Vec::new();
     for node in nodes {
@@ -62,6 +78,7 @@ pub(super) fn layout_inline_nodes(
         available_width,
         align,
         strut_line_height,
+        direction_rtl,
     )
 }
 
@@ -103,6 +120,7 @@ pub(super) fn layout_vertical_inline_nodes(
         available_height.max(0.0),
         align,
         strut_line_height,
+        false,
     );
 
     horizontal_lines
@@ -1597,16 +1615,18 @@ struct InlineCursor {
     line_height: f32,
     start_x: f32,
     strut_line_height: f32,
+    direction_rtl: bool,
 }
 
 impl InlineCursor {
-    fn new(start_x: f32, start_y: f32, strut_line_height: f32) -> Self {
+    fn new(start_x: f32, start_y: f32, strut_line_height: f32, direction_rtl: bool) -> Self {
         Self {
             x: start_x,
             y: start_y,
             line_height: strut_line_height,
             start_x,
             strut_line_height,
+            direction_rtl,
         }
     }
 
@@ -1628,6 +1648,7 @@ impl InlineCursor {
             effective_height,
             available_width,
             align,
+            self.direction_rtl,
         );
         self.y += effective_height;
         self.x = self.start_x;
@@ -1709,10 +1730,11 @@ fn layout_inline_segments(
     available_width: f32,
     align: TextAlign,
     strut_line_height: f32,
+    direction_rtl: bool,
 ) -> Vec<LineBox> {
     let mut lines = Vec::new();
     let mut current_fragments = Vec::new();
-    let mut cursor = InlineCursor::new(start_x, start_y, strut_line_height);
+    let mut cursor = InlineCursor::new(start_x, start_y, strut_line_height, direction_rtl);
 
     let mut prev_segment_allows_wrapping = true;
     for segment in segments {
@@ -1819,6 +1841,7 @@ fn layout_inline_segments(
             cursor.line_height.max(0.0),
             available_width,
             align,
+            direction_rtl,
         );
     }
 
@@ -2184,14 +2207,37 @@ fn push_line(
     height: f32,
     available_width: f32,
     align: TextAlign,
+    direction_rtl: bool,
 ) {
-    let offset_x = match align {
+    let physical_align = match align {
+        TextAlign::Start if direction_rtl => TextAlign::Right,
+        TextAlign::Start => TextAlign::Left,
+        TextAlign::End if direction_rtl => TextAlign::Left,
+        TextAlign::End => TextAlign::Right,
+        other => other,
+    };
+    let offset_x = match physical_align {
         TextAlign::Left => 0.0,
         TextAlign::Right => (available_width - width).max(0.0),
         TextAlign::Center => (available_width - width).max(0.0) / 2.0,
+        TextAlign::Start | TextAlign::End => unreachable!("logical alignment must be resolved"),
     };
     for fragment in fragments.iter_mut() {
         fragment.rect.x += offset_x;
+    }
+
+    // The shaping/line-breaking pass emits fragments in DOM order.  For a
+    // horizontal RTL inline formatting context, mirror each fragment inside
+    // the aligned line box so the first logical run occupies inline-start
+    // (the physical right edge) while keeping DOM order stable for hit-test
+    // and inspection code.  Vertical writing uses its own transpose and
+    // deliberately reaches this helper with `direction_rtl == false`.
+    if direction_rtl {
+        let line_left = x + offset_x;
+        for fragment in fragments.iter_mut() {
+            fragment.rect.x =
+                line_left + width - (fragment.rect.x - line_left) - fragment.rect.width;
+        }
     }
 
     let baseline = fragments

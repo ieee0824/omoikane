@@ -1135,6 +1135,7 @@ fn flush_pending_inline_nodes(
         (width - offsets.left - offsets.right).max(0.0),
         text_align(style),
         line_height(style),
+        direction_is_rtl(style),
     );
     if let Some(last_line) = inline_lines.last() {
         *cursor_y = last_line.rect.y + last_line.rect.height;
@@ -1369,6 +1370,7 @@ fn layout_element(
             width,
             text_align(&style),
             0.0,
+            direction_is_rtl(&style),
         );
         if !lines.iter().any(|line| {
             line.fragments
