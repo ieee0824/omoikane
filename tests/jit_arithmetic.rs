@@ -80,6 +80,28 @@ fn property_shape_and_descriptor_changes_match_interpreter_semantics() {
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+fn property_mutation_enters_native_code_then_bails_out_safely() {
+    let mut context = Context::default();
+    let result = context
+        .eval(Source::from_bytes(
+            "function own(o,n){var s=0;for(var i=0;i<n;i++)s+=o.x;return s}\
+             function inherited(o,n){var s=0;for(var i=0;i<n;i++)s+=o.x;return s}\
+             var a={x:2},warmOwn=own(a,200);delete a.x;\
+             Object.defineProperty(a,'x',{value:7});var changedOwn=own(a,1000);\
+             var p={x:3},o=Object.create(p),warmInherited=inherited(o,200);\
+             p.x=5;[warmOwn,changedOwn,warmInherited,inherited(o,200)].join(',')",
+        ))
+        .expect("execute property mutations after hot native entries");
+    assert_eq!(result.display().to_string(), "\"400,7000,600,1000\"");
+
+    let diagnostics = context.arithmetic_jit_diagnostics();
+    assert!(diagnostics.successful_compilations >= 1);
+    assert!(diagnostics.property_guard_hits >= 1);
+    assert!(diagnostics.property_guard_misses >= 1);
+}
+
+#[test]
 fn overflow_nan_negative_zero_branch_and_type_mismatch_preserve_number_semantics() {
     assert_eq!(
         evaluate(
