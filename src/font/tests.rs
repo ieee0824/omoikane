@@ -17,6 +17,14 @@ fn shaping_controls_have_zero_advance_policy() {
 }
 
 #[test]
+fn letter_spacing_boundaries_follow_extended_grapheme_clusters() {
+    assert_eq!(grapheme_spacing_boundaries("e\u{301}"), 0);
+    assert_eq!(grapheme_spacing_boundaries("👩‍💻"), 0);
+    assert_eq!(grapheme_spacing_boundaries("👩‍💻a"), 1);
+    assert_eq!(grapheme_spacing_boundaries("لا"), 1);
+}
+
+#[test]
 fn opentype_shaping_applies_arabic_context_and_ligatures() {
     let Some(path) = find_test_font() else {
         eprintln!("Skipping OpenType shaping test: no system font available");
