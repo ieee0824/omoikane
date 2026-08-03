@@ -748,13 +748,15 @@ fn bidi_override_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a
         return Cow::Borrowed(text);
     }
 
-    let clusters: Vec<&str> = text.graphemes(true).collect();
-    if clusters.len() < 2 {
+    let Some(first_cluster) = text.graphemes(true).next() else {
+        return Cow::Borrowed(text);
+    };
+    if first_cluster.len() == text.len() {
         return Cow::Borrowed(text);
     }
 
     let mut visual = String::with_capacity(text.len());
-    for cluster in clusters.into_iter().rev() {
+    for cluster in text.graphemes(true).rev() {
         visual.push_str(cluster);
     }
     Cow::Owned(visual)
