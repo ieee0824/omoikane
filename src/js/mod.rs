@@ -2752,6 +2752,16 @@ impl JsRuntime {
             self.run_jobs()
         })();
         let _ = self.eval("__omoikane_set_current_script(null)");
+        #[cfg(test)]
+        {
+            let probe = self
+                .eval("[typeof frameElement, frameElement === null, typeof document, document && document.__id, document && document.documentElement && document.documentElement.getAttribute('data-frame-element'), document && document.documentElement && document.documentElement.getAttribute('data-external-child')].join('|')")
+                .map(|value| value.display().to_string())
+                .unwrap_or_else(|error| format!("<probe error: {error}>"));
+            eprintln!(
+                "[iframe script probe] iframe={iframe_id} document={document_id} script={script_id} result={probe}"
+            );
+        }
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.context.enter_realm(old_realm);
         #[cfg(test)]
@@ -31761,7 +31771,7 @@ b</textarea></form>"#);
                 let (content_type, body) = if path.ends_with("/frames/child.xhtml") {
                     (
                         "application/xhtml+xml",
-                        "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>var s=document.createElement('script');s.src='relative.js';s.addEventListener('load',function(){document.documentElement.setAttribute('data-relative-load','yes')});document.head.appendChild(s)</script></body></html>".to_string(),
+                        "<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>var s=document.createElement('script');s.src='relative.js';s.addEventListener('load',function(){document.documentElement.setAttribute('data-relative-load','yes')});document.head.appendChild(s)</script></body></html>".to_string(),
                     )
                 } else if path.ends_with("/frames/relative.js") {
                     (
@@ -32965,7 +32975,7 @@ b</textarea></form>"#);
         use crate::html::TreeBuilder;
         let port = spawn_static_http_server(
             "application/xhtml+xml",
-            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
                 globalThis.childRealmMarker = 'child';
                 document.documentElement.setAttribute('data-child-script', 'yes');
                 Promise.resolve().then(() => document.documentElement.setAttribute('data-child-job', 'yes'));
@@ -33032,7 +33042,7 @@ b</textarea></form>"#);
         use crate::html::TreeBuilder;
         let port = spawn_static_http_server(
             "application/xhtml+xml",
-            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
                 const frame = frameElement;
                 const valid = frame !== null && frame.tagName === 'IFRAME' &&
                     frame.ownerDocument.__id === parent.document.__id &&
@@ -33083,7 +33093,7 @@ b</textarea></form>"#);
         use crate::html::TreeBuilder;
         let port = spawn_static_http_server(
             "application/xhtml+xml",
-            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
                 const script = document.createElement('script');
                 script.src = 'data:text/javascript,document.documentElement.setAttribute(%22data-external-child%22,%22yes%22)';
                 script.addEventListener('load', () => document.documentElement.setAttribute('data-external-load', 'yes'));
