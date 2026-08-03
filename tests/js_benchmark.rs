@@ -60,6 +60,7 @@ use serde::{Deserialize, Serialize};
 
 const SHAPES_PATH: &str = "tests/js_benchmark/shapes.js";
 const BASELINE_PATH: &str = "tests/js_benchmark/baseline.json";
+const GATE2_SNAPSHOT_PATH: &str = "docs/jit/gate2-performance-snapshot.json";
 
 /// How far a measurement may drift from the baseline before it is called an
 /// improvement or a regression.
@@ -92,6 +93,10 @@ struct Baseline {
     passes: u32,
     /// Which engine and version the `reference` numbers came from.
     reference_engine: String,
+    target_arch: String,
+    target_os: String,
+    environment: String,
+    measurement_runs: usize,
     shapes: Vec<BaselineShape>,
 }
 
@@ -145,6 +150,10 @@ struct ShapeResult {
     id: String,
     description: String,
     ns_per_op: f64,
+    /// Per-process samples in execution order. `ns_per_op` is their median.
+    samples_ns_per_op: Vec<f64>,
+    min_ns_per_op: f64,
+    max_ns_per_op: f64,
     baseline_ns_per_op: f64,
     /// Negative means faster than the baseline.
     delta_ratio: f64,
@@ -162,11 +171,19 @@ struct Report {
     baseline_version: u32,
     baseline_profile: String,
     baseline_passes: u32,
+    baseline_target_arch: String,
+    baseline_target_os: String,
+    baseline_environment: String,
+    baseline_measurement_runs: usize,
     reference_engine: String,
     target_arch: &'static str,
     target_os: &'static str,
     measured_passes: u32,
     measured_profile: &'static str,
+    measurement_runs: usize,
+    revision: String,
+    environment: String,
+    baseline_comparable: bool,
     total: usize,
     improvements: Vec<String>,
     regressions: Vec<String>,
@@ -179,6 +196,21 @@ fn measured_profile() -> &'static str {
     } else {
         "release"
     }
+}
+
+fn measurement_run_count() -> usize {
+    let Some(raw) = std::env::var_os("OMOIKANE_JS_BENCH_RUNS") else {
+        return 1;
+    };
+    let count = raw
+        .to_string_lossy()
+        .parse::<usize>()
+        .expect("OMOIKANE_JS_BENCH_RUNS must be an integer");
+    assert!(
+        (1..=9).contains(&count),
+        "OMOIKANE_JS_BENCH_RUNS must be between 1 and 9"
+    );
+    count
 }
 
 fn load_baseline() -> Baseline {
@@ -251,32 +283,77 @@ fn run_benchmarks() -> BenchmarkRun {
     }
 }
 
-fn build_report(baseline: &Baseline, run: &BenchmarkRun) -> Report {
-    assert_eq!(
-        run.passes, baseline.passes,
-        "shapes.js timed {} passes but the baseline and its reference numbers were \
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
+}
+
+fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
+    assert!(!runs.is_empty(), "at least one benchmark run is required");
+    for run in runs {
+        assert_eq!(
+            run.passes, baseline.passes,
+            "shapes.js timed {} passes but the baseline and its reference numbers were \
          recorded over {}; re-record them rather than comparing across pass counts",
-        run.passes, baseline.passes
-    );
-    let measurements = &run.measurements;
+            run.passes, baseline.passes
+        );
+    }
     let mut shapes = Vec::new();
     let mut improvements = Vec::new();
     let mut regressions = Vec::new();
 
     for expected in &baseline.shapes {
-        let measured = measurements
+        let measured = runs
             .iter()
-            .find(|measurement| measurement.id == expected.id)
-            .unwrap_or_else(|| panic!("baseline shape {} was not measured", expected.id));
-        assert_eq!(
-            measured.iterations, expected.iterations,
-            "shape {} ran {} iterations but the baseline and its reference numbers \
-             were measured at {}; re-record the baseline (and the reference engine's \
-             numbers) rather than comparing across iteration counts",
-            expected.id, measured.iterations, expected.iterations
-        );
+            .map(|run| {
+                let measurement = run
+                    .measurements
+                    .iter()
+                    .find(|measurement| measurement.id == expected.id)
+                    .unwrap_or_else(|| panic!("baseline shape {} was not measured", expected.id));
+                assert_eq!(
+                    measurement.iterations, expected.iterations,
+                    "shape {} ran {} iterations but the baseline and its reference numbers \
+                     were measured at {}; re-record the baseline (and the reference engine's \
+                     numbers) rather than comparing across iteration counts",
+                    expected.id, measurement.iterations, expected.iterations
+                );
+                assert!(
+                    measurement.ns_per_op.is_finite() && measurement.ns_per_op > 0.0,
+                    "shape {} produced no usable timing: {:?}",
+                    measurement.id,
+                    measurement
+                );
+                assert!(
+                    measurement.elapsed_ms.is_finite() && measurement.elapsed_ms > 0.0,
+                    "shape {} completed below timer resolution; raise its iteration count",
+                    measurement.id
+                );
+                measurement
+            })
+            .collect::<Vec<_>>();
+        let samples_ns_per_op = measured
+            .iter()
+            .map(|measurement| measurement.ns_per_op)
+            .collect::<Vec<_>>();
+        let ns_per_op = median(samples_ns_per_op.clone());
+        let min_ns_per_op = samples_ns_per_op
+            .iter()
+            .copied()
+            .min_by(f64::total_cmp)
+            .expect("non-empty samples");
+        let max_ns_per_op = samples_ns_per_op
+            .iter()
+            .copied()
+            .max_by(f64::total_cmp)
+            .expect("non-empty samples");
 
-        let delta_ratio = measured.ns_per_op / expected.baseline_ns_per_op - 1.0;
+        let delta_ratio = ns_per_op / expected.baseline_ns_per_op - 1.0;
         let drift = if delta_ratio > DRIFT_TOLERANCE {
             regressions.push(expected.id.clone());
             Drift::Regressed
@@ -290,25 +367,50 @@ fn build_report(baseline: &Baseline, run: &BenchmarkRun) -> Report {
         shapes.push(ShapeResult {
             id: expected.id.clone(),
             description: expected.description.clone(),
-            ns_per_op: measured.ns_per_op,
+            ns_per_op,
+            samples_ns_per_op,
+            min_ns_per_op,
+            max_ns_per_op,
             baseline_ns_per_op: expected.baseline_ns_per_op,
             delta_ratio,
             drift,
             reference: expected.reference,
-            versus_interpreter: measured.ns_per_op / expected.reference.spidermonkey_interpreter,
-            versus_jit: measured.ns_per_op / expected.reference.spidermonkey_jit,
+            versus_interpreter: ns_per_op / expected.reference.spidermonkey_interpreter,
+            versus_jit: ns_per_op / expected.reference.spidermonkey_jit,
         });
     }
 
+    let environment = std::env::var("OMOIKANE_BENCH_ENVIRONMENT").unwrap_or_else(|_| {
+        if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            "github-actions".to_string()
+        } else {
+            "local".to_string()
+        }
+    });
     Report {
         baseline_version: baseline.version,
         baseline_profile: baseline.profile.clone(),
         baseline_passes: baseline.passes,
+        baseline_target_arch: baseline.target_arch.clone(),
+        baseline_target_os: baseline.target_os.clone(),
+        baseline_environment: baseline.environment.clone(),
+        baseline_measurement_runs: baseline.measurement_runs,
         reference_engine: baseline.reference_engine.clone(),
         target_arch: std::env::consts::ARCH,
         target_os: std::env::consts::OS,
-        measured_passes: run.passes,
+        measured_passes: runs[0].passes,
         measured_profile: measured_profile(),
+        measurement_runs: runs.len(),
+        revision: std::env::var("OMOIKANE_BENCH_REVISION")
+            .or_else(|_| std::env::var("GITHUB_SHA"))
+            .unwrap_or_else(|_| "unknown".to_string()),
+        baseline_comparable: baseline.profile == measured_profile()
+            && baseline.passes == runs[0].passes
+            && baseline.measurement_runs == runs.len()
+            && baseline.target_arch == std::env::consts::ARCH
+            && baseline.target_os == std::env::consts::OS
+            && baseline.environment == environment,
+        environment,
         total: shapes.len(),
         improvements,
         regressions,
@@ -318,26 +420,42 @@ fn build_report(baseline: &Baseline, run: &BenchmarkRun) -> Report {
 
 fn print_report(report: &Report) {
     println!(
-        "JS benchmark: shapes={} profile={} passes={} target={}-{} (baseline v{} recorded under {}; reference: {})",
+        "JS benchmark: shapes={} runs={} profile={} passes={} target={}-{} (baseline v{}; reference: {})",
         report.total,
+        report.measurement_runs,
         report.measured_profile,
         report.measured_passes,
         report.target_os,
         report.target_arch,
         report.baseline_version,
-        report.baseline_profile,
         report.reference_engine
     );
+    if !report.baseline_comparable {
+        println!(
+            "  note: baseline drift is advisory; current=profile:{} runs:{} target={}-{} environment={:?}; baseline=profile:{} runs:{} target={}-{} environment={:?}",
+            report.measured_profile,
+            report.measurement_runs,
+            report.target_os,
+            report.target_arch,
+            report.environment,
+            report.baseline_profile,
+            report.baseline_measurement_runs,
+            report.baseline_target_os,
+            report.baseline_target_arch,
+            report.baseline_environment
+        );
+    }
     println!(
-        "  {:<26} {:>10} {:>10} {:>8}  {:>9} {:>8}",
-        "shape", "ns/op", "baseline", "delta", "vs SM-int", "vs SM-jit"
+        "  {:<26} {:>10} {:>10} {:>8} {:>9}  {:>9} {:>8}",
+        "shape", "median", "range", "delta", "vs SM-int", "vs SM-jit", ""
     );
     for shape in &report.shapes {
         println!(
-            "  {:<26} {:>10.1} {:>10.1} {:>7.0}% {:>8.1}x {:>7.0}x  {}",
+            "  {:<26} {:>10.1} {:>4.0}-{:<4.0} {:>7.0}% {:>8.1}x {:>7.0}x  {}",
             shape.id,
             shape.ns_per_op,
-            shape.baseline_ns_per_op,
+            shape.min_ns_per_op,
+            shape.max_ns_per_op,
             shape.delta_ratio * 100.0,
             shape.versus_interpreter,
             shape.versus_jit,
@@ -377,6 +495,10 @@ fn baseline_shapes_are_unique_and_well_formed() {
     assert!(baseline.version > 0);
     assert!(baseline.passes > 0);
     assert!(!baseline.reference_engine.trim().is_empty());
+    assert!(!baseline.target_arch.trim().is_empty());
+    assert!(!baseline.target_os.trim().is_empty());
+    assert!(!baseline.environment.trim().is_empty());
+    assert!(baseline.measurement_runs > 0);
     assert!(!baseline.shapes.is_empty());
 
     let mut ids = HashSet::new();
@@ -411,12 +533,40 @@ fn baseline_shapes_are_unique_and_well_formed() {
 }
 
 #[test]
+fn gate2_snapshot_preserves_five_finite_samples_for_every_shape() {
+    let snapshot: serde_json::Value = serde_json::from_slice(
+        &fs::read(GATE2_SNAPSHOT_PATH).expect("read Gate 2 performance snapshot"),
+    )
+    .expect("parse Gate 2 performance snapshot");
+    assert_eq!(snapshot["measurement_runs"], 5);
+    assert_eq!(snapshot["measured_passes"], 4);
+    assert_eq!(snapshot["baseline_comparable"], false);
+    let shapes = snapshot["shapes"].as_array().expect("snapshot shapes");
+    assert_eq!(shapes.len(), 11);
+    for shape in shapes {
+        let samples = shape["samples_ns_per_op"]
+            .as_array()
+            .expect("shape samples");
+        assert_eq!(samples.len(), 5);
+        assert!(samples.iter().all(|sample| {
+            sample
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value > 0.0)
+        }));
+    }
+}
+
+#[test]
 fn report_classifies_drift_against_the_baseline() {
     let baseline = Baseline {
         version: 1,
         profile: "dev".to_string(),
         passes: 4,
         reference_engine: "test".to_string(),
+        target_arch: std::env::consts::ARCH.to_string(),
+        target_os: std::env::consts::OS.to_string(),
+        environment: "test".to_string(),
+        measurement_runs: 1,
         shapes: vec![
             BaselineShape {
                 id: "faster".to_string(),
@@ -466,7 +616,7 @@ fn report_classifies_drift_against_the_baseline() {
         ],
     };
 
-    let report = build_report(&baseline, &run);
+    let report = build_report(&baseline, &[run]);
 
     assert_eq!(report.improvements, ["faster"]);
     assert_eq!(report.regressions, ["slower"]);
@@ -484,6 +634,46 @@ fn report_classifies_drift_against_the_baseline() {
     assert_eq!(faster.versus_jit, 7.0);
 }
 
+#[test]
+fn report_uses_the_median_and_preserves_each_sample() {
+    let baseline = Baseline {
+        version: 1,
+        profile: "dev".to_string(),
+        passes: 4,
+        reference_engine: "test".to_string(),
+        target_arch: std::env::consts::ARCH.to_string(),
+        target_os: std::env::consts::OS.to_string(),
+        environment: "test".to_string(),
+        measurement_runs: 1,
+        shapes: vec![BaselineShape {
+            id: "arith".to_string(),
+            description: "median probe".to_string(),
+            iterations: 1_000,
+            baseline_ns_per_op: 100.0,
+            reference: Reference {
+                spidermonkey_interpreter: 50.0,
+                spidermonkey_jit: 10.0,
+            },
+        }],
+    };
+    let run = |ns_per_op| BenchmarkRun {
+        passes: 4,
+        measurements: vec![Measurement {
+            id: "arith".to_string(),
+            iterations: 1_000,
+            elapsed_ms: ns_per_op / 1_000.0,
+            ns_per_op,
+        }],
+    };
+
+    let report = build_report(&baseline, &[run(120.0), run(80.0), run(100.0)]);
+    let shape = &report.shapes[0];
+    assert_eq!(report.measurement_runs, 3);
+    assert_eq!(shape.ns_per_op, 100.0);
+    assert_eq!(shape.samples_ns_per_op, [120.0, 80.0, 100.0]);
+    assert_eq!((shape.min_ns_per_op, shape.max_ns_per_op), (80.0, 120.0));
+}
+
 /// The guard that makes the mismatch this schema field exists to prevent
 /// impossible rather than merely documented.
 #[test]
@@ -494,6 +684,10 @@ fn report_refuses_to_compare_across_iteration_counts() {
         profile: "dev".to_string(),
         passes: 4,
         reference_engine: "test".to_string(),
+        target_arch: std::env::consts::ARCH.to_string(),
+        target_os: std::env::consts::OS.to_string(),
+        environment: "test".to_string(),
+        measurement_runs: 1,
         shapes: vec![BaselineShape {
             id: "arith".to_string(),
             description: "recorded at a different count".to_string(),
@@ -515,7 +709,7 @@ fn report_refuses_to_compare_across_iteration_counts() {
         }],
     };
 
-    build_report(&baseline, &run);
+    build_report(&baseline, &[run]);
 }
 
 #[test]
@@ -526,6 +720,10 @@ fn report_refuses_to_compare_across_pass_counts() {
         profile: "dev".to_string(),
         passes: 2,
         reference_engine: "test".to_string(),
+        target_arch: std::env::consts::ARCH.to_string(),
+        target_os: std::env::consts::OS.to_string(),
+        environment: "test".to_string(),
+        measurement_runs: 1,
         shapes: vec![BaselineShape {
             id: "arith".to_string(),
             description: "recorded over fewer passes".to_string(),
@@ -547,7 +745,7 @@ fn report_refuses_to_compare_across_pass_counts() {
         }],
     };
 
-    build_report(&baseline, &run);
+    build_report(&baseline, &[run]);
 }
 
 #[test]
@@ -577,27 +775,31 @@ fn benchmark_output_lines_are_parsed_into_measurements() {
 #[test]
 fn js_execution_benchmark_reports_every_shape() {
     let baseline = load_baseline();
-    let run = run_benchmarks();
-    let report = build_report(&baseline, &run);
+    let runs = (0..measurement_run_count())
+        .map(|_| run_benchmarks())
+        .collect::<Vec<_>>();
+    let report = build_report(&baseline, &runs);
 
     print_report(&report);
     write_report_if_requested(&report);
 
     // Structural invariants only: timings are reported, not asserted.
-    assert_eq!(run.measurements.len(), baseline.shapes.len());
-    for measurement in &run.measurements {
-        assert!(
-            measurement.ns_per_op.is_finite() && measurement.ns_per_op > 0.0,
-            "shape {} produced no usable timing: {:?}",
-            measurement.id,
-            measurement
-        );
-        assert!(measurement.iterations > 0);
-        assert!(
-            measurement.elapsed_ms > 0.0,
-            "shape {} completed below timer resolution; raise its iteration count",
-            measurement.id
-        );
+    for run in &runs {
+        assert_eq!(run.measurements.len(), baseline.shapes.len());
+        for measurement in &run.measurements {
+            assert!(
+                measurement.ns_per_op.is_finite() && measurement.ns_per_op > 0.0,
+                "shape {} produced no usable timing: {:?}",
+                measurement.id,
+                measurement
+            );
+            assert!(measurement.iterations > 0);
+            assert!(
+                measurement.elapsed_ms > 0.0,
+                "shape {} completed below timer resolution; raise its iteration count",
+                measurement.id
+            );
+        }
     }
 }
 
