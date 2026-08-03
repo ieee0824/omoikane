@@ -5703,6 +5703,17 @@ fn complex_script_layout_uses_run_shaping_advances() {
     assert!((measured - expected).abs() < 0.01, "layout={measured}, shaped={expected}");
 }
 
+#[test]
+fn letter_spacing_is_applied_between_grapheme_clusters_not_emoji_components() {
+    let plain = FontMetrics::from_font_size(24.0);
+    let mut spaced = plain;
+    spaced.letter_spacing = 5.0;
+    let cluster = "👩‍💻";
+    let plain_width = super::measure_text_width(cluster, plain);
+    let spaced_width = super::measure_text_width(cluster, spaced);
+    assert!((plain_width - spaced_width).abs() < 0.01);
+}
+
 // ---- list-style layout tests ----
 
 fn build_ul_with_items(item_count: usize) -> (NodeHandle, NodeHandle, Vec<NodeHandle>) {

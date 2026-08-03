@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{
     Font, FontError, FontStyle, FontWeight, GlyphRaster, ShapingDirection, WebFontRegistry,
-    is_zero_advance_character, load_default_text_fonts,
+    is_zero_advance_character, load_default_text_fonts, shape_text_with_fallback,
 };
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
@@ -1011,13 +1011,6 @@ pub(crate) fn paint_shaped_horizontal_text(
     clip: Option<Rect>,
     letter_spacing: f32,
 ) -> Option<f32> {
-    let Some(font) = fonts.iter().copied().find(|font| {
-        text.chars().all(|ch| {
-            ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch)
-        })
-    }) else {
-        return None;
-    };
     let rtl = style.resolved_bidi_level.is_some_and(|level| level % 2 == 1)
         || style.resolved_bidi_level.is_none()
             && (style.direction.as_deref() == Some("rtl")
@@ -1029,34 +1022,42 @@ pub(crate) fn paint_shaped_horizontal_text(
     } else {
         ShapingDirection::LeftToRight
     };
-    let Ok(glyphs) = font.shape_text(text, font_size, direction) else {
+    let Ok(runs) = shape_text_with_fallback(fonts, text, font_size, direction) else {
         return None;
     };
-    if glyphs.is_empty() && !text.is_empty() {
+    if runs.iter().all(|run| run.glyphs.is_empty()) && !text.is_empty() {
         return None;
     }
 
     let baseline_y = rect.y + layout_ascent;
     let mut cursor_x = rect.x;
-    for (index, shaped) in glyphs.iter().enumerate() {
-        if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, font_size)
-            && glyph.width > 0
-            && glyph.height > 0
-            && !glyph.bitmap.is_empty()
-        {
-            canvas.draw_glyph_mask(
-                cursor_x + shaped.x_offset + glyph.offset_x,
-                baseline_y - shaped.y_offset + glyph.offset_y,
-                glyph.width,
-                glyph.height,
-                &glyph.bitmap,
-                color,
-                clip,
-            );
-        }
-        cursor_x += shaped.x_advance.abs();
-        if glyphs.get(index + 1).is_some_and(|next| next.cluster != shaped.cluster) {
-            cursor_x += letter_spacing;
+    for (run_index, run) in runs.iter().enumerate() {
+        let font = fonts[run.font_index];
+        for (glyph_index, shaped) in run.glyphs.iter().enumerate() {
+            if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, font_size)
+                && glyph.width > 0
+                && glyph.height > 0
+                && !glyph.bitmap.is_empty()
+            {
+                canvas.draw_glyph_mask(
+                    cursor_x + shaped.x_offset + glyph.offset_x,
+                    baseline_y - shaped.y_offset + glyph.offset_y,
+                    glyph.width,
+                    glyph.height,
+                    &glyph.bitmap,
+                    color,
+                    clip,
+                );
+            }
+            cursor_x += shaped.x_advance.abs();
+            let next_cluster = run
+                .glyphs
+                .get(glyph_index + 1)
+                .or_else(|| runs.get(run_index + 1).and_then(|next| next.glyphs.first()))
+                .map(|glyph| glyph.cluster);
+            if next_cluster.is_some_and(|cluster| cluster != shaped.cluster) {
+                cursor_x += letter_spacing;
+            }
         }
     }
     Some(cursor_x - rect.x)

@@ -42,6 +42,46 @@ fn opentype_shaping_applies_arabic_context_and_ligatures() {
     assert!(lam_alef.iter().all(|glyph| glyph.x_advance >= 0.0));
 }
 
+#[test]
+fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
+    let primary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/acid3/font.ttf");
+    let Ok(primary) = Font::load_from_file(&primary_path) else {
+        eprintln!("Skipping cluster fallback test: fixture font unavailable");
+        return;
+    };
+    let Some(fallback_path) = find_test_font() else {
+        eprintln!("Skipping cluster fallback test: no system font available");
+        return;
+    };
+    let fallback = Font::load_from_file(std::path::Path::new(&fallback_path)).unwrap();
+    let Some(base) = ['A', 'e', 'a'].into_iter().find(|ch| {
+        primary.has_glyph(*ch) && fallback.has_glyph(*ch) && fallback.has_glyph('\u{301}')
+    }) else {
+        eprintln!("Skipping cluster fallback test: fonts lack a shared marked base");
+        return;
+    };
+    if primary.has_glyph('\u{301}') {
+        eprintln!("Skipping cluster fallback test: fixture already owns combining acute");
+        return;
+    }
+
+    let text = format!("{base}\u{301}{base}");
+    let runs = shape_text_with_fallback(
+        &[&primary, &fallback],
+        &text,
+        24.0,
+        ShapingDirection::LeftToRight,
+    )
+    .unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].font_index, 1);
+    assert_eq!(&text[runs[0].text_range.clone()], format!("{base}\u{301}"));
+    assert_eq!(runs[1].font_index, 0);
+    assert_eq!(&text[runs[1].text_range.clone()], base.to_string());
+    assert!(runs[0].glyphs.iter().all(|glyph| glyph.cluster < runs[0].text_range.end));
+}
+
 /// Try to find a system font for testing.
 /// Returns path if found, otherwise None.
 fn find_test_font() -> Option<String> {
