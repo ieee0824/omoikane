@@ -7,9 +7,9 @@ decision. It does not enable JIT code in production.
 
 Build once, keep the machine otherwise idle, and pin the test process to one
 CPU. The harness runs the same 11 workloads, iteration counts, and four timed
-passes used by `tests/js_benchmark/baseline.json`. Five independent runtime
-processes are reduced by the per-shape median; every raw sample and its range is
-retained in the JSON report.
+passes used by `tests/js_benchmark/baseline.json`. Five runs, each with a fresh
+`JsRuntime` in the test process, are reduced by the per-shape median; every raw
+sample and its range is retained in the JSON report.
 
 ```sh
 cargo test --test js_benchmark --no-run
@@ -22,20 +22,42 @@ taskset -c 0 cargo test --test js_benchmark \
 ```
 
 `OMOIKANE_JS_BENCH_RUNS` accepts 1 through 9. CI deliberately keeps the default
-of one process so ordinary pull requests do not become several minutes slower;
-the five-process command is the release/gate protocol. Reports identify the
+of one run so ordinary pull requests do not become several minutes slower; the
+five-run command is the release/gate protocol. Reports identify the
 revision, environment label, target, profile, pass count, sample count, raw
 samples, median, and range. The harness rejects an iteration/pass mismatch and
 rejects non-positive or non-finite timings.
 
-The SpiderMonkey interpreter numbers are the recorded Firefox 152.0.6 reference
+The SpiderMonkey interpreter numbers are the recorded Firefox reference
 under matching workload iteration/pass conditions. They remain an auxiliary
 cross-engine reference: they were measured on another runner and are not used as
 a wall-clock CI assertion.
 
+### Recording the SpiderMonkey reference
+
+Run the same `shapes.js` in five fresh Firefox profiles for both interpreter and
+JIT modes:
+
+```sh
+OMOIKANE_SM_BENCH_SHOW_SAMPLES=0 \
+  ./scripts/record-spidermonkey-reference.sh
+```
+
+The script disables Baseline/Ion for interpreter mode, leaves normal tiering
+enabled for JIT mode, verifies all 11 shapes were emitted, and prints the minimum
+`ns/op` for each mode and shape. Copy those minima into
+`tests/js_benchmark/baseline.json`, including the reported Firefox version in
+`reference_engine`. Run the command a second time on the same idle machine. The
+two sets must remain in the same performance cluster for every shape; a
+multi-fold difference means the reference must not be committed. Raw
+per-process samples are printed by default. Omoikane's own
+`baseline_ns_per_op` remains the median of five in-process runs, each with a
+fresh `JsRuntime`, because it estimates typical report runtime and has no
+optimizing-tier bimodality.
+
 ## Result and dominant costs
 
-The checked-in `gate2-performance-snapshot.json` is the final five-process
+The checked-in `gate2-performance-snapshot.json` is the final five-run
 snapshot. Its median gap to the auxiliary SM-interpreter reference is 10.7x to
 33.8x; `prop-mono` is 13.2x and `arith` is 10.7x. The report marks its historical
 baseline comparison as non-comparable because this run used a shared host while

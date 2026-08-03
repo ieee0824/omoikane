@@ -1,11 +1,11 @@
 {
-  "version": 6,
+  "version": 7,
   "profile": "dev",
   "passes": 4,
-  "reference_engine": "SpiderMonkey (Firefox 152.0.6)",
+  "reference_engine": "SpiderMonkey (Firefox 153.0.1; minimum of 5 independent processes)",
   "target_arch": "x86_64",
   "target_os": "linux",
-  "environment": "idle two-core container used for baseline v6",
+  "environment": "Omoikane timing baseline inherited from v6 idle two-core container; Firefox 153.0.1 references recorded separately on x86_64 Linux",
   "measurement_runs": 5,
   "shapes": [
     {
@@ -14,8 +14,8 @@
       "iterations": 2000000,
       "baseline_ns_per_op": 140.7,
       "reference": {
-        "spidermonkey_interpreter": 29.16,
-        "spidermonkey_jit": 4.0
+        "spidermonkey_interpreter": 37.82,
+        "spidermonkey_jit": 3.54
       }
     },
     {
@@ -24,8 +24,8 @@
       "iterations": 1000000,
       "baseline_ns_per_op": 242.9,
       "reference": {
-        "spidermonkey_interpreter": 62.92,
-        "spidermonkey_jit": 0.96
+        "spidermonkey_interpreter": 47.26,
+        "spidermonkey_jit": 1.82
       }
     },
     {
@@ -34,8 +34,8 @@
       "iterations": 500000,
       "baseline_ns_per_op": 267.8,
       "reference": {
-        "spidermonkey_interpreter": 34.8,
-        "spidermonkey_jit": 2.88
+        "spidermonkey_interpreter": 39.52,
+        "spidermonkey_jit": 6.2
       }
     },
     {
@@ -44,8 +44,8 @@
       "iterations": 1000000,
       "baseline_ns_per_op": 298.5,
       "reference": {
-        "spidermonkey_interpreter": 66.9,
-        "spidermonkey_jit": 4.0
+        "spidermonkey_interpreter": 43.22,
+        "spidermonkey_jit": 3.56
       }
     },
     {
@@ -54,8 +54,8 @@
       "iterations": 300000,
       "baseline_ns_per_op": 804.9,
       "reference": {
-        "spidermonkey_interpreter": 76.33,
-        "spidermonkey_jit": 3.93
+        "spidermonkey_interpreter": 53.07,
+        "spidermonkey_jit": 3.27
       }
     },
     {
@@ -64,8 +64,8 @@
       "iterations": 300000,
       "baseline_ns_per_op": 627.2,
       "reference": {
-        "spidermonkey_interpreter": 93.27,
-        "spidermonkey_jit": 4.13
+        "spidermonkey_interpreter": 55.67,
+        "spidermonkey_jit": 4.27
       }
     },
     {
@@ -74,8 +74,8 @@
       "iterations": 200000,
       "baseline_ns_per_op": 159.7,
       "reference": {
-        "spidermonkey_interpreter": 26.4,
-        "spidermonkey_jit": 4.1
+        "spidermonkey_interpreter": 42.5,
+        "spidermonkey_jit": 6.7
       }
     },
     {
@@ -84,8 +84,8 @@
       "iterations": 500000,
       "baseline_ns_per_op": 401.5,
       "reference": {
-        "spidermonkey_interpreter": 103.28,
-        "spidermonkey_jit": 7.12
+        "spidermonkey_interpreter": 66.4,
+        "spidermonkey_jit": 16.8
       }
     },
     {
@@ -94,8 +94,8 @@
       "iterations": 500000,
       "baseline_ns_per_op": 144.4,
       "reference": {
-        "spidermonkey_interpreter": 20.2,
-        "spidermonkey_jit": 3.8
+        "spidermonkey_interpreter": 27.96,
+        "spidermonkey_jit": 4.0
       }
     },
     {
@@ -104,8 +104,8 @@
       "iterations": 500000,
       "baseline_ns_per_op": 272.2,
       "reference": {
-        "spidermonkey_interpreter": 38.48,
-        "spidermonkey_jit": 3.88
+        "spidermonkey_interpreter": 39.2,
+        "spidermonkey_jit": 3.76
       }
     },
     {
@@ -114,8 +114,8 @@
       "iterations": 500000,
       "baseline_ns_per_op": 336.4,
       "reference": {
-        "spidermonkey_interpreter": 80.2,
-        "spidermonkey_jit": 4.36
+        "spidermonkey_interpreter": 46.72,
+        "spidermonkey_jit": 3.36
       }
     }
   ]
