@@ -179,15 +179,11 @@ pub(crate) fn paint_text_with_registry(
                     let transformed = apply_text_transform(text, text_transform);
                     let transformed_text = transformed.as_deref().unwrap_or(text.as_str());
                     let vertical_mode = vertical_paint_mode(&fragment.style);
-                    // Unicode bidi reordering applies to the horizontal inline
-                    // axis.  Vertical writing keeps its existing column-aware
-                    // paint order until vertical bidi embedding is handled by
-                    // the writing-mode path.
-                    let visual_text = if vertical_mode.is_none() {
-                        bidi_visual_text(transformed_text, &fragment.style)
-                    } else {
-                        Cow::Borrowed(transformed_text)
-                    };
+                    // Resolve bidi before selecting the physical paint axis.
+                    // The vertical painter already maps the resulting visual
+                    // sequence onto its direction-aware column cursor, so it
+                    // must consume the same UAX#9 order as horizontal paint.
+                    let visual_text = bidi_visual_text(transformed_text, &fragment.style);
                     let display_text = visual_text.as_ref();
 
                     // Try to resolve the best web font variant for this fragment.
@@ -1520,6 +1516,28 @@ mod bidi_tests {
         let style = FragmentStyle {
             direction: Some("rtl".to_string()),
             unicode_bidi: Some("normal".to_string()),
+            ..FragmentStyle::default()
+        };
+        assert_eq!(bidi_visual_text("abc אבג", &style), "גבא abc");
+    }
+
+    #[test]
+    fn vertical_ltr_text_uses_the_same_visual_run_order() {
+        let style = FragmentStyle {
+            direction: Some("ltr".to_string()),
+            unicode_bidi: Some("normal".to_string()),
+            writing_mode: Some("vertical-rl".to_string()),
+            ..FragmentStyle::default()
+        };
+        assert_eq!(bidi_visual_text("abc אבג", &style), "abc גבא");
+    }
+
+    #[test]
+    fn vertical_rtl_text_uses_the_rtl_visual_run_order() {
+        let style = FragmentStyle {
+            direction: Some("rtl".to_string()),
+            unicode_bidi: Some("normal".to_string()),
+            writing_mode: Some("vertical-lr".to_string()),
             ..FragmentStyle::default()
         };
         assert_eq!(bidi_visual_text("abc אבג", &style), "גבא abc");
