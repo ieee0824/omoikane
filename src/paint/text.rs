@@ -11,7 +11,7 @@ use crate::font::{
     is_zero_advance_character, load_default_text_fonts,
 };
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
-use unicode_bidi::{BidiInfo, Level};
+use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
 use super::color::{parse_color, Color};
@@ -701,6 +701,7 @@ fn vertical_paint_mode(style: &FragmentStyle) -> Option<(bool, bool)> {
 fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
     if text.is_empty()
         || !matches!(style.unicode_bidi.as_deref(), None | Some("normal"))
+        || !contains_bidi_rtl_candidate(text)
     {
         return Cow::Borrowed(text);
     }
@@ -720,6 +721,24 @@ fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
         visual.push_str(bidi.reorder_line(paragraph, paragraph.range.clone()).as_ref());
     }
     Cow::Owned(visual)
+}
+
+/// Avoid running the full paragraph algorithm for the overwhelmingly common
+/// pure-LTR paint fragments. Explicit RTL/embedding controls are included so
+/// that their presence still reaches the UAX#9 resolver.
+fn contains_bidi_rtl_candidate(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            bidi_class(ch),
+            BidiClass::R
+                | BidiClass::AL
+                | BidiClass::AN
+                | BidiClass::RLE
+                | BidiClass::RLI
+                | BidiClass::RLO
+                | BidiClass::FSI
+        )
+    })
 }
 
 /// Paints one text fragment using the direction produced by vertical inline
