@@ -2406,12 +2406,16 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                     primary,
                     &context.system_fonts,
                 );
-                let char_count = text
-                    .chars()
-                    .filter(|ch| !is_zero_advance_character(*ch))
+                // Shaped paint inserts spacing between extended grapheme
+                // clusters, not between the scalars that form one cluster.
+                let cluster_count = text
+                    .graphemes(true)
+                    .filter(|cluster| {
+                        cluster.chars().any(|ch| !is_zero_advance_character(ch))
+                    })
                     .count();
-                let spacing = if char_count > 1 {
-                    metrics.letter_spacing * (char_count - 1) as f32
+                let spacing = if cluster_count > 1 {
+                    metrics.letter_spacing * (cluster_count - 1) as f32
                 } else {
                     0.0
                 };
