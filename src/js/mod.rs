@@ -3047,11 +3047,6 @@ impl JsRuntime {
     ) -> JsResult<()> {
         let realm = self.ensure_iframe_realm(iframe_id, document_id)?;
         let old_realm = self.context.enter_realm(realm);
-        // Timers and animation frames created by child script must carry the
-        // child Document owner even though they are queued on this runtime's
-        // shared event loop. Keep the document guard active for the entire
-        // script turn, including promise jobs and nested Worker construction.
-        let _document = activate_module_document(&self.host_state, document_id);
         let script_node = self.host_state.borrow().get_node(script_id);
         self.host_state.borrow_mut().write_insertion_ref = script_node;
         let result = (|| {
@@ -9645,7 +9640,13 @@ fn request_animation_frame_native(
             .into());
     }
     let binding = current_iframe_realm(context);
-    let owner_document_id = active_document_id();
+    // Resolve ownership from the executing Context Realm first. Inline child
+    // scripts run in a cached iframe Realm even when no asynchronous module
+    // guard is active; deriving the Document here keeps their timers scoped
+    // without leaking a thread-local owner into unrelated host work.
+    let owner_document_id = current_iframe_realm(context)
+        .map(|(_, document_id)| document_id)
+        .or_else(active_document_id);
     with_host_state(|state| {
         let (realm, document_id) = binding
             .map(|(realm, document_id)| (Some(realm), Some(document_id)))
