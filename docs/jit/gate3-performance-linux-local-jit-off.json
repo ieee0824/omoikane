@@ -1,0 +1,368 @@
+{
+  "baseline_version": 7,
+  "baseline_profile": "dev",
+  "baseline_passes": 4,
+  "baseline_target_arch": "x86_64",
+  "baseline_target_os": "linux",
+  "baseline_environment": "Omoikane timing baseline inherited from v6 idle two-core container; Firefox 153.0.1 references recorded separately on x86_64 Linux",
+  "baseline_measurement_runs": 5,
+  "reference_engine": "SpiderMonkey (Firefox 153.0.1; minimum of 5 independent processes)",
+  "target_arch": "x86_64",
+  "target_os": "linux",
+  "measured_passes": 4,
+  "measured_profile": "dev",
+  "measurement_runs": 5,
+  "revision": "ec601999",
+  "environment": "linux-x86_64 CPU0, idle 2026-08-03 gate3 jit-off set2",
+  "baseline_comparable": false,
+  "total": 11,
+  "improvements": [],
+  "regressions": [
+    "arith",
+    "prop-mono",
+    "prop-mega",
+    "call",
+    "closure-alloc",
+    "object-alloc",
+    "string-concat",
+    "array",
+    "primitive-string-property",
+    "primitive-string-method",
+    "proto-method"
+  ],
+  "jit_diagnostic_samples": [
+    {
+      "enabled": false,
+      "compile_requests": 0,
+      "successful_compilations": 0,
+      "compile_rejections": 0,
+      "total_compile_time_ns": 0,
+      "generated_code_bytes": 0,
+      "compiled_entries": 0,
+      "bailouts": 0,
+      "property_guard_hits": 0,
+      "property_guard_misses": 0,
+      "property_bailouts": 0
+    },
+    {
+      "enabled": false,
+      "compile_requests": 0,
+      "successful_compilations": 0,
+      "compile_rejections": 0,
+      "total_compile_time_ns": 0,
+      "generated_code_bytes": 0,
+      "compiled_entries": 0,
+      "bailouts": 0,
+      "property_guard_hits": 0,
+      "property_guard_misses": 0,
+      "property_bailouts": 0
+    },
+    {
+      "enabled": false,
+      "compile_requests": 0,
+      "successful_compilations": 0,
+      "compile_rejections": 0,
+      "total_compile_time_ns": 0,
+      "generated_code_bytes": 0,
+      "compiled_entries": 0,
+      "bailouts": 0,
+      "property_guard_hits": 0,
+      "property_guard_misses": 0,
+      "property_bailouts": 0
+    },
+    {
+      "enabled": false,
+      "compile_requests": 0,
+      "successful_compilations": 0,
+      "compile_rejections": 0,
+      "total_compile_time_ns": 0,
+      "generated_code_bytes": 0,
+      "compiled_entries": 0,
+      "bailouts": 0,
+      "property_guard_hits": 0,
+      "property_guard_misses": 0,
+      "property_bailouts": 0
+    },
+    {
+      "enabled": false,
+      "compile_requests": 0,
+      "successful_compilations": 0,
+      "compile_rejections": 0,
+      "total_compile_time_ns": 0,
+      "generated_code_bytes": 0,
+      "compiled_entries": 0,
+      "bailouts": 0,
+      "property_guard_hits": 0,
+      "property_guard_misses": 0,
+      "property_bailouts": 0
+    }
+  ],
+  "jit_diagnostics": {
+    "enabled": false,
+    "compile_requests": 0,
+    "successful_compilations": 0,
+    "compile_rejections": 0,
+    "total_compile_time_ns": 0,
+    "generated_code_bytes": 0,
+    "compiled_entries": 0,
+    "bailouts": 0,
+    "property_guard_hits": 0,
+    "property_guard_misses": 0,
+    "property_bailouts": 0
+  },
+  "shapes": [
+    {
+      "id": "arith",
+      "description": "Bytecode dispatch and integer arithmetic with no property access or allocation",
+      "ns_per_op": 302.99,
+      "samples_ns_per_op": [
+        291.34,
+        316.53,
+        315.12,
+        296.55,
+        302.99
+      ],
+      "min_ns_per_op": 291.34,
+      "max_ns_per_op": 316.53,
+      "baseline_ns_per_op": 140.7,
+      "delta_ratio": 1.1534470504619763,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 37.82,
+        "spidermonkey_jit": 3.54
+      },
+      "versus_interpreter": 8.011369645690111,
+      "versus_jit": 85.590395480226
+    },
+    {
+      "id": "prop-mono",
+      "description": "Monomorphic property read/write through one call site (inline cache hit path)",
+      "ns_per_op": 838.54,
+      "samples_ns_per_op": [
+        780.1,
+        874.52,
+        889.41,
+        838.54,
+        809.78
+      ],
+      "min_ns_per_op": 780.1,
+      "max_ns_per_op": 889.41,
+      "baseline_ns_per_op": 242.9,
+      "delta_ratio": 2.4522025524907365,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 47.26,
+        "spidermonkey_jit": 1.82
+      },
+      "versus_interpreter": 17.74312314853999,
+      "versus_jit": 460.7362637362637
+    },
+    {
+      "id": "prop-mega",
+      "description": "Megamorphic property read across eight shapes (inline cache miss path)",
+      "ns_per_op": 693.91,
+      "samples_ns_per_op": [
+        641.68,
+        773.08,
+        693.91,
+        699.6,
+        658.12
+      ],
+      "min_ns_per_op": 641.68,
+      "max_ns_per_op": 773.08,
+      "baseline_ns_per_op": 267.8,
+      "delta_ratio": 1.591150112023898,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 39.52,
+        "spidermonkey_jit": 6.2
+      },
+      "versus_interpreter": 17.558451417004047,
+      "versus_jit": 111.92096774193547
+    },
+    {
+      "id": "call",
+      "description": "Function call overhead",
+      "ns_per_op": 842.81,
+      "samples_ns_per_op": [
+        806.66,
+        986.13,
+        874.0,
+        842.81,
+        830.64
+      ],
+      "min_ns_per_op": 806.66,
+      "max_ns_per_op": 986.13,
+      "baseline_ns_per_op": 298.5,
+      "delta_ratio": 1.8234840871021776,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 43.22,
+        "spidermonkey_jit": 3.56
+      },
+      "versus_interpreter": 19.50046274872744,
+      "versus_jit": 236.74438202247188
+    },
+    {
+      "id": "closure-alloc",
+      "description": "One closure allocated per iteration (allocator and GC pressure)",
+      "ns_per_op": 2442.46,
+      "samples_ns_per_op": [
+        2138.59,
+        2731.31,
+        2391.47,
+        2691.87,
+        2442.46
+      ],
+      "min_ns_per_op": 2138.59,
+      "max_ns_per_op": 2731.31,
+      "baseline_ns_per_op": 804.9,
+      "delta_ratio": 2.0344887563672507,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 53.07,
+        "spidermonkey_jit": 3.27
+      },
+      "versus_interpreter": 46.02336536649708,
+      "versus_jit": 746.9296636085627
+    },
+    {
+      "id": "object-alloc",
+      "description": "One object literal allocated per iteration (allocator and GC pressure)",
+      "ns_per_op": 2049.35,
+      "samples_ns_per_op": [
+        1977.19,
+        2178.54,
+        2083.01,
+        2049.35,
+        1948.71
+      ],
+      "min_ns_per_op": 1948.71,
+      "max_ns_per_op": 2178.54,
+      "baseline_ns_per_op": 627.2,
+      "delta_ratio": 2.267458545918367,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 55.67,
+        "spidermonkey_jit": 4.27
+      },
+      "versus_interpreter": 36.81246631938207,
+      "versus_jit": 479.94145199063234
+    },
+    {
+      "id": "string-concat",
+      "description": "String building by repeated appending, which now extends the string in place rather than reallocating and copying it (issues #318-#320)",
+      "ns_per_op": 389.74,
+      "samples_ns_per_op": [
+        389.74,
+        392.79,
+        391.09,
+        370.73,
+        375.91
+      ],
+      "min_ns_per_op": 370.73,
+      "max_ns_per_op": 392.79,
+      "baseline_ns_per_op": 159.7,
+      "delta_ratio": 1.4404508453350036,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 42.5,
+        "spidermonkey_jit": 6.7
+      },
+      "versus_interpreter": 9.170352941176471,
+      "versus_jit": 58.170149253731346
+    },
+    {
+      "id": "array",
+      "description": "Array index and push",
+      "ns_per_op": 1328.08,
+      "samples_ns_per_op": [
+        1379.2,
+        1328.08,
+        1401.29,
+        1245.92,
+        1317.8
+      ],
+      "min_ns_per_op": 1245.92,
+      "max_ns_per_op": 1401.29,
+      "baseline_ns_per_op": 401.5,
+      "delta_ratio": 2.3077957658779575,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 66.4,
+        "spidermonkey_jit": 16.8
+      },
+      "versus_interpreter": 20.001204819277106,
+      "versus_jit": 79.05238095238094
+    },
+    {
+      "id": "primitive-string-property",
+      "description": "Property read on a string primitive, with no call (wrapper allocation shows here first; its spidermonkey_jit figure is loop-overhead-bound, see shapes.js)",
+      "ns_per_op": 337.56,
+      "samples_ns_per_op": [
+        343.94,
+        337.56,
+        341.06,
+        328.84,
+        330.33
+      ],
+      "min_ns_per_op": 328.84,
+      "max_ns_per_op": 343.94,
+      "baseline_ns_per_op": 144.4,
+      "delta_ratio": 1.3376731301939055,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 27.96,
+        "spidermonkey_jit": 4.0
+      },
+      "versus_interpreter": 12.072961373390557,
+      "versus_jit": 84.39
+    },
+    {
+      "id": "primitive-string-method",
+      "description": "Method call on a string primitive (the read above plus the call)",
+      "ns_per_op": 739.51,
+      "samples_ns_per_op": [
+        770.95,
+        742.91,
+        739.51,
+        698.92,
+        731.64
+      ],
+      "min_ns_per_op": 698.92,
+      "max_ns_per_op": 770.95,
+      "baseline_ns_per_op": 272.2,
+      "delta_ratio": 1.7167891256429098,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 39.2,
+        "spidermonkey_jit": 3.76
+      },
+      "versus_interpreter": 18.865051020408163,
+      "versus_jit": 196.67819148936172
+    },
+    {
+      "id": "proto-method",
+      "description": "Method resolved one step up a prototype chain, with a plain object receiver built outside the timed body",
+      "ns_per_op": 1018.17,
+      "samples_ns_per_op": [
+        1063.54,
+        1018.17,
+        969.8,
+        963.72,
+        1049.74
+      ],
+      "min_ns_per_op": 963.72,
+      "max_ns_per_op": 1063.54,
+      "baseline_ns_per_op": 336.4,
+      "delta_ratio": 2.02666468489893,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 46.72,
+        "spidermonkey_jit": 3.36
+      },
+      "versus_interpreter": 21.793022260273972,
+      "versus_jit": 303.0267857142857
+    }
+  ]
+}
