@@ -727,6 +727,9 @@ fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
 /// pure-LTR paint fragments. Explicit RTL/embedding controls are included so
 /// that their presence still reaches the UAX#9 resolver.
 fn contains_bidi_rtl_candidate(text: &str) -> bool {
+    if text.is_ascii() {
+        return false;
+    }
     text.chars().any(|ch| {
         matches!(
             bidi_class(ch),
