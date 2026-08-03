@@ -996,6 +996,11 @@ impl Finalize for HostState {}
 unsafe impl Trace for HostState {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.event_loop.trace(tracer) };
+        // `IframeDocument.realm` and rendering callbacks retained by the event
+        // loop are Boa `Realm` handles backed by `Rooted<RealmInner>`. They are
+        // explicit native GC roots rather than JsValue edges, so retaining the
+        // handles here keeps child intrinsics alive without a separate Trace
+        // traversal (Realm intentionally exposes no `trace` method).
         if let Some(resolver) = &self.canonical_node_identity_resolver {
             unsafe { resolver.trace(tracer) };
         }
@@ -4626,6 +4631,20 @@ impl JsRuntime {
                 continue;
             };
 
+            let event_loop::AnimationFrameCallback {
+                callback,
+                realm,
+                document_id,
+            } = callback;
+            if let (Some(realm), Some(document_id)) = (realm.as_ref(), document_id)
+                && !self.iframe_realm_is_live(document_id, realm)
+            {
+                // Navigation replaced the child Document before its rendering
+                // opportunity. Drop the stale callback with the old Realm.
+                continue;
+            }
+            let old_realm = realm.map(|realm| self.context.enter_realm(realm));
+
             let result = self.with_active_host(|context| {
                 let callable = callback.as_callable().ok_or_else(|| {
                     JsError::from(
@@ -4640,6 +4659,9 @@ impl JsRuntime {
                 )?;
                 Ok(())
             });
+            if let Some(old_realm) = old_realm {
+                self.context.enter_realm(old_realm);
+            }
             callbacks_run += 1;
             if let Err(error) = result
                 && first_error.is_none()
@@ -4686,6 +4708,17 @@ impl JsRuntime {
         for id in callback_ids {
             let callback = self.host_state.borrow_mut().event_loop.take_animation_frame_callback(id);
             let Some(callback) = callback else { continue };
+            let event_loop::AnimationFrameCallback {
+                callback,
+                realm,
+                document_id,
+            } = callback;
+            if let (Some(realm), Some(document_id)) = (realm.as_ref(), document_id)
+                && !self.iframe_realm_is_live(document_id, realm)
+            {
+                continue;
+            }
+            let old_realm = realm.map(|realm| self.context.enter_realm(realm));
             let result = if let Some(callable) = callback.as_callable() {
                 let args = [JsValue::from(timestamp)];
                 TimedJsFuture::new(ActiveHostFuture {
@@ -4701,6 +4734,9 @@ impl JsRuntime {
             } else {
                 Err(JsNativeError::typ().with_message("animation frame callback is not callable").into())
             };
+            if let Some(old_realm) = old_realm {
+                self.context.enter_realm(old_realm);
+            }
             callbacks_run += 1;
             if let Err(error) = result && first_error.is_none() { first_error = Some(error); }
         }
@@ -9025,10 +9061,29 @@ fn bind_timer_payload_to_current_realm(
     }
 }
 
+/// Captures the active child browsing-context Realm, if the current host
+/// invocation is running page code inside one. `Realm` is an explicit Boa
+/// `Rooted<RealmInner>` handle, so retaining the returned clone keeps the
+/// child intrinsics/global alive until the callback is consumed.
+fn current_iframe_realm(context: &Context) -> Option<(Realm, usize)> {
+    let realm = context.realm().clone();
+    ACTIVE_HOST_STATE.with(|slot| {
+        let state = slot.borrow().clone()?;
+        let state = state.borrow();
+        state.iframe_documents.values().find_map(|entry| {
+            entry
+                .realm
+                .as_ref()
+                .filter(|active| *active == &realm)
+                .map(|active| (active.clone(), entry.document.identity()))
+        })
+    })
+}
+
 fn request_animation_frame_native(
     _: &JsValue,
     args: &[JsValue],
-    _: &mut Context,
+    context: &mut Context,
 ) -> JsResult<JsValue> {
     let callback = args.first().cloned().unwrap_or_default();
     if !callback.is_callable() {
@@ -9036,11 +9091,16 @@ fn request_animation_frame_native(
             .with_message("requestAnimationFrame callback must be callable")
             .into());
     }
+    let binding = current_iframe_realm(context);
     with_host_state(|state| {
-        let id = state
-            .borrow_mut()
-            .event_loop
-            .schedule_animation_frame(callback);
+        let (realm, document_id) = binding
+            .map(|(realm, document_id)| (Some(realm), Some(document_id)))
+            .unwrap_or((None, None));
+        let id = state.borrow_mut().event_loop.schedule_animation_frame_with_realm(
+            callback,
+            realm,
+            document_id,
+        );
         Ok(JsValue::from(id as f64))
     })
 }
@@ -32957,6 +33017,7 @@ b</textarea></form>"#);
                 globalThis.childRealmMarker = 'child';
                 document.documentElement.setAttribute('data-child-script', 'yes');
                 Promise.resolve().then(() => document.documentElement.setAttribute('data-child-job', 'yes'));
+                requestAnimationFrame(() => document.documentElement.setAttribute('data-child-frame', 'yes'));
                 setTimeout(() => {
                     document.documentElement.setAttribute('data-child-timer', 'yes');
                     parent.topOnly = 'leaked';
@@ -32975,6 +33036,9 @@ b</textarea></form>"#);
         // Timers queued by the iframe's resource-load task become due on the
         // following event-loop turn, just like browser macrotasks.
         pump_zero_delay_tasks(&mut runtime);
+        runtime
+            .run_animation_frame(0)
+            .expect("child animation-frame callback should run");
 
         // The frame is intentionally cross-origin, so its `contentDocument`
         // is hidden from the parent Realm. Inspect the native child tree to
@@ -32994,7 +33058,12 @@ b</textarea></form>"#);
             .into_iter()
             .find(|node| node.node_type() == NodeType::Element)
             .expect("child document must have a document element");
-        for attribute in ["data-child-script", "data-child-job", "data-child-timer"] {
+        for attribute in [
+            "data-child-script",
+            "data-child-job",
+            "data-child-frame",
+            "data-child-timer",
+        ] {
             assert_eq!(
                 child_root
                     .get_attribute(attribute)
@@ -33204,6 +33273,7 @@ b</textarea></form>"#);
             "application/xhtml+xml",
             r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>
                 setTimeout(() => document.documentElement.setAttribute('data-stale', 'bad'), 10);
+                requestAnimationFrame(() => document.documentElement.setAttribute('data-stale-frame', 'bad'));
             </script></body></html>"#,
         );
         let new_port = spawn_static_http_server(
@@ -33227,6 +33297,7 @@ b</textarea></form>"#);
             ))
             .unwrap();
         runtime.tick(10).unwrap();
+        runtime.run_animation_frame(0).unwrap();
 
         let current_root = {
             let state = runtime.host_state.borrow();
@@ -33247,6 +33318,11 @@ b</textarea></form>"#);
             current_root.get_attribute("data-stale"),
             None,
             "a timer from the replaced child Realm must not mutate the new Document",
+        );
+        assert_eq!(
+            current_root.get_attribute("data-stale-frame"),
+            None,
+            "an animation frame from the replaced child Realm must not mutate the new Document",
         );
     }
 
