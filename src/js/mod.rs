@@ -3043,6 +3043,11 @@ impl JsRuntime {
     ) -> JsResult<()> {
         let realm = self.ensure_iframe_realm(iframe_id, document_id)?;
         let old_realm = self.context.enter_realm(realm);
+        // Timers and animation frames created by child script must carry the
+        // child Document owner even though they are queued on this runtime's
+        // shared event loop. Keep the document guard active for the entire
+        // script turn, including promise jobs and nested Worker construction.
+        let _document = activate_module_document(&self.host_state, document_id);
         let script_node = self.host_state.borrow().get_node(script_id);
         self.host_state.borrow_mut().write_insertion_ref = script_node;
         let result = (|| {
@@ -4537,7 +4542,12 @@ impl JsRuntime {
                     let result = self
                         .eval_async_for_document(&source, document_id)
                         .await;
-                    self.record_error_from("timer", result);
+                    if let Err(error) = result {
+                        if is_wall_clock_timeout(&error) {
+                            return Err(error);
+                        }
+                        self.record_error_from::<()>("timer", Err(error));
+                    }
                 }
                 Task::Timer {
                     payload: TimerPayload::Source(source),

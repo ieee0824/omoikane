@@ -5718,7 +5718,8 @@
   }
   function retireIframeWindowProxies(root) {
     if (!root) return;
-    if (root.nodeType === 1 && String(root.localName).toLowerCase() === "iframe") {
+    if (root.nodeType === 1 &&
+        asciiLowercase(internalNodeLocalName(root) || "") === "iframe") {
       retireIframeWindowProxy(root);
     }
     const children = root.childNodes || [];
