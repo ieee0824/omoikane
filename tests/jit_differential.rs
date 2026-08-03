@@ -166,7 +166,7 @@ mod differential {
             ),
             (
                 "array-allocation",
-                "JSON.stringify((() => { const values = []; let sum = 0; for (let i = 0; i < 256; i++) { values.push(i); sum += values[i & 31]; if (values.length > 32) values.length = 0; } return { length: values.length, sum }; })())",
+                "JSON.stringify((() => { const values = []; let sum = 0; for (let i = 0; i < 256; i++) { if (values.length >= 32) values.length = 0; values.push(i); sum += values[i & 31]; } return { length: values.length, sum }; })())",
             ),
             (
                 "string-concat",
