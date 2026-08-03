@@ -1,5 +1,6 @@
 //! Text painting, text decoration, list markers, and inline image fragments.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -185,9 +186,9 @@ pub(crate) fn paint_text_with_registry(
                     let visual_text = if vertical_mode.is_none() {
                         bidi_visual_text(transformed_text, &fragment.style)
                     } else {
-                        transformed_text.to_string()
+                        Cow::Borrowed(transformed_text)
                     };
-                    let display_text = visual_text.as_str();
+                    let display_text = visual_text.as_ref();
 
                     // Try to resolve the best web font variant for this fragment.
                     // If the fragment has a registered web-font family, use it as the
@@ -694,12 +695,14 @@ fn vertical_paint_mode(style: &FragmentStyle) -> Option<(bool, bool)> {
 /// Layout continues to measure and expose the source string in logical DOM
 /// order. The paint cursor, however, advances along the physical inline axis,
 /// so mixed-direction runs must be reordered before glyphs are rasterized.
-/// `unicode-bidi: bidi-override` is intentionally left untouched: that mode
-/// requires treating every character as the paragraph direction and is a
-/// separate embedding-mode concern.
-fn bidi_visual_text(text: &str, style: &FragmentStyle) -> String {
-    if text.is_empty() || style.unicode_bidi.as_deref() == Some("bidi-override") {
-        return text.to_string();
+/// Only `unicode-bidi: normal` (or the computed value's absence) is handled in
+/// this pass. `isolate`, `isolate-override`, and `bidi-override` require their
+/// own embedding boundaries and are intentionally left untouched.
+fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
+    if text.is_empty()
+        || !matches!(style.unicode_bidi.as_deref(), None | Some("normal"))
+    {
+        return Cow::Borrowed(text);
     }
 
     let paragraph_level = if style.direction.as_deref() == Some("rtl") {
@@ -709,14 +712,14 @@ fn bidi_visual_text(text: &str, style: &FragmentStyle) -> String {
     };
     let bidi = BidiInfo::new(text, Some(paragraph_level));
     if !bidi.has_rtl() {
-        return text.to_string();
+        return Cow::Borrowed(text);
     }
 
     let mut visual = String::with_capacity(text.len());
     for paragraph in &bidi.paragraphs {
         visual.push_str(bidi.reorder_line(paragraph, paragraph.range.clone()).as_ref());
     }
-    visual
+    Cow::Owned(visual)
 }
 
 /// Paints one text fragment using the direction produced by vertical inline
