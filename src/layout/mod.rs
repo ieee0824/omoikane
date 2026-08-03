@@ -949,6 +949,30 @@ fn computed_keyword<'a>(style: &'a ComputedStyle, property: &str) -> Option<&'a 
     }
 }
 
+/// Whether `contain` activates one of the core containment axes.
+pub(crate) fn has_containment(style: &ComputedStyle, keyword: &str) -> bool {
+    let Some(value) = computed_keyword(style, "contain") else {
+        return false;
+    };
+    value.eq_ignore_ascii_case("strict")
+        || (value.eq_ignore_ascii_case("content") && keyword != "size")
+        || value
+            .split_ascii_whitespace()
+            .any(|value| value.eq_ignore_ascii_case(keyword))
+}
+
+fn has_inline_size_containment(style: &ComputedStyle) -> bool {
+    has_containment(style, "size")
+        || matches!(computed_keyword(style, "container-type"), Some(value)
+            if value.eq_ignore_ascii_case("size") || value.eq_ignore_ascii_case("inline-size"))
+}
+
+pub(crate) fn has_block_size_containment(style: &ComputedStyle) -> bool {
+    has_containment(style, "size")
+        || matches!(computed_keyword(style, "container-type"), Some(value)
+            if value.eq_ignore_ascii_case("size"))
+}
+
 fn collect_container_contexts(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
@@ -1618,6 +1642,7 @@ fn layout_block_children(
             let parent_top_collapse = previous_margin_bottom.is_none()
                 && lines.is_empty()
                 && pending_inline_nodes.is_empty()
+                && !has_containment(style, "layout")
                 && border.top == 0.0
                 && padding.top == 0.0
                 && clear_side(child_style) == ClearSide::None
@@ -1926,7 +1951,11 @@ fn resolve_content_height(
 ) -> f32 {
     let border_box = is_border_box(style);
     let pb_vertical = padding.vertical() + border.vertical();
-    let auto_height = (cursor_y - y).max(0.0);
+    let auto_height = if has_block_size_containment(style) {
+        0.0
+    } else {
+        (cursor_y - y).max(0.0)
+    };
     let mut height = resolved_length(style, "height", containing_height)
         .map(|h| if border_box { (h - pb_vertical).max(0.0) } else { h })
         .unwrap_or(auto_height);
@@ -2341,7 +2370,7 @@ fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
     matches!(
         position_scheme(style),
         PositionScheme::Relative | PositionScheme::Sticky | PositionScheme::Absolute | PositionScheme::Fixed
-    )
+    ) || has_containment(style, "layout") || has_containment(style, "paint")
 }
 
 fn position_scheme(style: &ComputedStyle) -> PositionScheme {
@@ -2517,6 +2546,10 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
                 let margin = edge_sizes(&style, "margin");
                 return width + padding.horizontal() + border.horizontal() + margin.horizontal();
             }
+            if has_inline_size_containment(&style) {
+                let margin = edge_sizes(&style, "margin");
+                return padding.horizontal() + border.horizontal() + margin.horizontal();
+            }
             // For images, use rendered size.
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);
@@ -2561,6 +2594,10 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             if let Some(width) = explicit_length(&style, "width") {
                 let margin = edge_sizes(&style, "margin");
                 return width + padding.horizontal() + border.horizontal() + margin.horizontal();
+            }
+            if has_inline_size_containment(&style) {
+                let margin = edge_sizes(&style, "margin");
+                return padding.horizontal() + border.horizontal() + margin.horizontal();
             }
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);

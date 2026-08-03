@@ -1646,26 +1646,27 @@ fn hit_test_box(
             return None;
         }
     }
-    if layout.overflow.clips_overflow() {
+    let paint_containment = crate::layout::has_containment(&style, "paint");
+    if paint_containment || layout.overflow.clips_overflow() {
         let transformed_padding = transformed_rect_bounds(padding_box, transform);
         let base = clip.unwrap_or(viewport);
         let overflow_clip = Rect {
-            x: if layout.overflow.clips_x() {
+            x: if paint_containment || layout.overflow.clips_x() {
                 transformed_padding.x
             } else {
                 base.x
             },
-            y: if layout.overflow.clips_y() {
+            y: if paint_containment || layout.overflow.clips_y() {
                 transformed_padding.y
             } else {
                 base.y
             },
-            width: if layout.overflow.clips_x() {
+            width: if paint_containment || layout.overflow.clips_x() {
                 transformed_padding.width
             } else {
                 base.width
             },
-            height: if layout.overflow.clips_y() {
+            height: if paint_containment || layout.overflow.clips_y() {
                 transformed_padding.height
             } else {
                 base.height
@@ -2832,6 +2833,11 @@ fn paint_box_internal_to(
     border_box: Rect,
     padding_box: Rect,
 ) {
+    let has_paint_containment = crate::layout::has_containment(style, "paint");
+    let paint_containment_clip = has_paint_containment
+        .then(|| intersect_optional_clip(inherited_clip, padding_box))
+        .flatten();
+
     // box-shadow を背景より前（下）に描画する
     border::paint_box_shadow(canvas, style, border_box, inherited_clip);
 
@@ -2875,7 +2881,11 @@ fn paint_box_internal_to(
         inherited_clip,
         viewport,
     );
-    if layout.overflow.clips_overflow() {
+    if has_paint_containment {
+        if paint_containment_clip.is_some() {
+            paint_replaced_image_box(canvas, layout, style, paint_containment_clip);
+        }
+    } else if layout.overflow.clips_overflow() {
         let overflow_clip =
             overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport);
         if overflow_clip.is_some() {
@@ -2889,13 +2899,22 @@ fn paint_box_internal_to(
         layout,
         resolver,
         PseudoElement::Before,
-        inherited_clip,
+        if has_paint_containment {
+            paint_containment_clip
+        } else {
+            inherited_clip
+        },
         viewport,
     );
 
     border::paint_borders(canvas, layout, style, inherited_clip);
 
-    let clip = if layout.overflow.clips_overflow() {
+    let clip = if has_paint_containment {
+        let Some(combined) = paint_containment_clip else {
+            return;
+        };
+        Some(combined)
+    } else if layout.overflow.clips_overflow() {
         let Some(combined) =
             overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport)
         else {

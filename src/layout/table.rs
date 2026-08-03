@@ -197,7 +197,11 @@ pub(super) fn layout_table_container(
         children.push(group_box);
     }
 
-    let auto_height = (cursor_y - y).max(spacing);
+    let auto_height = if super::has_block_size_containment(&style) {
+        0.0
+    } else {
+        (cursor_y - y).max(spacing)
+    };
     let mut content_height = resolved_length(&style, "height", 0.0)
         .map(|h| super::border_box_adjust_height(&style, h, &padding, &border))
         .unwrap_or(auto_height);

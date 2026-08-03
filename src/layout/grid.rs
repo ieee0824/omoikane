@@ -173,8 +173,12 @@ pub(super) fn layout_grid_container(
     let mut row_tracks = explicit_rows;
     row_tracks.resize(row_count, Track::auto());
     let row_heights = resolve_tracks(&row_tracks, row_basis, row_gap, &content_row_heights);
-    let auto_height = row_heights.iter().sum::<f32>()
-        + row_gap * row_heights.len().saturating_sub(1) as f32;
+    let auto_height = if super::has_block_size_containment(&style) {
+        0.0
+    } else {
+        row_heights.iter().sum::<f32>()
+            + row_gap * row_heights.len().saturating_sub(1) as f32
+    };
     let mut content_height = specified_height.unwrap_or(auto_height);
     let (min_height, max_height) = normalized_min_max_lengths(&style, "min-height", "max-height", 0.0);
     if let Some(value) = min_height { content_height = content_height.max(super::border_box_adjust_height(&style, value, &padding, &border)); }

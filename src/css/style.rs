@@ -1603,6 +1603,39 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             DeclarationValidation::Invalid
         };
     }
+    if name.eq_ignore_ascii_case("contain") {
+        let keyword = |value: &Value| match value {
+            Value::Keyword(keyword) => Some(keyword.to_ascii_lowercase()),
+            _ => None,
+        };
+        let valid = match value {
+            Value::Keyword(value) => {
+                let value = value.to_ascii_lowercase();
+                is_css_wide_keyword(&value)
+                    || matches!(
+                        value.as_str(),
+                        "none" | "strict" | "content" | "size" | "layout" | "paint"
+                    )
+            }
+            Value::List(values) => {
+                let keywords = values.iter().filter_map(keyword).collect::<Vec<_>>();
+                !keywords.is_empty()
+                    && keywords.len() == values.len()
+                    && keywords
+                        .iter()
+                        .all(|value| matches!(value.as_str(), "size" | "layout" | "paint"))
+                    && keywords.iter().collect::<BTreeSet<_>>().len() == keywords.len()
+            }
+            _ => false,
+        };
+        return if valid {
+            DeclarationValidation::Valid(ComputedValue::Keyword(
+                render_value(value).to_ascii_lowercase(),
+            ))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
     if name.eq_ignore_ascii_case("transform") {
         let rendered = render_value(value);
         let reference = super::TransformReferenceBox {
@@ -3624,6 +3657,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "clip-path"
             | "-webkit-clip-path"
             | "color"
+            | "contain"
             | "container-name"
             | "container-type"
             | "content"
@@ -5536,6 +5570,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .entry("position".to_string())
         .or_insert_with(|| ComputedValue::Keyword("static".to_string()));
     properties
+        .entry("contain".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
         .entry("container-name".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
     properties
@@ -5654,6 +5691,7 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
         "aspect-ratio",
         "background-clip",
         "background-origin",
+        "contain",
         "container-name",
         "container-type",
         "object-fit",

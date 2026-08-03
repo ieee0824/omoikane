@@ -237,9 +237,13 @@ pub(super) fn layout_flex_container(
         }
     }
 
-    let auto_height = match direction {
-        FlexDirection::Row => cross_cursor - y,
-        FlexDirection::Column => column_main_end - y,
+    let auto_height = if super::has_block_size_containment(&style) {
+        0.0
+    } else {
+        match direction {
+            FlexDirection::Row => cross_cursor - y,
+            FlexDirection::Column => column_main_end - y,
+        }
     };
     let mut content_height = resolved_length(&style, "height", 0.0)
         .map(|h| super::border_box_adjust_height(&style, h, &padding, &border))
