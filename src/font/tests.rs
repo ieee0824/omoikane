@@ -22,6 +22,10 @@ fn letter_spacing_boundaries_follow_extended_grapheme_clusters() {
     assert_eq!(grapheme_spacing_boundaries("👩‍💻"), 0);
     assert_eq!(grapheme_spacing_boundaries("👩‍💻a"), 1);
     assert_eq!(grapheme_spacing_boundaries("لا"), 1);
+    assert_eq!(
+        grapheme_spacing_cluster_starts("\u{301}AB"),
+        vec!["\u{301}".len(), "\u{301}A".len()]
+    );
 }
 
 #[test]

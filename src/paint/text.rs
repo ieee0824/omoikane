@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{
     Font, FontError, FontStyle, FontWeight, GlyphRaster, ShapingDirection, WebFontRegistry,
-    grapheme_spacing_boundaries, is_zero_advance_character, load_default_text_fonts,
+    grapheme_spacing_cluster_starts, is_zero_advance_character, load_default_text_fonts,
     shape_text_with_fallback,
 };
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
@@ -1040,7 +1040,8 @@ pub(crate) fn paint_shaped_horizontal_text(
 
     let baseline_y = rect.y + layout_ascent;
     let mut cursor_x = rect.x;
-    let spacing_boundaries = grapheme_spacing_boundaries(text);
+    let spacing_clusters = grapheme_spacing_cluster_starts(text);
+    let spacing_boundaries = spacing_clusters.len().saturating_sub(1);
     let mut applied_spacing = 0usize;
     for (run_index, run) in runs.iter().enumerate() {
         let font = fonts[run.font_index];
@@ -1067,7 +1068,11 @@ pub(crate) fn paint_shaped_horizontal_text(
                 .or_else(|| runs.get(run_index + 1).and_then(|next| next.glyphs.first()))
                 .map(|glyph| glyph.cluster);
             if applied_spacing < spacing_boundaries
-                && next_cluster.is_some_and(|cluster| cluster != shaped.cluster)
+                && spacing_clusters.binary_search(&shaped.cluster).is_ok()
+                && next_cluster.is_some_and(|cluster| {
+                    cluster != shaped.cluster
+                        && spacing_clusters.binary_search(&cluster).is_ok()
+                })
             {
                 cursor_x += letter_spacing;
                 applied_spacing += 1;
