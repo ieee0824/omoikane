@@ -2724,6 +2724,46 @@ fn row_subgrid_inherits_spanned_parent_tracks_and_gap() {
 }
 
 #[test]
+fn row_subgrid_defers_auto_parent_tracks_during_intrinsic_sizing() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("main");
+    let subgrid = NodeHandle::element("section");
+    let first = NodeHandle::element("i");
+    let second = NodeHandle::element("i");
+    first.set_attribute("class", "first");
+    second.set_attribute("class", "second");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(subgrid.clone());
+    subgrid.append_child(first);
+    subgrid.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } main { display: grid; grid-template-rows: auto auto; row-gap: 8px; } \
+             section { display: grid; grid-row: 1 / 3; grid-template-rows: subgrid; } \
+             .first { grid-row: 1; height: 20px; } .second { grid-row: 2; height: 30px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 120.0 },
+    )
+    .unwrap();
+    let grid_box = find_layout_box_by_tag(&layout, "main").unwrap();
+    let subgrid_box = find_layout_box_by_tag(&layout, "section").unwrap();
+    assert_eq!(grid_box.dimensions.content.height, 58.0);
+    assert_eq!(subgrid_box.dimensions.content.height, 58.0);
+    assert_eq!(subgrid_box.children[0].dimensions.content.height, 20.0);
+    assert_eq!(subgrid_box.children[1].dimensions.content.height, 30.0);
+}
+
+#[test]
 fn sizes_repeat_auto_px_percent_and_fractional_grid_tracks() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

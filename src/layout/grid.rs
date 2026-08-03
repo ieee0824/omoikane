@@ -73,23 +73,39 @@ fn inherited_tracks_for_item(
     placement: Placement,
     columns: &[f32],
     column_gap: f32,
-    rows: &[f32],
+    rows: Option<&[f32]>,
     row_gap: f32,
-) -> Option<SubgridContext> {
-    (is_subgrid_axis(style, "grid-template-columns")
-        || is_subgrid_axis(style, "grid-template-rows"))
-    .then(|| SubgridContext {
-        columns: columns
+) -> Result<Option<SubgridContext>, ()> {
+    let columns_are_subgrid = is_subgrid_axis(style, "grid-template-columns");
+    let rows_are_subgrid = is_subgrid_axis(style, "grid-template-rows");
+    if !columns_are_subgrid && !rows_are_subgrid {
+        return Ok(None);
+    }
+    let inherited_columns = if columns_are_subgrid {
+        columns
             .get(placement.column..placement.column + placement.column_span)
-            .unwrap_or_default()
-            .to_vec(),
+            .ok_or(())?
+            .to_vec()
+    } else {
+        Vec::new()
+    };
+    let inherited_rows = if rows_are_subgrid {
+        match rows {
+            Some(rows) => rows
+                .get(placement.row..placement.row + placement.row_span)
+                .ok_or(())?
+                .to_vec(),
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    Ok(Some(SubgridContext {
+        columns: inherited_columns,
         column_gap,
-        rows: rows
-            .get(placement.row..placement.row + placement.row_span)
-            .unwrap_or_default()
-            .to_vec(),
+        rows: inherited_rows,
         row_gap,
-    })
+    }))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -225,9 +241,10 @@ pub(super) fn layout_grid_container(
             placement,
             &column_widths,
             column_gap,
-            &fixed_row_heights,
+            None,
             row_gap,
-        );
+        )
+        .ok()?;
         let layout = super::layout_node_with_subgrid(
             child,
             resolver,
@@ -281,15 +298,17 @@ pub(super) fn layout_grid_container(
         let placement = placements[*index];
         let child = &items[*index];
         let child_style = resolver.computed_style(child);
-        let Some(inherited) = inherited_tracks_for_item(
+        let inherited = match inherited_tracks_for_item(
             &child_style,
             placement,
             &column_widths,
             aligned_column_gap,
-            &row_heights,
+            Some(&row_heights),
             aligned_row_gap,
-        ) else {
-            continue;
+        ) {
+            Ok(Some(inherited)) => inherited,
+            Ok(None) => continue,
+            Err(()) => return None,
         };
         let cell_width = track_area(
             &column_widths,
