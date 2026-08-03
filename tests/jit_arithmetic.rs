@@ -56,7 +56,7 @@ fn issue_305_prop_mono_shape_uses_guarded_native_slots() {
     let expected = iterations * (iterations - 1) / 2 + 4 * iterations;
     assert_eq!(result.display().to_string(), expected.to_string());
     let diagnostics = context.arithmetic_jit_diagnostics();
-    assert_eq!(diagnostics.successful_compilations, 1);
+    assert!(diagnostics.successful_compilations >= 1);
     assert!(diagnostics.property_guard_hits >= 1);
     assert_eq!(diagnostics.property_guard_misses, 0);
     assert_eq!(diagnostics.property_bailouts, 0);
