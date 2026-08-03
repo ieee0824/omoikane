@@ -1,0 +1,10 @@
+version: 2
+
+# Keep routine version bumps out of the queue. Dependabot security updates
+# remain enabled even when open-pull-requests-limit is zero.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 0
