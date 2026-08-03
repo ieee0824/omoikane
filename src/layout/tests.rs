@@ -2637,6 +2637,133 @@ fn lays_out_grid_row_major_with_fractional_columns_and_gap() {
 }
 
 #[test]
+fn column_subgrid_inherits_spanned_parent_tracks_and_gap() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("main");
+    let subgrid = NodeHandle::element("section");
+    let first = NodeHandle::element("i");
+    let second = NodeHandle::element("i");
+    first.set_attribute("class", "first");
+    second.set_attribute("class", "second");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(subgrid.clone());
+    subgrid.append_child(first);
+    subgrid.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } main { display: grid; width: 230px; \
+             grid-template-columns: 50px 70px 90px; column-gap: 10px; } \
+             section { display: grid; grid-column: 2 / 4; grid-template-columns: subgrid; } \
+             i { height: 10px; } .first { grid-column: 1; } .second { grid-column: 2; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 100.0 },
+    )
+    .unwrap();
+    let subgrid_box = find_layout_box_by_tag(&layout, "section").unwrap();
+    assert_eq!(subgrid_box.dimensions.content.x, 60.0);
+    assert_eq!(subgrid_box.dimensions.content.width, 170.0);
+    assert_eq!(subgrid_box.children[0].dimensions.content.x, 60.0);
+    assert_eq!(subgrid_box.children[0].dimensions.content.width, 70.0);
+    assert_eq!(subgrid_box.children[1].dimensions.content.x, 140.0);
+    assert_eq!(subgrid_box.children[1].dimensions.content.width, 90.0);
+    assert_eq!(
+        resolver.computed_style(&subgrid).get("grid-template-columns"),
+        Some(&ComputedValue::Keyword("subgrid".to_string()))
+    );
+}
+
+#[test]
+fn row_subgrid_inherits_spanned_parent_tracks_and_gap() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("main");
+    let subgrid = NodeHandle::element("section");
+    let first = NodeHandle::element("i");
+    let second = NodeHandle::element("i");
+    first.set_attribute("class", "first");
+    second.set_attribute("class", "second");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(subgrid.clone());
+    subgrid.append_child(first);
+    subgrid.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } main { display: grid; width: 100px; \
+             grid-template-columns: 100px; grid-template-rows: 30px 50px; row-gap: 8px; } \
+             section { display: grid; grid-row: 1 / 3; grid-template-rows: subgrid; } \
+             i { height: 100%; } .first { grid-row: 1; } .second { grid-row: 2; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 120.0 },
+    )
+    .unwrap();
+    let subgrid_box = find_layout_box_by_tag(&layout, "section").unwrap();
+    assert_eq!(subgrid_box.dimensions.content.height, 88.0);
+    assert_eq!(subgrid_box.children[0].dimensions.content.y, 0.0);
+    assert_eq!(subgrid_box.children[0].dimensions.content.height, 30.0);
+    assert_eq!(subgrid_box.children[1].dimensions.content.y, 38.0);
+    assert_eq!(subgrid_box.children[1].dimensions.content.height, 50.0);
+}
+
+#[test]
+fn row_subgrid_defers_auto_parent_tracks_during_intrinsic_sizing() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("main");
+    let subgrid = NodeHandle::element("section");
+    let first = NodeHandle::element("i");
+    let second = NodeHandle::element("i");
+    first.set_attribute("class", "first");
+    second.set_attribute("class", "second");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(subgrid.clone());
+    subgrid.append_child(first);
+    subgrid.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } main { display: grid; grid-template-rows: auto auto; row-gap: 8px; } \
+             section { display: grid; grid-row: 1 / 3; grid-template-rows: subgrid; } \
+             .first { grid-row: 1; height: 20px; } .second { grid-row: 2; height: 30px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 120.0 },
+    )
+    .unwrap();
+    let grid_box = find_layout_box_by_tag(&layout, "main").unwrap();
+    let subgrid_box = find_layout_box_by_tag(&layout, "section").unwrap();
+    assert_eq!(grid_box.dimensions.content.height, 58.0);
+    assert_eq!(subgrid_box.dimensions.content.height, 58.0);
+    assert_eq!(subgrid_box.children[0].dimensions.content.height, 20.0);
+    assert_eq!(subgrid_box.children[1].dimensions.content.height, 30.0);
+}
+
+#[test]
 fn sizes_repeat_auto_px_percent_and_fractional_grid_tracks() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
