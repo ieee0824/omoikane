@@ -808,6 +808,7 @@ impl StyleResolver {
         apply_presentational_hints(node, &mut properties, pseudo);
         resolve_current_color_on_color_property(&mut properties, parent_style);
         resolve_explicit_inherit(&mut properties, parent_style);
+        resolve_writing_direction_css_wide_keywords(&mut properties, parent_style);
         resolve_non_inherited_css_wide_keywords(&mut properties);
         apply_inheritance(&mut properties, parent_style);
         apply_initial_values(&mut properties);
@@ -1154,6 +1155,64 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                     || matches!(
                         lower.as_str(),
                         "static" | "relative" | "absolute" | "fixed" | "sticky"
+                    )
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("direction") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "ltr" | "rtl") {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("writing-mode") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(
+                        lower.as_str(),
+                        "horizontal-tb"
+                            | "vertical-rl"
+                            | "vertical-lr"
+                            | "sideways-rl"
+                            | "sideways-lr"
+                    )
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("unicode-bidi") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower)
+                    || matches!(
+                        lower.as_str(),
+                        "normal"
+                            | "embed"
+                            | "bidi-override"
+                            | "isolate"
+                            | "isolate-override"
+                            | "plaintext"
                     )
                 {
                     DeclarationValidation::Valid(ComputedValue::Keyword(lower))
@@ -3564,6 +3623,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "content"
             | "cursor"
             | "display"
+            | "direction"
             | "flex-basis"
             | "flex-direction"
             | "flex-grow"
@@ -3647,6 +3707,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "text-decoration-color"
             | "text-decoration-style"
             | "text-transform"
+            | "unicode-bidi"
             | "letter-spacing"
             | "word-spacing"
             | "top"
@@ -3657,6 +3718,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "word-break"
             | "overflow-wrap"
             | "word-wrap"
+            | "writing-mode"
             | "z-index"
             | "box-shadow"
             | "opacity"
@@ -5444,6 +5506,15 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .entry("font-size".to_string())
         .or_insert_with(|| ComputedValue::Px(16.0));
     properties
+        .entry("direction".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("ltr".to_string()));
+    properties
+        .entry("writing-mode".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("horizontal-tb".to_string()));
+    properties
+        .entry("unicode-bidi".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
+    properties
         .entry("text-transform".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
     // `cursor` initial value is `auto` (CSS UI). Ensuring it is always present
@@ -5597,6 +5668,7 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
         "transition-duration",
         "transition-timing-function",
         "transition-delay",
+        "unicode-bidi",
     ] {
         let uses_initial_value = matches!(
             properties.get(name),
@@ -5608,6 +5680,36 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
         );
         if uses_initial_value {
             properties.remove(name);
+        }
+    }
+}
+
+/// Resolve CSS-wide keywords for inherited writing-direction properties before
+/// the normal inheritance pass. `initial`/`revert` use the property initial
+/// value here (including `revert-layer`), while `unset` follows the inherited
+/// value just like `inherit`.
+fn resolve_writing_direction_css_wide_keywords(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    parent_style: Option<&ComputedStyle>,
+) {
+    for name in ["direction", "writing-mode"] {
+        let Some(ComputedValue::Keyword(keyword)) = properties.get(name) else {
+            continue;
+        };
+        let lower = keyword.to_ascii_lowercase();
+        if matches!(lower.as_str(), "initial" | "revert" | "revert-layer") {
+            let initial = match name {
+                "direction" => "ltr",
+                "writing-mode" => "horizontal-tb",
+                _ => unreachable!("writing-direction property list is fixed"),
+            };
+            properties.insert(name.to_string(), ComputedValue::Keyword(initial.to_string()));
+        } else if lower == "unset" {
+            if let Some(parent) = parent_style.and_then(|style| style.get(name)) {
+                properties.insert(name.to_string(), parent.clone());
+            } else {
+                properties.remove(name);
+            }
         }
     }
 }
@@ -5722,6 +5824,7 @@ fn apply_inheritance(
         "text-transform",
         "visibility",
         "white-space",
+        "writing-mode",
         "word-break",
         "word-spacing",
     ] {

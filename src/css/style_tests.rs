@@ -4376,6 +4376,84 @@ fn inherits_direction_from_parent() {
 }
 
 #[test]
+fn writing_direction_properties_validate_and_support_css_wide_keywords() {
+    for (property, value) in [
+        ("direction", "rtl"),
+        ("writing-mode", "vertical-rl"),
+        ("writing-mode", "sideways-lr"),
+        ("unicode-bidi", "isolate-override"),
+    ] {
+        assert!(supports_declaration(property, value), "{property}: {value}");
+        assert!(supports_declaration(property, "initial"));
+        assert!(supports_declaration(property, "unset"));
+    }
+    assert!(!supports_declaration("direction", "auto"));
+    assert!(!supports_declaration("writing-mode", "diagonal"));
+    assert!(!supports_declaration("unicode-bidi", "override"));
+}
+
+#[test]
+fn inherits_direction_and_writing_mode_but_not_unicode_bidi_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { direction: rtl; writing-mode: vertical-rl; unicode-bidi: isolate; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(style.get("direction"), Some(&ComputedValue::Keyword("rtl".into())));
+    assert_eq!(
+        style.get("writing-mode"),
+        Some(&ComputedValue::Keyword("vertical-rl".into()))
+    );
+    assert_eq!(
+        style.get("unicode-bidi"),
+        Some(&ComputedValue::Keyword("normal".into()))
+    );
+}
+
+#[test]
+fn writing_direction_initial_and_unset_resolve_deterministically() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("div");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { direction: rtl; writing-mode: vertical-lr; unicode-bidi: isolate; } \
+             div { direction: initial; writing-mode: unset; unicode-bidi: unset; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(style.get("direction"), Some(&ComputedValue::Keyword("ltr".into())));
+    assert_eq!(
+        style.get("writing-mode"),
+        Some(&ComputedValue::Keyword("vertical-lr".into()))
+    );
+    assert_eq!(
+        style.get("unicode-bidi"),
+        Some(&ComputedValue::Keyword("normal".into()))
+    );
+}
+
+#[test]
 fn inherits_text_indent_from_parent() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

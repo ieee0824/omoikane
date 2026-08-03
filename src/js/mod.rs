@@ -19990,6 +19990,48 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn writing_direction_properties_are_observable_in_computed_style() {
+        let doc = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let parent = NodeHandle::element("section");
+        let child = NodeHandle::element("div");
+        doc.append_child(body.clone());
+        body.append_child(parent.clone());
+        parent.append_child(child.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const parent = document.querySelector('section');
+                const child = document.querySelector('div');
+                parent.style.direction = 'rtl';
+                parent.style.writingMode = 'vertical-rl';
+                parent.style.unicodeBidi = 'isolate';
+                child.style.direction = 'initial';
+                child.style.writingMode = 'unset';
+                child.style.unicodeBidi = 'unset';
+                return [
+                    CSS.supports('direction', 'rtl'),
+                    CSS.supports('writing-mode', 'vertical-rl'),
+                    CSS.supports('unicode-bidi', 'isolate'),
+                    CSS.supports('writing-mode', 'diagonal') === false,
+                    getComputedStyle(parent).direction,
+                    getComputedStyle(parent).writingMode,
+                    getComputedStyle(parent).unicodeBidi,
+                    getComputedStyle(child).direction,
+                    getComputedStyle(child).writingMode,
+                    getComputedStyle(child).unicodeBidi
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "true|true|true|true|rtl|vertical-rl|isolate|ltr|vertical-rl|normal"
+        );
+    }
+
+    #[test]
     fn style_set_property_records_priority_without_leaking_into_value() {
         let doc = NodeHandle::document();
         let div = NodeHandle::element("div");
