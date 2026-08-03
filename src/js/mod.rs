@@ -3840,7 +3840,7 @@ impl JsRuntime {
 
     /// Returns runtime-wide baseline-JIT counters for performance-gate tooling.
     #[cfg(feature = "baseline-jit")]
-    pub const fn baseline_jit_diagnostics(&self) -> boa_engine::jit::ArithmeticJitDiagnostics {
+    pub fn baseline_jit_diagnostics(&self) -> boa_engine::jit::ArithmeticJitDiagnostics {
         self.context.arithmetic_jit_diagnostics()
     }
 
