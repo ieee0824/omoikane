@@ -6545,6 +6545,19 @@ impl Drop for JsRuntime {
         // so a later collection cannot trace a stale worker realm.
         let _guard = activate_host_state(Rc::clone(&self.host_state));
         self.terminate_workers();
+
+        // Iframe realms and queued callbacks are explicit Boa roots held by
+        // HostState. Release them while the Context is still alive.  Dropping
+        // these roots after Context teardown leaves Boa's generational
+        // collector with realm/JsValue handles whose owner has already gone
+        // away; this is observable when two independent runtimes are created
+        // and collected in one process (the Acid3 harness does exactly that).
+        let mut state = self.host_state.borrow_mut();
+        state.iframe_documents.clear();
+        state.iframe_context_ids.clear();
+        state.event_loop = EventLoop::default();
+        state.pending_resource_loads.clear();
+        state.worker_owner_realm = None;
     }
 }
 
