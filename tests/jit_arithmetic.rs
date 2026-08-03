@@ -46,13 +46,15 @@ fn issue_305_function_reports_a_compiled_entry() {
 #[test]
 #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 fn issue_305_prop_mono_shape_uses_guarded_native_slots() {
+    let iterations = 2_000_i64;
     let mut context = Context::default();
     let result = context
-        .eval(Source::from_bytes(
-            "(function(n){var o={a:1,b:2,c:3},s=0;for(var i=0;i<n;i++){o.b=o.a+i;s+=o.b+o.c}return s})(1000000)",
-        ))
+        .eval(Source::from_bytes(&format!(
+            "(function(n){{var o={{a:1,b:2,c:3}},s=0;for(var i=0;i<n;i++){{o.b=o.a+i;s+=o.b+o.c}}return s}})({iterations})",
+        )))
         .expect("execute hot monomorphic property loop");
-    assert_eq!(result.display().to_string(), "500003500000");
+    let expected = iterations * (iterations - 1) / 2 + 4 * iterations;
+    assert_eq!(result.display().to_string(), expected.to_string());
     let diagnostics = context.arithmetic_jit_diagnostics();
     assert_eq!(diagnostics.successful_compilations, 1);
     assert!(diagnostics.property_guard_hits >= 1);
