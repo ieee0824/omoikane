@@ -835,6 +835,23 @@ fn vertical_glyph_cell(
     }
 }
 
+fn vertical_cursor_after(
+    cursor_y: f32,
+    cell_start: f32,
+    advance: f32,
+    spacing: f32,
+    zero_advance: bool,
+    direction_rtl: bool,
+) -> f32 {
+    if zero_advance {
+        cursor_y
+    } else if direction_rtl {
+        cell_start - spacing
+    } else {
+        cell_start + advance + spacing
+    }
+}
+
 /// Avoid running the full paragraph algorithm for the overwhelmingly common
 /// pure-LTR paint fragments. Explicit RTL/embedding controls are included so
 /// that their presence still reaches the UAX#9 resolver.
@@ -982,13 +999,14 @@ fn paint_text_vertical_with_font_refs(
         } else {
             0.0
         };
-        cursor_y = if zero_advance {
-            cursor_y
-        } else if direction_rtl {
-            cell_start - spacing
-        } else {
-            cell_start + advance + spacing
-        };
+        cursor_y = vertical_cursor_after(
+            cursor_y,
+            cell_start,
+            advance,
+            spacing,
+            zero_advance,
+            direction_rtl,
+        );
         if !zero_advance {
             previous_cell = Some((cell_start, advance, font_index));
             remaining_non_zero -= 1;
@@ -1650,7 +1668,8 @@ fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
 mod bidi_tests {
     use super::{
         FragmentStyle, bidi_visual_text, fragment_text_for_paint, horizontal_glyph_origin,
-        is_invisible_shaping_control, vertical_glyph_cell, vertical_paint_characters,
+        is_invisible_shaping_control, vertical_cursor_after, vertical_glyph_cell,
+        vertical_paint_characters,
     };
 
     #[test]
@@ -1810,6 +1829,8 @@ mod bidi_tests {
         let previous = Some((20.0, 8.0, 0));
         assert_eq!(vertical_glyph_cell(28.0, previous, true, false, 0.0), (20.0, 8.0));
         assert_eq!(vertical_glyph_cell(20.0, previous, true, true, 0.0), (20.0, 8.0));
+        assert_eq!(vertical_cursor_after(28.0, 20.0, 0.0, 0.0, true, false), 28.0);
+        assert_eq!(vertical_cursor_after(20.0, 20.0, 0.0, 0.0, true, true), 20.0);
         assert!(is_invisible_shaping_control('\u{fe0f}'));
         assert!(is_invisible_shaping_control('\u{200c}'));
         assert!(is_invisible_shaping_control('\u{200d}'));
