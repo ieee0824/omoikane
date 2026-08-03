@@ -10141,6 +10141,14 @@
   globalThis.AnimationEvent = Event;
   globalThis.TransitionEvent = TransitionEvent;
   globalThis.document = wrapNode(__omoikane_document_id);
+  // The embedding runtime supplies the owner iframe id only while creating a
+  // child browsing-context Realm. Resolve it through this Realm's wrapper
+  // cache, then remove the bootstrap-only slot before page code runs. A
+  // cross-origin child receives no id and therefore observes the standard
+  // `null` frameElement boundary.
+  const frameElementId = globalThis.__omoikane_frame_element_id;
+  try { delete globalThis.__omoikane_frame_element_id; } catch (_) {}
+  globalThis.frameElement = frameElementId == null ? null : wrapNode(frameElementId);
   // Window named properties expose parsed elements with an `id` as global
   // bindings (for example `<style id=theme>` is reachable as `theme`). Keep
   // built-in globals intact. These properties remain writable because an

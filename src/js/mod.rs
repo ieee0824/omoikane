@@ -24,6 +24,7 @@ use boa_engine::object::{
     JsObject,
     builtins::{JsArrayBuffer, JsPromise, JsUint8Array},
 };
+use boa_engine::realm::Realm;
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
 use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
@@ -506,6 +507,17 @@ enum TimerPayload {
     ResourceLoad { node_id: usize },
     /// A geolocation request whose timeout has elapsed.
     GeolocationTimeout { request_id: u64 },
+    /// A script task captured while an iframe child Realm was active.
+    ///
+    /// Boa Promise jobs already carry their execution Realm internally, but
+    /// host-owned tasks do not. Keeping the Realm and Document identity with
+    /// the task prevents a child callback from running against the top global,
+    /// and lets navigation discard callbacks belonging to a stale Document.
+    Realm {
+        payload: Box<TimerPayload>,
+        realm: Realm,
+        document_id: usize,
+    },
 }
 
 /// A top-level navigation requested by script in the current browsing context.
@@ -807,6 +819,7 @@ impl TimerPayload {
             Self::Callback { .. } => "callback",
             Self::ResourceLoad { .. } => "resource-load",
             Self::GeolocationTimeout { .. } => "geolocation-timeout",
+            Self::Realm { payload, .. } => payload.kind(),
         }
     }
 }
@@ -987,6 +1000,11 @@ impl Finalize for HostState {}
 unsafe impl Trace for HostState {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.event_loop.trace(tracer) };
+        // `IframeDocument.realm` and rendering callbacks retained by the event
+        // loop are Boa `Realm` handles backed by `Rooted<RealmInner>`. They are
+        // explicit native GC roots rather than JsValue edges, so retaining the
+        // handles here keeps child intrinsics alive without a separate Trace
+        // traversal (Realm intentionally exposes no `trace` method).
         if let Some(resolver) = &self.canonical_node_identity_resolver {
             unsafe { resolver.trace(tracer) };
         }
@@ -1218,6 +1236,12 @@ struct IframeDocument {
     /// The `src` attribute value this document was loaded from (`""` for an
     /// `about:blank` sub-document with no `src`).
     loaded_src: String,
+    /// Effective URL used to initialize the child browsing-context global.
+    document_url: String,
+    /// Child browsing-context Realm. It is created lazily when the document's
+    /// XHTML inline scripts are about to run and dropped with the document on
+    /// navigation/detach.
+    realm: Option<Realm>,
 }
 
 /// Sandbox policy captured when an iframe navigation creates its Document.
@@ -1627,11 +1651,22 @@ impl HostState {
                 needs_full_sample: true,
             },
         );
+        let document_url = child_url
+            .clone()
+            .or_else(|| match resolve_resource_ref(&src, self.base_url.as_ref()) {
+                Some(ResolvedResource::Url(url)) => Some(url.to_string()),
+                Some(ResolvedResource::Data { .. }) => Some(src.clone()),
+                None => None,
+            })
+            .or_else(|| self.base_url.as_ref().map(ToString::to_string))
+            .unwrap_or_else(|| "about:blank".to_string());
         self.iframe_documents.insert(
             iframe_id,
             IframeDocument {
                 document: document.clone(),
                 loaded_src: src,
+                document_url,
+                realm: None,
             },
         );
         document
@@ -1751,6 +1786,19 @@ impl HostState {
 
     fn get_node(&self, id: usize) -> Option<NodeHandle> {
         self.nodes.get(&id).cloned()
+    }
+
+    /// Returns the URL base belonging to the Document that owns `node`.
+    /// Resource references created inside an iframe must resolve against that
+    /// browsing context's committed URL rather than the top-level page base.
+    fn base_url_for_document(&self, document_id: usize) -> Option<crate::http::Url> {
+        if document_id == self.document.identity() {
+            return self.base_url.clone();
+        }
+        self.iframe_documents
+            .values()
+            .find(|entry| entry.document.identity() == document_id)
+            .and_then(|entry| entry.document_url.parse().ok())
     }
 
     fn csp_policy_for_document(&self, document: &NodeHandle) -> CspPolicy {
@@ -2537,6 +2585,334 @@ impl JsRuntime {
     /// Returns the current DOM document.
     pub fn document(&self) -> NodeHandle {
         self.host_state.borrow().document.clone()
+    }
+
+    /// Creates (or returns) the Boa Realm used by an iframe's document.
+    ///
+    /// The DOM bootstrap is evaluated once in that Realm so wrappers, global
+    /// constructors, and Promise jobs cannot accidentally share the parent's
+    /// JavaScript global.  Same-origin frames receive a controlled reference
+    /// to the top-level global for legacy `parent`/`top` access; opaque or
+    /// sandboxed frames receive a null-prototype object instead.
+    fn ensure_iframe_realm(
+        &mut self,
+        iframe_id: usize,
+        document_id: usize,
+    ) -> JsResult<Realm> {
+        if let Some(realm) = self
+            .host_state
+            .borrow()
+            .iframe_documents
+            .get(&iframe_id)
+            .filter(|entry| entry.document.identity() == document_id)
+            .and_then(|entry| entry.realm.clone())
+        {
+            return Ok(realm);
+        }
+
+        let (document_url, same_origin, owner_document_id) = {
+            let state = self.host_state.borrow();
+            let entry = state
+                .iframe_documents
+                .get(&iframe_id)
+                .filter(|entry| entry.document.identity() == document_id)
+                .ok_or_else(|| {
+                    JsNativeError::reference().with_message("iframe document is no longer live")
+                })?;
+            let sandbox = state
+                .document_sandbox
+                .get(&document_id)
+                .copied()
+                .unwrap_or_default();
+            let child_origin = state.document_origins.get(&document_id).cloned().flatten();
+            let owner_document = owner_document_for_node(
+                &state
+                    .get_node(iframe_id)
+                    .ok_or_else(|| JsNativeError::reference().with_message("iframe is detached"))?,
+            )
+            .ok_or_else(|| JsNativeError::reference().with_message("iframe owner is detached"))?;
+            let owner_origin = state
+                .document_origins
+                .get(&owner_document.identity())
+                .cloned()
+                .flatten();
+            // A non-sandboxed iframe is not automatically same-origin: the
+            // effective child origin must match the embedding Document's
+            // origin.  `about:blank` inherits that origin when it is loaded,
+            // while opaque resources (for example `data:`) deliberately carry
+            // `None` and can never match it.
+            let same_origin = (!sandbox.active || sandbox.allow_same_origin)
+                && child_origin.is_some()
+                && child_origin == owner_origin;
+            (entry.document_url.clone(), same_origin, owner_document.identity())
+        };
+
+        let top_global: JsValue = self.context.global_object().into();
+        // A nested same-origin frame's `parent` is the owning browsing
+        // context's global, not always the top-level global. Capture that
+        // Realm's global before entering the new child Realm. The owning
+        // Realm already exists whenever a nested frame is created by its
+        // parent script; if it does not, retain the top-level fallback so a
+        // detached/host-created frame still has a usable parent object.
+        let parent_global = if same_origin && owner_document_id != self.document().identity() {
+            let owner_realm = self
+                .host_state
+                .borrow()
+                .iframe_documents
+                .values()
+                .find(|entry| entry.document.identity() == owner_document_id)
+                .and_then(|entry| entry.realm.clone());
+            if let Some(owner_realm) = owner_realm {
+                let old_realm = self.context.enter_realm(owner_realm);
+                let global: JsValue = self.context.global_object().into();
+                self.context.enter_realm(old_realm);
+                global
+            } else {
+                top_global.clone()
+            }
+        } else {
+            top_global.clone()
+        };
+        let realm = self.with_active_host(|context| context.create_realm())?;
+        let old_realm = self.context.enter_realm(realm.clone());
+        let previous_resolver = self
+            .host_state
+            .borrow()
+            .canonical_node_identity_resolver
+            .clone();
+        let setup = (|| {
+            register_host_bindings(&mut self.context, &self.host_state)?;
+            let global = self.context.global_object();
+            global.set(
+                js_string!("__omoikane_document_id"),
+                JsValue::from(document_id as f64),
+                true,
+                &mut self.context,
+            )?;
+            global.set(
+                js_string!("__omoikane_location_href"),
+                JsValue::from(js_string!(document_url.as_str())),
+                true,
+                &mut self.context,
+            )?;
+            global.set(
+                js_string!("__omoikane_frame_element_id"),
+                if same_origin {
+                    JsValue::from(iframe_id as f64)
+                } else {
+                    JsValue::null()
+                },
+                true,
+                &mut self.context,
+            )?;
+            self.with_active_host(|context| context.eval(Source::from_bytes(DOM_BOOTSTRAP)))?;
+            self.with_active_host(|context| context.run_jobs())?;
+
+            let parent = if same_origin {
+                parent_global
+            } else {
+                self.context
+                    .eval(Source::from_bytes("Object.create(null)"))?
+            };
+            let top = if same_origin {
+                top_global.clone()
+            } else {
+                parent.clone()
+            };
+            let global = self.context.global_object();
+            global.set(js_string!("parent"), parent.clone(), true, &mut self.context)?;
+            global.set(js_string!("top"), top, true, &mut self.context)?;
+            Ok::<(), JsError>(())
+        })();
+        self.context.enter_realm(old_realm);
+        self.host_state
+            .borrow_mut()
+            .canonical_node_identity_resolver = previous_resolver;
+        setup?;
+
+        let mut state = self.host_state.borrow_mut();
+        let entry = state
+            .iframe_documents
+            .get_mut(&iframe_id)
+            .filter(|entry| entry.document.identity() == document_id)
+            .ok_or_else(|| JsNativeError::reference().with_message("iframe document was replaced"))?;
+        entry.realm = Some(realm.clone());
+        Ok(realm)
+    }
+
+    /// Evaluates one iframe inline script in its child Realm and restores the
+    /// caller's Realm even when evaluation or its microtask checkpoint fails.
+    fn eval_iframe_script(
+        &mut self,
+        iframe_id: usize,
+        document_id: usize,
+        script_id: usize,
+        source: &str,
+    ) -> JsResult<()> {
+        let realm = self.ensure_iframe_realm(iframe_id, document_id)?;
+        let old_realm = self.context.enter_realm(realm);
+        let script_node = self.host_state.borrow().get_node(script_id);
+        self.host_state.borrow_mut().write_insertion_ref = script_node;
+        let result = (|| {
+            self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
+            self.eval(source)?;
+            self.run_jobs()
+        })();
+        let _ = self.eval("__omoikane_set_current_script(null)");
+        self.host_state.borrow_mut().write_insertion_ref = None;
+        self.context.enter_realm(old_realm);
+        result.map(|_| ())
+    }
+
+    /// Returns whether `realm` still belongs to the live iframe Document that
+    /// created it. Navigation removes the `IframeDocument` entry, making any
+    /// queued callback from the previous generation inert.
+    fn iframe_realm_is_live(&self, document_id: usize, realm: &Realm) -> bool {
+        self.host_state.borrow().iframe_documents.values().any(|entry| {
+            entry.document.identity() == document_id
+                && entry.realm.as_ref().is_some_and(|active| active == realm)
+        })
+    }
+
+    /// Returns the live child Realm for `document_id`, creating it when a
+    /// resource task reaches a child Document before its first inline script.
+    /// The top-level Document deliberately returns `None` because its current
+    /// Context Realm is already the correct execution environment.
+    fn realm_for_document(&mut self, document_id: usize) -> JsResult<Option<Realm>> {
+        if document_id == self.document().identity() {
+            return Ok(None);
+        }
+        let iframe_id = self
+            .host_state
+            .borrow()
+            .iframe_documents
+            .iter()
+            .find(|(_, entry)| entry.document.identity() == document_id)
+            .map(|(iframe_id, _)| *iframe_id);
+        let Some(iframe_id) = iframe_id else {
+            return Ok(None);
+        };
+        let realm = self.ensure_iframe_realm(iframe_id, document_id)?;
+        if self.iframe_realm_is_live(document_id, &realm) {
+            Ok(Some(realm))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Looks up a child Realm without creating one. Resource events attached
+    /// through an existing caller Realm must stay in that caller when the
+    /// target Document has never executed child page code (notably an iframe
+    /// moved into an inert sub-document).
+    fn existing_realm_for_document(&self, document_id: usize) -> Option<Realm> {
+        if document_id == self.document().identity() {
+            return None;
+        }
+        self.host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .find(|entry| entry.document.identity() == document_id)
+            .and_then(|entry| entry.realm.clone())
+    }
+
+    /// Executes a classic script in the Realm that owns its Document. This is
+    /// used by dynamically inserted `<script src>` elements in child frames;
+    /// evaluating the source through the top Context would install globals and
+    /// callbacks on the wrong browsing context.
+    fn eval_script_in_document_realm(
+        &mut self,
+        document_id: usize,
+        script_id: usize,
+        source: &str,
+    ) -> JsResult<()> {
+        let realm = self.realm_for_document(document_id)?;
+        if document_id != self.document().identity() && realm.is_none() {
+            return Err(JsNativeError::reference()
+                .with_message("script document Realm is no longer live")
+                .into());
+        }
+        let old_realm = realm.map(|realm| self.context.enter_realm(realm));
+        let script_node = self.host_state.borrow().get_node(script_id);
+        self.host_state.borrow_mut().write_insertion_ref = script_node;
+        let result = (|| {
+            self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
+            self.eval(source)?;
+            self.run_jobs()
+        })();
+        let _ = self.eval("__omoikane_set_current_script(null)");
+        self.host_state.borrow_mut().write_insertion_ref = None;
+        if let Some(old_realm) = old_realm {
+            self.context.enter_realm(old_realm);
+        }
+        result.map(|_| ())
+    }
+
+    /// Evaluates a module while the owning Document Realm is active. Module
+    /// loader bookkeeping remains keyed by the native Document identity, so
+    /// imports and CSP violations stay scoped to the child generation.
+    fn eval_module_in_document_realm_timed(
+        &mut self,
+        document_id: usize,
+        script_id: usize,
+        source: &str,
+        url: &str,
+        document: NodeHandle,
+    ) -> (
+        Result<JsValue, String>,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
+        let realm = match self.realm_for_document(document_id) {
+            Ok(realm) => realm,
+            Err(error) => return (Err(error.to_string()), std::time::Duration::ZERO, std::time::Duration::ZERO),
+        };
+        if document_id != self.document().identity() && realm.is_none() {
+            return (
+                Err("script document Realm is no longer live".to_string()),
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+            );
+        }
+        let old_realm = realm.map(|realm| self.context.enter_realm(realm));
+        let script_node = self.host_state.borrow().get_node(script_id);
+        self.host_state.borrow_mut().write_insertion_ref = script_node;
+        let _ = self.eval(&format!("__omoikane_set_current_script({script_id})"));
+        let result = self.eval_module_timed(source, url, document);
+        let _ = self.eval("__omoikane_set_current_script(null)");
+        self.host_state.borrow_mut().write_insertion_ref = None;
+        if let Some(old_realm) = old_realm {
+            self.context.enter_realm(old_realm);
+        }
+        result
+    }
+
+    /// Evaluates a host-generated dispatch script in the Realm that owns a
+    /// Document. The top-level Document uses the currently active Realm;
+    /// iframe Documents use their cached child Realm. This keeps resource and
+    /// load/error listeners attached by a child from being looked up through
+    /// the parent's wrapper cache.
+    fn eval_in_document_realm(&mut self, document_id: usize, source: &str) -> JsResult<()> {
+        let realm = self.existing_realm_for_document(document_id);
+        let Some(realm) = realm else {
+            // A child Document that has not run page code yet has no child
+            // Realm. Its DOM wrappers can still be owned by the caller Realm
+            // (for example when a parent script moves an iframe into that
+            // document), so keep the historical caller-Realm dispatch path.
+            self.eval(source)?;
+            self.run_jobs()?;
+            return Ok(());
+        };
+        if !self.iframe_realm_is_live(document_id, &realm) {
+            return Ok(());
+        }
+        let old_realm = self.context.enter_realm(realm);
+        let result = (|| {
+            self.eval(source)?;
+            self.run_jobs()
+        })();
+        self.context.enter_realm(old_realm);
+        result
     }
 
     /// Returns the stable native identity of the explicitly focused element.
@@ -4074,13 +4450,13 @@ impl JsRuntime {
             let mut state = self.host_state.borrow_mut();
             state.pending_resource_loads.remove(&node_id);
             state.get_node(node_id).and_then(|node| {
-                document_root_for_node(&node)?;
+                let document = document_root_for_node(&node)?;
                 let src = node.get_attribute("src")?;
                 Some((
                     node.clone(),
                     src,
                     ScriptKind::from_type_attribute(node.get_attribute("type").as_deref()),
-                    state.base_url.clone(),
+                    state.base_url_for_document(document.identity()),
                 ))
             })
         }) else {
@@ -4312,6 +4688,20 @@ impl JsRuntime {
                 continue;
             };
 
+            let event_loop::AnimationFrameCallback {
+                callback,
+                realm,
+                document_id,
+            } = callback;
+            if let (Some(realm), Some(document_id)) = (realm.as_ref(), document_id)
+                && !self.iframe_realm_is_live(document_id, realm)
+            {
+                // Navigation replaced the child Document before its rendering
+                // opportunity. Drop the stale callback with the old Realm.
+                continue;
+            }
+            let old_realm = realm.map(|realm| self.context.enter_realm(realm));
+
             let result = self.with_active_host(|context| {
                 let callable = callback.as_callable().ok_or_else(|| {
                     JsError::from(
@@ -4326,6 +4716,9 @@ impl JsRuntime {
                 )?;
                 Ok(())
             });
+            if let Some(old_realm) = old_realm {
+                self.context.enter_realm(old_realm);
+            }
             callbacks_run += 1;
             if let Err(error) = result
                 && first_error.is_none()
@@ -4372,6 +4765,17 @@ impl JsRuntime {
         for id in callback_ids {
             let callback = self.host_state.borrow_mut().event_loop.take_animation_frame_callback(id);
             let Some(callback) = callback else { continue };
+            let event_loop::AnimationFrameCallback {
+                callback,
+                realm,
+                document_id,
+            } = callback;
+            if let (Some(realm), Some(document_id)) = (realm.as_ref(), document_id)
+                && !self.iframe_realm_is_live(document_id, realm)
+            {
+                continue;
+            }
+            let old_realm = realm.map(|realm| self.context.enter_realm(realm));
             let result = if let Some(callable) = callback.as_callable() {
                 let args = [JsValue::from(timestamp)];
                 TimedJsFuture::new(ActiveHostFuture {
@@ -4387,6 +4791,9 @@ impl JsRuntime {
             } else {
                 Err(JsNativeError::typ().with_message("animation frame callback is not callable").into())
             };
+            if let Some(old_realm) = old_realm {
+                self.context.enter_realm(old_realm);
+            }
             callbacks_run += 1;
             if let Err(error) = result && first_error.is_none() { first_error = Some(error); }
         }
@@ -5006,6 +5413,19 @@ impl JsRuntime {
     /// retained function callback with its bound extra arguments.
     fn run_timer_payload(&mut self, payload: TimerPayload) -> JsResult<()> {
         match payload {
+            TimerPayload::Realm {
+                payload,
+                realm,
+                document_id,
+            } => {
+                if !self.iframe_realm_is_live(document_id, &realm) {
+                    return Ok(());
+                }
+                let old_realm = self.context.enter_realm(realm);
+                let result = self.run_timer_payload(*payload);
+                self.context.enter_realm(old_realm);
+                result
+            }
             // A timer's code is the page's, so its failure is recorded and the
             // loop continues. `run_timers` already worked this way; propagating
             // here made the same page abort navigation when it was driven through
@@ -5026,14 +5446,17 @@ impl JsRuntime {
                 Ok(())
             }
             TimerPayload::ResourceLoad { node_id } => {
-                let (should_dispatch, xhtml_scripts, dynamic_script) = {
+                let (should_dispatch, xhtml_scripts, dynamic_script, resource_document_id) = {
                     let mut state = self.host_state.borrow_mut();
                     state.pending_resource_loads.remove(&node_id);
                     let Some(node) = state.get_node(node_id) else {
                         return Ok(());
                     };
+                    let resource_document_id = document_root_for_node(&node)
+                        .map(|document| document.identity())
+                        .unwrap_or_else(|| state.document.identity());
                     if document_root_for_node(&node).is_none() {
-                        (false, Vec::new(), None)
+                        (false, Vec::new(), None, resource_document_id)
                     } else {
                         let mut xhtml_scripts: Vec<NodeHandle> = Vec::new();
                         // A dynamically inserted external script is classified by
@@ -5043,11 +5466,19 @@ impl JsRuntime {
                             .tag_name()
                             .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
                         {
+                            let document_id = document_root_for_node(&node)
+                                .map(|document| document.identity())
+                                .unwrap_or_else(|| state.document.identity());
                             node.get_attribute("src").map(|src| {
                                 let kind = ScriptKind::from_type_attribute(
                                     node.get_attribute("type").as_deref(),
                                 );
-                                (node.clone(), src, kind, state.base_url.clone())
+                                (
+                                    node.clone(),
+                                    src,
+                                    kind,
+                                    state.base_url_for_document(document_id),
+                                )
                             })
                         } else {
                             None
@@ -5103,9 +5534,18 @@ impl JsRuntime {
                             // allocated and cannot reuse the same address.
                             drop(previous);
                         }
-                        (true, xhtml_scripts, dynamic_script)
+                        (true, xhtml_scripts, dynamic_script, resource_document_id)
                     }
                 };
+                let dispatch_document_id = dynamic_script
+                    .as_ref()
+                    .and_then(|(script, _, _, _)| document_root_for_node(script))
+                    .map(|document| document.identity())
+                    .unwrap_or(resource_document_id);
+                let xhtml_context = xhtml_scripts
+                    .first()
+                    .and_then(document_root_for_node)
+                    .map(|document| (node_id, document.identity()));
                 for script in xhtml_scripts {
                     // Like top-level document scripts, one failing XHTML
                     // script must not prevent later scripts or the iframe load
@@ -5139,8 +5579,13 @@ impl JsRuntime {
                             .entry(document.identity())
                             .or_default() += 1;
                     }
-                    let _ = self.eval(&collect_text_content(&script));
-                    let _ = self.run_jobs();
+                    let source = collect_text_content(&script);
+                    let result = if let Some((iframe_id, document_id)) = xhtml_context {
+                        self.eval_iframe_script(iframe_id, document_id, script.identity(), &source)
+                    } else {
+                        self.eval(&source).and_then(|_| self.run_jobs())
+                    };
+                    self.record_error_from("iframe inline script", result);
                 }
                 // A script whose type Omoikane does not execute is not fetched and
                 // does not load, so it must not go on to dispatch `load` either.
@@ -5163,16 +5608,17 @@ impl JsRuntime {
                         }
                         let timing_name =
                             resource_reference_timing_name(&src, base_url.as_ref());
-                        let dispatched = self.eval(&dispatch_resource_timing_script(
-                            "error",
-                            node_id,
-                            &timing_name,
-                            false,
-                            0.0,
-                        ));
+                        let dispatched = self.eval_in_document_realm(
+                            dispatch_document_id,
+                            &dispatch_resource_timing_script(
+                                "error",
+                                node_id,
+                                &timing_name,
+                                false,
+                                0.0,
+                            ),
+                        );
                         self.record_error_from(&src, dispatched);
-                        let jobs = self.run_jobs();
-                        self.record_error_from(&src, jobs);
                         dispatch_load = false;
                     } else if !self
                         .host_state
@@ -5218,12 +5664,13 @@ impl JsRuntime {
                                     "[dynamic script: {src}] failed to fetch"
                                 ));
                                 dispatch_load = false;
-                                let dispatched = self.eval(&dispatch_resource_timing_script(
-                                    "error", node_id, &timing_name, false, elapsed_ms,
-                                ));
+                                let dispatched = self.eval_in_document_realm(
+                                    dispatch_document_id,
+                                    &dispatch_resource_timing_script(
+                                        "error", node_id, &timing_name, false, elapsed_ms,
+                                    ),
+                                );
                                 self.record_error_from(&src, dispatched);
-                                let jobs = self.run_jobs();
-                                self.record_error_from(&src, jobs);
                             }
                             Some((effective_url, _source))
                                 if !self
@@ -5243,12 +5690,13 @@ impl JsRuntime {
                                     effective_url.clone(),
                                 );
                                 dispatch_load = false;
-                                let dispatched = self.eval(&dispatch_resource_timing_script(
-                                    "error", node_id, &effective_url, redirected, elapsed_ms,
-                                ));
+                                let dispatched = self.eval_in_document_realm(
+                                    dispatch_document_id,
+                                    &dispatch_resource_timing_script(
+                                        "error", node_id, &effective_url, redirected, elapsed_ms,
+                                    ),
+                                );
                                 self.record_error_from(&src, dispatched);
-                                let jobs = self.run_jobs();
-                                self.record_error_from(&src, jobs);
                             }
                             Some((effective_url, source)) => {
                                 let redirected = resource_reference_was_redirected(
@@ -5257,12 +5705,11 @@ impl JsRuntime {
                                     base_url.as_ref(),
                                 );
                                 dispatch_timing = Some((effective_url, redirected, elapsed_ms));
-                                let marked = self
-                                    .eval(&format!("__omoikane_set_current_script({node_id})"));
-                                self.record_error_from(&src, marked);
                                 let result = match kind {
                                     ScriptKind::Module => self
-                                        .eval_module_timed(
+                                        .eval_module_in_document_realm_timed(
+                                            dispatch_document_id,
+                                            script_node.identity(),
                                             &source,
                                             &module_script_url(&src, base_url.as_ref(), false),
                                             document_root_for_node(&script_node)
@@ -5270,19 +5717,20 @@ impl JsRuntime {
                                         )
                                         .0,
                                     _ => self
-                                        .eval(&source)
-                                        .map_err(|error| error.to_string())
-                                        .map(|_| JsValue::undefined()),
+                                        .eval_script_in_document_realm(
+                                            dispatch_document_id,
+                                            script_node.identity(),
+                                            &source,
+                                        )
+                                        .map(|_| JsValue::undefined())
+                                        .map_err(|error| error.to_string()),
                                 };
-                                let _ = self.eval("__omoikane_set_current_script(null)");
                                 if let Err(error) = result {
                                     let context = script_source_context(&source);
                                     self.record_task_error(format!(
                                         "[dynamic script: {src}; {context}] {error}"
                                     ));
                                 }
-                                let jobs = self.run_jobs();
-                                self.record_error_from(&src, jobs);
                                 if log_scripts {
                                     eprintln!("[omoikane][script] completed dynamic {src}");
                                 }
@@ -5293,12 +5741,13 @@ impl JsRuntime {
                 if dispatch_load {
                     let (timing_name, redirected, elapsed_ms) = dispatch_timing
                         .unwrap_or_else(|| (String::new(), false, 0.0));
-                    let dispatched = self.eval(&dispatch_resource_timing_script(
-                        "load", node_id, &timing_name, redirected, elapsed_ms,
-                    ));
+                    let dispatched = self.eval_in_document_realm(
+                        dispatch_document_id,
+                        &dispatch_resource_timing_script(
+                            "load", node_id, &timing_name, redirected, elapsed_ms,
+                        ),
+                    );
                     self.record_error_from("resource load", dispatched);
-                    let jobs = self.run_jobs();
-                    self.record_error_from("resource load", jobs);
                 }
                 Ok(())
             }
@@ -8639,10 +9088,59 @@ fn clear_timer_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     })
 }
 
+/// Associates a host task with the active iframe Realm, if the current Boa
+/// context is executing one. Top-level tasks retain the historical payload
+/// shape; child tasks carry their Document identity so stale navigation tasks
+/// can be ignored when they eventually reach the event loop.
+fn bind_timer_payload_to_current_realm(
+    context: &Context,
+    payload: TimerPayload,
+) -> TimerPayload {
+    let realm = context.realm().clone();
+    let document_id = ACTIVE_HOST_STATE.with(|slot| {
+        let state = slot.borrow().clone()?;
+        let state = state.borrow();
+        state.iframe_documents.values().find_map(|entry| {
+            entry
+                .realm
+                .as_ref()
+                .is_some_and(|active| active == &realm)
+                .then_some(entry.document.identity())
+        })
+    });
+    match document_id {
+        Some(document_id) => TimerPayload::Realm {
+            payload: Box::new(payload),
+            realm,
+            document_id,
+        },
+        None => payload,
+    }
+}
+
+/// Captures the active child browsing-context Realm, if the current host
+/// invocation is running page code inside one. `Realm` is an explicit Boa
+/// `Rooted<RealmInner>` handle, so retaining the returned clone keeps the
+/// child intrinsics/global alive until the callback is consumed.
+fn current_iframe_realm(context: &Context) -> Option<(Realm, usize)> {
+    let realm = context.realm().clone();
+    ACTIVE_HOST_STATE.with(|slot| {
+        let state = slot.borrow().clone()?;
+        let state = state.borrow();
+        state.iframe_documents.values().find_map(|entry| {
+            entry
+                .realm
+                .as_ref()
+                .filter(|active| *active == &realm)
+                .map(|active| (active.clone(), entry.document.identity()))
+        })
+    })
+}
+
 fn request_animation_frame_native(
     _: &JsValue,
     args: &[JsValue],
-    _: &mut Context,
+    context: &mut Context,
 ) -> JsResult<JsValue> {
     let callback = args.first().cloned().unwrap_or_default();
     if !callback.is_callable() {
@@ -8650,11 +9148,16 @@ fn request_animation_frame_native(
             .with_message("requestAnimationFrame callback must be callable")
             .into());
     }
+    let binding = current_iframe_realm(context);
     with_host_state(|state| {
-        let id = state
-            .borrow_mut()
-            .event_loop
-            .schedule_animation_frame(callback);
+        let (realm, document_id) = binding
+            .map(|(realm, document_id)| (Some(realm), Some(document_id)))
+            .unwrap_or((None, None));
+        let id = state.borrow_mut().event_loop.schedule_animation_frame_with_realm(
+            callback,
+            realm,
+            document_id,
+        );
         Ok(JsValue::from(id as f64))
     })
 }
@@ -8704,6 +9207,7 @@ fn schedule_timer_from_js(
     } else {
         TimerPayload::Source(handler.to_string(context)?.to_std_string_escaped())
     };
+    let payload = bind_timer_payload_to_current_realm(context, payload);
 
     with_host_state(|state| {
         let id = state
@@ -9710,7 +10214,7 @@ fn revoke_object_url_native(
 fn queue_file_reading_task_native(
     _: &JsValue,
     args: &[JsValue],
-    _: &mut Context,
+    context: &mut Context,
 ) -> JsResult<JsValue> {
     let callback = args.first().cloned().unwrap_or_default();
     if !callback.is_callable() {
@@ -9718,14 +10222,18 @@ fn queue_file_reading_task_native(
             .with_message("file reading task callback must be callable")
             .into());
     }
+    let payload = bind_timer_payload_to_current_realm(
+        context,
+        TimerPayload::Callback {
+            callback,
+            args: Vec::new(),
+        },
+    );
     with_host_state(|state| {
         state
             .borrow_mut()
             .event_loop
-            .enqueue_file_reading(TimerPayload::Callback {
-                callback,
-                args: Vec::new(),
-            });
+            .enqueue_file_reading(payload);
         Ok(JsValue::undefined())
     })
 }
@@ -9734,7 +10242,7 @@ fn queue_file_reading_task_native(
 fn queue_networking_task_native(
     _: &JsValue,
     args: &[JsValue],
-    _: &mut Context,
+    context: &mut Context,
 ) -> JsResult<JsValue> {
     let callback = args.first().cloned().unwrap_or_default();
     if !callback.is_callable() {
@@ -9742,10 +10250,15 @@ fn queue_networking_task_native(
             .with_message("networking task callback must be callable")
             .into());
     }
+    let payload = bind_timer_payload_to_current_realm(
+        context,
+        TimerPayload::Callback {
+            callback,
+            args: Vec::new(),
+        },
+    );
     with_host_state(|state| {
-        state.borrow_mut().event_loop.enqueue_networking(
-            TimerPayload::Callback { callback, args: Vec::new() },
-        );
+        state.borrow_mut().event_loop.enqueue_networking(payload);
         Ok(JsValue::undefined())
     })
 }
@@ -9754,7 +10267,7 @@ fn queue_networking_task_native(
 fn queue_dom_manipulation_task_native(
     _: &JsValue,
     args: &[JsValue],
-    _: &mut Context,
+    context: &mut Context,
 ) -> JsResult<JsValue> {
     let callback = args.first().cloned().unwrap_or_default();
     if !callback.is_callable() {
@@ -9762,14 +10275,18 @@ fn queue_dom_manipulation_task_native(
             .with_message("DOM manipulation task callback must be callable")
             .into());
     }
+    let payload = bind_timer_payload_to_current_realm(
+        context,
+        TimerPayload::Callback {
+            callback,
+            args: Vec::new(),
+        },
+    );
     with_host_state(|state| {
         state
             .borrow_mut()
             .event_loop
-            .enqueue_dom_manipulation(TimerPayload::Callback {
-                callback,
-                args: Vec::new(),
-            });
+            .enqueue_dom_manipulation(payload);
         Ok(JsValue::undefined())
     })
 }
@@ -31302,6 +31819,73 @@ b</textarea></form>"#);
         port
     }
 
+    /// Serves a same-origin XHTML outer frame whose script creates a nested
+    /// same-origin XHTML frame. The nested script writes through `parent` so
+    /// tests can distinguish the owning child Realm from the top-level Realm.
+    fn spawn_nested_xhtml_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0u8; 4096];
+                let size = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..size]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let body = if path.ends_with("/outer.xhtml") {
+                    format!(
+                        "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>var nested=document.createElement('iframe');nested.src='http://127.0.0.1:{port}/nested.xhtml';document.body.appendChild(nested);</script></body></html>"
+                    )
+                } else {
+                    "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.document.documentElement.setAttribute('data-nested-parent','yes')</script></body></html>".to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/xhtml+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    /// Serves an XHTML frame below `/frames/` and its relative external
+    /// script. The top-level page base is `/index.html`, so using the wrong
+    /// Realm/document base would request `/relative.js` and fail.
+    fn spawn_relative_child_script_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0u8; 4096];
+                let size = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..size]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (content_type, body) = if path.ends_with("/frames/child.xhtml") {
+                    (
+                        "application/xhtml+xml",
+                        "<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>var s=document.createElement('script');s.src='relative.js';s.addEventListener('load',function(){document.documentElement.setAttribute('data-relative-load','yes')});document.head.appendChild(s)</script></body></html>".to_string(),
+                    )
+                } else if path.ends_with("/frames/relative.js") {
+                    (
+                        "text/javascript",
+                        "document.documentElement.setAttribute('data-relative-script','yes')".to_string(),
+                    )
+                } else {
+                    ("text/plain", String::new())
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
     fn spawn_redirect_script_server() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -32456,7 +33040,11 @@ b</textarea></form>"#);
         let doc = TreeBuilder::parse(&format!(
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/x.xhtml"></iframe></body></html>"#
         )).document();
-        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
         pump_zero_delay_tasks(&mut runtime);
         assert_eq!(runtime.eval("xmlNotice").unwrap().as_number(), Some(1.0));
 
@@ -32474,6 +33062,324 @@ b</textarea></form>"#);
                 .unwrap()
                 .to_std_string_escaped(),
             "undefined"
+        );
+    }
+
+    #[test]
+    fn iframe_xhtml_script_uses_child_realm_and_drops_cross_origin_parent_access() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
+                globalThis.childRealmMarker = 'child';
+                document.documentElement.setAttribute('data-child-script', 'yes');
+                Promise.resolve().then(() => document.documentElement.setAttribute('data-child-job', 'yes'));
+                requestAnimationFrame(() => document.documentElement.setAttribute('data-child-frame', 'yes'));
+                setTimeout(() => {
+                    document.documentElement.setAttribute('data-child-timer', 'yes');
+                    parent.topOnly = 'leaked';
+                }, 0);
+            </script></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/child.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(doc, "http://origin.test/index.html").unwrap();
+        runtime.eval("globalThis.topOnly = 'top';").unwrap();
+
+        pump_zero_delay_tasks(&mut runtime);
+        // Timers queued by the iframe's resource-load task become due on the
+        // following event-loop turn, just like browser macrotasks.
+        pump_zero_delay_tasks(&mut runtime);
+        runtime
+            .run_animation_frame(0)
+            .expect("child animation-frame callback should run");
+
+        // The frame is intentionally cross-origin, so its `contentDocument`
+        // is hidden from the parent Realm. Inspect the native child tree to
+        // verify that all three callbacks still mutated that child Document.
+        let child_document = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("iframe load must install a child document")
+                .document
+                .clone()
+        };
+        let child_root = child_document
+            .child_nodes()
+            .into_iter()
+            .find(|node| node.node_type() == NodeType::Element)
+            .expect("child document must have a document element");
+        for attribute in [
+            "data-child-script",
+            "data-child-job",
+            "data-child-frame",
+            "data-child-timer",
+        ] {
+            assert_eq!(
+                child_root
+                    .get_attribute(attribute)
+                    .as_deref(),
+                Some("yes"),
+                "child script state must stay in the child Document",
+            );
+        }
+        assert_eq!(
+            eval_string_value(&mut runtime, "typeof childRealmMarker").as_deref(),
+            Some("undefined"),
+            "child globals must not be installed on the top global",
+        );
+        assert_eq!(
+            eval_string_value(&mut runtime, "topOnly").as_deref(),
+            Some("top"),
+            "cross-origin parent writes must not reach the top global",
+        );
+    }
+
+    #[test]
+    fn iframe_same_origin_child_realm_binds_frame_element() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
+                const frame = frameElement;
+                let valid = frame !== null;
+                if (valid) {
+                    if (frame.tagName !== 'IFRAME') valid = false;
+                    if (frame.ownerDocument.__id !== parent.document.__id) valid = false;
+                    if (frame.contentDocument !== document) valid = false;
+                    if (frame !== frameElement) valid = false;
+                }
+                document.documentElement.setAttribute('data-frame-element', String(valid));
+                if (frame !== null) frame.setAttribute('data-from-frame-element', 'yes');
+            </script></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/same.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+
+        let (child_root, iframe) = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            let child = state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("same-origin iframe must load")
+                .document
+                .clone();
+            let root = child
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("same-origin child must have a root");
+            (root, iframe)
+        };
+        assert_eq!(
+            child_root.get_attribute("data-frame-element").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            iframe.get_attribute("data-from-frame-element").as_deref(),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn iframe_child_realm_routes_dynamic_script_and_load_event() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
+                const script = document.createElement('script');
+                script.src = 'data:text/javascript,document.documentElement.setAttribute(%22data-external-child%22,%22yes%22)';
+                script.addEventListener('load', () => document.documentElement.setAttribute('data-external-load', 'yes'));
+                document.head.appendChild(script);
+            </script></body></html>"#,
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/dynamic.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        pump_zero_delay_tasks(&mut runtime);
+
+        let child_root = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            let document = state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("dynamic child iframe must load")
+                .document
+                .clone();
+            document
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("dynamic child document must have a root")
+        };
+        assert_eq!(
+            child_root.get_attribute("data-external-child").as_deref(),
+            Some("yes")
+        );
+        assert_eq!(
+            child_root.get_attribute("data-external-load").as_deref(),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn iframe_child_dynamic_script_uses_document_url_as_base() {
+        use crate::html::TreeBuilder;
+        let port = spawn_relative_child_script_server();
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/frames/child.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        pump_zero_delay_tasks(&mut runtime);
+
+        let child_root = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            let document = state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("relative child iframe must load")
+                .document
+                .clone();
+            document
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("relative child document must have a root")
+        };
+        assert_eq!(
+            child_root.get_attribute("data-relative-script").as_deref(),
+            Some("yes")
+        );
+        assert_eq!(
+            child_root.get_attribute("data-relative-load").as_deref(),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn nested_same_origin_child_realm_uses_owning_parent_global() {
+        use crate::html::TreeBuilder;
+        let port = spawn_nested_xhtml_server();
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="outer" src="http://127.0.0.1:{port}/outer.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+
+        let outer_root = {
+            let state = runtime.host_state.borrow();
+            let outer = state.document.query_selector("#outer").unwrap();
+            let outer_document = state
+                .iframe_documents
+                .get(&outer.identity())
+                .expect("outer iframe must load")
+                .document
+                .clone();
+            outer_document
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("outer document must have a root")
+        };
+        assert_eq!(
+            outer_root.get_attribute("data-nested-parent").as_deref(),
+            Some("yes"),
+            "nested child parent must resolve to the outer child global",
+        );
+    }
+
+    #[test]
+    fn reloaded_iframe_drops_stale_child_realm_timers() {
+        use crate::html::TreeBuilder;
+        let old_port = spawn_static_http_server(
+            "application/xhtml+xml",
+            r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>
+                setTimeout(() => document.documentElement.setAttribute('data-stale', 'bad'), 10);
+                requestAnimationFrame(() => document.documentElement.setAttribute('data-stale-frame', 'bad'));
+            </script></body></html>"#,
+        );
+        let new_port = spawn_static_http_server(
+            "application/xhtml+xml",
+            "<html xmlns='http://www.w3.org/1999/xhtml'><body></body></html>",
+        );
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="http://127.0.0.1:{old_port}/old.xhtml"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{old_port}/index.html"),
+        )
+        .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').src = 'http://127.0.0.1:{new_port}/new.xhtml'"
+            ))
+            .unwrap();
+        runtime.tick(10).unwrap();
+        runtime.run_animation_frame(0).unwrap();
+
+        let current_root = {
+            let state = runtime.host_state.borrow();
+            let iframe = state.document.query_selector("#f").unwrap();
+            let document = state
+                .iframe_documents
+                .get(&iframe.identity())
+                .expect("replacement iframe document must be live")
+                .document
+                .clone();
+            document
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .expect("replacement document must have a root")
+        };
+        assert_eq!(
+            current_root.get_attribute("data-stale"),
+            None,
+            "a timer from the replaced child Realm must not mutate the new Document",
+        );
+        assert_eq!(
+            current_root.get_attribute("data-stale-frame"),
+            None,
+            "an animation frame from the replaced child Realm must not mutate the new Document",
         );
     }
 
@@ -32646,7 +33552,11 @@ b</textarea></form>"#);
             r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/x.xhtml"></iframe></body></html>"#
         ))
         .document();
-        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/index.html"),
+        )
+        .unwrap();
         runtime
             .eval("document.getElementById('f').addEventListener('load', () => globalThis.xhtmlLoadCount = (globalThis.xhtmlLoadCount || 0) + 1)")
             .unwrap();

@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use boa_engine::JsValue;
+use boa_engine::{JsValue, realm::Realm};
 use boa_gc::{Finalize, Trace, Tracer};
 
 use super::{NavigationRequest, TimerPayload};
@@ -75,6 +75,17 @@ pub(crate) enum Task {
     },
 }
 
+/// A rendering callback together with the browsing-context generation that
+/// owns it. Unlike ordinary timers, animation-frame callbacks are retained in
+/// a dedicated rendering queue, so they carry the same Realm/document guard
+/// explicitly.
+#[derive(Debug, Clone)]
+pub(crate) struct AnimationFrameCallback {
+    pub(crate) callback: JsValue,
+    pub(crate) realm: Option<Realm>,
+    pub(crate) document_id: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 struct TimerTask {
     id: u64,
@@ -94,7 +105,7 @@ pub(crate) struct EventLoop {
     timers: Vec<TimerTask>,
     next_animation_frame_id: u64,
     animation_frame_order: Vec<u64>,
-    animation_frame_callbacks: HashMap<u64, JsValue>,
+    animation_frame_callbacks: HashMap<u64, AnimationFrameCallback>,
 }
 
 impl Finalize for EventLoop {}
@@ -113,7 +124,10 @@ unsafe impl Trace for EventLoop {
             unsafe { trace_timer_payload(&timer.payload, tracer) };
         }
         for callback in self.animation_frame_callbacks.values() {
-            unsafe { callback.trace(tracer) };
+            unsafe { callback.callback.trace(tracer) };
+            // `Realm` is a Boa `Rooted<RealmInner>` handle, not a heap edge
+            // reachable through a JsValue. Holding the handle is itself the
+            // GC root; there is no Realm::trace operation to invoke here.
         }
     }
 
@@ -121,11 +135,22 @@ unsafe impl Trace for EventLoop {
 }
 
 unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
-    if let TimerPayload::Callback { callback, args } = payload {
-        unsafe { callback.trace(tracer) };
-        for arg in args {
-            unsafe { arg.trace(tracer) };
+    match payload {
+        TimerPayload::Callback { callback, args } => {
+            unsafe { callback.trace(tracer) };
+            for arg in args {
+                unsafe { arg.trace(tracer) };
+            }
         }
+        TimerPayload::Realm { payload, .. } => {
+            // The Realm field is an explicit Boa Rooted handle. Trace the
+            // JsValue-bearing payload, but do not treat the Realm as a
+            // JsValue edge (it has no Realm::trace implementation).
+            unsafe { trace_timer_payload(payload, tracer) }
+        }
+        TimerPayload::Source(_)
+        | TimerPayload::ResourceLoad { .. }
+        | TimerPayload::GeolocationTimeout { .. } => {}
     }
 }
 
@@ -363,10 +388,26 @@ impl EventLoop {
     }
 
     pub(crate) fn schedule_animation_frame(&mut self, callback: JsValue) -> u64 {
+        self.schedule_animation_frame_with_realm(callback, None, None)
+    }
+
+    pub(crate) fn schedule_animation_frame_with_realm(
+        &mut self,
+        callback: JsValue,
+        realm: Option<Realm>,
+        document_id: Option<usize>,
+    ) -> u64 {
         self.next_animation_frame_id = self.next_animation_frame_id.saturating_add(1);
         let id = self.next_animation_frame_id;
         self.animation_frame_order.push(id);
-        self.animation_frame_callbacks.insert(id, callback);
+        self.animation_frame_callbacks.insert(
+            id,
+            AnimationFrameCallback {
+                callback,
+                realm,
+                document_id,
+            },
+        );
         id
     }
 
@@ -381,7 +422,7 @@ impl EventLoop {
         )
     }
 
-    pub(crate) fn take_animation_frame_callback(&mut self, id: u64) -> Option<JsValue> {
+    pub(crate) fn take_animation_frame_callback(&mut self, id: u64) -> Option<AnimationFrameCallback> {
         self.animation_frame_callbacks.remove(&id)
     }
 
