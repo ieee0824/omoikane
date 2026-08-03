@@ -569,6 +569,7 @@ pub(crate) fn paint_text_with_font(
     // Align paint baseline with layout's line-box baseline model to avoid vertical drift.
     let baseline_y = rect.y + layout_ascent;
     let mut cursor_x = rect.x;
+    let mut cluster_origin_x = rect.x;
     let mut previous_char: Option<(char, usize)> = None;
 
     let chars: Vec<char> = text.chars().collect();
@@ -578,17 +579,32 @@ pub(crate) fn paint_text_with_font(
         .count();
     for &ch in &chars {
         let zero_advance = is_zero_advance_character(ch);
-        let (font_index, glyph, advance_x) = rasterize_with_fallback(fonts, ch, font_size);
+        let preferred_font = zero_advance.then(|| previous_char.map(|(_, index)| index)).flatten();
+        let (font_index, glyph, advance_x) = rasterize_with_fallback_preferred(
+            fonts,
+            ch,
+            font_size,
+            preferred_font,
+        );
+        let glyph = (!is_invisible_shaping_control(ch)).then_some(glyph).flatten();
         if !zero_advance
             && let Some((prev, prev_font_index)) = previous_char
             && prev_font_index == font_index
         {
             cursor_x += fonts[font_index].glyph_kerning(prev, ch, font_size);
         }
+        if !zero_advance {
+            cluster_origin_x = cursor_x;
+        }
 
         if let Some(glyph) = glyph
             && glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
-                let glyph_x = cursor_x + glyph.offset_x;
+                let glyph_x = horizontal_glyph_origin(
+                    cursor_x,
+                    cluster_origin_x,
+                    zero_advance,
+                    glyph.offset_x,
+                );
                 let glyph_y = baseline_y + glyph.offset_y;
 
                 canvas.draw_glyph_mask(
@@ -631,6 +647,7 @@ pub(crate) fn paint_text_with_font_refs(
 ) {
     let baseline_y = rect.y + layout_ascent;
     let mut cursor_x = rect.x;
+    let mut cluster_origin_x = rect.x;
     let mut previous_char: Option<(char, usize)> = None;
 
     let chars: Vec<char> = text.chars().collect();
@@ -640,17 +657,32 @@ pub(crate) fn paint_text_with_font_refs(
         .count();
     for &ch in &chars {
         let zero_advance = is_zero_advance_character(ch);
-        let (font_index, glyph, advance_x) = rasterize_with_fallback_refs(fonts, ch, font_size);
+        let preferred_font = zero_advance.then(|| previous_char.map(|(_, index)| index)).flatten();
+        let (font_index, glyph, advance_x) = rasterize_with_fallback_refs_preferred(
+            fonts,
+            ch,
+            font_size,
+            preferred_font,
+        );
+        let glyph = (!is_invisible_shaping_control(ch)).then_some(glyph).flatten();
         if !zero_advance
             && let Some((prev, prev_font_index)) = previous_char
             && prev_font_index == font_index
         {
             cursor_x += fonts[font_index].glyph_kerning(prev, ch, font_size);
         }
+        if !zero_advance {
+            cluster_origin_x = cursor_x;
+        }
 
         if let Some(glyph) = glyph
             && glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
-                let glyph_x = cursor_x + glyph.offset_x;
+                let glyph_x = horizontal_glyph_origin(
+                    cursor_x,
+                    cluster_origin_x,
+                    zero_advance,
+                    glyph.offset_x,
+                );
                 let glyph_y = baseline_y + glyph.offset_y;
 
                 canvas.draw_glyph_mask(
@@ -774,6 +806,52 @@ fn vertical_paint_characters(text: &str, direction_rtl: bool) -> Vec<char> {
     }
 }
 
+fn horizontal_glyph_origin(
+    cursor_x: f32,
+    cluster_origin_x: f32,
+    zero_advance: bool,
+    offset_x: f32,
+) -> f32 {
+    (if zero_advance { cluster_origin_x } else { cursor_x }) + offset_x
+}
+
+fn is_invisible_shaping_control(ch: char) -> bool {
+    matches!(ch as u32, 0xfe00..=0xfe0f | 0xe0100..=0xe01ef | 0x200c | 0x200d)
+}
+
+fn vertical_glyph_cell(
+    cursor_y: f32,
+    previous_cell: Option<(f32, f32, usize)>,
+    zero_advance: bool,
+    direction_rtl: bool,
+    advance: f32,
+) -> (f32, f32) {
+    if zero_advance {
+        previous_cell.map_or((cursor_y, 0.0), |(start, advance, _)| (start, advance))
+    } else if direction_rtl {
+        (cursor_y - advance, advance)
+    } else {
+        (cursor_y, advance)
+    }
+}
+
+fn vertical_cursor_after(
+    cursor_y: f32,
+    cell_start: f32,
+    advance: f32,
+    spacing: f32,
+    zero_advance: bool,
+    direction_rtl: bool,
+) -> f32 {
+    if zero_advance {
+        cursor_y
+    } else if direction_rtl {
+        cell_start - spacing
+    } else {
+        cell_start + advance + spacing
+    }
+}
+
 /// Avoid running the full paragraph algorithm for the overwhelmingly common
 /// pure-LTR paint fragments. Explicit RTL/embedding controls are included so
 /// that their presence still reaches the UAX#9 resolver.
@@ -864,25 +942,35 @@ fn paint_text_vertical_with_font_refs(
         rect.y
     };
     let clockwise = vertical_rl;
+    let mut previous_cell = None;
     let mut remaining_non_zero = chars
         .iter()
         .filter(|ch| !is_zero_advance_character(**ch))
         .count();
     for ch in chars.iter().copied() {
         let zero_advance = is_zero_advance_character(ch);
-        let (_, glyph, advance_x) = rasterize_with_fallback_refs(fonts, ch, font_size);
+        let preferred_font = zero_advance
+            .then(|| previous_cell.map(|(_, _, index)| index))
+            .flatten();
+        let (font_index, glyph, advance_x) = rasterize_with_fallback_refs_preferred(
+            fonts,
+            ch,
+            font_size,
+            preferred_font,
+        );
+        let glyph = (!is_invisible_shaping_control(ch)).then_some(glyph).flatten();
         let advance = if zero_advance {
             0.0
         } else {
             advance_x.max(1.0)
         };
-        let cell_start = if zero_advance {
-            cursor_y
-        } else if direction_rtl {
-            cursor_y - advance
-        } else {
-            cursor_y
-        };
+        let (cell_start, paint_advance) = vertical_glyph_cell(
+            cursor_y,
+            previous_cell,
+            zero_advance,
+            direction_rtl,
+            advance,
+        );
 
         if let Some(glyph) = glyph
             && glyph.width > 0
@@ -892,7 +980,7 @@ fn paint_text_vertical_with_font_refs(
             let rotated_width = glyph.height as f32;
             let rotated_height = glyph.width as f32;
             let glyph_x = rect.x + ((rect.width - rotated_width) * 0.5).max(0.0);
-            let glyph_y = cell_start + ((advance - rotated_height) * 0.5).max(0.0);
+            let glyph_y = cell_start + ((paint_advance - rotated_height) * 0.5).max(0.0);
             draw_rotated_glyph_mask(
                 canvas,
                 glyph_x,
@@ -911,14 +999,16 @@ fn paint_text_vertical_with_font_refs(
         } else {
             0.0
         };
-        cursor_y = if zero_advance {
-            cell_start
-        } else if direction_rtl {
-            cell_start - spacing
-        } else {
-            cell_start + advance + spacing
-        };
+        cursor_y = vertical_cursor_after(
+            cursor_y,
+            cell_start,
+            advance,
+            spacing,
+            zero_advance,
+            direction_rtl,
+        );
         if !zero_advance {
+            previous_cell = Some((cell_start, advance, font_index));
             remaining_non_zero -= 1;
         }
     }
@@ -1049,6 +1139,20 @@ pub(crate) fn rasterize_with_fallback(
     (0, None, (font_size * 0.6).max(1.0))
 }
 
+fn rasterize_with_fallback_preferred(
+    fonts: &[Arc<Font>],
+    ch: char,
+    font_size: f32,
+    preferred: Option<usize>,
+) -> (usize, Option<Arc<GlyphRaster>>, f32) {
+    if let Some(index) = preferred.filter(|index| fonts[*index].has_glyph(ch))
+        && let Ok(glyph) = rasterize_cached(&fonts[index], ch, font_size)
+    {
+        return (index, Some(glyph), 0.0);
+    }
+    rasterize_with_fallback(fonts, ch, font_size)
+}
+
 /// Like `rasterize_with_fallback` but accepts `&[&Font]` references.
 pub(crate) fn rasterize_with_fallback_refs(
     fonts: &[&Font],
@@ -1130,6 +1234,20 @@ pub(crate) fn rasterize_with_fallback_refs(
         return (0, None, primary.glyph_advance(ch, font_size));
     }
     (0, None, (font_size * 0.6).max(1.0))
+}
+
+fn rasterize_with_fallback_refs_preferred(
+    fonts: &[&Font],
+    ch: char,
+    font_size: f32,
+    preferred: Option<usize>,
+) -> (usize, Option<Arc<GlyphRaster>>, f32) {
+    if let Some(index) = preferred.filter(|index| fonts[*index].has_glyph(ch))
+        && let Ok(glyph) = rasterize_cached(fonts[index], ch, font_size)
+    {
+        return (index, Some(glyph), 0.0);
+    }
+    rasterize_with_fallback_refs(fonts, ch, font_size)
 }
 
 pub(crate) use crate::font::is_cjk_preferred_character;
@@ -1493,8 +1611,8 @@ fn select_fragment_web_font<'a>(
 
 /// Measures the painted advance width of `text`, mirroring the advance model of
 /// [`paint_text_with_font_refs`] / [`paint_text_placeholder`] exactly:
-/// per-character advances, kerning between adjacent characters drawn from the
-/// same font, and letter-spacing between characters.
+/// non-zero advances, kerning between adjacent advancing characters drawn from
+/// the same font, and letter-spacing between advancing characters.
 ///
 /// Used to horizontally center form-control labels; when `fonts` is empty the
 /// placeholder advance of `font_size * 0.6` is used to match the glyph fallback.
@@ -1505,18 +1623,24 @@ pub(crate) fn measure_form_control_text_width(
     letter_spacing: f32,
 ) -> f32 {
     if fonts.is_empty() {
-        let char_count = text.chars().count();
-        if char_count == 0 {
+        let advancing_count = text
+            .chars()
+            .filter(|ch| !is_zero_advance_character(*ch))
+            .count();
+        if advancing_count == 0 {
             return 0.0;
         }
-        return char_count as f32 * (font_size * 0.6).max(1.0)
-            + letter_spacing * (char_count - 1) as f32;
+        return advancing_count as f32 * (font_size * 0.6).max(1.0)
+            + letter_spacing * (advancing_count - 1) as f32;
     }
     let mut width = 0.0;
-    let mut char_count = 0usize;
+    let mut advancing_count = 0usize;
     let mut previous: Option<(char, usize)> = None;
     for ch in text.chars() {
-        char_count += 1;
+        if is_zero_advance_character(ch) {
+            continue;
+        }
+        advancing_count += 1;
         let (font_index, _, advance) = rasterize_with_fallback_refs(fonts, ch, font_size);
         if let Some((prev, prev_index)) = previous
             && prev_index == font_index
@@ -1526,8 +1650,8 @@ pub(crate) fn measure_form_control_text_width(
         width += advance;
         previous = Some((ch, font_index));
     }
-    if char_count > 1 {
-        width += letter_spacing * (char_count - 1) as f32;
+    if advancing_count > 1 {
+        width += letter_spacing * (advancing_count - 1) as f32;
     }
     width
 }
@@ -1549,7 +1673,9 @@ fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
 #[cfg(test)]
 mod bidi_tests {
     use super::{
-        FragmentStyle, bidi_visual_text, fragment_text_for_paint, vertical_paint_characters,
+        FragmentStyle, bidi_visual_text, fragment_text_for_paint, horizontal_glyph_origin,
+        is_invisible_shaping_control, vertical_cursor_after, vertical_glyph_cell,
+        vertical_paint_characters,
     };
 
     #[test]
@@ -1699,5 +1825,21 @@ mod bidi_tests {
             vertical_paint_characters("A👩‍💻B", true),
             "B👩‍💻A".chars().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn zero_advance_glyphs_reuse_the_base_glyph_cell() {
+        assert_eq!(horizontal_glyph_origin(18.0, 10.0, true, 1.5), 11.5);
+        assert_eq!(horizontal_glyph_origin(18.0, 10.0, false, 1.5), 19.5);
+
+        let previous = Some((20.0, 8.0, 0));
+        assert_eq!(vertical_glyph_cell(28.0, previous, true, false, 0.0), (20.0, 8.0));
+        assert_eq!(vertical_glyph_cell(20.0, previous, true, true, 0.0), (20.0, 8.0));
+        assert_eq!(vertical_cursor_after(28.0, 20.0, 0.0, 0.0, true, false), 28.0);
+        assert_eq!(vertical_cursor_after(20.0, 20.0, 0.0, 0.0, true, true), 20.0);
+        assert!(is_invisible_shaping_control('\u{fe0f}'));
+        assert!(is_invisible_shaping_control('\u{200c}'));
+        assert!(is_invisible_shaping_control('\u{200d}'));
+        assert!(!is_invisible_shaping_control('\u{301}'));
     }
 }

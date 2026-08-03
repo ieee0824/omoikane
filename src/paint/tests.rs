@@ -8861,6 +8861,10 @@ fn form_control_text_measure_matches_painter_advance_model() {
         "placeholder width expected 6 + 2 + 6 = 14, got {placeholder}"
     );
     assert_eq!(measure_form_control_text_width("", 10.0, &[], 2.0), 0.0);
+    assert_eq!(
+        measure_form_control_text_width("a\u{301}\u{fe0f}\u{200d}b", 10.0, &[], 2.0),
+        placeholder,
+    );
 
     // Font path: the measured width must equal the exact cursor advance of
     // paint_text_with_font_refs (per-char rasterize advance + same-font kerning +
@@ -8894,6 +8898,10 @@ fn form_control_text_measure_matches_painter_advance_model() {
     assert!(
         (measured - expected).abs() < 1e-3,
         "measured {measured} must equal painter cursor advance {expected}"
+    );
+    assert_eq!(
+        measure_form_control_text_width("a\u{301}\u{fe0f}\u{200d}b", font_size, &font_refs, letter_spacing),
+        measure_form_control_text_width("ab", font_size, &font_refs, letter_spacing),
     );
 }
 
