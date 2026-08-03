@@ -12,6 +12,7 @@ use crate::font::{
 };
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
 use super::color::{parse_color, Color};
@@ -702,14 +703,23 @@ fn fragment_text_for_paint<'a>(
 /// Layout continues to measure and expose the source string in logical DOM
 /// order. The paint cursor, however, advances along the physical inline axis,
 /// so mixed-direction runs must be reordered before glyphs are rasterized.
-/// Only `unicode-bidi: normal` (or the computed value's absence) is handled in
-/// this pass. `isolate`, `isolate-override`, and `bidi-override` require their
-/// own embedding boundaries and are intentionally left untouched.
+/// `normal` uses UAX#9 resolution. Directional override modes force every
+/// grapheme cluster into the element's declared direction while preserving
+/// the logical DOM/layout string.
 fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
-    if text.is_empty()
-        || !matches!(style.unicode_bidi.as_deref(), None | Some("normal"))
-        || !contains_bidi_rtl_candidate(text)
-    {
+    if text.is_empty() {
+        return Cow::Borrowed(text);
+    }
+
+    match style.unicode_bidi.as_deref() {
+        Some("bidi-override" | "isolate-override") => {
+            return bidi_override_visual_text(text, style);
+        }
+        None | Some("normal") => {}
+        _ => return Cow::Borrowed(text),
+    }
+
+    if !contains_bidi_rtl_candidate(text) {
         return Cow::Borrowed(text);
     }
 
@@ -728,6 +738,38 @@ fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
         visual.push_str(bidi.reorder_line(paragraph, paragraph.range.clone()).as_ref());
     }
     Cow::Owned(visual)
+}
+
+/// Applies CSS directional override without splitting extended grapheme
+/// clusters. LTR override is already logical order; RTL override reverses the
+/// cluster sequence while leaving every cluster's scalar order intact.
+fn bidi_override_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
+    if style.direction.as_deref() != Some("rtl") {
+        return Cow::Borrowed(text);
+    }
+
+    let Some(first_cluster) = text.graphemes(true).next() else {
+        return Cow::Borrowed(text);
+    };
+    if first_cluster.len() == text.len() {
+        return Cow::Borrowed(text);
+    }
+
+    let mut visual = String::with_capacity(text.len());
+    for cluster in text.graphemes(true).rev() {
+        visual.push_str(cluster);
+    }
+    Cow::Owned(visual)
+}
+
+/// Returns scalar paint order while reversing vertical RTL by grapheme rather
+/// than by code point, so marks/selectors/joiners stay with their base glyph.
+fn vertical_paint_characters(text: &str, direction_rtl: bool) -> Vec<char> {
+    if direction_rtl {
+        text.graphemes(true).rev().flat_map(str::chars).collect()
+    } else {
+        text.chars().collect()
+    }
 }
 
 /// Avoid running the full paragraph algorithm for the overwhelmingly common
@@ -812,10 +854,7 @@ fn paint_text_vertical_with_font_refs(
     vertical_rl: bool,
     direction_rtl: bool,
 ) {
-    let mut chars: Vec<char> = text.chars().collect();
-    if direction_rtl {
-        chars.reverse();
-    }
+    let chars = vertical_paint_characters(text, direction_rtl);
 
     let mut cursor_y = if direction_rtl {
         rect.y + rect.height
@@ -1158,10 +1197,7 @@ pub(crate) fn paint_text_placeholder_with_mode(
         return;
     };
 
-    let mut chars: Vec<char> = text.chars().collect();
-    if direction_rtl {
-        chars.reverse();
-    }
+    let chars = vertical_paint_characters(text, direction_rtl);
     let advance = (font_size * 0.6).max(1.0);
     let glyph_width = (font_size * 0.7).min(rect.width).max(1.0);
     let glyph_height = (font_size * 0.45).max(1.0);
@@ -1510,7 +1546,9 @@ fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
 
 #[cfg(test)]
 mod bidi_tests {
-    use super::{FragmentStyle, bidi_visual_text, fragment_text_for_paint};
+    use super::{
+        FragmentStyle, bidi_visual_text, fragment_text_for_paint, vertical_paint_characters,
+    };
 
     #[test]
     fn mixed_ltr_text_is_reordered_into_visual_runs() {
@@ -1559,12 +1597,75 @@ mod bidi_tests {
     }
 
     #[test]
-    fn bidi_override_keeps_logical_character_order_for_now() {
+    fn rtl_bidi_override_reverses_grapheme_clusters() {
         let style = FragmentStyle {
             direction: Some("rtl".to_string()),
             unicode_bidi: Some("bidi-override".to_string()),
             ..FragmentStyle::default()
         };
+        assert_eq!(bidi_visual_text("abc אבג", &style), "גבא cba");
+        assert_eq!(bidi_visual_text("a\u{301}b", &style), "ba\u{301}");
+        assert_eq!(bidi_visual_text("A👩‍💻B", &style), "B👩‍💻A");
+    }
+
+    #[test]
+    fn ltr_bidi_override_keeps_logical_cluster_order() {
+        let style = FragmentStyle {
+            direction: Some("ltr".to_string()),
+            unicode_bidi: Some("bidi-override".to_string()),
+            ..FragmentStyle::default()
+        };
         assert_eq!(bidi_visual_text("abc אבג", &style), "abc אבג");
+    }
+
+    #[test]
+    fn isolate_override_uses_the_same_directional_override() {
+        let style = FragmentStyle {
+            direction: Some("rtl".to_string()),
+            unicode_bidi: Some("isolate-override".to_string()),
+            ..FragmentStyle::default()
+        };
+        assert_eq!(bidi_visual_text("abc אבג", &style), "גבא cba");
+    }
+
+    #[test]
+    fn vertical_override_routes_cluster_order_through_paint_state() {
+        let style = FragmentStyle {
+            direction: Some("rtl".to_string()),
+            unicode_bidi: Some("isolate-override".to_string()),
+            writing_mode: Some("vertical-rl".to_string()),
+            ..FragmentStyle::default()
+        };
+        let (visual_text, vertical_mode) = fragment_text_for_paint("a\u{301}b", &style);
+        assert_eq!(visual_text, "ba\u{301}");
+        assert_eq!(vertical_mode, Some((true, true)));
+        assert_eq!(
+            vertical_paint_characters(visual_text.as_ref(), true),
+            vec!['a', '\u{301}', 'b']
+        );
+    }
+
+    #[test]
+    fn non_override_modes_are_not_forced_into_directional_order() {
+        for mode in ["isolate", "embed", "plaintext"] {
+            let style = FragmentStyle {
+                direction: Some("rtl".to_string()),
+                unicode_bidi: Some(mode.to_string()),
+                ..FragmentStyle::default()
+            };
+            assert_eq!(bidi_visual_text("abc אבג", &style), "abc אבג");
+        }
+    }
+
+    #[test]
+    fn vertical_rtl_reverses_clusters_without_splitting_marks_or_joiners() {
+        assert_eq!(
+            vertical_paint_characters("a\u{301}b", true),
+            vec!['b', 'a', '\u{301}']
+        );
+        assert_eq!(
+            vertical_paint_characters("A👩‍💻B", true),
+            "B👩‍💻A".chars().collect::<Vec<_>>()
+        );
     }
 }
