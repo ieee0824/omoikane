@@ -57,6 +57,11 @@ pub(crate) enum Task {
     WorkerOwnerMessage {
         worker_id: u64,
         owner: JsValue,
+        /// The Realm that owns the page-side Worker object. Worker messages
+        /// must construct their event and dispatch it in this Realm rather
+        /// than in the top-level Realm when the Worker was created by an
+        /// iframe.
+        realm: Option<Realm>,
         data: String,
     },
     /// A message sent from a page-owned `SharedWorkerPort` to the shared
@@ -74,6 +79,8 @@ pub(crate) enum Task {
     WorkerError {
         worker_id: u64,
         owner: Option<JsValue>,
+        /// Realm of the page-side Worker object, if it was already bound.
+        realm: Option<Realm>,
         message: String,
     },
 }
@@ -329,6 +336,7 @@ impl EventLoop {
         &mut self,
         worker_id: u64,
         owner: JsValue,
+        realm: Option<Realm>,
         data: String,
     ) {
         self.enqueue(
@@ -336,6 +344,7 @@ impl EventLoop {
             Task::WorkerOwnerMessage {
                 worker_id,
                 owner,
+                realm,
                 data,
             },
         );
@@ -370,11 +379,17 @@ impl EventLoop {
         &mut self,
         worker_id: u64,
         owner: Option<JsValue>,
+        realm: Option<Realm>,
         message: String,
     ) {
         self.enqueue(
             TaskSource::PostedMessage,
-            Task::WorkerError { worker_id, owner, message },
+            Task::WorkerError {
+                worker_id,
+                owner,
+                realm,
+                message,
+            },
         );
     }
 

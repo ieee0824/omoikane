@@ -1010,6 +1010,9 @@ struct HostState {
     worker_terminated: bool,
     worker_owner_bound: bool,
     worker_owner_object: Option<JsValue>,
+    /// Realm of the page-side Worker object. Dedicated worker runtimes use
+    /// this when queueing messages back to an iframe owner.
+    worker_owner_realm: Option<Realm>,
     worker_startup_outgoing: VecDeque<String>,
     /// Shared-worker globals identify themselves so the event-loop pump does
     /// not recursively execute the registry entry currently being serviced.
@@ -1541,6 +1544,7 @@ impl HostState {
             worker_terminated: false,
             worker_owner_bound: false,
             worker_owner_object: None,
+            worker_owner_realm: None,
             worker_startup_outgoing: VecDeque::new(),
             shared_worker_id: None,
             shared_worker_ports: HashMap::new(),
@@ -3477,7 +3481,7 @@ impl JsRuntime {
             let Some(entry) = self.host_state.borrow_mut().workers.remove(&worker_id) else {
                 continue;
             };
-            let (owner_state, result, errors, terminated) = {
+            let (owner_state, owner_realm, result, errors, terminated) = {
                 let mut worker = entry.borrow_mut();
                 if worker.terminated || worker.runtime.host_state.borrow().worker_terminated {
                     self.host_state
@@ -3488,8 +3492,16 @@ impl JsRuntime {
                 }
                 let result = worker.runtime.run_until_idle();
                 let errors = worker.runtime.take_task_errors();
-                let terminated = worker.runtime.host_state.borrow().worker_terminated;
-                (Rc::clone(&worker.owner_state), result, errors, terminated)
+                let worker_state = worker.runtime.host_state.borrow();
+                let owner_realm = worker_state.worker_owner_realm.clone();
+                let terminated = worker_state.worker_terminated;
+                (
+                    Rc::clone(&worker.owner_state),
+                    owner_realm,
+                    result,
+                    errors,
+                    terminated,
+                )
             };
             if !terminated {
                 self.host_state
@@ -3510,13 +3522,13 @@ impl JsRuntime {
                 owner_state
                     .borrow_mut()
                     .event_loop
-                    .enqueue_worker_error(worker_id, None, error.to_string());
+                    .enqueue_worker_error(worker_id, None, owner_realm.clone(), error.to_string());
             }
             for error in errors {
                 owner_state
                     .borrow_mut()
                     .event_loop
-                    .enqueue_worker_error(worker_id, None, error);
+                    .enqueue_worker_error(worker_id, None, owner_realm.clone(), error);
             }
         }
     }
@@ -5454,16 +5466,18 @@ impl JsRuntime {
             Task::WorkerOwnerMessage {
                 worker_id,
                 owner,
+                realm,
                 data,
             } => {
-                self.run_worker_owner_message(worker_id, owner, data)
+                self.run_worker_owner_message(worker_id, owner, realm, data)
             }
             Task::WorkerError {
                 worker_id,
                 owner,
+                realm,
                 message,
             } => {
-                self.run_worker_error(worker_id, owner, message)
+                self.run_worker_error(worker_id, owner, realm, message)
             }
             Task::SharedWorkerMessage { connection_id, data } => {
                 self.run_shared_worker_message(connection_id, data)
@@ -5606,7 +5620,7 @@ impl JsRuntime {
             return Ok(());
         }
         let owner_state = Rc::clone(&worker.owner_state);
-        let (errors, terminated) = {
+        let (errors, owner_realm, terminated) = {
             let runtime = &mut worker.runtime;
             let mut errors = Vec::new();
             if let Err(error) = runtime.install_worker_message_values(data, owner_origin) {
@@ -5629,14 +5643,19 @@ impl JsRuntime {
                     errors.push(format!("[worker message jobs] {error}"));
                 }
             }
+            let owner_realm = runtime
+                .host_state
+                .borrow()
+                .worker_owner_realm
+                .clone();
             let terminated = runtime.is_terminated_worker();
-            (errors, terminated)
+            (errors, owner_realm, terminated)
         };
         for error in errors {
             owner_state
                 .borrow_mut()
                 .event_loop
-                .enqueue_worker_error(worker_id, None, error);
+                .enqueue_worker_error(worker_id, None, owner_realm.clone(), error);
         }
         drop(worker);
         if !terminated {
@@ -5657,13 +5676,18 @@ impl JsRuntime {
         &mut self,
         _worker_id: u64,
         owner_object: JsValue,
+        owner_realm: Option<Realm>,
         data: String,
     ) -> JsResult<()> {
         let owner_origin = host_state_origin(&self.host_state.borrow());
+        let old_realm = owner_realm.map(|realm| self.context.enter_realm(realm));
         if let Err(error) = self.install_worker_owner_values(owner_object, data) {
             self.record_task_error(format!("[worker message setup] {error}"));
             let cleanup = self.clear_worker_owner_values();
             self.record_error_from("worker message cleanup", cleanup);
+            if let Some(old_realm) = old_realm {
+                self.context.enter_realm(old_realm);
+            }
             return Ok(());
         }
         let result = self.eval(
@@ -5674,6 +5698,9 @@ impl JsRuntime {
         let cleanup = self.clear_worker_owner_values();
         self.record_error_from("worker message cleanup", cleanup);
         self.record_error_from("worker message", result);
+        if let Some(old_realm) = old_realm {
+            self.context.enter_realm(old_realm);
+        }
         Ok(())
     }
 
@@ -5681,8 +5708,16 @@ impl JsRuntime {
         &mut self,
         worker_id: u64,
         owner: Option<JsValue>,
+        owner_realm: Option<Realm>,
         message: String,
     ) -> JsResult<()> {
+        let owner_realm = owner_realm.or_else(|| {
+            self.host_state
+                .borrow()
+                .workers
+                .get(&worker_id)
+                .and_then(|entry| entry.borrow().runtime.host_state.borrow().worker_owner_realm.clone())
+        });
         let owner_object = owner.or_else(|| {
             self.host_state
                 .borrow()
@@ -5691,10 +5726,14 @@ impl JsRuntime {
                 .and_then(|entry| entry.borrow().owner_object.clone())
         });
         let Some(owner_object) = owner_object else { return Ok(()); };
+        let old_realm = owner_realm.map(|realm| self.context.enter_realm(realm));
         if let Err(error) = self.install_worker_owner_values(owner_object, message) {
             self.record_task_error(format!("[worker error setup] {error}"));
             let cleanup = self.clear_worker_owner_values();
             self.record_error_from("worker error cleanup", cleanup);
+            if let Some(old_realm) = old_realm {
+                self.context.enter_realm(old_realm);
+            }
             return Ok(());
         }
         let result = self.eval(
@@ -5703,6 +5742,9 @@ impl JsRuntime {
         let cleanup = self.clear_worker_owner_values();
         self.record_error_from("worker error cleanup", cleanup);
         self.record_error_from("worker error", result);
+        if let Some(old_realm) = old_realm {
+            self.context.enter_realm(old_realm);
+        }
         Ok(())
     }
 
@@ -11015,6 +11057,7 @@ fn shared_worker_bind_port_native(
             state.borrow_mut().event_loop.enqueue_worker_error(
                 connection_id,
                 Some(owner_object),
+                None,
                 message,
             );
         }
@@ -11715,6 +11758,7 @@ fn bind_worker_owner_native(
 ) -> JsResult<JsValue> {
     let id = worker_id_argument(args, context)?;
     let owner_object = args.get(1).cloned().unwrap_or_default();
+    let owner_realm = Some(context.realm().clone());
     with_host_state(|state| {
         let entry = state.borrow().workers.get(&id).cloned();
         let Some(entry) = entry else { return Ok(JsValue::undefined()); };
@@ -11728,6 +11772,7 @@ fn bind_worker_owner_native(
             let mut worker_state = worker.runtime.host_state.borrow_mut();
             worker_state.worker_owner_bound = true;
             worker_state.worker_owner_object = Some(owner_object.clone());
+            worker_state.worker_owner_realm = owner_realm.clone();
         }
         let startup_queued = std::mem::take(&mut worker.runtime.host_state.borrow_mut().worker_startup_outgoing);
         worker.outgoing.extend(startup_queued);
@@ -11736,6 +11781,7 @@ fn bind_worker_owner_native(
             state.borrow_mut().event_loop.enqueue_worker_owner_message(
                 id,
                 owner_object.clone(),
+                owner_realm.clone(),
                 data,
             );
         }
@@ -11743,7 +11789,12 @@ fn bind_worker_owner_native(
             state
                 .borrow_mut()
                 .event_loop
-                .enqueue_worker_error(id, Some(owner_object.clone()), message);
+                .enqueue_worker_error(
+                    id,
+                    Some(owner_object.clone()),
+                    owner_realm.clone(),
+                    message,
+                );
         }
         if worker.terminated {
             let mut state = state.borrow_mut();
@@ -11812,13 +11863,14 @@ fn worker_owner_post_message_native(
         .to_string(context)?
         .to_std_string_escaped();
     with_host_state(|state| {
-        let (owner, id, owner_bound, owner_object) = {
+        let (owner, id, owner_bound, owner_object, owner_realm) = {
             let state_ref = state.borrow();
             (
                 state_ref.worker_owner.clone(),
                 state_ref.worker_id,
                 state_ref.worker_owner_bound,
                 state_ref.worker_owner_object.clone(),
+                state_ref.worker_owner_realm.clone(),
             )
         };
         let Some(owner) = owner else { return Ok(JsValue::undefined()); };
@@ -11833,6 +11885,7 @@ fn worker_owner_post_message_native(
         owner.borrow_mut().event_loop.enqueue_worker_owner_message(
             id,
             owner_object,
+            owner_realm,
             data,
         );
         Ok(JsValue::undefined())
