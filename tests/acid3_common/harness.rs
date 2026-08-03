@@ -461,10 +461,12 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
 /// Evaluates `expr` and returns it coerced to a Rust `String`. Any thrown error
 /// is captured as `<<eval-error: ...>>` rather than propagated.
 fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
+    acid3_debug_log(&format!("eval start expr={expr}"));
     let wrapped = format!(
         "(function(){{ try {{ var __v = ({expr}); return (__v === null || __v === undefined) ? '' : String(__v); }} catch (e) {{ return '<<eval-error: ' + e + '>>'; }} }})()"
     );
     let result = runtime.eval(&wrapped);
+    acid3_debug_log(&format!("eval after runtime expr={expr} ok={}", result.is_ok()));
     let value = match result {
         Ok(value) => value.as_string().map(|s| s.to_std_string_escaped()),
         Err(_) => None,
@@ -477,7 +479,9 @@ fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
         let next = count.get().saturating_add(1);
         if next >= EVALS_PER_GC {
             count.set(0);
+            acid3_debug_log(&format!("eval before periodic gc expr={expr}"));
             boa_gc::force_collect();
+            acid3_debug_log(&format!("eval after periodic gc expr={expr}"));
         } else {
             count.set(next);
         }
