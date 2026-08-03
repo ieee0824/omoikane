@@ -24,12 +24,15 @@ fn default_and_feature_builds_preserve_interpreter_semantics() {
 
 #[cfg(feature = "baseline-jit")]
 mod enabled {
-    use boa_engine::jit::{
-        BaselineBlockKind, BaselineController, BaselineEntry, BaselineIr, BytecodeCodeMap,
-        CompileDecision, JitCacheKey, JitCodeCache,
-    };
-    use boa_engine::vm::BYTECODE_CONTRACT_VERSION;
+    use boa_engine::jit::{BaselineBlockKind, BaselineIr, BytecodeCodeMap};
     use boa_engine::{Context, Script, Source};
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    use boa_engine::jit::{
+        BaselineController, BaselineEntry, CompileDecision, JitCacheKey, JitCodeCache,
+    };
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    use boa_engine::vm::BYTECODE_CONTRACT_VERSION;
 
     fn lower(source: &str) -> BaselineIr {
         let mut context = Context::default();
