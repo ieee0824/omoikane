@@ -25,9 +25,11 @@ crc32fast = "1.5"
 # Array.prototype.filter callback rooting (ieee0824/boa#57), and
 # nursery-bounded generational GC (ieee0824/boa#56), and
 # defineProperty receiver/descriptor rooting (ieee0824/boa#58), and
-# inline-cache hit rooting without weak-shape upgrades (ieee0824/boa#59).
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "a92ac8c82e71d6dd58ffcee449ac075144b3d689", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "a92ac8c82e71d6dd58ffcee449ac075144b3d689" }
+# inline-cache hit rooting without weak-shape upgrades (ieee0824/boa#59), and
+# Array.prototype.join/unshift receiver rooting during allocating property
+# callbacks (ieee0824/boa#61).
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "8c97192d0d31d0f18d8ce110b934dbd3ce3506fb", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "8c97192d0d31d0f18d8ce110b934dbd3ce3506fb" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
