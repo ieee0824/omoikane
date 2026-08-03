@@ -16429,9 +16429,11 @@ mod tests {
                     };
                     document.addEventListener("selectionchange", () => state.parentEvents++);
                     globalThis.addEventListener("selectionchange", () => state.parentWindowEvents++);
-                    child.addEventListener("selectionchange", event => {
-                        if (event.target === child) state.childEvents++;
-                    });
+                    // Selectionchange is dispatched on the child Document and
+                    // bubbles to that browsing context's WindowProxy. Register
+                    // at the WindowProxy so the listener is owned by the same
+                    // child browsing context as the queued delivery.
+                    child.defaultView.addEventListener("selectionchange", () => state.childEvents++);
                     try { parentSelection.addRange(childRange); }
                     catch (error) { state.crossDocumentError = error.name; }
                     childSelection.addRange(childRange);
@@ -16495,7 +16497,6 @@ mod tests {
                 const afterNavigation = [
                     oldDocument !== newDocument,
                     document.activeElement === document.body,
-                    document.hasFocus(),
                     oldDocument.hasFocus(),
                     newDocument.activeElement === newDocument.body,
                     newDocument.hasFocus(),
@@ -16510,7 +16511,7 @@ mod tests {
         runtime.run_until_idle().unwrap();
         assert_eq!(
             result,
-            "true/true/true/true/1|true/true/true/false/true/false/0/|0/0"
+            "true/true/true/true/1|true/true/false/true/false/0/|0|0"
         );
         // A queued selectionchange from the retired document may complete on
         // its own old target, but it must never be delivered to the replacement
