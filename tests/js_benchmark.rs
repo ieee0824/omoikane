@@ -552,10 +552,10 @@ fn print_report(report: &Report) {
         );
     }
     println!(
-        "  baseline JIT: enabled={} compile={}/{} rejected={} time={}ns code={}B entries={} bailouts={} property(hit/miss/bailout)={}/{}/{}",
+        "  baseline JIT: enabled={} requests={} compiled={} rejected={} time={}ns code={}B entries={} bailouts={} property(hit/miss/bailout)={}/{}/{}",
         report.jit_diagnostics.enabled,
-        report.jit_diagnostics.successful_compilations,
         report.jit_diagnostics.compile_requests,
+        report.jit_diagnostics.successful_compilations,
         report.jit_diagnostics.compile_rejections,
         report.jit_diagnostics.total_compile_time_ns,
         report.jit_diagnostics.generated_code_bytes,
@@ -718,6 +718,33 @@ fn gate3_snapshots_preserve_matched_samples_and_native_diagnostics() {
         }
 
         let diagnostics = &snapshot["jit_diagnostics"];
+        let diagnostic_samples = snapshot["jit_diagnostic_samples"]
+            .as_array()
+            .expect("JIT diagnostic samples");
+        assert_eq!(diagnostic_samples.len(), 5, "{path}");
+        assert!(
+            diagnostic_samples
+                .iter()
+                .all(|sample| sample["enabled"] == jit_enabled)
+        );
+        for field in [
+            "compile_requests",
+            "successful_compilations",
+            "compile_rejections",
+            "total_compile_time_ns",
+            "generated_code_bytes",
+            "compiled_entries",
+            "bailouts",
+            "property_guard_hits",
+            "property_guard_misses",
+            "property_bailouts",
+        ] {
+            let sample_total = diagnostic_samples
+                .iter()
+                .map(|sample| sample[field].as_u64().expect("diagnostic counter"))
+                .sum::<u64>();
+            assert_eq!(diagnostics[field], sample_total, "{path}: {field}");
+        }
         if jit_enabled {
             assert!(
                 diagnostics["successful_compilations"].as_u64().unwrap_or(0) > 0,
