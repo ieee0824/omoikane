@@ -5,7 +5,7 @@
 //! implementation; keeping the queues separate makes source ownership
 //! explicit without changing the deterministic ordering embedders relied on.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use boa_engine::{JsValue, realm::Realm};
 use boa_gc::{Finalize, Trace, Tracer};
@@ -33,7 +33,10 @@ pub(crate) enum TaskSource {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Task {
-    Timer(TimerPayload),
+    Timer {
+        payload: TimerPayload,
+        owner_document_id: Option<usize>,
+    },
     /// A geolocation request delivered after the current script task.
     Geolocation { request_id: u64 },
     Navigation(NavigationRequest),
@@ -90,6 +93,7 @@ pub(crate) struct AnimationFrameCallback {
 struct TimerTask {
     id: u64,
     payload: TimerPayload,
+    owner_document_id: Option<usize>,
     next_run_at: u64,
     interval_ms: u64,
     repeat: bool,
@@ -156,7 +160,7 @@ unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
 
 unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
     match task {
-        Task::Timer(payload) => unsafe { trace_timer_payload(payload, tracer) },
+        Task::Timer { payload, .. } => unsafe { trace_timer_payload(payload, tracer) },
         Task::PostedMessage { port, data } => {
             unsafe { port.trace(tracer) };
             unsafe { data.trace(tracer) };
@@ -198,12 +202,52 @@ impl EventLoop {
     }
 
     pub(crate) fn enqueue_timer(&mut self, payload: TimerPayload) {
+        self.enqueue_timer_for_document(payload, None);
+    }
+
+    fn enqueue_timer_for_document(
+        &mut self,
+        payload: TimerPayload,
+        owner_document_id: Option<usize>,
+    ) {
         let source = match payload {
             TimerPayload::ResourceLoad { .. } => TaskSource::Networking,
             TimerPayload::GeolocationTimeout { .. } => TaskSource::Geolocation,
             _ => TaskSource::Timer,
         };
-        self.enqueue(source, Task::Timer(payload));
+        self.enqueue(
+            source,
+            Task::Timer {
+                payload,
+                owner_document_id,
+            },
+        );
+    }
+
+    /// Drops queued resource-load tasks owned by nodes in a destroyed browsing
+    /// context. Keeping these entries until their turn would retain task state
+    /// after an iframe detach even though the referenced nodes can no longer
+    /// participate in a document.
+    pub(crate) fn cancel_resource_loads_for_nodes(&mut self, node_ids: &HashSet<usize>) {
+        let mut cancelled_task_ids = HashSet::new();
+        for queue in self.queues.values_mut() {
+            queue.retain(|(task_id, task)| {
+                let cancelled = matches!(
+                    task,
+                    Task::Timer {
+                        payload: TimerPayload::ResourceLoad { node_id },
+                        ..
+                    }
+                        if node_ids.contains(node_id)
+                );
+                if cancelled {
+                    cancelled_task_ids.insert(*task_id);
+                }
+                !cancelled
+            });
+        }
+        self.order
+            .retain(|(task_id, _)| !cancelled_task_ids.contains(task_id));
     }
 
     pub(crate) fn enqueue_navigation(&mut self, request: NavigationRequest) {
@@ -216,17 +260,35 @@ impl EventLoop {
     /// virtual time to advance: a read that has already produced its bytes owes
     /// its events to the very next turn of the event loop, not to a delay.
     pub(crate) fn enqueue_file_reading(&mut self, payload: TimerPayload) {
-        self.enqueue(TaskSource::FileReading, Task::Timer(payload));
+        self.enqueue(
+            TaskSource::FileReading,
+            Task::Timer {
+                payload,
+                owner_document_id: None,
+            },
+        );
     }
 
     /// Queues a callback on the networking task source.
     pub(crate) fn enqueue_networking(&mut self, payload: TimerPayload) {
-        self.enqueue(TaskSource::Networking, Task::Timer(payload));
+        self.enqueue(
+            TaskSource::Networking,
+            Task::Timer {
+                payload,
+                owner_document_id: None,
+            },
+        );
     }
 
     /// Queues a callback on the DOM manipulation task source.
     pub(crate) fn enqueue_dom_manipulation(&mut self, payload: TimerPayload) {
-        self.enqueue(TaskSource::DomManipulation, Task::Timer(payload));
+        self.enqueue(
+            TaskSource::DomManipulation,
+            Task::Timer {
+                payload,
+                owner_document_id: None,
+            },
+        );
     }
 
     /// Queues a geolocation delivery on its own task source.
@@ -333,12 +395,14 @@ impl EventLoop {
         payload: TimerPayload,
         delay_ms: u64,
         repeat: bool,
+        owner_document_id: Option<usize>,
     ) -> u64 {
         let id = self.next_timer_id;
         self.next_timer_id = self.next_timer_id.saturating_add(1);
         self.timers.push(TimerTask {
             id,
             payload,
+            owner_document_id,
             next_run_at: self.now_ms.saturating_add(delay_ms),
             interval_ms: delay_ms,
             repeat,
@@ -355,7 +419,12 @@ impl EventLoop {
         let mut ready = Vec::new();
         for timer in &mut self.timers {
             if timer.next_run_at <= self.now_ms {
-                ready.push((timer.next_run_at, timer.id, timer.payload.clone()));
+                ready.push((
+                    timer.next_run_at,
+                    timer.id,
+                    timer.payload.clone(),
+                    timer.owner_document_id,
+                ));
                 if timer.repeat {
                     timer.next_run_at = self.now_ms.saturating_add(timer.interval_ms);
                 }
@@ -364,8 +433,8 @@ impl EventLoop {
         ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         self.timers
             .retain(|timer| timer.repeat || timer.next_run_at > self.now_ms);
-        for (_, _, payload) in ready {
-            self.enqueue_timer(payload);
+        for (_, _, payload, owner_document_id) in ready {
+            self.enqueue_timer_for_document(payload, owner_document_id);
         }
     }
 
@@ -378,7 +447,11 @@ impl EventLoop {
             || self
                 .queues
                 .values()
-                .any(|queue| queue.iter().any(|(_, task)| matches!(task, Task::Timer(_))))
+                .any(|queue| {
+                    queue
+                        .iter()
+                        .any(|(_, task)| matches!(task, Task::Timer { .. }))
+                })
     }
 
     pub(crate) fn has_pending_geolocation_tasks(&self) -> bool {
@@ -387,8 +460,23 @@ impl EventLoop {
             .is_some_and(|queue| queue.iter().any(|(_, task)| matches!(task, Task::Geolocation { .. })))
     }
 
-    pub(crate) fn schedule_animation_frame(&mut self, callback: JsValue) -> u64 {
-        self.schedule_animation_frame_with_realm(callback, None, None)
+    pub(crate) fn schedule_animation_frame(
+        &mut self,
+        callback: JsValue,
+        owner_document_id: Option<usize>,
+    ) -> u64 {
+        self.next_animation_frame_id = self.next_animation_frame_id.saturating_add(1);
+        let id = self.next_animation_frame_id;
+        self.animation_frame_order.push(id);
+        self.animation_frame_callbacks.insert(
+            id,
+            AnimationFrameCallback {
+                callback,
+                realm: None,
+                document_id: owner_document_id,
+            },
+        );
+        id
     }
 
     pub(crate) fn schedule_animation_frame_with_realm(
@@ -426,6 +514,45 @@ impl EventLoop {
         self.animation_frame_callbacks.remove(&id)
     }
 
+    /// Cancels asynchronous callbacks whose script owner has been destroyed.
+    /// This covers callbacks still waiting on virtual time as well as timer
+    /// tasks already promoted into a task-source queue.
+    pub(crate) fn cancel_tasks_for_document(&mut self, document_id: usize) {
+        self.timers
+            .retain(|timer| timer.owner_document_id != Some(document_id));
+
+        let mut cancelled_task_ids = HashSet::new();
+        for queue in self.queues.values_mut() {
+            queue.retain(|(task_id, task)| {
+                let cancelled = matches!(
+                    task,
+                    Task::Timer {
+                        owner_document_id: Some(owner_document_id),
+                        ..
+                    } if *owner_document_id == document_id
+                );
+                if cancelled {
+                    cancelled_task_ids.insert(*task_id);
+                }
+                !cancelled
+            });
+        }
+        self.order
+            .retain(|(task_id, _)| !cancelled_task_ids.contains(task_id));
+
+        let cancelled_frame_ids: HashSet<_> = self
+            .animation_frame_callbacks
+            .iter()
+            .filter_map(|(id, callback)| {
+                (callback.document_id == Some(document_id)).then_some(*id)
+            })
+            .collect();
+        self.animation_frame_callbacks
+            .retain(|id, _| !cancelled_frame_ids.contains(id));
+        self.animation_frame_order
+            .retain(|id| !cancelled_frame_ids.contains(id));
+    }
+
     pub(crate) fn has_pending_animation_frames(&self) -> bool {
         !self.animation_frame_order.is_empty()
     }
@@ -433,7 +560,6 @@ impl EventLoop {
     pub(crate) fn rendering_time_ms(&self) -> f64 {
         self.now_ms as f64
     }
-
 }
 
 #[cfg(test)]
@@ -451,7 +577,7 @@ mod tests {
         ));
         assert!(matches!(
             event_loop.pop_task(),
-            Some((TaskSource::Timer, Task::Timer(_)))
+            Some((TaskSource::Timer, Task::Timer { .. }))
         ));
     }
 
@@ -465,7 +591,10 @@ mod tests {
         let sources: Vec<_> = std::iter::from_fn(|| event_loop.pop_task())
             .map(|(source, task)| {
                 let label = match task {
-                    Task::Timer(TimerPayload::Source(source)) => source,
+                    Task::Timer {
+                        payload: TimerPayload::Source(source),
+                        ..
+                    } => source,
                     other => panic!("unexpected task: {other:?}"),
                 };
                 (source, label)
@@ -493,13 +622,93 @@ mod tests {
     }
 
     #[test]
+    fn destroyed_context_cancels_only_its_resource_load_tasks() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_timer(TimerPayload::ResourceLoad { node_id: 4 });
+        event_loop.enqueue_timer(TimerPayload::Source("timer".into()));
+        event_loop.enqueue_timer(TimerPayload::ResourceLoad { node_id: 9 });
+
+        event_loop.cancel_resource_loads_for_nodes(&HashSet::from([4]));
+
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((
+                TaskSource::Timer,
+                Task::Timer {
+                    payload: TimerPayload::Source(source),
+                    ..
+                }
+            ))
+                if source == "timer"
+        ));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((
+                TaskSource::Networking,
+                Task::Timer {
+                    payload: TimerPayload::ResourceLoad { node_id: 9 },
+                    ..
+                }
+            ))
+        ));
+        assert!(event_loop.pop_task().is_none());
+    }
+
+    #[test]
+    fn destroyed_document_cancels_scheduled_and_queued_callbacks() {
+        let mut event_loop = EventLoop::default();
+        event_loop.schedule_timer(
+            TimerPayload::Source("queued-child".into()),
+            0,
+            false,
+            Some(7),
+        );
+        event_loop.schedule_timer(
+            TimerPayload::Source("queued-main".into()),
+            0,
+            false,
+            Some(1),
+        );
+        event_loop.advance(0);
+        event_loop.schedule_timer(
+            TimerPayload::Source("scheduled-child".into()),
+            10,
+            false,
+            Some(7),
+        );
+        event_loop.schedule_animation_frame(JsValue::undefined(), Some(7));
+
+        event_loop.cancel_tasks_for_document(7);
+        event_loop.advance(10);
+
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((
+                TaskSource::Timer,
+                Task::Timer {
+                    payload: TimerPayload::Source(source),
+                    owner_document_id: Some(1),
+                }
+            )) if source == "queued-main"
+        ));
+        assert!(event_loop.pop_task().is_none());
+        assert!(!event_loop.has_pending_animation_frames());
+    }
+
+    #[test]
     fn networking_callbacks_keep_global_task_enqueue_order() {
         let mut event_loop = EventLoop::default();
         event_loop.enqueue_networking(TimerPayload::Source("open".into()));
         event_loop.enqueue_timer(TimerPayload::Source("timer".into()));
         event_loop.enqueue_networking(TimerPayload::Source("message".into()));
         let labels: Vec<_> = std::iter::from_fn(|| event_loop.pop_task())
-            .map(|(_, task)| match task { Task::Timer(TimerPayload::Source(value)) => value, _ => panic!("unexpected task") })
+            .map(|(_, task)| match task {
+                Task::Timer {
+                    payload: TimerPayload::Source(value),
+                    ..
+                } => value,
+                _ => panic!("unexpected task"),
+            })
             .collect();
         assert_eq!(labels, ["open", "timer", "message"]);
     }
@@ -541,7 +750,7 @@ mod tests {
 
         assert!(matches!(
             event_loop.pop_task(),
-            Some((TaskSource::Timer, Task::Timer(_)))
+            Some((TaskSource::Timer, Task::Timer { .. }))
         ));
         assert!(matches!(
             event_loop.pop_task(),
