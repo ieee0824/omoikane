@@ -33,9 +33,10 @@ crc32fast = "1.5"
 # bounded polymorphic inline-cache shapes (ieee0824/boa#60), and
 # Array.prototype.join/unshift receiver rooting during allocating property
 # callbacks (ieee0824/boa#61), and the verified bytecode/JIT metadata contract
-# (ieee0824/boa#62). The merge commit contains all four changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "51819522e7b8cb0e757e7dd18dc509ee89668bd8", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "51819522e7b8cb0e757e7dd18dc509ee89668bd8" }
+# (ieee0824/boa#62), and the allocation-free interpreter frame/fallback contract
+# (ieee0824/boa#63). The merge commit contains all listed fork changes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "3128ab90c3b7967323345dd467d603f9f1e46a97", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "3128ab90c3b7967323345dd467d603f9f1e46a97" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
