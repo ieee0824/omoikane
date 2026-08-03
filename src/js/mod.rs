@@ -2737,6 +2737,33 @@ impl Default for SandboxConfig {
     }
 }
 
+/// Omoikane-owned snapshot of baseline-JIT counters for performance tooling.
+#[cfg(feature = "baseline-jit")]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BaselineJitDiagnostics {
+    /// Hot loops submitted to the emitter.
+    pub compile_requests: u64,
+    /// Requests that installed generated code.
+    pub successful_compilations: u64,
+    /// Requests rejected as unsupported or invalid.
+    pub compile_rejections: u64,
+    /// Nanoseconds spent verifying and emitting compile requests.
+    pub total_compile_time_ns: u64,
+    /// Executable bytes emitted by successful requests.
+    pub generated_code_bytes: u64,
+    /// Calls that entered generated machine code.
+    pub compiled_entries: u64,
+    /// Calls that resumed the interpreter.
+    pub bailouts: u64,
+    /// Native entries whose property guards matched.
+    pub property_guard_hits: u64,
+    /// Native entries rejected by a property guard.
+    pub property_guard_misses: u64,
+    /// Property-enabled entries that resumed the interpreter.
+    pub property_bailouts: u64,
+}
+
 pub struct JsRuntime {
     // The provider must be dropped before `host_state` so it never traces a
     // freed host allocation during teardown.
@@ -3841,8 +3868,20 @@ impl JsRuntime {
     /// Returns runtime-wide baseline-JIT counters for performance-gate tooling.
     #[cfg(feature = "baseline-jit")]
     #[doc(hidden)]
-    pub fn baseline_jit_diagnostics(&self) -> boa_engine::jit::ArithmeticJitDiagnostics {
-        self.context.arithmetic_jit_diagnostics()
+    pub fn baseline_jit_diagnostics(&self) -> BaselineJitDiagnostics {
+        let diagnostics = self.context.arithmetic_jit_diagnostics();
+        BaselineJitDiagnostics {
+            compile_requests: diagnostics.compile_requests,
+            successful_compilations: diagnostics.successful_compilations,
+            compile_rejections: diagnostics.compile_rejections,
+            total_compile_time_ns: diagnostics.total_compile_time_ns,
+            generated_code_bytes: diagnostics.generated_code_bytes,
+            compiled_entries: diagnostics.compiled_entries,
+            bailouts: diagnostics.bailouts,
+            property_guard_hits: diagnostics.property_guard_hits,
+            property_guard_misses: diagnostics.property_guard_misses,
+            property_bailouts: diagnostics.property_bailouts,
+        }
     }
 
     /// Evaluates JavaScript source code.
