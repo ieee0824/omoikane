@@ -340,14 +340,18 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             let delay_ms = 10u64;
             let max_ticks = 6000usize;
             let mut last_index = read_int(&mut runtime, "index").unwrap_or(-1);
+            acid3_debug_log(&format!("mode={mode:?} initial index={last_index}"));
             let mut stalled = 0usize;
             for _ in 0..max_ticks {
                 iterations += 1;
+                acid3_debug_log(&format!("mode={mode:?} tick start iteration={iterations} index={last_index}"));
                 if let Err(e) = runtime.tick(delay_ms) {
                     drive_errors.push(format!("tick: {e}"));
                     break;
                 }
+                acid3_debug_log(&format!("mode={mode:?} tick after iteration={iterations}"));
                 let idx = read_int(&mut runtime, "index").unwrap_or(last_index);
+                acid3_debug_log(&format!("mode={mode:?} tick index={idx} iteration={iterations}"));
                 let total = read_int(&mut runtime, "tests.length");
                 if let Some(t) = total {
                     if idx >= t {
