@@ -228,7 +228,7 @@ pub(crate) fn paint_text_with_registry(
                     }
 
                     // Draw text decorations after text
-                    if vertical_mode.is_some() {
+                    if let Some((vertical_rl, _)) = vertical_mode {
                         paint_text_decoration_vertical(
                             canvas,
                             fragment.rect,
@@ -236,6 +236,7 @@ pub(crate) fn paint_text_with_registry(
                             decoration_line,
                             decoration_color,
                             clip,
+                            vertical_rl,
                         );
                     } else {
                         paint_text_decoration(
@@ -1042,6 +1043,7 @@ fn paint_text_decoration_vertical(
     decoration: TextDecorationLines,
     color: Color,
     clip: Option<Rect>,
+    vertical_rl: bool,
 ) {
     if decoration.is_none() {
         return;
@@ -1060,10 +1062,24 @@ fn paint_text_decoration_vertical(
         );
     };
     if decoration.underline {
-        draw(canvas, rect.x + rect.width - thickness);
+        draw(
+            canvas,
+            if vertical_rl {
+                rect.x + rect.width - thickness
+            } else {
+                rect.x
+            },
+        );
     }
     if decoration.overline {
-        draw(canvas, rect.x);
+        draw(
+            canvas,
+            if vertical_rl {
+                rect.x
+            } else {
+                rect.x + rect.width - thickness
+            },
+        );
     }
     if decoration.line_through {
         draw(canvas, rect.x + ((rect.width - thickness) * 0.5).max(0.0));
