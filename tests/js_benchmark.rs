@@ -731,6 +731,7 @@ fn gate3_snapshots_preserve_matched_samples_and_native_diagnostics() {
                 diagnostics["property_guard_hits"].as_u64().unwrap_or(0) > 0,
                 "{path}"
             );
+            assert_eq!(diagnostics["bailouts"], 0, "{path}");
             assert_eq!(diagnostics["property_guard_misses"], 0, "{path}");
             assert_eq!(diagnostics["property_bailouts"], 0, "{path}");
         } else {
