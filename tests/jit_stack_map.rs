@@ -41,6 +41,7 @@ fn nested_interpreter_and_jit_frames_resolve_exact_live_values() {
                         ValueLocation::MachineRegister(2),
                         ValueLocation::StackSlot(-8),
                         ValueLocation::FrameRegister(0),
+                        // Intentional duplicate: stack maps canonicalize live locations.
                         ValueLocation::FrameRegister(0),
                     ],
                 ),
