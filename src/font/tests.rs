@@ -71,9 +71,9 @@ fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
         return;
     };
 
-    // Pick a multi-scalar cluster using the same shaping-based support check as
-    // production. Some fonts synthesize a combining mark even when a cmap-only
-    // `has_glyph` probe reports it missing, which made this test host-dependent.
+    // Pick a multi-scalar cluster using production's shaping-based support
+    // check. A cmap-only mark probe does not model synthesized or attached
+    // marks reliably and made the old fixed expectation host-dependent.
     let fallback_cluster = ['α', 'β', 'Ж', 'й', 'क', 'ب', 'ש']
         .into_iter()
         .flat_map(|base| ['\u{301}', '\u{308}', '\u{327}'].map(|mark| format!("{base}{mark}")))
