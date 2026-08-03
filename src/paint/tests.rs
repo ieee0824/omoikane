@@ -7042,6 +7042,50 @@ fn placeholder_letter_spacing_shifts_pixels_right() {
     );
 }
 
+#[test]
+fn vertical_placeholder_respects_inline_direction_and_column_geometry() {
+    let color = Color::rgb(0, 0, 0);
+    let rect = Rect {
+        x: 20.0,
+        y: 0.0,
+        width: 20.0,
+        height: 60.0,
+    };
+    let mut ltr = Canvas::new(60, 70);
+    paint_text_placeholder_with_mode(
+        &mut ltr,
+        rect,
+        "AB",
+        16.0,
+        color,
+        None,
+        0.0,
+        Some((true, false)),
+    );
+    let first_ltr = (0..70)
+        .find(|&y| (0..60).any(|x| ltr.pixel(x, y).is_some_and(|p| p.a > 0)))
+        .expect("vertical LTR text should paint");
+    let mut rtl = Canvas::new(60, 70);
+    paint_text_placeholder_with_mode(
+        &mut rtl,
+        rect,
+        "AB",
+        16.0,
+        color,
+        None,
+        0.0,
+        Some((true, true)),
+    );
+    let first_rtl = (0..70)
+        .find(|&y| (0..60).any(|x| rtl.pixel(x, y).is_some_and(|p| p.a > 0)))
+        .expect("vertical RTL text should paint");
+    assert!(first_ltr < first_rtl, "RTL inline paint should start from the opposite edge");
+    assert!(
+        (0..70).any(|y| y > first_ltr + 10 && (0..60).any(|x| ltr.pixel(x, y).is_some_and(|p| p.a > 0))),
+        "vertical text should advance along the physical y axis"
+    );
+}
+
 /// Decimal marker should NOT look like a single bullet square:
 /// it should spread pixels across a wider x range than a bullet marker would.
 #[test]

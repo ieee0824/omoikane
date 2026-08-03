@@ -65,6 +65,96 @@ pub(super) fn layout_inline_nodes(
     )
 }
 
+/// Lays out an inline formatting context whose inline axis is vertical.
+///
+/// The text shaping and line-breaking code is intentionally shared with the
+/// horizontal path: it already measures glyph advances, applies white-space
+/// and word-breaking rules, and produces deterministic DOM-order fragments.
+/// We run that algorithm in a local horizontal coordinate system (where the
+/// available width is the physical inline length), then transpose each line
+/// into a vertical column.  This keeps wrapping decisions identical while
+/// making column stacking and fragment geometry explicit for the block layout
+/// and paint stages.
+pub(super) fn layout_vertical_inline_nodes(
+    nodes: &[NodeHandle],
+    resolver: &mut StyleResolver,
+    start_x: f32,
+    start_y: f32,
+    available_width: f32,
+    available_height: f32,
+    align: TextAlign,
+    strut_line_height: f32,
+    vertical_rl: bool,
+    direction_rtl: bool,
+) -> Vec<LineBox> {
+    let mut segments = Vec::new();
+    for node in nodes {
+        collect_inline_segments(node, resolver, &mut segments);
+    }
+    coalesce_adjacent_text_segments(&mut segments);
+
+    // Horizontal layout's x axis is the vertical inline axis in this local
+    // coordinate system.  A local origin of zero makes the transpose below
+    // independent of the containing block's absolute position.
+    let horizontal_lines = layout_inline_segments(
+        &segments,
+        0.0,
+        0.0,
+        available_height.max(0.0),
+        align,
+        strut_line_height,
+    );
+
+    horizontal_lines
+        .into_iter()
+        .map(|line| {
+            // Horizontal line stacking (local y) becomes vertical block-axis
+            // column stacking.  A vertical-rl block starts at the right edge;
+            // vertical-lr starts at the left edge.
+            let column_width = line.rect.height.max(0.0);
+            let column_offset = line.rect.y;
+            let column_x = if vertical_rl {
+                start_x + (available_width - column_offset - column_width).max(0.0)
+            } else {
+                start_x + column_offset
+            };
+
+            let mut fragments = line.fragments;
+            for fragment in &mut fragments {
+                // The local fragment's y offset is vertical-align within its
+                // line.  Its x offset is the inline-axis position and maps to
+                // physical y.
+                let inline_offset = fragment.rect.x - line.rect.x;
+                let cross_offset = fragment.rect.y - line.rect.y;
+                fragment.rect = Rect {
+                    x: column_x + cross_offset,
+                    y: if direction_rtl {
+                        start_y + (line.rect.width - inline_offset - fragment.rect.width).max(0.0)
+                    } else {
+                        start_y + inline_offset
+                    },
+                    width: fragment.rect.height,
+                    height: fragment.rect.width,
+                };
+            }
+
+            LineBox {
+                rect: Rect {
+                    x: column_x,
+                    y: start_y + line.rect.x,
+                    width: column_width,
+                    height: line.rect.width.max(0.0),
+                },
+                // Baselines are currently consumed only by horizontal paint;
+                // retain the inline-axis baseline in the transposed space so
+                // callers inspecting line geometry still get a stable value.
+                baseline: start_y + line.baseline,
+                fragments,
+            }
+        })
+        .collect()
+}
+
 /// Adjacent text nodes with identical formatting form one continuous inline
 /// text run. Comments and DOM node boundaries do not introduce a soft wrap
 /// opportunity (for example, `word<!-- -->.` must stay one word).
