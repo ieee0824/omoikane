@@ -223,6 +223,148 @@ fn vertical_rtl_mixed_inline_fragments_keep_dom_nodes_in_reverse_inline_geometry
 }
 
 #[test]
+fn bidi_line_reorders_adjacent_rtl_fragments_without_changing_dom_order() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    let leading = NodeHandle::element("span");
+    let first_rtl = NodeHandle::element("span");
+    let second_rtl = NodeHandle::element("span");
+    let trailing = NodeHandle::element("span");
+    leading.set_attribute("class", "leading");
+    first_rtl.set_attribute("class", "first");
+    second_rtl.set_attribute("class", "second");
+    trailing.set_attribute("class", "trailing");
+    leading.append_child(NodeHandle::text("A "));
+    first_rtl.append_child(NodeHandle::text("אב"));
+    second_rtl.append_child(NodeHandle::text("גד"));
+    trailing.append_child(NodeHandle::text(" Z"));
+    paragraph.append_child(leading);
+    paragraph.append_child(first_rtl);
+    paragraph.append_child(second_rtl);
+    paragraph.append_child(trailing);
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { direction: ltr; width: 300px; font-size: 16px; } \
+             .leading { color: black; } .first { color: red; } \
+             .second { color: blue; } .trailing { color: green; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+    )
+    .unwrap();
+    let line = &layout.children[0].lines[0];
+    let texts: Vec<&str> = line.fragments.iter().filter_map(InlineFragment::text).collect();
+    assert_eq!(texts, vec!["A", " ", "אב", "גד", " ", "Z"]);
+
+    let leading = &line.fragments[0];
+    let first_rtl = &line.fragments[2];
+    let second_rtl = &line.fragments[3];
+    let trailing = &line.fragments[5];
+    assert!(leading.rect.x < second_rtl.rect.x);
+    assert!(second_rtl.rect.x < first_rtl.rect.x);
+    assert!(first_rtl.rect.x < trailing.rect.x);
+    assert_eq!(first_rtl.style.resolved_bidi_level.map(|level| level % 2), Some(1));
+    assert_eq!(second_rtl.style.resolved_bidi_level.map(|level| level % 2), Some(1));
+}
+
+#[test]
+fn vertical_bidi_line_uses_the_same_cross_fragment_run_order() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let first = NodeHandle::element("span");
+    let second = NodeHandle::element("span");
+    let first_text = NodeHandle::text("אב");
+    let second_text = NodeHandle::text("גד");
+    first.set_attribute("style", "color: red");
+    second.set_attribute("style", "color: blue");
+    first.append_child(first_text.clone());
+    second.append_child(second_text.clone());
+    body.append_child(first);
+    body.append_child(second);
+    document.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { writing-mode: vertical-lr; direction: ltr; width: 80px; height: 120px; } \
+             span { font-size: 16px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 80.0, height: 120.0 },
+    )
+    .unwrap();
+    let line = &layout.lines[0];
+    let first_fragment = line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.node == first_text)
+        .unwrap();
+    let second_fragment = line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.node == second_text)
+        .unwrap();
+    assert!(second_fragment.rect.y < first_fragment.rect.y);
+    assert_eq!(line.fragments[0].node, first_text);
+    assert_eq!(line.fragments[1].node, second_text);
+}
+
+#[test]
+fn adjacent_bidi_isolates_do_not_merge_into_one_reversed_run() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    let first = NodeHandle::element("span");
+    let second = NodeHandle::element("span");
+    first.set_attribute("class", "first");
+    second.set_attribute("class", "second");
+    first.append_child(NodeHandle::text("אב"));
+    second.append_child(NodeHandle::text("גד"));
+    paragraph.append_child(first);
+    paragraph.append_child(second);
+    body.append_child(paragraph.clone());
+    document.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { direction: ltr; width: 200px; } \
+             span { direction: rtl; unicode-bidi: isolate; } \
+             .first { color: red; } .second { color: blue; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+    let line = &layout.children[0].lines[0];
+    assert_eq!(line.fragments[0].text(), Some("אב"));
+    assert_eq!(line.fragments[1].text(), Some("גד"));
+    assert!(line.fragments[0].rect.x < line.fragments[1].rect.x);
+    assert_eq!(line.fragments[0].style.resolved_bidi_level.map(|level| level % 2), Some(1));
+    assert_eq!(line.fragments[1].style.resolved_bidi_level.map(|level| level % 2), Some(1));
+}
+
+#[test]
 fn auto_width_fills_remaining_space() {
     let (_document, _html, body, _card) = sample_tree();
     let mut resolver = StyleResolver::new();
@@ -1220,12 +1362,11 @@ fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
         .find(|fragment| fragment.text() == Some("B"))
         .unwrap();
 
-    // DOM order remains A then B, while RTL inline-start places A at the
-    // physical right edge.  Logical `end` reverses only the line alignment;
-    // the run order remains RTL in both cases.
-    assert!(start_a.rect.x > start_b.rect.x);
+    // DOM order remains A then B. UAX#9 keeps the Latin run itself LTR even
+    // inside an RTL paragraph; logical start/end only change line alignment.
+    assert!(start_a.rect.x < start_b.rect.x);
     assert!(start_line.rect.x > end_line.rect.x);
-    assert!(end_a.rect.x > end_b.rect.x);
+    assert!(end_a.rect.x < end_b.rect.x);
 }
 
 #[test]
