@@ -301,8 +301,14 @@ fn measurement_run_count() -> usize {
 }
 
 fn load_baseline() -> Baseline {
-    serde_json::from_slice(&fs::read(BASELINE_PATH).expect("read benchmark baseline"))
-        .expect("parse benchmark baseline")
+    serde_json::from_slice(
+        &fs::read(manifest_path(BASELINE_PATH)).expect("read benchmark baseline"),
+    )
+    .expect("parse benchmark baseline")
+}
+
+fn manifest_path(path: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
 /// Parses the `name|iterations|elapsed_ms|ns_per_op` lines the benchmark emits.
@@ -332,7 +338,7 @@ struct BenchmarkRun {
 }
 
 fn run_benchmarks() -> BenchmarkRun {
-    let source = fs::read_to_string(SHAPES_PATH).expect("read benchmark shapes");
+    let source = fs::read_to_string(manifest_path(SHAPES_PATH)).expect("read benchmark shapes");
     // The benchmark intentionally executes tens of millions of loop
     // iterations across its four passes. Keep the production default strict,
     // but give this measurement harness an explicit budget large enough for
@@ -667,7 +673,7 @@ fn baseline_shapes_are_unique_and_well_formed() {
 #[test]
 fn gate2_snapshot_preserves_five_finite_samples_for_every_shape() {
     let snapshot: serde_json::Value = serde_json::from_slice(
-        &fs::read(GATE2_SNAPSHOT_PATH).expect("read Gate 2 performance snapshot"),
+        &fs::read(manifest_path(GATE2_SNAPSHOT_PATH)).expect("read Gate 2 performance snapshot"),
     )
     .expect("parse Gate 2 performance snapshot");
     assert_eq!(snapshot["measurement_runs"], 5);
@@ -698,7 +704,7 @@ fn gate3_snapshots_preserve_matched_samples_and_native_diagnostics() {
         .collect::<HashSet<_>>();
     for &(path, jit_enabled, target_os) in GATE3_SNAPSHOTS {
         let snapshot: serde_json::Value = serde_json::from_slice(
-            &fs::read(path).unwrap_or_else(|error| panic!("read {path}: {error}")),
+            &fs::read(manifest_path(path)).unwrap_or_else(|error| panic!("read {path}: {error}")),
         )
         .unwrap_or_else(|error| panic!("parse {path}: {error}"));
         assert_eq!(snapshot["measurement_runs"], 5, "{path}");
