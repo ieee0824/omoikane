@@ -29,10 +29,12 @@ crc32fast = "1.5"
 # Array.prototype.filter callback rooting (ieee0824/boa#57), and
 # nursery-bounded generational GC (ieee0824/boa#56), and
 # defineProperty receiver/descriptor rooting (ieee0824/boa#58), and
-# monomorphic and bounded polymorphic inline-cache hit validation
-# (ieee0824/boa#59, ieee0824/boa#60).
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "f3d64b496b01b8e50fff98e97007124cbe139f78", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "f3d64b496b01b8e50fff98e97007124cbe139f78" }
+# inline-cache hit rooting without weak-shape upgrades (ieee0824/boa#59),
+# bounded polymorphic inline-cache shapes (ieee0824/boa#60), and
+# Array.prototype.join/unshift receiver rooting during allocating property
+# callbacks (ieee0824/boa#61). The merge commit contains all three fixes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "c8a13822051425151ea53e6edf9d5814e6b0542f", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "c8a13822051425151ea53e6edf9d5814e6b0542f" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
