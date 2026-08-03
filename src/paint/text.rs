@@ -1040,6 +1040,7 @@ pub(crate) fn paint_shaped_horizontal_text(
 
     let baseline_y = rect.y + layout_ascent;
     let mut cursor_x = rect.x;
+    let spacing_boundaries = grapheme_spacing_boundaries(text);
     let mut applied_spacing = 0usize;
     for (run_index, run) in runs.iter().enumerate() {
         let font = fonts[run.font_index];
@@ -1065,7 +1066,9 @@ pub(crate) fn paint_shaped_horizontal_text(
                 .get(glyph_index + 1)
                 .or_else(|| runs.get(run_index + 1).and_then(|next| next.glyphs.first()))
                 .map(|glyph| glyph.cluster);
-            if next_cluster.is_some_and(|cluster| cluster != shaped.cluster) {
+            if applied_spacing < spacing_boundaries
+                && next_cluster.is_some_and(|cluster| cluster != shaped.cluster)
+            {
                 cursor_x += letter_spacing;
                 applied_spacing += 1;
             }
@@ -1074,8 +1077,7 @@ pub(crate) fn paint_shaped_horizontal_text(
     // A ligature may absorb several source grapheme boundaries into one
     // shaped glyph/cluster. Keep the painted advance aligned with layout even
     // when no glyph boundary exists at which to apply that spacing.
-    cursor_x += letter_spacing
-        * grapheme_spacing_boundaries(text).saturating_sub(applied_spacing) as f32;
+    cursor_x += letter_spacing * (spacing_boundaries - applied_spacing) as f32;
     Some(cursor_x - rect.x)
 }
 
