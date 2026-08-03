@@ -4,19 +4,22 @@
 //! W^X publication, entry ABI, cache lifetime, and runtime separation needed by
 //! later lowering work.
 
-#![cfg(all(
-    feature = "baseline-jit",
-    target_arch = "x86_64",
-    any(target_os = "linux", target_os = "macos")
-))]
+#![cfg(feature = "baseline-jit")]
 
-use boa_engine::jit::{CodePermission, JIT_ABI, JitCacheKey, JitCodeCache, JitError};
+use boa_engine::jit::{JitCacheKey, JitCodeCache, JitError};
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+use boa_engine::jit::{CodePermission, JIT_ABI};
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+const FIXED_RETURN_STUB_LEN: usize = 11;
 
 fn key(code_id: u64, version: u32) -> JitCacheKey {
     JitCacheKey { code_id, version }
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 fn fixed_stub_uses_the_frozen_abi_and_rx_mapping() {
     assert_eq!(JIT_ABI, "System V AMD64: extern C fn() -> u64");
     let mut cache = JitCodeCache::new();
@@ -30,10 +33,14 @@ fn fixed_stub_uses_the_frozen_abi_and_rx_mapping() {
     );
     let (permission, mapped_len) = cache.diagnostics(handle).expect("live diagnostics");
     assert_eq!(permission, CodePermission::ReadExecute);
-    assert!(mapped_len >= 11);
+    assert!(
+        mapped_len >= FIXED_RETURN_STUB_LEN,
+        "published mapping has {mapped_len} bytes, expected at least {FIXED_RETURN_STUB_LEN}"
+    );
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 fn replacement_and_invalidation_cannot_reuse_stale_code() {
     let mut cache = JitCodeCache::new();
     let old = cache
@@ -56,6 +63,7 @@ fn replacement_and_invalidation_cannot_reuse_stale_code() {
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 fn executable_code_is_runtime_local() {
     let mut first_runtime = JitCodeCache::new();
     let mut second_runtime = JitCodeCache::new();
@@ -75,5 +83,15 @@ fn executable_code_is_runtime_local() {
     assert!(matches!(
         second_runtime.call_fixed_return(first),
         Err(JitError::StaleCodeHandle)
+    ));
+}
+
+#[test]
+#[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+fn unsupported_target_fails_loudly_instead_of_running_zero_tests() {
+    let mut cache = JitCodeCache::new();
+    assert!(matches!(
+        cache.compile_fixed_return(key(4, 1), 0),
+        Err(JitError::UnsupportedPlatform)
     ));
 }
