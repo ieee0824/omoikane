@@ -449,6 +449,21 @@
     return id === undefined ? undefined : __omoikane_node_type(id);
   }
 
+  // A queued callback may retain a wrapper after its browsing context has
+  // navigated and the native node registry has retired that generation. Keep
+  // event-path construction inert for such a wrapper instead of asking the
+  // native node accessors to resolve an id that no longer exists.
+  function isLiveNode(node) {
+    const id = internalNodeId(node);
+    if (id === undefined) return false;
+    try {
+      nativeNodeType(id);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function internalNodeLocalName(node) {
     const localName = getWrapperLocalName(wrapperLocalNames, node);
     if (localName !== undefined) return localName;
@@ -1139,7 +1154,7 @@
   }
 
   function eventParent(node, event, originalRoot) {
-    if (!(node instanceof Node)) return null;
+    if (!(node instanceof Node) || !isLiveNode(node)) return null;
     const assignedSlotId = internalAssignedSlot(node.__id);
     if (assignedSlotId !== null && assignedSlotId !== undefined) {
       return wrapNode(assignedSlotId);
@@ -1154,6 +1169,7 @@
   }
 
   function buildEventPath(target, event) {
+    if (target instanceof Node && !isLiveNode(target)) return [];
     const path = [];
     const originalRoot = target instanceof Node ? nodeRoot(target) : null;
     let current = target;
