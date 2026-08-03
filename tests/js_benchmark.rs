@@ -15,6 +15,8 @@
 //! same rule as `render_benchmark_fixture.rs`: the test checks structural invariants
 //! and the numbers are printed for a human (or archived via
 //! `OMOIKANE_JS_BENCH_REPORT`).
+//! The JSON report also records target OS/architecture, profile, and pass count
+//! so a result from another runner is not mistaken for a local measurement.
 //!
 //! One timing *is* asserted, and only because it is not a wall-clock number:
 //! `appending_cost_does_not_grow_with_the_string_being_built` compares the cost per
@@ -161,6 +163,8 @@ struct Report {
     baseline_profile: String,
     baseline_passes: u32,
     reference_engine: String,
+    target_arch: &'static str,
+    target_os: &'static str,
     measured_passes: u32,
     measured_profile: &'static str,
     total: usize,
@@ -170,7 +174,11 @@ struct Report {
 }
 
 fn measured_profile() -> &'static str {
-    if cfg!(debug_assertions) { "dev" } else { "release" }
+    if cfg!(debug_assertions) {
+        "dev"
+    } else {
+        "release"
+    }
 }
 
 fn load_baseline() -> Baseline {
@@ -297,6 +305,8 @@ fn build_report(baseline: &Baseline, run: &BenchmarkRun) -> Report {
         baseline_profile: baseline.profile.clone(),
         baseline_passes: baseline.passes,
         reference_engine: baseline.reference_engine.clone(),
+        target_arch: std::env::consts::ARCH,
+        target_os: std::env::consts::OS,
         measured_passes: run.passes,
         measured_profile: measured_profile(),
         total: shapes.len(),
@@ -308,10 +318,12 @@ fn build_report(baseline: &Baseline, run: &BenchmarkRun) -> Report {
 
 fn print_report(report: &Report) {
     println!(
-        "JS benchmark: shapes={} profile={} passes={} (baseline v{} recorded under {}; reference: {})",
+        "JS benchmark: shapes={} profile={} passes={} target={}-{} (baseline v{} recorded under {}; reference: {})",
         report.total,
         report.measured_profile,
         report.measured_passes,
+        report.target_os,
+        report.target_arch,
         report.baseline_version,
         report.baseline_profile,
         report.reference_engine
@@ -377,7 +389,11 @@ fn baseline_shapes_are_unique_and_well_formed() {
             "invalid shape id: {}",
             shape.id
         );
-        assert!(ids.insert(shape.id.clone()), "duplicate shape id: {}", shape.id);
+        assert!(
+            ids.insert(shape.id.clone()),
+            "duplicate shape id: {}",
+            shape.id
+        );
         assert!(!shape.description.trim().is_empty());
         assert!(shape.iterations > 0);
         assert!(shape.baseline_ns_per_op > 0.0);
@@ -455,7 +471,11 @@ fn report_classifies_drift_against_the_baseline() {
     assert_eq!(report.improvements, ["faster"]);
     assert_eq!(report.regressions, ["slower"]);
     assert_eq!(
-        report.shapes.iter().map(|shape| shape.drift).collect::<Vec<_>>(),
+        report
+            .shapes
+            .iter()
+            .map(|shape| shape.drift)
+            .collect::<Vec<_>>(),
         [Drift::Improved, Drift::Regressed, Drift::Unchanged]
     );
     // A shape 7x its own baseline is still only 1.4x SpiderMonkey's interpreter.
@@ -532,7 +552,8 @@ fn report_refuses_to_compare_across_pass_counts() {
 
 #[test]
 fn benchmark_output_lines_are_parsed_into_measurements() {
-    let parsed = parse_measurements("arith|400000|12.5000|31.25\n\nprop-mono|200000|40.0000|200.00\n");
+    let parsed =
+        parse_measurements("arith|400000|12.5000|31.25\n\nprop-mono|200000|40.0000|200.00\n");
 
     assert_eq!(
         parsed,

@@ -157,6 +157,26 @@ mod differential {
                 "JSON.stringify((() => { const events = []; const target = { value: 1 }; function bump(object) { object.value += 4; events.push(object.value); } bump(target); delete target.value; target.value = 9; return { value: target.value, events }; })())",
             ),
             (
+                "closure-allocation",
+                "JSON.stringify((() => { let sum = 0; for (let i = 0; i < 256; i++) { const add = value => value + i; sum = (sum + add(i)) % 1000003; } return { sum }; })())",
+            ),
+            (
+                "object-allocation",
+                "JSON.stringify((() => { let sum = 0; for (let i = 0; i < 256; i++) { const object = { x: i, y: i + 1 }; sum = (sum + object.x + object.y) % 1000003; } return { sum }; })())",
+            ),
+            (
+                "array-allocation",
+                "JSON.stringify((() => { const values = []; let sum = 0; for (let i = 0; i < 256; i++) { values.push(i); sum += values[i & 31]; if (values.length > 32) values.length = 0; } return { length: values.length, sum }; })())",
+            ),
+            (
+                "string-concat",
+                "JSON.stringify((() => { let value = ''; for (let i = 0; i < 256; i++) { value += 'ab'; if (value.length > 64) value = ''; } return { length: value.length, suffix: value.slice(-4) }; })())",
+            ),
+            (
+                "primitive-string",
+                "JSON.stringify((() => { let property = 0; let method = 0; for (let i = 0; i < 256; i++) { property += 'abc'.length; method += 'abc'.charCodeAt(i & 2); } return { property, method }; })())",
+            ),
+            (
                 "exception-propagation",
                 "JSON.stringify((() => { try { (() => { throw new RangeError('gate2-error'); })(); return { caught: false }; } catch (error) { return { caught: true, name: error.name, message: error.message }; } })())",
             ),
@@ -179,6 +199,37 @@ mod differential {
             evaluate(&mut omoikane, source),
             "uncaught exception classification must remain stable"
         );
+    }
+
+    #[test]
+    fn allocation_pressure_survives_forced_collection() {
+        const ALLOCATION_PROBE: &str = r#"
+            (() => {
+              let checksum = 0;
+              for (let round = 0; round < 64; round++) {
+                const objects = [];
+                for (let i = 0; i < 128; i++) {
+                  const object = { value: i, text: 'ab' + i };
+                  objects.push(() => object.value + object.text.length);
+                }
+                checksum = (checksum + objects[round & 127]()) % 1000003;
+              }
+              return checksum;
+            })()
+            "#;
+        let mut runtime = JsRuntime::new().expect("Omoikane runtime should build");
+        let mut last = None;
+        for _ in 0..4 {
+            last = Some(
+                runtime
+                    .eval(ALLOCATION_PROBE)
+                    .expect("allocation probe should finish within the bounded workload")
+                    .as_number()
+                    .expect("allocation probe should return a number"),
+            );
+            boa_gc::force_collect();
+        }
+        assert_eq!(last, Some(2_262.0));
     }
 }
 
