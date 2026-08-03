@@ -1012,6 +1012,24 @@ fn layout_node(
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
 ) -> Option<LayoutBox> {
+    layout_node_with_subgrid(
+        node,
+        resolver,
+        containing_block,
+        viewport,
+        positioned_ancestor,
+        None,
+    )
+}
+
+fn layout_node_with_subgrid(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    containing_block: Rect,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
+    subgrid: Option<grid::SubgridContext>,
+) -> Option<LayoutBox> {
     match node.node_type() {
         NodeType::Document => layout_document(
             node,
@@ -1026,6 +1044,7 @@ fn layout_node(
             containing_block,
             viewport,
             positioned_ancestor,
+            subgrid,
         ),
         _ => None,
     }
@@ -1350,6 +1369,7 @@ fn layout_element(
     containing_block: Rect,
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
+    subgrid: Option<grid::SubgridContext>,
 ) -> Option<LayoutBox> {
     if is_non_rendered_html_element(node) {
         return None;
@@ -1496,7 +1516,7 @@ fn layout_element(
     if is_grid_container(&style) {
         return layout_grid_container(
             node, resolver, style, margin, padding, border, x, y, width,
-            containing_block.height, viewport,
+            containing_block.height, viewport, subgrid,
         );
     }
 

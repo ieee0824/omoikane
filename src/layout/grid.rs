@@ -1,6 +1,5 @@
 //! Basic explicit CSS Grid track sizing and row-major auto-placement.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::css::{AffineTransform, ComputedStyle, ComputedValue, StyleResolver};
@@ -8,7 +7,7 @@ use crate::dom::{NodeHandle, NodeType};
 
 use super::{
     BoxDimensions, EdgeSizes, LayoutBox, Rect, edge_sizes, intrinsic_width, is_display_none,
-    is_out_of_flow_positioned, layout_node, layout_positioned_child,
+    is_out_of_flow_positioned, layout_positioned_child,
     normalized_min_max_lengths, overflow, resolved_length, sort_children_by_z_index,
     translate_layout_box_to_outer, visibility, z_index,
 };
@@ -57,34 +56,11 @@ struct AxisRequest {
 }
 
 #[derive(Clone, Debug, Default)]
-struct SubgridContext {
+pub(super) struct SubgridContext {
     columns: Vec<f32>,
     column_gap: f32,
     rows: Vec<f32>,
     row_gap: f32,
-}
-
-thread_local! {
-    static SUBGRID_CONTEXTS: RefCell<HashMap<usize, SubgridContext>> = RefCell::new(HashMap::new());
-}
-
-fn with_subgrid_context<T>(node: &NodeHandle, context: SubgridContext, run: impl FnOnce() -> T) -> T {
-    let identity = node.identity();
-    let previous = SUBGRID_CONTEXTS.with(|contexts| contexts.borrow_mut().insert(identity, context));
-    let result = run();
-    SUBGRID_CONTEXTS.with(|contexts| {
-        let mut contexts = contexts.borrow_mut();
-        if let Some(previous) = previous {
-            contexts.insert(identity, previous);
-        } else {
-            contexts.remove(&identity);
-        }
-    });
-    result
-}
-
-fn subgrid_context(node: &NodeHandle) -> Option<SubgridContext> {
-    SUBGRID_CONTEXTS.with(|contexts| contexts.borrow().get(&node.identity()).cloned())
 }
 
 fn is_subgrid_axis(style: &ComputedStyle, property: &str) -> bool {
@@ -152,8 +128,8 @@ pub(super) fn layout_grid_container(
     width: f32,
     containing_block_height: f32,
     viewport: Rect,
+    inherited_subgrid: Option<SubgridContext>,
 ) -> Option<LayoutBox> {
-    let inherited_subgrid = subgrid_context(node);
     let columns_are_subgrid = is_subgrid_axis(&style, "grid-template-columns");
     let rows_are_subgrid = is_subgrid_axis(&style, "grid-template-rows");
     let mut items = Vec::new();
@@ -252,13 +228,14 @@ pub(super) fn layout_grid_container(
             &fixed_row_heights,
             row_gap,
         );
-        let layout = if let Some(inherited) = inherited {
-            with_subgrid_context(child, inherited, || {
-                layout_node(child, resolver, containing, viewport, None)
-            })
-        } else {
-            layout_node(child, resolver, containing, viewport, None)
-        };
+        let layout = super::layout_node_with_subgrid(
+            child,
+            resolver,
+            containing,
+            viewport,
+            None,
+            inherited,
+        );
         if let Some(layout) = layout {
             let occupied = content_row_heights[placement.row..placement.row + placement.row_span].iter().sum::<f32>()
                 + row_gap * placement.row_span.saturating_sub(1) as f32;
@@ -334,9 +311,14 @@ pub(super) fn layout_grid_container(
             cell_width
         };
         let containing = Rect { x: 0.0, y: 0.0, width: item_width, height: cell_height };
-        if let Some(relayout) = with_subgrid_context(child, inherited, || {
-            layout_node(child, resolver, containing, viewport, None)
-        }) {
+        if let Some(relayout) = super::layout_node_with_subgrid(
+            child,
+            resolver,
+            containing,
+            viewport,
+            None,
+            Some(inherited),
+        ) {
             *layout = relayout;
         }
     }
