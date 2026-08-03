@@ -16455,9 +16455,10 @@ mod tests {
             "0"
         );
         runtime.run_until_idle().unwrap();
+        let task_errors = runtime.take_task_errors();
         assert!(
-            runtime.take_task_errors().is_empty(),
-            "iframe selectionchange delivery must not raise a task error"
+            task_errors.is_empty(),
+            "iframe selectionchange delivery must not raise a task error: {task_errors:?}"
         );
         assert_eq!(
             eval_str(
