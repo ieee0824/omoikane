@@ -28,8 +28,8 @@ crc32fast = "1.5"
 # inline-cache hit rooting without weak-shape upgrades (ieee0824/boa#59), and
 # Array.prototype.join/unshift receiver rooting during allocating property
 # callbacks (ieee0824/boa#61).
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "519955298e5f4149911eb3cb5e87f3ec78c4f481", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "519955298e5f4149911eb3cb5e87f3ec78c4f481" }
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "bc9fb8626a9696038a6eff5c2b867e20592c6f7b", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "bc9fb8626a9696038a6eff5c2b867e20592c6f7b" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
