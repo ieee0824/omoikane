@@ -2715,12 +2715,6 @@ impl JsRuntime {
         self.host_state
             .borrow_mut()
             .canonical_node_identity_resolver = previous_resolver;
-        #[cfg(test)]
-        if let Err(error) = &setup {
-            eprintln!(
-                "[iframe realm setup] iframe={iframe_id} document={document_id} same_origin={same_origin} error={error}"
-            );
-        }
         setup?;
 
         let mut state = self.host_state.borrow_mut();
@@ -2752,24 +2746,8 @@ impl JsRuntime {
             self.run_jobs()
         })();
         let _ = self.eval("__omoikane_set_current_script(null)");
-        #[cfg(test)]
-        {
-            let probe = self
-                .eval("[typeof frameElement, frameElement === null, typeof document, document && document.__id, document && document.documentElement && document.documentElement.getAttribute('data-frame-element'), document && document.documentElement && document.documentElement.getAttribute('data-external-child')].join('|')")
-                .map(|value| value.display().to_string())
-                .unwrap_or_else(|error| format!("<probe error: {error}>"));
-            eprintln!(
-                "[iframe script probe] iframe={iframe_id} document={document_id} script={script_id} result={probe}"
-            );
-        }
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.context.enter_realm(old_realm);
-        #[cfg(test)]
-        if let Err(error) = &result {
-            eprintln!(
-                "[iframe script] iframe={iframe_id} document={document_id} script={script_id} error={error}"
-            );
-        }
         result.map(|_| ())
     }
 
@@ -33044,11 +33022,15 @@ b</textarea></form>"#);
             "application/xhtml+xml",
             r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
                 const frame = frameElement;
-                const valid = frame !== null && frame.tagName === 'IFRAME' &&
-                    frame.ownerDocument.__id === parent.document.__id &&
-                    frame.contentDocument === document && frame === frameElement;
+                let valid = frame !== null;
+                if (valid) {
+                    if (frame.tagName !== 'IFRAME') valid = false;
+                    if (frame.ownerDocument.__id !== parent.document.__id) valid = false;
+                    if (frame.contentDocument !== document) valid = false;
+                    if (frame !== frameElement) valid = false;
+                }
                 document.documentElement.setAttribute('data-frame-element', String(valid));
-                frame.setAttribute('data-from-frame-element', 'yes');
+                if (frame !== null) frame.setAttribute('data-from-frame-element', 'yes');
             </script></body></html>"#,
         );
         let doc = TreeBuilder::parse(&format!(
@@ -33076,18 +33058,6 @@ b</textarea></form>"#);
                 .into_iter()
                 .find(|node| node.node_type() == NodeType::Element)
                 .expect("same-origin child must have a root");
-            eprintln!(
-                "[iframe frame test] iframe={} child={} scripts={} attrs={:?} task_errors={:?}",
-                iframe.identity(),
-                child.identity(),
-                state
-                    .document_script_executions
-                    .get(&child.identity())
-                    .copied()
-                    .unwrap_or_default(),
-                root.attributes(),
-                state.task_errors,
-            );
             (root, iframe)
         };
         assert_eq!(
