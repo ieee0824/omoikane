@@ -374,6 +374,24 @@ fn paint_containment_clips_overflow_visible_descendants() {
 }
 
 #[test]
+fn paint_containment_skips_before_pseudo_outside_ancestor_clip() {
+    let html = r#"<html><head><style>
+        body { margin: 0; }
+        .ancestor { width: 10px; height: 10px; overflow: hidden; }
+        .contained { margin-left: 20px; width: 5px; height: 5px; contain: paint; }
+        .contained::before { display: block; content: ''; width: 5px; height: 5px; background: red; }
+    </style></head><body><div class="ancestor"><div class="contained"></div></div></body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect { x: 0.0, y: 0.0, width: 30.0, height: 20.0 },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(21, 1), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
 fn skips_hidden_boxes() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

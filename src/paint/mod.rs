@@ -2894,18 +2894,20 @@ fn paint_box_internal_to(
     } else {
         paint_replaced_image_box(canvas, layout, style, inherited_clip);
     }
-    paint_block_generated_pseudo_box(
-        canvas,
-        layout,
-        resolver,
-        PseudoElement::Before,
-        if has_paint_containment {
-            paint_containment_clip
-        } else {
-            inherited_clip
-        },
-        viewport,
-    );
+    if !has_paint_containment || paint_containment_clip.is_some() {
+        paint_block_generated_pseudo_box(
+            canvas,
+            layout,
+            resolver,
+            PseudoElement::Before,
+            if has_paint_containment {
+                paint_containment_clip
+            } else {
+                inherited_clip
+            },
+            viewport,
+        );
+    }
 
     border::paint_borders(canvas, layout, style, inherited_clip);
 
