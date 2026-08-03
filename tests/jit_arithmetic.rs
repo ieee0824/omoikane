@@ -1,4 +1,4 @@
-//! Gate 3-3 integration contract for arithmetic native execution and fallback.
+//! Gate 3 arithmetic/property native execution and fallback integration contract.
 #![cfg(feature = "baseline-jit")]
 
 use boa_engine::{Context, Source};
@@ -41,6 +41,66 @@ fn issue_305_function_reports_a_compiled_entry() {
     assert_eq!(diagnostics.compile_requests, 1);
     assert_eq!(diagnostics.successful_compilations, 1);
     assert!(diagnostics.compiled_entries >= 1);
+}
+
+#[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+fn issue_305_prop_mono_shape_uses_guarded_native_slots() {
+    let iterations = 2_000_i64;
+    let mut context = Context::default();
+    let result = context
+        .eval(Source::from_bytes(&format!(
+            "(function(n){{var o={{a:1,b:2,c:3}},s=0;for(var i=0;i<n;i++){{o.b=o.a+i;s+=o.b+o.c}}return s}})({iterations})",
+        )))
+        .expect("execute hot monomorphic property loop");
+    let expected = iterations * (iterations - 1) / 2 + 4 * iterations;
+    assert_eq!(result.display().to_string(), expected.to_string());
+    let diagnostics = context.arithmetic_jit_diagnostics();
+    assert!(diagnostics.successful_compilations >= 1);
+    assert!(diagnostics.property_guard_hits >= 1);
+    assert_eq!(diagnostics.property_guard_misses, 0);
+    assert_eq!(diagnostics.property_bailouts, 0);
+}
+
+#[test]
+fn property_shape_and_descriptor_changes_match_interpreter_semantics() {
+    assert_eq!(
+        evaluate(
+            "function f(o,n){var s=0;for(var i=0;i<n;i++)s+=o.x;return s}\
+             var a={x:2};f(a,200);delete a.x;Object.defineProperty(a,'x',{value:7});\
+             var own=f(a,1000), accessor=f({get x(){return 11}},1000);own+accessor"
+        ),
+        "18000"
+    );
+    assert_eq!(
+        evaluate(
+            "function f(o,n){var s=0;for(var i=0;i<n;i++)s+=o.x;return s}\
+             var p={x:3},o=Object.create(p),first=f(o,200);p.x=5;first+f(o,200)"
+        ),
+        "1600"
+    );
+}
+
+#[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+fn property_mutation_enters_native_code_then_bails_out_safely() {
+    let mut context = Context::default();
+    let result = context
+        .eval(Source::from_bytes(
+            "function own(o,n){var s=0;for(var i=0;i<n;i++)s+=o.x;return s}\
+             function inherited(o,n){var s=0;for(var i=0;i<n;i++)s+=o.x;return s}\
+             var a={x:2},warmOwn=own(a,200);delete a.x;\
+             Object.defineProperty(a,'x',{value:7});var changedOwn=own(a,1000);\
+             var p={x:3},o=Object.create(p),warmInherited=inherited(o,200);\
+             p.x=5;[warmOwn,changedOwn,warmInherited,inherited(o,200)].join(',')",
+        ))
+        .expect("execute property mutations after hot native entries");
+    assert_eq!(result.display().to_string(), "\"400,7000,600,1000\"");
+
+    let diagnostics = context.arithmetic_jit_diagnostics();
+    assert!(diagnostics.successful_compilations >= 1);
+    assert!(diagnostics.property_guard_hits >= 1);
+    assert!(diagnostics.property_guard_misses >= 1);
 }
 
 #[test]

@@ -40,10 +40,11 @@ crc32fast = "1.5"
 # (ieee0824/boa#63), and the stable inline-cache state/telemetry contract
 # (ieee0824/boa#64), and the opt-in x86_64 baseline-JIT code-memory/ABI
 # substrate (ieee0824/boa#65), architecture-neutral baseline lowering and
-# fallback (ieee0824/boa#66), and arithmetic native execution
-# (ieee0824/boa#67). The pinned commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "21f4299f43f81157943a3f924f79b418cb921fac", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "21f4299f43f81157943a3f924f79b418cb921fac" }
+# fallback (ieee0824/boa#66), arithmetic native execution
+# (ieee0824/boa#67), and monomorphic property shape/slot native execution
+# (ieee0824/boa#68). The pinned commit contains all listed fork changes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "7c4d07f05f6f3dd5c138001c86c75c3e4012c6ea", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "7c4d07f05f6f3dd5c138001c86c75c3e4012c6ea" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
