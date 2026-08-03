@@ -1,4 +1,4 @@
-//! Gate 3-3 integration contract for arithmetic native execution and fallback.
+//! Gate 3 arithmetic/property native execution and fallback integration contract.
 #![cfg(feature = "baseline-jit")]
 
 use boa_engine::{Context, Source};
@@ -41,6 +41,42 @@ fn issue_305_function_reports_a_compiled_entry() {
     assert_eq!(diagnostics.compile_requests, 1);
     assert_eq!(diagnostics.successful_compilations, 1);
     assert!(diagnostics.compiled_entries >= 1);
+}
+
+#[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+fn issue_305_prop_mono_shape_uses_guarded_native_slots() {
+    let mut context = Context::default();
+    let result = context
+        .eval(Source::from_bytes(
+            "(function(n){var o={a:1,b:2,c:3},s=0;for(var i=0;i<n;i++){o.b=o.a+i;s+=o.b+o.c}return s})(1000000)",
+        ))
+        .expect("execute hot monomorphic property loop");
+    assert_eq!(result.display().to_string(), "500003500000");
+    let diagnostics = context.arithmetic_jit_diagnostics();
+    assert_eq!(diagnostics.successful_compilations, 1);
+    assert!(diagnostics.property_guard_hits >= 1);
+    assert_eq!(diagnostics.property_guard_misses, 0);
+    assert_eq!(diagnostics.property_bailouts, 0);
+}
+
+#[test]
+fn property_shape_and_descriptor_changes_match_interpreter_semantics() {
+    assert_eq!(
+        evaluate(
+            "function f(o,n){var s=0;for(var i=0;i<n;i++)s+=o.x;return s}\
+             var a={x:2};f(a,200);delete a.x;Object.defineProperty(a,'x',{value:7});\
+             var own=f(a,1000), accessor=f({get x(){return 11}},1000);own+accessor"
+        ),
+        "18000"
+    );
+    assert_eq!(
+        evaluate(
+            "function f(o,n){var s=0;for(var i=0;i<n;i++)s+=o.x;return s}\
+             var p={x:3},o=Object.create(p),first=f(o,200);p.x=5;first+f(o,200)"
+        ),
+        "1600"
+    );
 }
 
 #[test]
