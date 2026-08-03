@@ -181,12 +181,13 @@ pub(crate) fn paint_text_with_registry(
                     // primary font and fall back to the global system font list.
                     let web_font_for_fragment =
                         select_fragment_web_font(web_fonts, &fragment.style);
+                    let vertical_mode = vertical_paint_mode(&fragment.style);
 
                     if let Some(web_font) = web_font_for_fragment {
                         // Build a temporary font list: web variant first, then fallbacks
                         let mut variant_fonts: Vec<&Font> = vec![web_font];
                         variant_fonts.extend(fonts.iter().map(|font| font.as_ref()));
-                        paint_text_with_font_refs(
+                        paint_fragment_text(
                             canvas,
                             fragment.rect,
                             display_text,
@@ -196,22 +197,25 @@ pub(crate) fn paint_text_with_registry(
                             frag_color,
                             clip,
                             fragment.metrics.letter_spacing,
+                            vertical_mode,
                         );
                     } else if !fonts.is_empty() {
-                        paint_text_with_font(
+                        let font_refs: Vec<&Font> = fonts.iter().map(|font| font.as_ref()).collect();
+                        paint_fragment_text(
                             canvas,
                             fragment.rect,
                             display_text,
                             font_size,
                             fragment.metrics.ascent,
-                            fonts,
+                            &font_refs,
                             frag_color,
                             clip,
                             fragment.metrics.letter_spacing,
+                            vertical_mode,
                         );
                     } else {
                         // Fallback: placeholder rectangles
-                        paint_text_placeholder(
+                        paint_text_placeholder_with_mode(
                             canvas,
                             fragment.rect,
                             display_text,
@@ -219,20 +223,32 @@ pub(crate) fn paint_text_with_registry(
                             frag_color,
                             clip,
                             fragment.metrics.letter_spacing,
+                            vertical_mode,
                         );
                     }
 
                     // Draw text decorations after text
-                    paint_text_decoration(
-                        canvas,
-                        fragment.rect,
-                        fragment.metrics.ascent,
-                        fragment.metrics.descent,
-                        font_size,
-                        decoration_line,
-                        decoration_color,
-                        clip,
-                    );
+                    if vertical_mode.is_some() {
+                        paint_text_decoration_vertical(
+                            canvas,
+                            fragment.rect,
+                            font_size,
+                            decoration_line,
+                            decoration_color,
+                            clip,
+                        );
+                    } else {
+                        paint_text_decoration(
+                            canvas,
+                            fragment.rect,
+                            fragment.metrics.ascent,
+                            fragment.metrics.descent,
+                            font_size,
+                            decoration_line,
+                            decoration_color,
+                            clip,
+                        );
+                    }
                 }
                 InlineFragmentContent::Image(image, style) => {
                     paint_inline_image_fragment(
@@ -618,6 +634,161 @@ pub(crate) fn paint_text_with_font_refs(
     }
 }
 
+/// Returns the vertical paint mode carried by an inline fragment.
+///
+/// The first flag selects the vertical-rl glyph rotation (clockwise); the
+/// second flag selects the inline base direction.  `None` keeps the existing
+/// horizontal paint path byte-for-byte.
+fn vertical_paint_mode(style: &FragmentStyle) -> Option<(bool, bool)> {
+    let writing_mode = style.writing_mode.as_deref()?;
+    let vertical_rl = matches!(writing_mode, "vertical-rl" | "sideways-rl");
+    let vertical = vertical_rl || matches!(writing_mode, "vertical-lr" | "sideways-lr");
+    vertical.then_some((vertical_rl, style.direction.as_deref() == Some("rtl")))
+}
+
+/// Paints one text fragment using the direction produced by vertical inline
+/// layout.  Latin and other horizontal glyphs are rotated into the vertical
+/// column; CJK glyphs still use the same deterministic fallback font selection.
+fn paint_fragment_text(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    layout_ascent: f32,
+    fonts: &[&Font],
+    color: Color,
+    clip: Option<Rect>,
+    letter_spacing: f32,
+    vertical_mode: Option<(bool, bool)>,
+) {
+    if let Some((vertical_rl, direction_rtl)) = vertical_mode {
+        paint_text_vertical_with_font_refs(
+            canvas,
+            rect,
+            text,
+            font_size,
+            layout_ascent,
+            fonts,
+            color,
+            clip,
+            letter_spacing,
+            vertical_rl,
+            direction_rtl,
+        );
+    } else {
+        paint_text_with_font_refs(
+            canvas,
+            rect,
+            text,
+            font_size,
+            layout_ascent,
+            fonts,
+            color,
+            clip,
+            letter_spacing,
+        );
+    }
+}
+
+/// Paints a horizontal glyph run into a vertical line box.  The layout stage
+/// has already transposed the fragment rectangle, so this function only maps
+/// glyph advances onto the physical y axis and keeps the paint order
+/// direction-aware.
+fn paint_text_vertical_with_font_refs(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    _layout_ascent: f32,
+    fonts: &[&Font],
+    color: Color,
+    clip: Option<Rect>,
+    letter_spacing: f32,
+    vertical_rl: bool,
+    direction_rtl: bool,
+) {
+    let mut chars: Vec<char> = text.chars().collect();
+    if direction_rtl {
+        chars.reverse();
+    }
+
+    let mut cursor_y = if direction_rtl {
+        rect.y + rect.height
+    } else {
+        rect.y
+    };
+    let clockwise = vertical_rl;
+    for (index, ch) in chars.iter().copied().enumerate() {
+        let (_, glyph, advance_x) = rasterize_with_fallback_refs(fonts, ch, font_size);
+        let advance = advance_x.max(1.0);
+        let cell_start = if direction_rtl {
+            cursor_y - advance
+        } else {
+            cursor_y
+        };
+
+        if let Some(glyph) = glyph
+            && glyph.width > 0
+            && glyph.height > 0
+            && !glyph.bitmap.is_empty()
+        {
+            let rotated_width = glyph.height as f32;
+            let rotated_height = glyph.width as f32;
+            let glyph_x = rect.x + ((rect.width - rotated_width) * 0.5).max(0.0);
+            let glyph_y = cell_start + ((advance - rotated_height) * 0.5).max(0.0);
+            draw_rotated_glyph_mask(
+                canvas,
+                glyph_x,
+                glyph_y,
+                glyph.width,
+                glyph.height,
+                &glyph.bitmap,
+                clockwise,
+                color,
+                clip,
+            );
+        }
+
+        if direction_rtl {
+            cursor_y = cell_start - if index + 1 < chars.len() { letter_spacing } else { 0.0 };
+        } else {
+            cursor_y = cell_start + advance
+                + if index + 1 < chars.len() { letter_spacing } else { 0.0 };
+        }
+    }
+}
+
+/// Rotates a single-channel glyph mask without changing the canvas API.  A
+/// vertical-rl column uses clockwise rotation; vertical-lr uses the inverse.
+fn draw_rotated_glyph_mask(
+    canvas: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: u32,
+    height: u32,
+    mask: &[u8],
+    clockwise: bool,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    let expected = width as usize * height as usize;
+    if mask.len() < expected || width == 0 || height == 0 {
+        return;
+    }
+    let mut rotated = vec![0; expected];
+    for source_y in 0..height {
+        for source_x in 0..width {
+            let destination = if clockwise {
+                (source_x * height + (height - 1 - source_y)) as usize
+            } else {
+                ((width - 1 - source_x) * height + source_y) as usize
+            };
+            rotated[destination] = mask[(source_y * width + source_x) as usize];
+        }
+    }
+    canvas.draw_glyph_mask(x, y, height, width, &rotated, color, clip);
+}
+
 /// Loads the default system text fonts, shared via `Arc` so that layout and
 /// paint can reuse a single set without re-reading font files from disk.
 pub(crate) fn load_text_fonts() -> Vec<Arc<Font>> {
@@ -807,6 +978,95 @@ pub(crate) fn paint_text_placeholder(
         if i + 1 < char_count {
             cursor_x += letter_spacing;
         }
+    }
+}
+
+pub(crate) fn paint_text_placeholder_with_mode(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    color: Color,
+    clip: Option<Rect>,
+    letter_spacing: f32,
+    vertical_mode: Option<(bool, bool)>,
+) {
+    let Some((_vertical_rl, direction_rtl)) = vertical_mode else {
+        paint_text_placeholder(canvas, rect, text, font_size, color, clip, letter_spacing);
+        return;
+    };
+
+    let mut chars: Vec<char> = text.chars().collect();
+    if direction_rtl {
+        chars.reverse();
+    }
+    let advance = (font_size * 0.6).max(1.0);
+    let glyph_width = (font_size * 0.7).min(rect.width).max(1.0);
+    let glyph_height = (font_size * 0.45).max(1.0);
+    let mut cursor_y = if direction_rtl {
+        rect.y + rect.height
+    } else {
+        rect.y
+    };
+    for (index, ch) in chars.iter().copied().enumerate() {
+        let cell_start = if direction_rtl {
+            cursor_y - advance
+        } else {
+            cursor_y
+        };
+        if !ch.is_whitespace() {
+            canvas.fill_rect_clipped(
+                Rect {
+                    x: rect.x + ((rect.width - glyph_width) * 0.5).max(0.0),
+                    y: cell_start + ((advance - glyph_height) * 0.5).max(0.0),
+                    width: glyph_width,
+                    height: glyph_height,
+                },
+                color,
+                clip,
+            );
+        }
+        let spacing = if index + 1 < chars.len() { letter_spacing } else { 0.0 };
+        cursor_y = if direction_rtl {
+            cell_start - spacing
+        } else {
+            cell_start + advance + spacing
+        };
+    }
+}
+
+fn paint_text_decoration_vertical(
+    canvas: &mut Canvas,
+    rect: Rect,
+    font_size: f32,
+    decoration: TextDecorationLines,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    if decoration.is_none() {
+        return;
+    }
+    let thickness = (font_size * 0.075).max(1.0);
+    let draw = |canvas: &mut Canvas, x: f32| {
+        canvas.fill_rect_clipped(
+            Rect {
+                x,
+                y: rect.y,
+                width: thickness,
+                height: rect.height,
+            },
+            color,
+            clip,
+        );
+    };
+    if decoration.underline {
+        draw(canvas, rect.x + rect.width - thickness);
+    }
+    if decoration.overline {
+        draw(canvas, rect.x);
+    }
+    if decoration.line_through {
+        draw(canvas, rect.x + ((rect.width - thickness) * 0.5).max(0.0));
     }
 }
 
