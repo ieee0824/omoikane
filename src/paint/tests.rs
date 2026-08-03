@@ -8994,6 +8994,42 @@ fn opentype_shaped_paint_uses_the_layout_advance_model() {
 }
 
 #[test]
+fn shaped_paint_does_not_space_after_non_advancing_leading_cluster() {
+    use crate::font::{ShapingDirection, load_default_text_fonts};
+    use super::text::paint_shaped_horizontal_text;
+
+    let fonts = load_default_text_fonts();
+    let text = "\u{301}A";
+    let Some((font, shaped)) = fonts.iter().find_map(|font| {
+        let shaped = font
+            .shape_text(text, 32.0, ShapingDirection::LeftToRight)
+            .ok()?;
+        (shaped.iter().all(|glyph| glyph.glyph_id != 0)
+            && shaped.windows(2).any(|pair| pair[0].cluster != pair[1].cluster))
+        .then_some((font, shaped))
+    }) else {
+        eprintln!("Skipping leading-mark spacing test: no suitable font available");
+        return;
+    };
+    let expected = shaped.iter().map(|glyph| glyph.x_advance.abs()).sum::<f32>();
+    let mut canvas = Canvas::new(120, 50);
+    let painted_advance = paint_shaped_horizontal_text(
+        &mut canvas,
+        Rect { x: 0.0, y: 0.0, width: 120.0, height: 50.0 },
+        text,
+        32.0,
+        35.0,
+        &[font],
+        &FragmentStyle::default(),
+        Color::rgb(0, 0, 0),
+        None,
+        5.0,
+    )
+    .unwrap();
+    assert!((painted_advance - expected).abs() < 0.001);
+}
+
+#[test]
 fn form_control_label_uses_web_font_variant() {
     // A FormControl label whose fragment style names a registered web-font
     // family must be measured and drawn with that variant. Painting with
