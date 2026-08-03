@@ -128,6 +128,35 @@ fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
     }));
 }
 
+#[test]
+fn fallback_shaping_keeps_primary_supported_text_in_one_run() {
+    let primary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/acid3/font.ttf");
+    let Ok(primary) = Font::load_from_file(&primary_path) else {
+        eprintln!("Skipping primary shaping test: fixture font unavailable");
+        return;
+    };
+    let Some(text) = ["abc", "ABC", "123"].into_iter().find(|text| {
+        primary
+            .shape_text(text, 24.0, ShapingDirection::LeftToRight)
+            .is_ok_and(|glyphs| glyphs.iter().all(|glyph| glyph.glyph_id != 0))
+    }) else {
+        eprintln!("Skipping primary shaping test: fixture has no supported sample");
+        return;
+    };
+
+    let runs = shape_text_with_fallback(
+        &[&primary],
+        text,
+        24.0,
+        ShapingDirection::LeftToRight,
+    )
+    .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].font_index, 0);
+    assert_eq!(runs[0].text_range, 0..text.len());
+}
+
 /// Try to find a system font for testing.
 /// Returns path if found, otherwise None.
 fn find_test_font() -> Option<String> {
