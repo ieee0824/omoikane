@@ -1829,9 +1829,9 @@ impl HostState {
         );
         let document_url = child_url
             .clone()
-            .or_else(|| match resolve_resource_ref(&src, self.base_url.as_ref()) {
+            .or_else(|| match resolve_resource_ref(&resource, self.base_url.as_ref()) {
                 Some(ResolvedResource::Url(url)) => Some(url.to_string()),
-                Some(ResolvedResource::Data { .. }) => Some(src.clone()),
+                Some(ResolvedResource::Data { .. }) => Some(resource.clone()),
                 None => None,
             })
             .or_else(|| self.base_url.as_ref().map(ToString::to_string))
@@ -1840,7 +1840,7 @@ impl HostState {
             iframe_id,
             IframeDocument {
                 document: document.clone(),
-                loaded_src: src,
+                loaded_src: resource.clone(),
                 document_url,
                 realm: None,
                 loaded_attribute: resource_attribute,
