@@ -157,6 +157,49 @@ fn fallback_shaping_keeps_primary_supported_text_in_one_run() {
     assert_eq!(runs[0].text_range, 0..text.len());
 }
 
+#[test]
+fn fallback_runs_never_split_variation_or_zwj_graphemes() {
+    let primary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/acid3/font.ttf");
+    let Ok(primary) = Font::load_from_file(&primary_path) else {
+        eprintln!("Skipping cluster boundary test: fixture font unavailable");
+        return;
+    };
+    let mut fonts = vec![primary];
+    if let Some(path) = find_test_font()
+        && let Ok(fallback) = Font::load_from_file(std::path::Path::new(&path))
+    {
+        fonts.push(fallback);
+    }
+    let font_refs = fonts.iter().collect::<Vec<_>>();
+
+    for text in ["A\u{fe0f}B", "👩‍💻A"] {
+        let runs = shape_text_with_fallback(
+            &font_refs,
+            text,
+            24.0,
+            ShapingDirection::LeftToRight,
+        )
+        .unwrap();
+        let mut boundaries = text
+            .grapheme_indices(true)
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        boundaries.push(text.len());
+        assert_eq!(runs.first().map(|run| run.text_range.start), Some(0));
+        assert_eq!(runs.last().map(|run| run.text_range.end), Some(text.len()));
+        assert!(runs.windows(2).all(|pair| pair[0].text_range.end == pair[1].text_range.start));
+        assert!(runs.iter().all(|run| {
+            boundaries.contains(&run.text_range.start)
+                && boundaries.contains(&run.text_range.end)
+                && run
+                    .glyphs
+                    .iter()
+                    .all(|glyph| run.text_range.contains(&glyph.cluster))
+        }));
+    }
+}
+
 /// Try to find a system font for testing.
 /// Returns path if found, otherwise None.
 fn find_test_font() -> Option<String> {
