@@ -43,6 +43,9 @@ pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("right") => {
             TextAlign::Right
         }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("left") => {
+            TextAlign::Left
+        }
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
             TextAlign::Center
         }
