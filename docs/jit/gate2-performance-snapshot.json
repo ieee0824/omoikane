@@ -1,0 +1,288 @@
+{
+  "baseline_version": 6,
+  "baseline_profile": "dev",
+  "baseline_passes": 4,
+  "baseline_target_arch": "x86_64",
+  "baseline_target_os": "linux",
+  "baseline_environment": "idle two-core container used for baseline v6",
+  "baseline_measurement_runs": 5,
+  "reference_engine": "SpiderMonkey (Firefox 152.0.6)",
+  "target_arch": "x86_64",
+  "target_os": "linux",
+  "measured_passes": 4,
+  "measured_profile": "dev",
+  "measurement_runs": 5,
+  "revision": "a3fafb9d3160230c3545055294a05aa31a4137f5",
+  "environment": "container linux-x86_64 CPU0; 2026-08-03; shared host",
+  "baseline_comparable": false,
+  "total": 11,
+  "improvements": [],
+  "regressions": [
+    "arith",
+    "prop-mono",
+    "prop-mega",
+    "call",
+    "closure-alloc",
+    "object-alloc",
+    "string-concat",
+    "array",
+    "primitive-string-property",
+    "primitive-string-method",
+    "proto-method"
+  ],
+  "shapes": [
+    {
+      "id": "arith",
+      "description": "Bytecode dispatch and integer arithmetic with no property access or allocation",
+      "ns_per_op": 311.04,
+      "samples_ns_per_op": [
+        295.59,
+        303.64,
+        311.04,
+        312.48,
+        314.4
+      ],
+      "min_ns_per_op": 295.59,
+      "max_ns_per_op": 314.4,
+      "baseline_ns_per_op": 140.7,
+      "delta_ratio": 1.2106609808102347,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 29.16,
+        "spidermonkey_jit": 4.0
+      },
+      "versus_interpreter": 10.666666666666668,
+      "versus_jit": 77.76
+    },
+    {
+      "id": "prop-mono",
+      "description": "Monomorphic property read/write through one call site (inline cache hit path)",
+      "ns_per_op": 832.12,
+      "samples_ns_per_op": [
+        786.8,
+        851.01,
+        820.51,
+        832.12,
+        837.03
+      ],
+      "min_ns_per_op": 786.8,
+      "max_ns_per_op": 851.01,
+      "baseline_ns_per_op": 242.9,
+      "delta_ratio": 2.4257719226018937,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 62.92,
+        "spidermonkey_jit": 0.96
+      },
+      "versus_interpreter": 13.225047679593134,
+      "versus_jit": 866.7916666666667
+    },
+    {
+      "id": "prop-mega",
+      "description": "Megamorphic property read across eight shapes (inline cache miss path)",
+      "ns_per_op": 687.24,
+      "samples_ns_per_op": [
+        649.77,
+        707.62,
+        670.24,
+        737.09,
+        687.24
+      ],
+      "min_ns_per_op": 649.77,
+      "max_ns_per_op": 737.09,
+      "baseline_ns_per_op": 267.8,
+      "delta_ratio": 1.5662434652725916,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 34.8,
+        "spidermonkey_jit": 2.88
+      },
+      "versus_interpreter": 19.74827586206897,
+      "versus_jit": 238.625
+    },
+    {
+      "id": "call",
+      "description": "Function call overhead",
+      "ns_per_op": 844.72,
+      "samples_ns_per_op": [
+        809.82,
+        848.25,
+        827.83,
+        844.72,
+        862.84
+      ],
+      "min_ns_per_op": 809.82,
+      "max_ns_per_op": 862.84,
+      "baseline_ns_per_op": 298.5,
+      "delta_ratio": 1.8298827470686767,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 66.9,
+        "spidermonkey_jit": 4.0
+      },
+      "versus_interpreter": 12.626606875934229,
+      "versus_jit": 211.18
+    },
+    {
+      "id": "closure-alloc",
+      "description": "One closure allocated per iteration (allocator and GC pressure)",
+      "ns_per_op": 2577.28,
+      "samples_ns_per_op": [
+        2050.42,
+        2577.28,
+        2350.72,
+        2783.8,
+        2619.32
+      ],
+      "min_ns_per_op": 2050.42,
+      "max_ns_per_op": 2783.8,
+      "baseline_ns_per_op": 804.9,
+      "delta_ratio": 2.2019878245744815,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 76.33,
+        "spidermonkey_jit": 3.93
+      },
+      "versus_interpreter": 33.7649679025285,
+      "versus_jit": 655.7964376590331
+    },
+    {
+      "id": "object-alloc",
+      "description": "One object literal allocated per iteration (allocator and GC pressure)",
+      "ns_per_op": 2022.03,
+      "samples_ns_per_op": [
+        1897.81,
+        1995.22,
+        2022.03,
+        2098.55,
+        2164.97
+      ],
+      "min_ns_per_op": 1897.81,
+      "max_ns_per_op": 2164.97,
+      "baseline_ns_per_op": 627.2,
+      "delta_ratio": 2.223899872448979,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 93.27,
+        "spidermonkey_jit": 4.13
+      },
+      "versus_interpreter": 21.67931810871663,
+      "versus_jit": 489.5956416464891
+    },
+    {
+      "id": "string-concat",
+      "description": "String building by repeated appending, which now extends the string in place rather than reallocating and copying it (issues #318-#320)",
+      "ns_per_op": 376.22,
+      "samples_ns_per_op": [
+        367.44,
+        376.81,
+        373.84,
+        376.22,
+        397.15
+      ],
+      "min_ns_per_op": 367.44,
+      "max_ns_per_op": 397.15,
+      "baseline_ns_per_op": 159.7,
+      "delta_ratio": 1.3557921102066377,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 26.4,
+        "spidermonkey_jit": 4.1
+      },
+      "versus_interpreter": 14.250757575757577,
+      "versus_jit": 91.76097560975612
+    },
+    {
+      "id": "array",
+      "description": "Array index and push",
+      "ns_per_op": 1275.11,
+      "samples_ns_per_op": [
+        1252.37,
+        1267.47,
+        1361.53,
+        1275.11,
+        1355.36
+      ],
+      "min_ns_per_op": 1252.37,
+      "max_ns_per_op": 1361.53,
+      "baseline_ns_per_op": 401.5,
+      "delta_ratio": 2.175865504358655,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 103.28,
+        "spidermonkey_jit": 7.12
+      },
+      "versus_interpreter": 12.346146398140975,
+      "versus_jit": 179.0884831460674
+    },
+    {
+      "id": "primitive-string-property",
+      "description": "Property read on a string primitive, with no call (wrapper allocation shows here first; its spidermonkey_jit figure is loop-overhead-bound, see shapes.js)",
+      "ns_per_op": 333.38,
+      "samples_ns_per_op": [
+        322.56,
+        328.66,
+        337.1,
+        333.38,
+        336.68
+      ],
+      "min_ns_per_op": 322.56,
+      "max_ns_per_op": 337.1,
+      "baseline_ns_per_op": 144.4,
+      "delta_ratio": 1.3087257617728532,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 20.2,
+        "spidermonkey_jit": 3.8
+      },
+      "versus_interpreter": 16.503960396039606,
+      "versus_jit": 87.73157894736842
+    },
+    {
+      "id": "primitive-string-method",
+      "description": "Method call on a string primitive (the read above plus the call)",
+      "ns_per_op": 727.18,
+      "samples_ns_per_op": [
+        727.18,
+        711.02,
+        734.23,
+        719.76,
+        758.65
+      ],
+      "min_ns_per_op": 711.02,
+      "max_ns_per_op": 758.65,
+      "baseline_ns_per_op": 272.2,
+      "delta_ratio": 1.6714915503306393,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 38.48,
+        "spidermonkey_jit": 3.88
+      },
+      "versus_interpreter": 18.89760914760915,
+      "versus_jit": 187.41752577319588
+    },
+    {
+      "id": "proto-method",
+      "description": "Method resolved one step up a prototype chain, with a plain object receiver built outside the timed body",
+      "ns_per_op": 967.4,
+      "samples_ns_per_op": [
+        952.26,
+        960.61,
+        1019.8,
+        967.4,
+        985.96
+      ],
+      "min_ns_per_op": 952.26,
+      "max_ns_per_op": 1019.8,
+      "baseline_ns_per_op": 336.4,
+      "delta_ratio": 1.875743162901308,
+      "drift": "regressed",
+      "reference": {
+        "spidermonkey_interpreter": 80.2,
+        "spidermonkey_jit": 4.36
+      },
+      "versus_interpreter": 12.062344139650872,
+      "versus_jit": 221.8807339449541
+    }
+  ]
+}
