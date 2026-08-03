@@ -7758,6 +7758,40 @@ fn size_containment_uses_zero_intrinsic_and_auto_block_size() {
 }
 
 #[test]
+fn grid_size_containment_keeps_explicit_tracks_but_ignores_content_contributions() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let grid = NodeHandle::element("section");
+    let fixed_child = NodeHandle::element("div");
+    let auto_child = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(grid.clone());
+    grid.append_child(fixed_child);
+    grid.append_child(auto_child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } section { display: grid; contain: size; \
+             grid-template-rows: 30px auto; row-gap: 5px; } \
+             div { height: 40px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+    )
+    .unwrap();
+    let grid_box = find_layout_box_by_tag(&layout, "section").unwrap();
+    assert_eq!(grid_box.dimensions.content.height, 35.0);
+    assert_eq!(grid_box.children[0].dimensions.content.height, 40.0);
+    assert_eq!(grid_box.children[1].dimensions.content.height, 40.0);
+}
+
+#[test]
 fn layout_containment_establishes_positioned_descendant_boundary() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
