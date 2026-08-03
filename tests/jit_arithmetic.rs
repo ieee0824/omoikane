@@ -1,7 +1,7 @@
 //! Gate 3-3 integration contract for arithmetic native execution and fallback.
 #![cfg(feature = "baseline-jit")]
 
-use boa_engine::{Context, Script, Source};
+use boa_engine::{Context, Source};
 
 fn evaluate(source: &str) -> String {
     Context::default()
@@ -28,15 +28,11 @@ fn issue_305_arithmetic_shape_matches_the_reference_result() {
 #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 fn issue_305_function_reports_a_compiled_entry() {
     let mut context = Context::default();
-    let script = Script::parse(
-        Source::from_bytes(
+    let result = context
+        .eval(Source::from_bytes(
             "(function(n){var s=1;for(var i=0;i<n;i++)s=(s+i*3)%1000003;return s})(2000)",
-        ),
-        None,
-        &mut context,
-    )
-    .expect("parse hot arithmetic loop");
-    let result = script.evaluate(&mut context).expect("execute hot loop");
+        ))
+        .expect("execute hot arithmetic loop");
     assert_eq!(
         result.display().to_string(),
         expected_arithmetic(2000).to_string()
