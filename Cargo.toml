@@ -32,9 +32,10 @@ crc32fast = "1.5"
 # inline-cache hit rooting without weak-shape upgrades (ieee0824/boa#59),
 # bounded polymorphic inline-cache shapes (ieee0824/boa#60), and
 # Array.prototype.join/unshift receiver rooting during allocating property
-# callbacks (ieee0824/boa#61). The merge commit contains all three fixes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "c8a13822051425151ea53e6edf9d5814e6b0542f", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "c8a13822051425151ea53e6edf9d5814e6b0542f" }
+# callbacks (ieee0824/boa#61), and the verified bytecode/JIT metadata contract
+# (ieee0824/boa#62). The merge commit contains all four changes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "51819522e7b8cb0e757e7dd18dc509ee89668bd8", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "51819522e7b8cb0e757e7dd18dc509ee89668bd8" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
