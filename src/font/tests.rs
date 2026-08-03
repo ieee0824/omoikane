@@ -63,18 +63,39 @@ fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
         return;
     };
     let fallback = Font::load_from_file(std::path::Path::new(&fallback_path)).unwrap();
-    let Some(base) = ['A', 'e', 'a'].into_iter().find(|ch| {
-        primary.has_glyph(*ch) && fallback.has_glyph(*ch) && fallback.has_glyph('\u{301}')
-    }) else {
-        eprintln!("Skipping cluster fallback test: fonts lack a shared marked base");
+    let Some(primary_base) = ['A', 'e', 'a']
+        .into_iter()
+        .find(|ch| primary.has_glyph(*ch))
+    else {
+        eprintln!("Skipping cluster fallback test: fixture has no test base glyph");
         return;
     };
-    if primary.has_glyph('\u{301}') {
-        eprintln!("Skipping cluster fallback test: fixture already owns combining acute");
-        return;
-    }
 
-    let text = format!("{base}\u{301}{base}");
+    // Pick a multi-scalar cluster using the same shaping-based support check as
+    // production. Some fonts synthesize a combining mark even when a cmap-only
+    // `has_glyph` probe reports it missing, which made this test host-dependent.
+    let fallback_cluster = ['α', 'β', 'Ж', 'й', 'क', 'ب', 'ש']
+        .into_iter()
+        .flat_map(|base| ['\u{301}', '\u{308}', '\u{327}'].map(|mark| format!("{base}{mark}")))
+        .find(|cluster| {
+            !cluster_supported_by_font(
+                &primary,
+                cluster,
+                24.0,
+                ShapingDirection::LeftToRight,
+            ) && cluster_supported_by_font(
+                &fallback,
+                cluster,
+                24.0,
+                ShapingDirection::LeftToRight,
+            )
+        });
+    let Some(fallback_cluster) = fallback_cluster else {
+        eprintln!("Skipping cluster fallback test: no deterministic fallback cluster available");
+        return;
+    };
+
+    let text = format!("{fallback_cluster}{primary_base}");
     let runs = shape_text_with_fallback(
         &[&primary, &fallback],
         &text,
@@ -84,10 +105,27 @@ fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
     .unwrap();
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[0].font_index, 1);
-    assert_eq!(&text[runs[0].text_range.clone()], format!("{base}\u{301}"));
+    assert_eq!(&text[runs[0].text_range.clone()], fallback_cluster);
     assert_eq!(runs[1].font_index, 0);
-    assert_eq!(&text[runs[1].text_range.clone()], base.to_string());
-    assert!(runs[0].glyphs.iter().all(|glyph| glyph.cluster < runs[0].text_range.end));
+    assert_eq!(&text[runs[1].text_range.clone()], primary_base.to_string());
+    assert_eq!(runs[0].text_range.end, runs[1].text_range.start);
+    let mut grapheme_boundaries = text
+        .grapheme_indices(true)
+        .map(|(start, _)| start)
+        .collect::<Vec<_>>();
+    grapheme_boundaries.push(text.len());
+    assert!(
+        runs.iter().all(|run| {
+            grapheme_boundaries.contains(&run.text_range.start)
+                && grapheme_boundaries.contains(&run.text_range.end)
+        }),
+        "font-run boundaries must coincide with grapheme boundaries"
+    );
+    assert!(runs.iter().all(|run| {
+        run.glyphs
+            .iter()
+            .all(|glyph| run.text_range.contains(&glyph.cluster))
+    }));
 }
 
 /// Try to find a system font for testing.
