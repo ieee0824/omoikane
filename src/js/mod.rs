@@ -37184,6 +37184,7 @@ b</textarea></form>"#);
                     weakMapDelete: WeakMap.prototype.delete,
                     weakSetAdd: WeakSet.prototype.add,
                     weakSetHas: WeakSet.prototype.has,
+                    reflectApply: Reflect.apply,
                     defineProperty: Object.defineProperty,
                   };
                   try {
@@ -37196,6 +37197,7 @@ b</textarea></form>"#);
                     WeakMap.prototype.delete = poisoned;
                     WeakSet.prototype.add = poisoned;
                     WeakSet.prototype.has = poisoned;
+                    Reflect.apply = poisoned;
                     Object.defineProperty = poisoned;
                     document.open();
                   } finally {
@@ -37207,6 +37209,7 @@ b</textarea></form>"#);
                     WeakMap.prototype.delete = originals.weakMapDelete;
                     WeakSet.prototype.add = originals.weakSetAdd;
                     WeakSet.prototype.has = originals.weakSetHas;
+                    Reflect.apply = originals.reflectApply;
                     Object.defineProperty = originals.defineProperty;
                   }
                   return [

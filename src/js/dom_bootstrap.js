@@ -87,15 +87,28 @@
   // teardown bookkeeping: those paths are a security/lifecycle boundary and
   // must continue to retire stale native identities even under prototype
   // poisoning.
-  const safeMapHas = Function.prototype.call.bind(Map.prototype.has);
-  const safeMapGet = Function.prototype.call.bind(Map.prototype.get);
-  const safeMapSet = Function.prototype.call.bind(Map.prototype.set);
-  const safeMapDelete = Function.prototype.call.bind(Map.prototype.delete);
-  const safeWeakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
-  const safeWeakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
-  const safeWeakMapDelete = Function.prototype.call.bind(WeakMap.prototype.delete);
-  const safeWeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
-  const safeWeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
+  const safeApply = Reflect.apply;
+  const mapHasIntrinsic = Map.prototype.has;
+  const mapGetIntrinsic = Map.prototype.get;
+  const mapSetIntrinsic = Map.prototype.set;
+  const mapDeleteIntrinsic = Map.prototype.delete;
+  const weakMapGetIntrinsic = WeakMap.prototype.get;
+  const weakMapSetIntrinsic = WeakMap.prototype.set;
+  const weakMapDeleteIntrinsic = WeakMap.prototype.delete;
+  const weakSetAddIntrinsic = WeakSet.prototype.add;
+  const weakSetHasIntrinsic = WeakSet.prototype.has;
+  const safeMapHas = (target, key) => safeApply(mapHasIntrinsic, target, [key]);
+  const safeMapGet = (target, key) => safeApply(mapGetIntrinsic, target, [key]);
+  const safeMapSet = (target, key, value) =>
+    safeApply(mapSetIntrinsic, target, [key, value]);
+  const safeMapDelete = (target, key) => safeApply(mapDeleteIntrinsic, target, [key]);
+  const safeWeakMapGet = (target, key) => safeApply(weakMapGetIntrinsic, target, [key]);
+  const safeWeakMapSet = (target, key, value) =>
+    safeApply(weakMapSetIntrinsic, target, [key, value]);
+  const safeWeakMapDelete = (target, key) =>
+    safeApply(weakMapDeleteIntrinsic, target, [key]);
+  const safeWeakSetAdd = (target, key) => safeApply(weakSetAddIntrinsic, target, [key]);
+  const safeWeakSetHas = (target, key) => safeApply(weakSetHasIntrinsic, target, [key]);
   const safeDefineProperty = Object.defineProperty;
   const cache = new Map();
   // Platform-object identity and insert-adjacent conversions must not depend on
@@ -2585,10 +2598,12 @@
     }
 
     get isConnected() {
-      // A wrapper from a destroyed child-Document generation has had its
-      // native identity permanently severed. Treat it as disconnected without
-      // passing the null sentinel back through native node lookups.
-      if (this.__id === null) return false;
+      // Nodes retained from a destroyed iframe generation remain rooted in
+      // their (now inactive) Document, so DOM's shadow-including-root test
+      // still considers them connected. Their native identity is severed only
+      // to prevent pointer reuse; answer from that retirement snapshot without
+      // passing the null sentinel through native node lookups.
+      if (this.__id === null) return true;
       let current = this;
       while (current) {
         if (current.nodeType === 9) return true;
@@ -5757,7 +5772,7 @@
       // the element is connected again and a fresh navigation is committed.
       // A connected document with an opaque sandbox origin is likewise hidden
       // from its parent browsing context.
-      if (!this.isConnected) return null;
+      if (this.__id === null || !this.isConnected) return null;
       const id = nativeIframeContentDocument(this.__id);
       forgetDiscardedNodeWrappers();
       return wrapNode(id);
@@ -5775,7 +5790,7 @@
       // WindowProxy identity is stable across navigation while each committed
       // Document gets a fresh backing Window state. Detach retires this proxy;
       // reconnect creates a new browsing context and therefore a new proxy.
-      if (!this.isConnected) return null;
+      if (this.__id === null || !this.isConnected) return null;
       if (!this.__contentWindowFacade) {
         const iframe = this;
         let retired = false;
