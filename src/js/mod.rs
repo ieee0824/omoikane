@@ -16422,6 +16422,7 @@ mod tests {
                     const state = globalThis.__issue558SelectionState = {
                         parentEvents: 0,
                         parentWindowEvents: 0,
+                        childDocumentEvents: 0,
                         childEvents: 0,
                         crossDocumentError: "",
                         parentSelection,
@@ -16429,6 +16430,7 @@ mod tests {
                     };
                     document.addEventListener("selectionchange", () => state.parentEvents++);
                     globalThis.addEventListener("selectionchange", () => state.parentWindowEvents++);
+                    child.addEventListener("selectionchange", () => state.childDocumentEvents++);
                     // Selectionchange is dispatched on the child Document and
                     // bubbles to that browsing context's WindowProxy. Register
                     // at the WindowProxy so the listener is owned by the same
@@ -16438,7 +16440,8 @@ mod tests {
                     catch (error) { state.crossDocumentError = error.name; }
                     childSelection.addRange(childRange);
                     return [state.parentEvents, state.parentWindowEvents,
-                        state.childEvents, state.parentSelection.rangeCount,
+                        state.childDocumentEvents, state.childEvents,
+                        state.parentSelection.rangeCount,
                         state.childSelection.rangeCount, state.crossDocumentError].join(',');
                 })()"#,
             )
@@ -16455,9 +16458,9 @@ mod tests {
         assert_eq!(
             eval_str(
                 &mut runtime,
-                "[__issue558SelectionState.parentEvents, __issue558SelectionState.parentWindowEvents, __issue558SelectionState.childEvents, __issue558SelectionState.parentSelection.rangeCount, __issue558SelectionState.childSelection.rangeCount, __issue558SelectionState.crossDocumentError].join(',')",
+                "[__issue558SelectionState.parentEvents, __issue558SelectionState.parentWindowEvents, __issue558SelectionState.childDocumentEvents, __issue558SelectionState.childEvents, __issue558SelectionState.parentSelection.rangeCount, __issue558SelectionState.childSelection.rangeCount, __issue558SelectionState.crossDocumentError].join(',')",
             ),
-            "0,0,1,0,1,WrongDocumentError"
+            "0,0,0,0,0,1,WrongDocumentError"
         );
     }
 
@@ -16511,7 +16514,10 @@ mod tests {
         runtime.run_until_idle().unwrap();
         assert_eq!(
             result,
-            "true/true/true/true/1|true/true/false/true/false/0/|0|0"
+            // Navigation keeps the iframe as the top document's active
+            // element, while the old child Document loses system focus and
+            // the replacement starts with its viewport/body active.
+            "true/true/true/true/1|true/false/false/true/false/0/|0|0"
         );
         // A queued selectionchange from the retired document may complete on
         // its own old target, but it must never be delivered to the replacement
