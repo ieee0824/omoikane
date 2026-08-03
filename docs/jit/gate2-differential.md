@@ -11,8 +11,10 @@ programs through two adapters:
 
 Both adapters return a serialized value or a normalized error classification.
 The cases cover arithmetic and loops, nested calls, closure capture,
-control-flow, mutation side effects, caught exceptions, and uncaught errors.
-This keeps the comparison at an engine-neutral boundary without duplicating a
+control-flow, mutation side effects, five object/closure/array/string
+allocation shapes, caught exceptions, and uncaught errors. A separate
+allocation-pressure case forces Boa GC between bounded rounds, so the test
+observes the existing root and heap behavior without introducing a second
 heap or changing the production default.
 
 Run the default compatibility check with:
