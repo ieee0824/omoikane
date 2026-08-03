@@ -564,9 +564,14 @@ pub(crate) fn paint_text_with_font(
     let mut previous_char: Option<(char, usize)> = None;
 
     let chars: Vec<char> = text.chars().collect();
-    for (i, &ch) in chars.iter().enumerate() {
+    let mut remaining_non_zero = chars
+        .iter()
+        .filter(|ch| !is_zero_advance_character(**ch))
+        .count();
+    for &ch in &chars {
+        let zero_advance = is_zero_advance_character(ch);
         let (font_index, glyph, advance_x) = rasterize_with_fallback(fonts, ch, font_size);
-        if !is_zero_advance_character(ch)
+        if !zero_advance
             && let Some((prev, prev_font_index)) = previous_char
             && prev_font_index == font_index
         {
@@ -591,15 +596,12 @@ pub(crate) fn paint_text_with_font(
 
         cursor_x += advance_x;
         // Apply letter-spacing between characters only (not after the last one)
-        if !is_zero_advance_character(ch)
-            && chars[i + 1..]
-                .iter()
-                .any(|next| !is_zero_advance_character(*next))
-        {
+        if !zero_advance && remaining_non_zero > 1 {
             cursor_x += letter_spacing;
         }
-        if !is_zero_advance_character(ch) {
+        if !zero_advance {
             previous_char = Some((ch, font_index));
+            remaining_non_zero -= 1;
         }
     }
 }
@@ -624,9 +626,14 @@ pub(crate) fn paint_text_with_font_refs(
     let mut previous_char: Option<(char, usize)> = None;
 
     let chars: Vec<char> = text.chars().collect();
-    for (i, &ch) in chars.iter().enumerate() {
+    let mut remaining_non_zero = chars
+        .iter()
+        .filter(|ch| !is_zero_advance_character(**ch))
+        .count();
+    for &ch in &chars {
+        let zero_advance = is_zero_advance_character(ch);
         let (font_index, glyph, advance_x) = rasterize_with_fallback_refs(fonts, ch, font_size);
-        if !is_zero_advance_character(ch)
+        if !zero_advance
             && let Some((prev, prev_font_index)) = previous_char
             && prev_font_index == font_index
         {
@@ -650,15 +657,12 @@ pub(crate) fn paint_text_with_font_refs(
             }
 
         cursor_x += advance_x;
-        if !is_zero_advance_character(ch)
-            && chars[i + 1..]
-                .iter()
-                .any(|next| !is_zero_advance_character(*next))
-        {
+        if !zero_advance && remaining_non_zero > 1 {
             cursor_x += letter_spacing;
         }
-        if !is_zero_advance_character(ch) {
+        if !zero_advance {
             previous_char = Some((ch, font_index));
+            remaining_non_zero -= 1;
         }
     }
 }
@@ -747,10 +751,21 @@ fn paint_text_vertical_with_font_refs(
         rect.y
     };
     let clockwise = vertical_rl;
-    for (index, ch) in chars.iter().copied().enumerate() {
+    let mut remaining_non_zero = chars
+        .iter()
+        .filter(|ch| !is_zero_advance_character(**ch))
+        .count();
+    for ch in chars.iter().copied() {
+        let zero_advance = is_zero_advance_character(ch);
         let (_, glyph, advance_x) = rasterize_with_fallback_refs(fonts, ch, font_size);
-        let advance = advance_x.max(1.0);
-        let cell_start = if direction_rtl {
+        let advance = if zero_advance {
+            0.0
+        } else {
+            advance_x.max(1.0)
+        };
+        let cell_start = if zero_advance {
+            cursor_y
+        } else if direction_rtl {
             cursor_y - advance
         } else {
             cursor_y
@@ -778,11 +793,20 @@ fn paint_text_vertical_with_font_refs(
             );
         }
 
-        if direction_rtl {
-            cursor_y = cell_start - if index + 1 < chars.len() { letter_spacing } else { 0.0 };
+        let spacing = if !zero_advance && remaining_non_zero > 1 {
+            letter_spacing
         } else {
-            cursor_y = cell_start + advance
-                + if index + 1 < chars.len() { letter_spacing } else { 0.0 };
+            0.0
+        };
+        cursor_y = if zero_advance {
+            cell_start
+        } else if direction_rtl {
+            cell_start - spacing
+        } else {
+            cell_start + advance + spacing
+        };
+        if !zero_advance {
+            remaining_non_zero -= 1;
         }
     }
 }
@@ -1017,8 +1041,13 @@ pub(crate) fn paint_text_placeholder(
     let glyph_y = rect.y + (font_size - glyph_height) * 0.5;
 
     let chars: Vec<char> = text.chars().collect();
-    for (i, ch) in chars.iter().enumerate() {
-        if !ch.is_whitespace() && !is_zero_advance_character(*ch) {
+    let mut remaining_non_zero = chars
+        .iter()
+        .filter(|ch| !is_zero_advance_character(**ch))
+        .count();
+    for ch in chars.iter().copied() {
+        let zero_advance = is_zero_advance_character(ch);
+        if !ch.is_whitespace() && !zero_advance {
             canvas.fill_rect_clipped(
                 Rect {
                     x: cursor_x,
@@ -1030,15 +1059,14 @@ pub(crate) fn paint_text_placeholder(
                 clip,
             );
         }
-        if !is_zero_advance_character(*ch) {
+        if !zero_advance {
             cursor_x += advance;
         }
-        if !is_zero_advance_character(*ch)
-            && chars[i + 1..]
-                .iter()
-                .any(|next| !is_zero_advance_character(*next))
-        {
+        if !zero_advance && remaining_non_zero > 1 {
             cursor_x += letter_spacing;
+        }
+        if !zero_advance {
+            remaining_non_zero -= 1;
         }
     }
 }
@@ -1070,13 +1098,20 @@ pub(crate) fn paint_text_placeholder_with_mode(
     } else {
         rect.y
     };
-    for (index, ch) in chars.iter().copied().enumerate() {
-        let cell_start = if direction_rtl {
+    let mut remaining_non_zero = chars
+        .iter()
+        .filter(|ch| !is_zero_advance_character(**ch))
+        .count();
+    for ch in chars.iter().copied() {
+        let zero_advance = is_zero_advance_character(ch);
+        let cell_start = if zero_advance {
+            cursor_y
+        } else if direction_rtl {
             cursor_y - advance
         } else {
             cursor_y
         };
-        if !ch.is_whitespace() && !is_zero_advance_character(ch) {
+        if !ch.is_whitespace() && !zero_advance {
             canvas.fill_rect_clipped(
                 Rect {
                     x: rect.x + ((rect.width - glyph_width) * 0.5).max(0.0),
@@ -1088,28 +1123,27 @@ pub(crate) fn paint_text_placeholder_with_mode(
                 clip,
             );
         }
-        let spacing = if !is_zero_advance_character(ch)
-            && chars[index + 1..]
-                .iter()
-                .any(|next| !is_zero_advance_character(*next))
-        {
+        let spacing = if !zero_advance && remaining_non_zero > 1 {
             letter_spacing
         } else {
             0.0
         };
         cursor_y = if direction_rtl {
-            if is_zero_advance_character(ch) {
+            if zero_advance {
                 cell_start
             } else {
                 cell_start - spacing
             }
         } else {
-            if is_zero_advance_character(ch) {
+            if zero_advance {
                 cell_start
             } else {
                 cell_start + advance + spacing
             }
         };
+        if !zero_advance {
+            remaining_non_zero -= 1;
+        }
     }
 }
 
