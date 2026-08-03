@@ -227,6 +227,12 @@ pub(crate) fn paint_text_with_registry(
                     let (visual_text, vertical_mode) =
                         fragment_text_for_paint(transformed_text, &fragment.style);
                     let display_text = visual_text.as_ref();
+                    // A resolved fragment level lets rustybuzz consume the logical
+                    // string with the matching direction. Without such a level, an
+                    // owned value means paint-time bidi resolution rewrote the
+                    // string, so preserve that established visual-order path.
+                    let can_shape_logical_text = fragment.style.resolved_bidi_level.is_some()
+                        || matches!(&visual_text, Cow::Borrowed(_));
 
                     // Try to resolve the best web font variant for this fragment.
                     // If the fragment has a registered web-font family, use it as the
@@ -238,6 +244,7 @@ pub(crate) fn paint_text_with_registry(
                         let mut variant_fonts: Vec<&Font> = vec![web_font];
                         variant_fonts.extend(fonts.iter().map(|font| font.as_ref()));
                         if vertical_mode.is_some()
+                            || !can_shape_logical_text
                             || paint_shaped_horizontal_text(
                                 canvas,
                                 fragment.rect,
@@ -283,7 +290,8 @@ pub(crate) fn paint_text_with_registry(
                         } else {
                             let font_refs: Vec<&Font> =
                                 fonts.iter().map(|font| font.as_ref()).collect();
-                            if paint_shaped_horizontal_text(
+                            if !can_shape_logical_text
+                                || paint_shaped_horizontal_text(
                                 canvas,
                                 fragment.rect,
                                 transformed_text,
