@@ -10,6 +10,10 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 gui = ["dep:softbuffer", "dep:winit"]
+# Test-only Gate 2 comparison harness. This never selects a production
+# JavaScript engine; it compares the existing Boa embedding with a standalone
+# Boa interpreter context over the same source programs.
+jit-differential = []
 
 [dependencies]
 ab_glyph = "0.2"
@@ -25,11 +29,12 @@ crc32fast = "1.5"
 # Array.prototype.filter callback rooting (ieee0824/boa#57), and
 # nursery-bounded generational GC (ieee0824/boa#56), and
 # defineProperty receiver/descriptor rooting (ieee0824/boa#58), and
-# inline-cache hit rooting without weak-shape upgrades (ieee0824/boa#59), and
+# inline-cache hit rooting without weak-shape upgrades (ieee0824/boa#59),
+# bounded polymorphic inline-cache shapes (ieee0824/boa#60), and
 # Array.prototype.join/unshift receiver rooting during allocating property
-# callbacks (ieee0824/boa#61).
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "bc9fb8626a9696038a6eff5c2b867e20592c6f7b", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "bc9fb8626a9696038a6eff5c2b867e20592c6f7b" }
+# callbacks (ieee0824/boa#61). The merge commit contains all three fixes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "c8a13822051425151ea53e6edf9d5814e6b0542f", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "c8a13822051425151ea53e6edf9d5814e6b0542f" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
