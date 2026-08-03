@@ -420,7 +420,7 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
 
 fn print_report(report: &Report) {
     println!(
-        "JS benchmark: shapes={} runs={} profile={} passes={} target={}-{} (baseline v{} recorded under {}; reference: {})",
+        "JS benchmark: shapes={} runs={} profile={} passes={} target={}-{} (baseline v{}; reference: {})",
         report.total,
         report.measurement_runs,
         report.measured_profile,
@@ -428,13 +428,21 @@ fn print_report(report: &Report) {
         report.target_os,
         report.target_arch,
         report.baseline_version,
-        report.baseline_profile,
         report.reference_engine
     );
     if !report.baseline_comparable {
         println!(
-            "  note: baseline drift is advisory because environment {:?} does not match {:?}",
-            report.environment, report.baseline_environment
+            "  note: baseline drift is advisory; current=profile:{} runs:{} target={}-{} environment={:?}; baseline=profile:{} runs:{} target={}-{} environment={:?}",
+            report.measured_profile,
+            report.measurement_runs,
+            report.target_os,
+            report.target_arch,
+            report.environment,
+            report.baseline_profile,
+            report.baseline_measurement_runs,
+            report.baseline_target_os,
+            report.baseline_target_arch,
+            report.baseline_environment
         );
     }
     println!(
