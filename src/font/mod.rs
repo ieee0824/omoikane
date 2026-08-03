@@ -3,7 +3,8 @@
 //! Provides TrueType/OpenType font support using the `ab_glyph` crate.
 //! Handles font file loading, character-to-glyph mapping, and rasterization.
 
-use ab_glyph::{Font as AbGlyphFont, FontVec, ScaleFont};
+use ab_glyph::{Font as AbGlyphFont, FontVec, GlyphId, ScaleFont};
+use rustybuzz::{Direction, Face, UnicodeBuffer};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -60,6 +61,25 @@ pub struct GlyphRaster {
     pub offset_y: f32,
 }
 
+/// One positioned glyph produced by OpenType shaping.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapedGlyph {
+    pub glyph_id: u16,
+    pub cluster: usize,
+    pub x_advance: f32,
+    pub y_advance: f32,
+    pub x_offset: f32,
+    pub y_offset: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapingDirection {
+    LeftToRight,
+    RightToLeft,
+    TopToBottom,
+    BottomToTop,
+}
+
 /// Font representation wrapping `ab_glyph::FontVec`.
 pub struct Font {
     inner: FontVec,
@@ -113,6 +133,57 @@ impl Font {
             scaled.h_advance(glyph_id)
         };
 
+        self.rasterize_glyph_id(glyph_id, size_px, advance_x)
+    }
+
+    /// Shapes a complete script run and returns positioned glyphs in visual order.
+    pub fn shape_text(
+        &self,
+        text: &str,
+        size_px: f32,
+        direction: ShapingDirection,
+    ) -> Result<Vec<ShapedGlyph>, FontError> {
+        let face = Face::from_slice(self.inner.font_data(), 0)
+            .ok_or_else(|| FontError::InvalidFont("Failed to build shaping face".to_string()))?;
+        let mut buffer = UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.set_direction(match direction {
+            ShapingDirection::LeftToRight => Direction::LeftToRight,
+            ShapingDirection::RightToLeft => Direction::RightToLeft,
+            ShapingDirection::TopToBottom => Direction::TopToBottom,
+            ShapingDirection::BottomToTop => Direction::BottomToTop,
+        });
+        buffer.guess_segment_properties();
+        let glyphs = rustybuzz::shape(&face, &[], buffer);
+        let scale = size_px / face.units_per_em().max(1) as f32;
+        Ok(glyphs
+            .glyph_infos()
+            .iter()
+            .zip(glyphs.glyph_positions())
+            .map(|(info, position)| ShapedGlyph {
+                glyph_id: info.glyph_id as u16,
+                cluster: info.cluster as usize,
+                x_advance: position.x_advance as f32 * scale,
+                y_advance: position.y_advance as f32 * scale,
+                x_offset: position.x_offset as f32 * scale,
+                y_offset: position.y_offset as f32 * scale,
+            })
+            .collect())
+    }
+
+    /// Rasterizes a glyph selected by the shaping engine.
+    pub fn rasterize_glyph(&self, glyph_id: u16, size_px: f32) -> Result<GlyphRaster, FontError> {
+        let glyph_id = GlyphId(glyph_id);
+        let advance_x = self.inner.as_scaled(size_px).h_advance(glyph_id);
+        self.rasterize_glyph_id(glyph_id, size_px, advance_x)
+    }
+
+    fn rasterize_glyph_id(
+        &self,
+        glyph_id: GlyphId,
+        size_px: f32,
+        advance_x: f32,
+    ) -> Result<GlyphRaster, FontError> {
         // Create a glyph with scale at position (0,0)
         let glyph = glyph_id.with_scale(size_px);
 

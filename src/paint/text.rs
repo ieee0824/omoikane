@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{
-    Font, FontError, FontStyle, FontWeight, GlyphRaster, WebFontRegistry,
+    Font, FontError, FontStyle, FontWeight, GlyphRaster, ShapingDirection, WebFontRegistry,
     is_zero_advance_character, load_default_text_fonts,
 };
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
@@ -26,8 +26,14 @@ const MAX_RENDER_GLYPH_CACHE_ENTRIES: usize = 16_384;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct RenderGlyphCacheKey {
     font_identity: usize,
-    ch: char,
+    glyph: RenderGlyphIdentity,
     size_bits: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum RenderGlyphIdentity {
+    Character(char),
+    GlyphId(u16),
 }
 
 #[derive(Default)]
@@ -84,7 +90,7 @@ pub(crate) fn with_render_glyph_cache<T>(paint: impl FnOnce() -> T) -> T {
 fn rasterize_cached(font: &Font, ch: char, size_px: f32) -> Result<Arc<GlyphRaster>, FontError> {
     let key = RenderGlyphCacheKey {
         font_identity: std::ptr::from_ref(font) as usize,
-        ch,
+        glyph: RenderGlyphIdentity::Character(ch),
         size_bits: size_px.to_bits(),
     };
     if let Some(glyph) = RENDER_GLYPH_CACHE.with(|cache| {
@@ -105,6 +111,41 @@ fn rasterize_cached(font: &Font, ch: char, size_px: f32) -> Result<Arc<GlyphRast
     }
 
     let glyph = Arc::new(font.rasterize(ch, size_px)?);
+    RENDER_GLYPH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.active {
+            #[cfg(test)]
+            {
+                cache.misses += 1;
+            }
+            if cache.glyphs.len() < MAX_RENDER_GLYPH_CACHE_ENTRIES {
+                cache.glyphs.insert(key, glyph.clone());
+            }
+        }
+    });
+    Ok(glyph)
+}
+
+fn rasterize_glyph_cached(
+    font: &Font,
+    glyph_id: u16,
+    size_px: f32,
+) -> Result<Arc<GlyphRaster>, FontError> {
+    let key = RenderGlyphCacheKey {
+        font_identity: std::ptr::from_ref(font) as usize,
+        glyph: RenderGlyphIdentity::GlyphId(glyph_id),
+        size_bits: size_px.to_bits(),
+    };
+    if let Some(glyph) = RENDER_GLYPH_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        cache.active.then(|| cache.glyphs.get(&key).cloned()).flatten()
+    }) {
+        #[cfg(test)]
+        RENDER_GLYPH_CACHE.with(|cache| cache.borrow_mut().hits += 1);
+        return Ok(glyph);
+    }
+
+    let glyph = Arc::new(font.rasterize_glyph(glyph_id, size_px)?);
     RENDER_GLYPH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.active {
@@ -196,18 +237,33 @@ pub(crate) fn paint_text_with_registry(
                         // Build a temporary font list: web variant first, then fallbacks
                         let mut variant_fonts: Vec<&Font> = vec![web_font];
                         variant_fonts.extend(fonts.iter().map(|font| font.as_ref()));
-                        paint_fragment_text(
-                            canvas,
-                            fragment.rect,
-                            display_text,
-                            font_size,
-                            fragment.metrics.ascent,
-                            &variant_fonts,
-                            frag_color,
-                            clip,
-                            fragment.metrics.letter_spacing,
-                            vertical_mode,
-                        );
+                        if vertical_mode.is_some()
+                            || paint_shaped_horizontal_text(
+                                canvas,
+                                fragment.rect,
+                                transformed_text,
+                                font_size,
+                                fragment.metrics.ascent,
+                                &variant_fonts,
+                                &fragment.style,
+                                frag_color,
+                                clip,
+                                fragment.metrics.letter_spacing,
+                            ).is_none()
+                        {
+                            paint_fragment_text(
+                                canvas,
+                                fragment.rect,
+                                display_text,
+                                font_size,
+                                fragment.metrics.ascent,
+                                &variant_fonts,
+                                frag_color,
+                                clip,
+                                fragment.metrics.letter_spacing,
+                                vertical_mode,
+                            );
+                        }
                     } else if !fonts.is_empty() {
                         if let Some(vertical_mode) = vertical_mode {
                             let font_refs: Vec<&Font> =
@@ -225,17 +281,32 @@ pub(crate) fn paint_text_with_registry(
                                 Some(vertical_mode),
                             );
                         } else {
-                            paint_text_with_font(
+                            let font_refs: Vec<&Font> =
+                                fonts.iter().map(|font| font.as_ref()).collect();
+                            if paint_shaped_horizontal_text(
                                 canvas,
                                 fragment.rect,
-                                display_text,
+                                transformed_text,
                                 font_size,
                                 fragment.metrics.ascent,
-                                fonts,
+                                &font_refs,
+                                &fragment.style,
                                 frag_color,
                                 clip,
                                 fragment.metrics.letter_spacing,
-                            );
+                            ).is_none() {
+                                paint_text_with_font(
+                                    canvas,
+                                    fragment.rect,
+                                    display_text,
+                                    font_size,
+                                    fragment.metrics.ascent,
+                                    fonts,
+                                    frag_color,
+                                    clip,
+                                    fragment.metrics.letter_spacing,
+                                );
+                            }
                         }
                     } else {
                         // Fallback: placeholder rectangles
@@ -926,6 +997,69 @@ fn paint_fragment_text(
             letter_spacing,
         );
     }
+}
+
+pub(crate) fn paint_shaped_horizontal_text(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    layout_ascent: f32,
+    fonts: &[&Font],
+    style: &FragmentStyle,
+    color: Color,
+    clip: Option<Rect>,
+    letter_spacing: f32,
+) -> Option<f32> {
+    let Some(font) = fonts.iter().copied().find(|font| {
+        text.chars().all(|ch| {
+            ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch)
+        })
+    }) else {
+        return None;
+    };
+    let rtl = style.resolved_bidi_level.is_some_and(|level| level % 2 == 1)
+        || style.resolved_bidi_level.is_none()
+            && (style.direction.as_deref() == Some("rtl")
+                || text.chars().any(|ch| {
+                    matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN)
+                }));
+    let direction = if rtl {
+        ShapingDirection::RightToLeft
+    } else {
+        ShapingDirection::LeftToRight
+    };
+    let Ok(glyphs) = font.shape_text(text, font_size, direction) else {
+        return None;
+    };
+    if glyphs.is_empty() && !text.is_empty() {
+        return None;
+    }
+
+    let baseline_y = rect.y + layout_ascent;
+    let mut cursor_x = rect.x;
+    for (index, shaped) in glyphs.iter().enumerate() {
+        if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, font_size)
+            && glyph.width > 0
+            && glyph.height > 0
+            && !glyph.bitmap.is_empty()
+        {
+            canvas.draw_glyph_mask(
+                cursor_x + shaped.x_offset + glyph.offset_x,
+                baseline_y - shaped.y_offset + glyph.offset_y,
+                glyph.width,
+                glyph.height,
+                &glyph.bitmap,
+                color,
+                clip,
+            );
+        }
+        cursor_x += shaped.x_advance.abs();
+        if glyphs.get(index + 1).is_some_and(|next| next.cluster != shaped.cluster) {
+            cursor_x += letter_spacing;
+        }
+    }
+    Some(cursor_x - rect.x)
 }
 
 /// Paints a horizontal glyph run into a vertical line box.  The layout stage

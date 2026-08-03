@@ -8906,6 +8906,51 @@ fn form_control_text_measure_matches_painter_advance_model() {
 }
 
 #[test]
+fn opentype_shaped_paint_uses_the_layout_advance_model() {
+    use crate::font::{ShapingDirection, load_default_text_fonts};
+    use super::text::paint_shaped_horizontal_text;
+
+    let fonts = load_default_text_fonts();
+    let Some(font) = fonts.iter().find(|font| "بب".chars().all(|ch| font.has_glyph(ch))) else {
+        eprintln!("Skipping shaped paint test: no Arabic font available");
+        return;
+    };
+    let font_size = 32.0;
+    let letter_spacing = 2.0;
+    let shaped = font
+        .shape_text("بب", font_size, ShapingDirection::RightToLeft)
+        .unwrap();
+    let cluster_boundaries = shaped
+        .windows(2)
+        .filter(|pair| pair[0].cluster != pair[1].cluster)
+        .count();
+    let expected = shaped.iter().map(|glyph| glyph.x_advance.abs()).sum::<f32>()
+        + cluster_boundaries as f32 * letter_spacing;
+
+    let mut canvas = Canvas::new(120, 50);
+    let style = FragmentStyle {
+        direction: Some("rtl".to_string()),
+        resolved_bidi_level: Some(1),
+        ..FragmentStyle::default()
+    };
+    let painted_advance = paint_shaped_horizontal_text(
+        &mut canvas,
+        Rect { x: 0.0, y: 0.0, width: 120.0, height: 50.0 },
+        "بب",
+        font_size,
+        35.0,
+        &[font],
+        &style,
+        Color::rgb(0, 0, 0),
+        None,
+        letter_spacing,
+    )
+    .unwrap();
+    assert!((painted_advance - expected).abs() < 0.001);
+    assert!(canvas.pixels().chunks_exact(4).any(|pixel| pixel[3] > 0));
+}
+
+#[test]
 fn form_control_label_uses_web_font_variant() {
     // A FormControl label whose fragment style names a registered web-font
     // family must be measured and drawn with that variant. Painting with

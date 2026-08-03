@@ -5683,6 +5683,26 @@ fn zero_width_shaping_controls_do_not_change_inline_advance() {
     );
 }
 
+#[test]
+fn complex_script_layout_uses_run_shaping_advances() {
+    use crate::font::{ShapingDirection, load_default_text_fonts};
+
+    let metrics = FontMetrics::from_font_size(32.0);
+    let fonts = load_default_text_fonts();
+    let Some(font) = fonts.iter().find(|font| "لا".chars().all(|ch| font.has_glyph(ch))) else {
+        eprintln!("Skipping Arabic layout shaping test: no Arabic font available");
+        return;
+    };
+    let expected = font
+        .shape_text("لا", 32.0, ShapingDirection::RightToLeft)
+        .unwrap()
+        .iter()
+        .map(|glyph| glyph.x_advance.abs())
+        .sum::<f32>();
+    let measured = super::measure_text_width("لا", metrics);
+    assert!((measured - expected).abs() < 0.01, "layout={measured}, shaped={expected}");
+}
+
 // ---- list-style layout tests ----
 
 fn build_ul_with_items(item_count: usize) -> (NodeHandle, NodeHandle, Vec<NodeHandle>) {

@@ -8,7 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
-    Font, FontFamilyKey, FontStyle, FontWeight, is_zero_advance_character, load_default_text_fonts,
+    Font, FontFamilyKey, FontStyle, FontWeight, ShapingDirection, is_zero_advance_character,
+    load_default_text_fonts,
 };
 use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
@@ -2443,6 +2444,19 @@ fn measure_text_width_with_fallback(
     primary: Option<&Font>,
     fonts: &[Arc<Font>],
 ) -> f32 {
+    if let Some(font) = select_layout_run_font(primary, fonts, text) {
+        let direction = if text.chars().any(|ch| {
+            matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN)
+        }) {
+            ShapingDirection::RightToLeft
+        } else {
+            ShapingDirection::LeftToRight
+        };
+        if let Ok(glyphs) = font.shape_text(text, font_size, direction) {
+            return glyphs.iter().map(|glyph| glyph.x_advance.abs()).sum();
+        }
+    }
+
     let mut width = 0.0;
     let mut previous: Option<(char, *const Font)> = None;
 
@@ -2467,6 +2481,21 @@ fn measure_text_width_with_fallback(
     }
 
     width
+}
+
+fn select_layout_run_font<'a>(
+    primary: Option<&'a Font>,
+    fonts: &'a [Arc<Font>],
+    text: &str,
+) -> Option<&'a Font> {
+    let supports_run = |font: &Font| {
+        text.chars().all(|ch| {
+            ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch)
+        })
+    };
+    primary
+        .filter(|font| supports_run(font))
+        .or_else(|| fonts.iter().map(Arc::as_ref).find(|font| supports_run(font)))
 }
 
 fn select_layout_font<'a>(
