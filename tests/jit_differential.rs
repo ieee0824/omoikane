@@ -11,7 +11,7 @@ mod differential {
     use boa_engine::{Context, Source};
     use omoikane::js::JsRuntime;
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, PartialEq)]
     enum Outcome {
         Value(serde_json::Value),
         Error { kind: String, marker: String },
