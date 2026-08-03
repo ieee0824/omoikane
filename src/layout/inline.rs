@@ -2406,6 +2406,8 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                     primary,
                     &context.system_fonts,
                 );
+                // Shaped paint inserts spacing between extended grapheme
+                // clusters, not between the scalars that form one cluster.
                 let cluster_count = text
                     .graphemes(true)
                     .filter(|cluster| {
