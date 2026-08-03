@@ -14,6 +14,9 @@ gui = ["dep:softbuffer", "dep:winit"]
 # JavaScript engine; it compares the existing Boa embedding with a standalone
 # Boa interpreter context over the same source programs.
 jit-differential = []
+# Test-only Gate 3 substrate. Enabling this exposes Boa's native code-memory
+# probe but does not select JIT execution for production JavaScript.
+baseline-jit = ["boa_engine/baseline-jit"]
 
 [dependencies]
 ab_glyph = "0.2"
@@ -35,9 +38,10 @@ crc32fast = "1.5"
 # callbacks (ieee0824/boa#61), and the verified bytecode/JIT metadata contract
 # (ieee0824/boa#62), and the allocation-free interpreter frame/fallback contract
 # (ieee0824/boa#63), and the stable inline-cache state/telemetry contract
-# (ieee0824/boa#64). The merge commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "2fe0b1911a898f9bb51cb822c18f89bf20835879", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "2fe0b1911a898f9bb51cb822c18f89bf20835879" }
+# (ieee0824/boa#64), and the opt-in x86_64 baseline-JIT code-memory/ABI
+# substrate (ieee0824/boa#65). The merge commit contains all listed fork changes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "82572c24de5d8a49196700f6e982651edd671fab", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "82572c24de5d8a49196700f6e982651edd671fab" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
