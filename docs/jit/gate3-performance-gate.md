@@ -13,9 +13,12 @@ checked-in iteration counts, four timed passes per workload, and five fresh
 SpiderMonkey comparison is baseline v7's Firefox 153.0.1 minimum of five fresh
 processes, recorded by the #317 procedure.
 
-Two independent Linux sets were recorded. A temporary branch-only Actions
-matrix also measured the same source on Linux and Intel macOS; its workflow was
-removed after downloading the reports so it does not add recurring CI cost.
+Two independent Linux sets were recorded. The table retains both decisions;
+the checked-in local JSON pair is set 2, while set 1 is retained as the summary
+values below rather than a second raw-report pair. A temporary branch-only
+Actions matrix also measured the same source on Linux and Intel macOS; its
+workflow was removed after downloading the reports so it does not add recurring
+CI cost.
 Cross-runner absolute numbers are not divided by the local Firefox reference;
 the matrix is used for matched JIT-on/off and OS parity only.
 
@@ -75,7 +78,8 @@ site, not on native entries. The rejected-site total is observable for future
 scope work but was only about 0.4% of the complete 11-shape run and did not cause
 a matched fallback regression.
 
-The checked-in raw reports preserve every timing and diagnostic sample:
+The checked-in set 2 and Actions raw reports preserve every timing and
+diagnostic sample for those archived runs:
 
 - `gate3-performance-linux-local-jit-{off,on}.json`
 - `gate3-performance-ubuntu-jit-{off,on}.json`
