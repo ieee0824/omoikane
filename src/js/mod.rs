@@ -20010,6 +20010,7 @@ b</textarea></form>"#);
                 parent.style.unicodeBidi = 'isolate';
                 child.style.direction = 'initial';
                 child.style.writingMode = 'unset';
+                child.style.unicodeBidi = 'unset';
                 return [
                     CSS.supports('direction', 'rtl'),
                     CSS.supports('writing-mode', 'vertical-rl'),

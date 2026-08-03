@@ -4393,7 +4393,7 @@ fn writing_direction_properties_validate_and_support_css_wide_keywords() {
 }
 
 #[test]
-fn inherits_writing_mode_and_unicode_bidi_from_parent() {
+fn inherits_direction_and_writing_mode_but_not_unicode_bidi_from_parent() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
     let body = NodeHandle::element("body");
@@ -4418,7 +4418,7 @@ fn inherits_writing_mode_and_unicode_bidi_from_parent() {
     );
     assert_eq!(
         style.get("unicode-bidi"),
-        Some(&ComputedValue::Keyword("isolate".into()))
+        Some(&ComputedValue::Keyword("normal".into()))
     );
 }
 
@@ -4437,7 +4437,7 @@ fn writing_direction_initial_and_unset_resolve_deterministically() {
         Origin::Author,
         parse_stylesheet(
             "body { direction: rtl; writing-mode: vertical-lr; unicode-bidi: isolate; } \
-             div { direction: initial; writing-mode: unset; unicode-bidi: initial; }",
+             div { direction: initial; writing-mode: unset; unicode-bidi: unset; }",
         )
         .unwrap(),
     );

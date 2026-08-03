@@ -5668,6 +5668,7 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
         "transition-duration",
         "transition-timing-function",
         "transition-delay",
+        "unicode-bidi",
     ] {
         let uses_initial_value = matches!(
             properties.get(name),
@@ -5685,12 +5686,13 @@ fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, Com
 
 /// Resolve CSS-wide keywords for inherited writing-direction properties before
 /// the normal inheritance pass. `initial`/`revert` use the property initial
-/// value here, while `unset` follows the inherited value just like `inherit`.
+/// value here (including `revert-layer`), while `unset` follows the inherited
+/// value just like `inherit`.
 fn resolve_writing_direction_css_wide_keywords(
     properties: &mut BTreeMap<String, ComputedValue>,
     parent_style: Option<&ComputedStyle>,
 ) {
-    for name in ["direction", "writing-mode", "unicode-bidi"] {
+    for name in ["direction", "writing-mode"] {
         let Some(ComputedValue::Keyword(keyword)) = properties.get(name) else {
             continue;
         };
@@ -5699,7 +5701,6 @@ fn resolve_writing_direction_css_wide_keywords(
             let initial = match name {
                 "direction" => "ltr",
                 "writing-mode" => "horizontal-tb",
-                "unicode-bidi" => "normal",
                 _ => unreachable!("writing-direction property list is fixed"),
             };
             properties.insert(name.to_string(), ComputedValue::Keyword(initial.to_string()));
@@ -5821,7 +5822,6 @@ fn apply_inheritance(
         "text-decoration-style",
         "text-indent",
         "text-transform",
-        "unicode-bidi",
         "visibility",
         "white-space",
         "writing-mode",
