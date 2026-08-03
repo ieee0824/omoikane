@@ -47,6 +47,12 @@
   const nativeCreateElementNS = globalThis.__omoikane_create_element_ns;
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
+  const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
+  const nativeIframeContextState = globalThis.__omoikane_iframe_context_state;
+  const nativeIframeForceNavigation = globalThis.__omoikane_iframe_force_navigation;
+  const nativeTakeDiscardedNodeIds = globalThis.__omoikane_take_discarded_node_ids;
+  const nativeDocumentURL = globalThis.__omoikane_document_url;
+  const nativeDocumentBaseURL = globalThis.__omoikane_document_base_url;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
   delete globalThis.__omoikane_clipboard_permission;
@@ -66,10 +72,44 @@
   delete globalThis.__omoikane_create_element_ns;
   delete globalThis.__omoikane_set_attribute_ns;
   delete globalThis.__omoikane_remove_attribute_ns;
+  delete globalThis.__omoikane_iframe_content_document;
+  delete globalThis.__omoikane_iframe_context_state;
+  delete globalThis.__omoikane_iframe_force_navigation;
+  delete globalThis.__omoikane_take_discarded_node_ids;
+  delete globalThis.__omoikane_document_url;
+  delete globalThis.__omoikane_document_base_url;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
   globalThis.top = globalThis;
+  // Page code may replace collection prototype methods after bootstrap. Keep
+  // pristine, receiver-independent references for wrapper identity and
+  // teardown bookkeeping: those paths are a security/lifecycle boundary and
+  // must continue to retire stale native identities even under prototype
+  // poisoning.
+  const safeApply = Reflect.apply;
+  const mapHasIntrinsic = Map.prototype.has;
+  const mapGetIntrinsic = Map.prototype.get;
+  const mapSetIntrinsic = Map.prototype.set;
+  const mapDeleteIntrinsic = Map.prototype.delete;
+  const weakMapGetIntrinsic = WeakMap.prototype.get;
+  const weakMapSetIntrinsic = WeakMap.prototype.set;
+  const weakMapDeleteIntrinsic = WeakMap.prototype.delete;
+  const weakSetAddIntrinsic = WeakSet.prototype.add;
+  const weakSetHasIntrinsic = WeakSet.prototype.has;
+  const safeMapHas = (target, key) => safeApply(mapHasIntrinsic, target, [key]);
+  const safeMapGet = (target, key) => safeApply(mapGetIntrinsic, target, [key]);
+  const safeMapSet = (target, key, value) =>
+    safeApply(mapSetIntrinsic, target, [key, value]);
+  const safeMapDelete = (target, key) => safeApply(mapDeleteIntrinsic, target, [key]);
+  const safeWeakMapGet = (target, key) => safeApply(weakMapGetIntrinsic, target, [key]);
+  const safeWeakMapSet = (target, key, value) =>
+    safeApply(weakMapSetIntrinsic, target, [key, value]);
+  const safeWeakMapDelete = (target, key) =>
+    safeApply(weakMapDeleteIntrinsic, target, [key]);
+  const safeWeakSetAdd = (target, key) => safeApply(weakSetAddIntrinsic, target, [key]);
+  const safeWeakSetHas = (target, key) => safeApply(weakSetHasIntrinsic, target, [key]);
+  const safeDefineProperty = Object.defineProperty;
   const cache = new Map();
   // Platform-object identity and insert-adjacent conversions must not depend on
   // page-mutable expandos, constructors, or prototypes. `cache` already owns
@@ -127,6 +167,46 @@
     const id = canonicalWrapperId(node);
     return id !== undefined && hasCanonicalElementId(ids, id);
   }
+  const nativeNodeIds = new WeakMap();
+  const retiredNodeWrappers = new WeakSet();
+  // Same-document history state is browser-owned. Keeping it off the public
+  // Document wrapper prevents an author-created expando from spoofing the URL
+  // used by subsequent same-origin checks.
+  const documentHistoryURLs = new WeakMap();
+  function forgetDiscardedNodeWrappers() {
+    const ids = nativeTakeDiscardedNodeIds() || [];
+    for (let index = 0; index < ids.length; index += 1) {
+      const id = ids[index];
+      // If teardown retired the browsing context which currently owns focus,
+      // hand focus back to the top Document before any later hasFocus() walk
+      // attempts to wrap the now-unregistered Document identity.
+      if (focusedDocumentId === id) focusedDocumentId = null;
+      const wrapper = safeMapGet(cache, id);
+      if (wrapper) {
+        // A native node identity is pointer-based and may be reused by a later
+        // Document generation. Permanently sever retained wrappers from that
+        // identity before dropping the cache entry so stale page references
+        // cannot resurrect as wrappers for an unrelated new node.
+        // Retire a nested iframe's WindowProxy first, while its wrapper still
+        // carries the native id needed by the live facade.
+        retireIframeWindowProxy(wrapper);
+        safeWeakSetAdd(retiredNodeWrappers, wrapper);
+        try {
+          safeDefineProperty(wrapper, "__retired", {
+            value: true,
+            writable: false,
+            configurable: false,
+          });
+        } catch (_) {}
+      }
+      safeMapDelete(cache, id);
+    }
+  }
+  safeDefineProperty(globalThis, "__omoikane_forget_discarded_node_wrappers", {
+    value: forgetDiscardedNodeWrappers,
+    writable: false,
+    configurable: false,
+  });
   const validatesSpecialStyleProperties = new Set([
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
@@ -323,8 +403,8 @@
     if (id === null || id === undefined) {
       return null;
     }
-    if (mapHas(cache, id)) {
-      return mapGet(cache, id);
+    if (safeMapHas(cache, id)) {
+      return safeMapGet(cache, id);
     }
     const nodeType = nativeNodeType(id);
     const interfaceType = nativeInterfaceTypeForNodeId(id, nodeType);
@@ -348,7 +428,11 @@
         knownSlots.push(node);
       }
     }
-    mapSet(cache, id, node);
+    if (nodeType === 9 || id === __omoikane_document_id) {
+      const committed = nativeDocumentURL(id);
+      if (committed !== null) node.__documentURL = String(committed);
+    }
+    safeMapSet(cache, id, node);
     return node;
   }
 
@@ -363,6 +447,21 @@
   function internalNodeType(node) {
     const id = internalNodeId(node);
     return id === undefined ? undefined : __omoikane_node_type(id);
+  }
+
+  // A queued callback may retain a wrapper after its browsing context has
+  // navigated and the native node registry has retired that generation. Keep
+  // event-path construction inert for such a wrapper instead of asking the
+  // native node accessors to resolve an id that no longer exists.
+  function isLiveNode(node) {
+    const id = internalNodeId(node);
+    if (id === undefined) return false;
+    try {
+      nativeNodeType(id);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   function internalNodeLocalName(node) {
@@ -1055,7 +1154,7 @@
   }
 
   function eventParent(node, event, originalRoot) {
-    if (!(node instanceof Node)) return null;
+    if (!(node instanceof Node) || !isLiveNode(node)) return null;
     const assignedSlotId = internalAssignedSlot(node.__id);
     if (assignedSlotId !== null && assignedSlotId !== undefined) {
       return wrapNode(assignedSlotId);
@@ -1070,6 +1169,7 @@
   }
 
   function buildEventPath(target, event) {
+    if (target instanceof Node && !isLiveNode(target)) return [];
     const path = [];
     const originalRoot = target instanceof Node ? nodeRoot(target) : null;
     let current = target;
@@ -1528,8 +1628,12 @@
       }
       stampInsertedOwnerDocument(parent, children);
       for (let index = 0; index < children.length; index++) {
-        if (connectedBeforeMove[index]) disconnectCustomElementTree(children[index]);
+        if (connectedBeforeMove[index]) {
+          retireIframeWindowProxies(children[index]);
+          disconnectCustomElementTree(children[index]);
+        }
       }
+      forgetDiscardedNodeWrappers();
       upgradeInsertedCustomElements(parent, children);
       if (children.length) {
         queueMutation(parent, "childList", {
@@ -1547,7 +1651,11 @@
     notifyImplicitRemoval(newNode);
     __omoikane_insert_before(parentId, newId, refId);
     stampInsertedOwnerDocument(parent, [newNode]);
-    if (connectedBeforeMove) disconnectCustomElementTree(newNode);
+    if (connectedBeforeMove) {
+      retireIframeWindowProxies(newNode);
+      disconnectCustomElementTree(newNode);
+    }
+    forgetDiscardedNodeWrappers();
     upgradeInsertedCustomElements(parent, [newNode]);
     queueMutation(parent, "childList", {
       addedNodes: [newNode],
@@ -1714,7 +1822,16 @@
 
   class Node {
     constructor(id) {
-      this.__id = id;
+      safeWeakMapSet(nativeNodeIds, this, id);
+      safeDefineProperty(this, "__id", {
+        enumerable: true,
+        configurable: false,
+        get() {
+          return safeWeakSetHas(retiredNodeWrappers, this)
+            ? null
+            : safeWeakMapGet(nativeNodeIds, this);
+        },
+      });
       this.__listeners = new Map();
       this.__onload = null;
     }
@@ -1756,8 +1873,10 @@
         }
         stampInsertedOwnerDocument(this, children);
         for (let i = 0; i < children.length; i++) {
+          if (connectedBeforeMove[i]) retireIframeWindowProxies(children[i]);
           if (connectedBeforeMove[i]) disconnectCustomElementTree(children[i]);
         }
+        forgetDiscardedNodeWrappers();
         upgradeInsertedCustomElements(this, children);
         if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling });
         refreshSlotAssignments();
@@ -1768,6 +1887,8 @@
       const connectedBeforeMove = !!(child && child.isConnected);
       notifyImplicitRemoval(child);
       __omoikane_append_child(this.__id, child.__id);
+      if (connectedBeforeMove) retireIframeWindowProxies(child);
+      forgetDiscardedNodeWrappers();
       stampInsertedOwnerDocument(this, [child]);
       if (connectedBeforeMove) disconnectCustomElementTree(child);
       upgradeInsertedCustomElements(this, [child]);
@@ -2175,6 +2296,10 @@
         // this base-class descriptor setter directly on CharacterData.
         mapSet(canonicalCharacterDataOverrides, this, text);
       }
+      if (wasConnected) {
+        for (const child of removedNodes) retireIframeWindowProxies(child);
+      }
+      forgetDiscardedNodeWrappers();
       const addedNodes = this.childNodes.slice();
       stampInsertedOwnerDocument(this, addedNodes);
       if (wasConnected) {
@@ -2197,6 +2322,10 @@
       const removedNodes = this.childNodes.slice();
       for (const child of removedNodes.slice().reverse()) preRemove(this, child);
       __omoikane_set_inner_html(this.__id, html);
+      if (wasConnected) {
+        for (const child of removedNodes) retireIframeWindowProxies(child);
+      }
+      forgetDiscardedNodeWrappers();
       const addedNodes = this.childNodes.slice();
       stampInsertedOwnerDocument(this, addedNodes);
       if (wasConnected) {
@@ -2247,6 +2376,8 @@
       preRemove(this, child);
       const wasConnected = child.isConnected;
       __omoikane_remove_child(this.__id, child.__id);
+      if (wasConnected) retireIframeWindowProxies(child);
+      forgetDiscardedNodeWrappers();
       if (wasConnected) disconnectCustomElementTree(child);
       queueMutation(this, "childList", { removedNodes: [child], previousSibling, nextSibling });
       refreshSlotAssignments();
@@ -2483,6 +2614,12 @@
     }
 
     get isConnected() {
+      // Nodes retained from a destroyed iframe generation remain rooted in
+      // their (now inactive) Document, so DOM's shadow-including-root test
+      // still considers them connected. Their native identity is severed only
+      // to prevent pointer reuse; answer from that retirement snapshot without
+      // passing the null sentinel through native node lookups.
+      if (this.__id === null) return true;
       let current = this;
       while (current) {
         if (current.nodeType === 9) return true;
@@ -4637,11 +4774,15 @@
     }
 
     get URL() {
+      const historyURL = safeWeakMapGet(documentHistoryURLs, this);
+      if (historyURL !== undefined) return historyURL;
+      const committed = nativeDocumentURL(this.__id);
+      if (committed !== null) this.__documentURL = String(committed);
       return this.__documentURL || globalThis.location.href;
     }
 
     get documentURI() {
-      return this.__documentURL || globalThis.location.href;
+      return this.URL;
     }
 
     get compatMode() {
@@ -4653,6 +4794,7 @@
     }
 
     get defaultView() {
+      if (this.__retired || safeWeakSetHas(retiredNodeWrappers, this)) return null;
       // The Window associated with this document. The top-level document's
       // Window is the global object itself; a sub-browsing-context document (an
       // iframe's contentDocument) routes to its owning iframe's contentWindow
@@ -4745,7 +4887,10 @@
     // 016-9 — because the reset targets this document node by id. Returns the
     // document, as the spec requires.
     open() {
+      const removedNodes = this.childNodes.slice();
       __omoikane_document_reset(this.__id);
+      for (const child of removedNodes) retireIframeWindowProxies(child);
+      forgetDiscardedNodeWrappers();
       return this;
     }
 
@@ -5578,6 +5723,26 @@
     "allow-top-navigation-by-user-activation",
     "allow-top-navigation-to-custom-protocols",
   ]);
+  const iframeWindowProxyRetirers = new WeakMap();
+  function retireIframeWindowProxy(iframe) {
+    const retire = safeWeakMapGet(iframeWindowProxyRetirers, iframe);
+    if (!retire) return;
+    retire();
+    safeWeakMapDelete(iframeWindowProxyRetirers, iframe);
+    iframe.__contentWindowFacade = null;
+    iframe.__contentWindowRefresh = null;
+  }
+  function retireIframeWindowProxies(root) {
+    if (!root) return;
+    if (root.nodeType === 1 &&
+        asciiLowercase(internalNodeLocalName(root) || "") === "iframe") {
+      retireIframeWindowProxy(root);
+    }
+    const children = root.childNodes || [];
+    for (let index = 0; index < children.length; index += 1) {
+      retireIframeWindowProxies(children[index]);
+    }
+  }
 
   // An <iframe> owns a nested browsing context whose document is reachable via
   // contentDocument (and, as a facade, contentWindow.document). The document is
@@ -5586,6 +5751,19 @@
   // types become a real DOM tree). Reading contentDocument again after changing
   // src reloads it.
   class HTMLIFrameElement extends HTMLElement {
+    __prepareResourceNavigation() {
+      if (!this.isConnected) return;
+      if (!this.__contentWindowFacade) {
+        // Creating the facade eagerly records the current initial entry before
+        // a direct src/srcdoc mutation replaces it.
+        void this.contentWindow;
+        return;
+      }
+      if (typeof this.__contentWindowRefresh === "function") {
+        this.__contentWindowRefresh();
+      }
+    }
+
     get sandbox() {
       if (!this.__sandboxTokenList) {
         this.__sandboxTokenList = new DOMTokenList(
@@ -5611,8 +5789,10 @@
       // the element is connected again and a fresh navigation is committed.
       // A connected document with an opaque sandbox origin is likewise hidden
       // from its parent browsing context.
-      if (!this.isConnected) return null;
-      return wrapNode(__omoikane_iframe_content_document(this.__id));
+      if (this.__id === null || !this.isConnected) return null;
+      const id = nativeIframeContentDocument(this.__id);
+      forgetDiscardedNodeWrappers();
+      return wrapNode(id);
     }
 
     getSVGDocument() {
@@ -5624,52 +5804,282 @@
     }
 
     get contentWindow() {
-      // Return one stable Window facade per iframe so that
-      // `iframe.contentWindow === iframe.contentWindow` holds and properties
-      // assigned to it persist across accesses. `document` is a live getter, so
-      // a later `src` change (which reloads the sub-document) is reflected on
-      // the next read. A full Window per frame is out of scope here.
+      // WindowProxy identity is stable across navigation while each committed
+      // Document gets a fresh backing Window state. Detach retires this proxy;
+      // reconnect creates a new browsing context and therefore a new proxy.
+      if (this.__id === null || !this.isConnected) return null;
       if (!this.__contentWindowFacade) {
         const iframe = this;
-        this.__contentWindowFacade = {
-          __listeners: new Map(),
-          get document() {
-            if (!iframe.isConnected) return null;
-            const document = iframe.contentDocument;
-            if (!document) {
-              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
+        let retired = false;
+        let expectedContext = null;
+        let activeGeneration = null;
+        let access = "closed";
+        let activeWindow = { __listeners: new Map() };
+        let activeHistory = null;
+        const historyEntries = [];
+        let historyIndex = -1;
+        let pendingHistoryAction = null;
+        let historyScrollRestoration = "auto";
+        let proxy;
+        const securityError = () => new DOMException(
+          "Blocked access to a cross-origin frame.",
+          "SecurityError",
+        );
+        const effectiveDocumentBaseURL = document => {
+          const base = document ? nativeDocumentBaseURL(document.__id) : null;
+          return base === null
+            ? (document ? document.URL : globalThis.document.URL)
+            : String(base);
+        };
+        const creatorBaseURL = () => {
+          const owner = iframe.ownerDocument;
+          return effectiveDocumentBaseURL(owner || globalThis.document);
+        };
+        const resolveHistoryURL = (value, currentURL) => {
+          const base = currentURL === "about:blank" || currentURL === "about:srcdoc"
+            ? creatorBaseURL()
+            : currentURL;
+          return new URL(String(value), base).href;
+        };
+        const callerBaseURL = () => {
+          return effectiveDocumentBaseURL(globalThis.document);
+        };
+        const captureHistoryEntry = generation => {
+          const attribute = iframe.hasAttribute("srcdoc") ? "srcdoc" : "src";
+          const value = iframe.getAttribute(attribute) || "";
+          const documentId = nativeIframeContentDocument(iframe.__id);
+          forgetDiscardedNodeWrappers();
+          const committedDocument = wrapNode(documentId);
+          let href = attribute === "srcdoc" ? "about:srcdoc" : "about:blank";
+          if (committedDocument) href = committedDocument.URL;
+          else if (value) {
+            try { href = new URL(value, creatorBaseURL()).href; }
+            catch (_) { href = value; }
+          }
+          return { attribute, value, href, state: null, generation };
+        };
+        const commitHistoryEntry = generation => {
+          const entry = captureHistoryEntry(generation);
+          const action = pendingHistoryAction;
+          pendingHistoryAction = null;
+          if (historyIndex < 0) {
+            historyEntries.push(entry);
+            historyIndex = 0;
+          } else if (action === "reload" || action === "traverse") {
+            // Reload and traversal select the existing session-history entry,
+            // but its active Document generation is the one just committed.
+            const replacedGeneration = historyEntries[historyIndex].generation;
+            historyEntries[historyIndex] = {
+              ...historyEntries[historyIndex],
+              attribute: entry.attribute,
+              value: entry.value,
+              generation,
+            };
+            if (action === "traverse") {
+              // Every same-document entry from the restored Document now
+              // belongs to this new generation. Rebinding only the selected
+              // entry would spuriously reload adjacent pushState entries.
+              for (const historyEntry of historyEntries) {
+                if (historyEntry.generation === replacedGeneration) {
+                  historyEntry.generation = generation;
+                }
+              }
             }
-            return document;
-          },
-          get closed() {
-            return !iframe.isConnected;
-          },
-          get customElements() {
-            if (!iframe.isConnected) return null;
-            const document = iframe.contentDocument;
-            if (!document) {
-              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
+            const documentId = nativeIframeContentDocument(iframe.__id);
+            forgetDiscardedNodeWrappers();
+            const restoredDocument = wrapNode(documentId);
+            if (restoredDocument) {
+              safeWeakMapSet(
+                documentHistoryURLs,
+                restoredDocument,
+                historyEntries[historyIndex].href,
+              );
             }
-            return registryForDocument(document);
-          },
-          get localStorage() {
-            if (!iframe.isConnected) return null;
-            const document = iframe.contentDocument;
-            if (!document) {
-              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
+          } else if (action === "replace") {
+            historyEntries[historyIndex] = entry;
+          } else {
+            historyEntries.splice(historyIndex + 1);
+            historyEntries.push(entry);
+            historyIndex = historyEntries.length - 1;
+          }
+        };
+        const refresh = () => {
+          if (retired) {
+            access = "closed";
+            return;
+          }
+          const raw = String(nativeIframeContextState(iframe.__id, expectedContext));
+          forgetDiscardedNodeWrappers();
+          if (raw === "closed") {
+            access = "closed";
+            return;
+          }
+          const [nextAccess, context, generation] = raw.split(":");
+          if (expectedContext === null) expectedContext = context;
+          if (context !== expectedContext) {
+            access = "closed";
+            return;
+          }
+          if (generation !== activeGeneration) {
+            commitHistoryEntry(generation);
+            activeGeneration = generation;
+            activeWindow = { __listeners: new Map() };
+            activeHistory = makeHistoryFacade(generation);
+          }
+          access = nextAccess;
+        };
+        const forceNavigation = () => {
+          nativeIframeForceNavigation(iframe.__id);
+          forgetDiscardedNodeWrappers();
+        };
+        const navigate = (value, disposition) => {
+          refresh();
+          if (access === "closed") return;
+          // Location navigation parses relative URLs against the caller's
+          // entry settings object. All iframe facades currently execute in the
+          // top-level realm, so its Document URL is the relevant base. History
+          // state URLs deliberately continue to use the target Document below.
+          const destination = new URL(String(value), callerBaseURL()).href;
+          pendingHistoryAction = disposition;
+          iframe.removeAttribute("srcdoc");
+          iframe.src = destination;
+          forceNavigation();
+        };
+        const reloadBrowsingContext = expectedGeneration => {
+          if (expectedGeneration === undefined) {
+            refresh();
+            if (access === "closed") return;
+            if (access !== "same") throw securityError();
+          } else {
+            requireHistoryAccess(expectedGeneration);
+          }
+          const entry = historyEntries[historyIndex];
+          pendingHistoryAction = "reload";
+          const reloadsSrcdoc = entry.attribute === "srcdoc" && entry.href === "about:srcdoc";
+          if (reloadsSrcdoc) {
+            iframe.setAttribute("srcdoc", entry.value);
+          } else {
+            iframe.removeAttribute("srcdoc");
+            iframe.src = entry.href;
+          }
+          forceNavigation();
+        };
+        const requireHistoryAccess = expectedGeneration => {
+          refresh();
+          if (access !== "same" ||
+              (expectedGeneration !== undefined && expectedGeneration !== activeGeneration)) {
+            throw securityError();
+          }
+        };
+        const traverseHistory = (delta, expectedGeneration) => {
+          requireHistoryAccess(expectedGeneration);
+          const amount = Number(delta);
+          if (!Number.isFinite(amount)) return;
+          if (amount === 0) {
+            reloadBrowsingContext(expectedGeneration);
+            return;
+          }
+          const target = historyIndex + Math.trunc(amount);
+          if (target < 0 || target >= historyEntries.length || target === historyIndex) return;
+          const entry = historyEntries[target];
+          historyIndex = target;
+          if (entry.generation === activeGeneration) {
+            const currentDocument = iframe.contentDocument;
+            if (currentDocument) {
+              safeWeakMapSet(documentHistoryURLs, currentDocument, entry.href);
             }
-            return storageForDocument("local", document, this);
-          },
-          get sessionStorage() {
-            if (!iframe.isConnected) return null;
-            const document = iframe.contentDocument;
-            if (!document) {
-              throw new DOMException("Blocked access to an inaccessible frame.", "SecurityError");
+            const event = new Event("popstate");
+            event.state = globalThis.structuredClone(entry.state);
+            proxy.dispatchEvent(event);
+            return;
+          }
+          pendingHistoryAction = "traverse";
+          if (entry.attribute === "srcdoc") {
+            iframe.setAttribute("srcdoc", entry.value);
+          } else {
+            iframe.removeAttribute("srcdoc");
+            iframe.src = entry.value;
+          }
+          forceNavigation();
+        };
+        const sameDocumentHistoryURL = (value, expectedGeneration) => {
+          requireHistoryAccess(expectedGeneration);
+          const currentDocument = iframe.contentDocument;
+          const currentURL = currentDocument ? currentDocument.URL : "about:blank";
+          const hasURL = value !== undefined && value !== null && String(value) !== "";
+          const nextURL = !hasURL
+            ? currentURL
+            : resolveHistoryURL(value, currentURL);
+          const originBase = currentURL === "about:blank" || currentURL === "about:srcdoc"
+            ? creatorBaseURL()
+            : currentURL;
+          if (hasURL) {
+            const ownerOrigin = new URL(originBase).origin;
+            if (ownerOrigin === "null" || new URL(nextURL).origin !== ownerOrigin) {
+              throw securityError();
             }
-            return storageForDocument("session", document, this);
-          },
-          frameElement: iframe,
-          getComputedStyle: globalThis.getComputedStyle,
+          }
+          return { currentDocument, nextURL };
+        };
+        function makeHistoryFacade(generation) {
+          return {
+            get length() {
+              requireHistoryAccess(generation);
+              return historyEntries.length;
+            },
+            get state() {
+              requireHistoryAccess(generation);
+              return historyIndex < 0 ? null : historyEntries[historyIndex].state;
+            },
+            get scrollRestoration() {
+              requireHistoryAccess(generation);
+              return historyScrollRestoration;
+            },
+            set scrollRestoration(value) {
+              requireHistoryAccess(generation);
+              const normalized = String(value);
+              if (normalized === "auto" || normalized === "manual") {
+                historyScrollRestoration = normalized;
+              }
+            },
+            pushState(state, unused, url) {
+              void unused;
+              const { currentDocument, nextURL } =
+                sameDocumentHistoryURL(url, generation);
+              const clonedState = globalThis.structuredClone(state);
+              historyEntries.splice(historyIndex + 1);
+              historyEntries.push({
+                ...historyEntries[historyIndex],
+                href: nextURL,
+                state: clonedState,
+                generation: activeGeneration,
+              });
+              historyIndex = historyEntries.length - 1;
+              if (currentDocument) {
+                safeWeakMapSet(documentHistoryURLs, currentDocument, nextURL);
+              }
+            },
+            replaceState(state, unused, url) {
+              void unused;
+              const { currentDocument, nextURL } =
+                sameDocumentHistoryURL(url, generation);
+              const clonedState = globalThis.structuredClone(state);
+              historyEntries[historyIndex] = {
+                ...historyEntries[historyIndex],
+                href: nextURL,
+                state: clonedState,
+                generation: activeGeneration,
+              };
+              if (currentDocument) {
+                safeWeakMapSet(documentHistoryURLs, currentDocument, nextURL);
+              }
+            },
+            go(delta = 0) { traverseHistory(delta, generation); },
+            back() { traverseHistory(-1, generation); },
+            forward() { traverseHistory(1, generation); },
+          };
+        }
+        const methods = {
           addEventListener(type, listener, options) {
             return Node.prototype.addEventListener.call(this, type, listener, options);
           },
@@ -5680,8 +6090,128 @@
             return dispatchEventOnTarget(this, event);
           },
         };
-        windowObjects.add(this.__contentWindowFacade);
-        registerBrowsingWindow(this.__contentWindowFacade);
+        const assignLocation = value => navigate(value, "push");
+        const reloadLocation = () => reloadBrowsingContext();
+        const locationFacade = {
+          get href() {
+            refresh();
+            if (access !== "same") throw securityError();
+            const document = iframe.contentDocument;
+            return document ? document.URL : "about:blank";
+          },
+          set href(value) { navigate(value, "push"); },
+          get assign() {
+            refresh();
+            if (access === "cross") throw securityError();
+            return assignLocation;
+          },
+          replace(value) { navigate(value, "replace"); },
+          get reload() {
+            refresh();
+            if (access === "cross") throw securityError();
+            return reloadLocation;
+          },
+        };
+        const safeCrossOriginProperties = new Set([
+          "window", "self", "frames", "closed", "length", "top", "parent",
+          "opener", "location", "close", "focus", "blur", "postMessage",
+        ]);
+        const parentWindow = () => {
+          const owner = iframe.ownerDocument;
+          if (!owner || owner === globalThis.document) return globalThis;
+          return owner.defaultView || globalThis;
+        };
+        const handler = {
+          get(_target, property, receiver) {
+            refresh();
+            if (property === Symbol.toStringTag) return "Window";
+            if (property === "closed") return access === "closed";
+            if (property === "window" || property === "self" || property === "frames") return proxy;
+            if (property === "top") return globalThis;
+            if (property === "parent") return parentWindow();
+            if (property === "opener") return null;
+            if (property === "length") return 0;
+            if (property === "location") return locationFacade;
+            if (property === "close" || property === "focus" || property === "blur") return () => {};
+            if (property === "postMessage") return () => {};
+            if (access === "closed") {
+              if (property === "document" || property === "customElements" ||
+                  property === "localStorage" || property === "sessionStorage" ||
+                  property === "frameElement") return null;
+              return undefined;
+            }
+            if (access === "cross") {
+              if (property === "frameElement") return null;
+              if (safeCrossOriginProperties.has(property)) return undefined;
+              throw securityError();
+            }
+            const document = iframe.contentDocument;
+            if (property === "document") return document;
+            if (property === "customElements") return registryForDocument(document);
+            if (property === "localStorage") return storageForDocument("local", document, proxy);
+            if (property === "sessionStorage") return storageForDocument("session", document, proxy);
+            if (property === "frameElement") return iframe;
+            if (property === "history") return activeHistory;
+            if (property === "getComputedStyle") return globalThis.getComputedStyle;
+            if (Object.prototype.hasOwnProperty.call(methods, property)) return methods[property];
+            return Reflect.get(activeWindow, property, receiver);
+          },
+          set(_target, property, value, receiver) {
+            refresh();
+            if (property === "location") {
+              navigate(value, "push");
+              return true;
+            }
+            if (access !== "same") throw securityError();
+            return Reflect.set(activeWindow, property, value, receiver);
+          },
+          has(_target, property) {
+            refresh();
+            if (safeCrossOriginProperties.has(property)) return true;
+            if (access !== "same") throw securityError();
+            return property in activeWindow || Object.prototype.hasOwnProperty.call(methods, property);
+          },
+          defineProperty(_target, property, descriptor) {
+            refresh();
+            if (access !== "same") throw securityError();
+            if (!descriptor || descriptor.configurable !== true) {
+              throw new TypeError("WindowProxy does not support non-configurable properties");
+            }
+            return Reflect.defineProperty(activeWindow, property, descriptor);
+          },
+          deleteProperty(_target, property) {
+            refresh();
+            if (access !== "same") throw securityError();
+            return Reflect.deleteProperty(activeWindow, property);
+          },
+          ownKeys() {
+            refresh();
+            if (access !== "same") throw securityError();
+            return Reflect.ownKeys(activeWindow);
+          },
+          getOwnPropertyDescriptor(_target, property) {
+            refresh();
+            if (access !== "same") throw securityError();
+            return Reflect.getOwnPropertyDescriptor(activeWindow, property);
+          },
+          preventExtensions() {
+            throw new TypeError("WindowProxy cannot be made non-extensible");
+          },
+        };
+        proxy = new Proxy({}, handler);
+        this.__contentWindowFacade = proxy;
+        this.__contentWindowRefresh = refresh;
+        safeWeakMapSet(iframeWindowProxyRetirers, this, () => {
+          retired = true;
+          access = "closed";
+          activeWindow = { __listeners: new Map() };
+          historyEntries.splice(0);
+          historyIndex = -1;
+          pendingHistoryAction = null;
+        });
+        windowObjects.add(proxy);
+        registerBrowsingWindow(proxy);
+        refresh();
       }
       return this.__contentWindowFacade;
     }
@@ -5691,13 +6221,39 @@
     }
 
     set src(value) {
-      __omoikane_set_attribute(this.__id, "src", String(value));
+      this.setAttribute("src", String(value));
+    }
+
+    get srcdoc() {
+      return __omoikane_get_attribute(this.__id, "srcdoc") || "";
+    }
+
+    set srcdoc(value) {
+      this.setAttribute("srcdoc", String(value));
+    }
+
+    setAttribute(name, value) {
+      const attribute = String(name).toLowerCase();
+      if (attribute === "src" || attribute === "srcdoc") {
+        this.__prepareResourceNavigation();
+      }
+      super.setAttribute(name, value);
+    }
+
+    removeAttribute(name) {
+      const attribute = String(name).toLowerCase();
+      if ((attribute === "src" || attribute === "srcdoc") && this.hasAttribute(name)) {
+        this.__prepareResourceNavigation();
+      }
+      super.removeAttribute(name);
     }
   }
 
   class HTMLObjectElement extends HTMLElement {
     get contentDocument() {
-      return wrapNode(__omoikane_iframe_content_document(this.__id));
+      const id = nativeIframeContentDocument(this.__id);
+      forgetDiscardedNodeWrappers();
+      return wrapNode(id);
     }
 
     getSVGDocument() {

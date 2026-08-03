@@ -27,7 +27,8 @@ use grid::{is_grid_container, layout_grid_container};
 use inline::{
     InlineSegmentContent,
     font_metrics, generated_inline_segments,
-    layout_inline_nodes, line_height, measure_text_width, normalize_text, resolve_image_rendered_size,
+    layout_inline_nodes, layout_vertical_inline_nodes, line_height, measure_text_width, normalize_text,
+    resolve_image_rendered_size,
     text_align, vertical_align, white_space,
 };
 use table::{
@@ -414,6 +415,14 @@ pub struct FragmentStyle {
     /// CSS `font-family` value (raw string, first family in list).
     /// Used by the paint stage to look up web font variants.
     pub font_family: Option<String>,
+    /// Resolved writing mode for the inline fragment.  Keeping this small
+    /// inherited value on the fragment lets paint use the same flow direction
+    /// as layout even when a nested inline overrides its ancestor.
+    pub writing_mode: Option<String>,
+    /// Resolved inline base direction (`ltr` or `rtl`).
+    pub direction: Option<String>,
+    /// Resolved bidi mode, reserved for future bidi-aware paint ordering.
+    pub unicode_bidi: Option<String>,
 }
 
 impl FragmentStyle {
@@ -452,6 +461,9 @@ impl FragmentStyle {
             font_weight: normalize_lower("font-weight"),
             font_style: normalize_lower("font-style"),
             font_family,
+            writing_mode: normalize_lower("writing-mode"),
+            direction: normalize_lower("direction"),
+            unicode_bidi: normalize_lower("unicode-bidi"),
         }
     }
 }
@@ -579,6 +591,44 @@ enum PositionScheme {
     Sticky,
     Absolute,
     Fixed,
+}
+
+/// The writing-mode values which affect the physical flow axes.  Sideways
+/// modes currently share the corresponding vertical flow direction; glyph
+/// orientation is handled by the paint path as a follow-up concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WritingMode {
+    HorizontalTb,
+    VerticalRl,
+    VerticalLr,
+}
+
+fn writing_mode(style: &ComputedStyle) -> WritingMode {
+    match style.get("writing-mode") {
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
+            if value.eq_ignore_ascii_case("vertical-rl")
+                || value.eq_ignore_ascii_case("sideways-rl") => WritingMode::VerticalRl,
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
+            if value.eq_ignore_ascii_case("vertical-lr")
+                || value.eq_ignore_ascii_case("sideways-lr") => WritingMode::VerticalLr,
+        _ => WritingMode::HorizontalTb,
+    }
+}
+
+fn is_vertical_writing(style: &ComputedStyle) -> bool {
+    !matches!(writing_mode(style), WritingMode::HorizontalTb)
+}
+
+fn is_vertical_rl(style: &ComputedStyle) -> bool {
+    matches!(writing_mode(style), WritingMode::VerticalRl)
+}
+
+fn direction_is_rtl(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("direction"),
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
+            if value.eq_ignore_ascii_case("rtl")
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1497,6 +1547,23 @@ fn layout_block_children(
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
 ) -> BlockChildrenResult {
+    if is_vertical_writing(style) {
+        return layout_vertical_block_children(
+            node,
+            resolver,
+            style,
+            padding,
+            border,
+            margin,
+            x,
+            y,
+            width,
+            containing_height,
+            viewport,
+            positioned_ancestor,
+        );
+    }
+
     let child_height_basis = resolved_length(style, "height", containing_height)
         .map(|height| border_box_adjust_height(style, height, &padding, &border))
         .unwrap_or(0.0);
@@ -1634,6 +1701,209 @@ fn layout_block_children(
         float_bottom,
         positioned_children,
     }
+}
+
+/// Block formatting context for vertical writing modes.
+///
+/// In vertical writing the inline axis is physical y and the block axis is
+/// physical x.  The normal horizontal implementation remains the source of
+/// truth for margins, positioning and nested horizontal subtrees; this path
+/// only changes the sibling cursor and delegates inline content to the
+/// transposed inline formatter.
+fn layout_vertical_block_children(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    x: f32,
+    y: f32,
+    width: f32,
+    containing_height: f32,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
+) -> BlockChildrenResult {
+    let vertical_rl = is_vertical_rl(style);
+    let mut children = Vec::new();
+    let mut positioned_children = Vec::new();
+    let mut lines = Vec::new();
+    let mut pending_inline_nodes = Vec::new();
+    let mut cursor_x = if vertical_rl { x + width } else { x };
+    let mut inline_bottom = y;
+    // An auto-height root often enters layout with a zero containing height.
+    // Vertical inline layout still needs a finite line-breaking basis; use an
+    // explicit height when present, otherwise a generous unbounded basis so
+    // content can establish the auto height naturally.
+    let available_inline_height = resolved_length(style, "height", containing_height)
+        .or_else(|| (containing_height > 0.0).then_some(containing_height))
+        .unwrap_or(1_000_000.0);
+
+    for child in node.layout_child_nodes() {
+        if child.node_type() == NodeType::Comment {
+            continue;
+        }
+        if is_inline_child(&child, resolver) {
+            pending_inline_nodes.push(child);
+            continue;
+        }
+
+        flush_pending_vertical_inline_nodes(
+            &mut pending_inline_nodes,
+            resolver,
+            style,
+            x,
+            y,
+            width,
+            available_inline_height,
+            &mut cursor_x,
+            vertical_rl,
+            &mut lines,
+            &mut inline_bottom,
+        );
+
+        let child_style = match child.node_type() {
+            NodeType::Element => Some(resolver.computed_style(&child)),
+            _ => None,
+        };
+        let Some(child_style) = child_style else {
+            continue;
+        };
+
+        // Positioned descendants are resolved after the containing block's
+        // final dimensions are known, just as in the horizontal path.
+        let provisional_x = if vertical_rl {
+            cursor_x - width
+        } else {
+            cursor_x
+        };
+        let child_containing = Rect {
+            x: provisional_x,
+            y,
+            width,
+            height: available_inline_height,
+        };
+        if is_out_of_flow_positioned(&child_style) {
+            positioned_children.push((child, child_style, child_containing));
+            continue;
+        }
+
+        let next_pos_ancestor = if establishes_positioned_containing_block(style) {
+            Some(BoxDimensions {
+                content: Rect { x, y, width, height: 0.0 },
+                padding,
+                border,
+                margin,
+            })
+        } else {
+            positioned_ancestor
+        };
+        let Some(mut layout_child) = layout_node(
+            &child,
+            resolver,
+            child_containing,
+            viewport,
+            next_pos_ancestor,
+        ) else {
+            continue;
+        };
+
+        let outer_x = if vertical_rl {
+            cursor_x - layout_child.total_width()
+        } else {
+            cursor_x
+        };
+        translate_layout_box_to_outer(&mut layout_child, outer_x, y);
+        if vertical_rl {
+            cursor_x = outer_x;
+        } else {
+            cursor_x = outer_x + layout_child.total_width();
+        }
+        inline_bottom = inline_bottom.max(y + layout_child.total_height());
+        children.push(layout_child);
+    }
+
+    flush_pending_vertical_inline_nodes(
+        &mut pending_inline_nodes,
+        resolver,
+        style,
+        x,
+        y,
+        width,
+        available_inline_height,
+        &mut cursor_x,
+        vertical_rl,
+        &mut lines,
+        &mut inline_bottom,
+    );
+    sort_children_by_z_index(&mut children);
+
+    BlockChildrenResult {
+        children,
+        lines,
+        // The vertical formatter uses cursor_y as the inline-axis extent so
+        // the existing height resolver can still apply explicit/min/max
+        // height declarations without a second sizing pipeline.
+        cursor_y: inline_bottom,
+        float_bottom: inline_bottom,
+        positioned_children,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_pending_vertical_inline_nodes(
+    pending: &mut Vec<NodeHandle>,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    cursor_x: &mut f32,
+    vertical_rl: bool,
+    lines: &mut Vec<LineBox>,
+    inline_bottom: &mut f32,
+) {
+    if pending.is_empty() || all_whitespace_only(pending) {
+        pending.clear();
+        return;
+    }
+
+    let (region_x, region_width) = if vertical_rl {
+        (x, (*cursor_x - x).max(0.0))
+    } else {
+        (*cursor_x, (x + width - *cursor_x).max(0.0))
+    };
+    let inline_lines = layout_vertical_inline_nodes(
+        pending,
+        resolver,
+        region_x,
+        y,
+        region_width,
+        height,
+        text_align(style),
+        line_height(style),
+        vertical_rl,
+        direction_is_rtl(style),
+    );
+    if let Some(last_line) = inline_lines
+        .iter()
+        .map(|line| line.rect.y + line.rect.height)
+        .reduce(f32::max)
+    {
+        *inline_bottom = (*inline_bottom).max(last_line);
+    }
+    let used_width = inline_lines
+        .iter()
+        .map(|line| line.rect.width)
+        .sum::<f32>();
+    if vertical_rl {
+        *cursor_x = (*cursor_x - used_width).max(x);
+    } else {
+        *cursor_x = (*cursor_x + used_width).min(x + width);
+    }
+    lines.extend(inline_lines);
+    pending.clear();
 }
 
 /// Resolves the content height for a block element, considering explicit height,
@@ -1880,58 +2150,67 @@ pub(crate) fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
         _ => "{prefix}-{}",
     };
     let shorthand = explicit_length(style, shorthand_property).unwrap_or(0.0);
+    let physical = |side: &str| {
+        explicit_length(
+            style,
+            &side_property
+                .replace("{}", side)
+                .replace("{prefix}", prefix),
+        )
+        .or_else(|| explicit_length(style, &format!("{prefix}-{side}")))
+    };
+
+    // Logical properties are resolved against the element's own writing mode,
+    // not the horizontal defaults used by the CSS cascade's physical aliases.
+    // Prefer them for vertical boxes so `padding-inline-start` maps to the
+    // inline (top/bottom) axis and `padding-block-start` maps to the column
+    // (left/right) axis.  Horizontal boxes retain the historical physical
+    // precedence, which also preserves the CSS cascade tests for a later
+    // `padding-left` overriding an earlier logical declaration.
+    if is_vertical_writing(style) {
+        let inline_start = logical_side_length(style, prefix, "inline", true);
+        let inline_end = logical_side_length(style, prefix, "inline", false);
+        let block_start = logical_side_length(style, prefix, "block", true);
+        let block_end = logical_side_length(style, prefix, "block", false);
+        let rtl = direction_is_rtl(style);
+        let top = if rtl { inline_end } else { inline_start };
+        let bottom = if rtl { inline_start } else { inline_end };
+        let (left, right) = if matches!(writing_mode(style), WritingMode::VerticalRl) {
+            (block_end, block_start)
+        } else {
+            (block_start, block_end)
+        };
+        return EdgeSizes {
+            top: top.or_else(|| physical("top")).unwrap_or(shorthand),
+            right: right.or_else(|| physical("right")).unwrap_or(shorthand),
+            bottom: bottom.or_else(|| physical("bottom")).unwrap_or(shorthand),
+            left: left.or_else(|| physical("left")).unwrap_or(shorthand),
+        };
+    }
+
+    let rtl = direction_is_rtl(style);
+    let inline_start = logical_side_length(style, prefix, "inline", true);
+    let inline_end = logical_side_length(style, prefix, "inline", false);
+    let block_start = logical_side_length(style, prefix, "block", true);
+    let block_end = logical_side_length(style, prefix, "block", false);
+    let left_logical = if rtl { inline_end } else { inline_start };
+    let right_logical = if rtl { inline_start } else { inline_end };
     EdgeSizes {
-        top: explicit_length(
-            style,
-            &side_property
-                .replace("{}", "top")
-                .replace("{prefix}", prefix),
-        )
-        .or_else(|| explicit_length(style, &format!("{prefix}-top")))
-        .unwrap_or(shorthand),
-        right: explicit_length(
-            style,
-            &side_property
-                .replace("{}", "right")
-                .replace("{prefix}", prefix),
-        )
-        .or_else(|| explicit_length(style, &format!("{prefix}-right")))
-        .or_else(|| logical_inline_end_length(style, prefix))
-        .unwrap_or(shorthand),
-        bottom: explicit_length(
-            style,
-            &side_property
-                .replace("{}", "bottom")
-                .replace("{prefix}", prefix),
-        )
-        .or_else(|| explicit_length(style, &format!("{prefix}-bottom")))
-        .unwrap_or(shorthand),
-        left: explicit_length(
-            style,
-            &side_property
-                .replace("{}", "left")
-                .replace("{prefix}", prefix),
-        )
-        .or_else(|| explicit_length(style, &format!("{prefix}-left")))
-        .or_else(|| logical_inline_start_length(style, prefix))
-        .unwrap_or(shorthand),
+        top: physical("top").or(block_start).unwrap_or(shorthand),
+        right: physical("right").or(right_logical).unwrap_or(shorthand),
+        bottom: physical("bottom").or(block_end).unwrap_or(shorthand),
+        left: physical("left").or(left_logical).unwrap_or(shorthand),
     }
 }
 
-fn logical_inline_start_length(style: &ComputedStyle, prefix: &str) -> Option<f32> {
-    match prefix {
-        "margin" => explicit_length(style, "margin-inline-start"),
-        "padding" => explicit_length(style, "padding-inline-start"),
-        _ => None,
-    }
-}
-
-fn logical_inline_end_length(style: &ComputedStyle, prefix: &str) -> Option<f32> {
-    match prefix {
-        "margin" => explicit_length(style, "margin-inline-end"),
-        "padding" => explicit_length(style, "padding-inline-end"),
-        _ => None,
-    }
+fn logical_side_length(
+    style: &ComputedStyle,
+    prefix: &str,
+    axis: &str,
+    start: bool,
+) -> Option<f32> {
+    let side = if start { "start" } else { "end" };
+    explicit_length(style, &format!("{prefix}-{axis}-{side}"))
 }
 
 fn explicit_length(style: &ComputedStyle, property: &str) -> Option<f32> {
@@ -1986,11 +2265,20 @@ fn is_auto(value: Option<&ComputedValue>) -> bool {
 }
 
 fn margin_start_is_auto(style: &ComputedStyle) -> bool {
-    is_auto(style.get("margin-left")) || is_auto(style.get("margin-inline-start"))
+    if is_vertical_writing(style) {
+        is_auto(style.get("margin-left")) || is_auto(style.get("margin-block-start"))
+    } else {
+        is_auto(style.get("margin-left"))
+            || is_auto(style.get("margin-inline-start"))
+    }
 }
 
 fn margin_end_is_auto(style: &ComputedStyle) -> bool {
-    is_auto(style.get("margin-right")) || is_auto(style.get("margin-inline-end"))
+    if is_vertical_writing(style) {
+        is_auto(style.get("margin-right")) || is_auto(style.get("margin-block-end"))
+    } else {
+        is_auto(style.get("margin-right")) || is_auto(style.get("margin-inline-end"))
+    }
 }
 
 // ── Margin collapsing ───────────────────────────────────────────────────────
@@ -2422,22 +2710,45 @@ fn layout_positioned_child(
         PositionScheme::Sticky => containing_block,
     };
 
-    // `inset-inline-end` is the right edge in LTR and the left edge in RTL.
-    let inline_end = resolved_length(style, "inset-inline-end", origin.width);
-    let rtl = matches!(
-        style.get("direction"),
-        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
-            if value.eq_ignore_ascii_case("rtl")
-    );
-    let (inline_end_left, inline_end_right) = if rtl {
-        (inline_end, None)
+    let rtl = direction_is_rtl(style);
+    let (left_logical, right_logical, top_logical, bottom_logical) = if is_vertical_writing(style) {
+        // In vertical writing the inline axis is physical y.  Direction
+        // reverses inline start/end, while writing-mode chooses the physical
+        // block start/end edge for the x axis.
+        let inline_start = resolved_length(style, "inset-inline-start", origin.height);
+        let inline_end = resolved_length(style, "inset-inline-end", origin.height);
+        let block_start = resolved_length(style, "inset-block-start", origin.width);
+        let block_end = resolved_length(style, "inset-block-end", origin.width);
+        let (top, bottom) = if rtl {
+            (inline_end, inline_start)
+        } else {
+            (inline_start, inline_end)
+        };
+        let (left, right) = if matches!(writing_mode(style), WritingMode::VerticalRl) {
+            (block_end, block_start)
+        } else {
+            (block_start, block_end)
+        };
+        (left, right, top, bottom)
     } else {
-        (None, inline_end)
+        let inline_start = resolved_length(style, "inset-inline-start", origin.width);
+        let inline_end = resolved_length(style, "inset-inline-end", origin.width);
+        let (left, right) = if rtl {
+            (inline_end, inline_start)
+        } else {
+            (inline_start, inline_end)
+        };
+        (
+            left,
+            right,
+            resolved_length(style, "inset-block-start", origin.height),
+            resolved_length(style, "inset-block-end", origin.height),
+        )
     };
-    let left = resolved_length(style, "left", origin.width).or(inline_end_left);
-    let right = resolved_length(style, "right", origin.width).or(inline_end_right);
-    let top = resolved_length(style, "top", origin.height);
-    let bottom = resolved_length(style, "bottom", origin.height);
+    let left = resolved_length(style, "left", origin.width).or(left_logical);
+    let right = resolved_length(style, "right", origin.width).or(right_logical);
+    let top = resolved_length(style, "top", origin.height).or(top_logical);
+    let bottom = resolved_length(style, "bottom", origin.height).or(bottom_logical);
     let static_outer = containing_block;
     let specified_width = resolved_length(style, "width", origin.width);
     let child_width = if specified_width.is_none() {

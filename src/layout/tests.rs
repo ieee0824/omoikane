@@ -1,4 +1,4 @@
-use crate::css::{Origin, parse_stylesheet};
+use crate::css::{ComputedValue, Origin, parse_stylesheet};
 use crate::dom::ShadowRootMode;
 use crate::layout::*;
 
@@ -97,6 +97,129 @@ fn computes_block_box_dimensions_from_inline_style() {
     assert_eq!(child.dimensions.padding.right, 10.0);
     assert_eq!(child.dimensions.padding.bottom, 10.0);
     assert_eq!(child.dimensions.padding.left, 10.0);
+}
+
+#[test]
+fn vertical_rl_flows_blocks_right_to_left_and_inline_text_top_to_bottom() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let first = NodeHandle::element("div");
+    let second = NodeHandle::element("div");
+    let text = NodeHandle::text("AB CD");
+    document.append_child(body.clone());
+    body.append_child(first.clone());
+    body.append_child(second.clone());
+    body.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { writing-mode: vertical-rl; width: 200px; height: 80px; } \
+             div { width: 40px; height: 20px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 80.0,
+        },
+    )
+    .unwrap();
+    let first_box = find_layout_box(&layout, &first).expect("first block must be laid out");
+    let second_box = find_layout_box(&layout, &second).expect("second block must be laid out");
+    assert!(first_box.dimensions.border_box().x > second_box.dimensions.border_box().x);
+    assert_eq!(first_box.dimensions.content.height, 20.0);
+
+    let body_style = resolver.computed_style(&body);
+    assert_eq!(body_style.get("writing-mode"), Some(&ComputedValue::Keyword("vertical-rl".into())));
+    assert!(!layout.lines.is_empty(), "direct text should form a vertical line");
+    let fragment = &layout.lines[0].fragments[0];
+    assert!(fragment.rect.width > 0.0 && fragment.rect.height > 0.0);
+    assert!(fragment.rect.y >= layout.lines[0].rect.y);
+}
+
+#[test]
+fn vertical_logical_padding_maps_inline_to_y_and_block_to_x() {
+    let (_document, _html, body, card) = sample_tree();
+    body.set_attribute("style", "writing-mode: vertical-lr; width: 160px; height: 100px");
+    card.set_attribute(
+        "style",
+        "width: 40px; height: 20px; padding-inline-start: 7px; padding-block-start: 11px",
+    );
+    let mut resolver = StyleResolver::new();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 160.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let card_box = find_layout_box(&layout, &card).expect("card must be laid out");
+    assert_eq!(card_box.dimensions.padding.top, 7.0);
+    assert_eq!(card_box.dimensions.padding.left, 11.0);
+}
+
+#[test]
+fn vertical_rtl_mixed_inline_fragments_keep_dom_nodes_in_reverse_inline_geometry() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let first = NodeHandle::element("span");
+    let second = NodeHandle::element("span");
+    let first_text = NodeHandle::text("A");
+    let second_text = NodeHandle::text("אב");
+    first.append_child(first_text.clone());
+    second.append_child(second_text.clone());
+    document.append_child(body.clone());
+    body.append_child(first.clone());
+    body.append_child(second.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { writing-mode: vertical-rl; direction: rtl; width: 120px; height: 80px; } \
+             span { font-size: 16px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 80.0,
+        },
+    )
+    .unwrap();
+    let first_fragment = layout
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .find(|fragment| fragment.node == first_text)
+        .expect("first inline fragment must be present");
+    let second_fragment = layout
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .find(|fragment| fragment.node == second_text)
+        .expect("second inline fragment must be present");
+    assert!(
+        first_fragment.rect.y > second_fragment.rect.y,
+        "rtl vertical inline geometry should reverse the DOM run order"
+    );
 }
 
 #[test]

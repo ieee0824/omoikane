@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 use std::cell::Cell;
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -22,6 +23,19 @@ use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
 
 const EVALS_PER_GC: usize = 512;
+
+fn acid3_debug_log(message: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(".artifacts")
+        .join("js-benchmark")
+        .join("acid3-debug.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{message}");
+    }
+}
 
 thread_local! {
     static EVALS_SINCE_GC: Cell<usize> = const { Cell::new(0) };
@@ -278,6 +292,8 @@ pub struct Acid3Run {
 /// Fetches, parses, scripts, and drives the Acid3 page, returning an honest
 /// snapshot of the current engine behaviour. Never panics on engine failure.
 pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
+    acid3_debug_log(&format!("start mode={mode:?}"));
+    eprintln!("[acid3-debug] start mode={mode:?}");
     EVALS_SINCE_GC.with(|count| count.set(0));
     let acid3_url = format!("{}/acid3.html", base_url.trim_end_matches('/'));
 
@@ -290,13 +306,18 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
 
     // 2. Parse + build runtime.
     let document = TreeBuilder::parse(&html).document();
+    acid3_debug_log(&format!("mode={mode:?} before runtime create"));
     let base: Url = acid3_url.parse().expect("parse base url");
     let mut runtime = JsRuntime::with_document(document).expect("create runtime");
+    acid3_debug_log(&format!("mode={mode:?} after runtime create"));
 
     // 3. Execute all inline / external <script>s (fires DOMContentLoaded).
     let script_errors = runtime.execute_document_scripts(Some(&base));
+    acid3_debug_log(&format!("mode={mode:?} after scripts"));
 
+    acid3_debug_log(&format!("mode={mode:?} before update typeof"));
     let update_typeof = eval_string(&mut runtime, "typeof update").unwrap_or_default();
+    acid3_debug_log(&format!("mode={mode:?} after update typeof"));
 
     let mut drive_errors = Vec::new();
     let mut iterations = 0usize;
@@ -309,22 +330,28 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             if let Err(e) = runtime.wire_inline_event_handlers() {
                 drive_errors.push(format!("wire inline handlers: {e}"));
             }
+            acid3_debug_log(&format!("mode={mode:?} before fire load"));
             if let Err(e) = runtime.fire_load() {
                 drive_errors.push(format!("fire load: {e}"));
             }
+            acid3_debug_log(&format!("mode={mode:?} after fire load"));
             // Advance virtual time so setTimeout(update, delay) tasks fire.
             // Cap: 60 virtual seconds at the page's 10ms delay = 6000 ticks.
             let delay_ms = 10u64;
             let max_ticks = 6000usize;
             let mut last_index = read_int(&mut runtime, "index").unwrap_or(-1);
+            acid3_debug_log(&format!("mode={mode:?} initial index={last_index}"));
             let mut stalled = 0usize;
             for _ in 0..max_ticks {
                 iterations += 1;
+                acid3_debug_log(&format!("mode={mode:?} tick start iteration={iterations} index={last_index}"));
                 if let Err(e) = runtime.tick(delay_ms) {
                     drive_errors.push(format!("tick: {e}"));
                     break;
                 }
+                acid3_debug_log(&format!("mode={mode:?} tick after iteration={iterations}"));
                 let idx = read_int(&mut runtime, "index").unwrap_or(last_index);
+                acid3_debug_log(&format!("mode={mode:?} tick index={idx} iteration={iterations}"));
                 let total = read_int(&mut runtime, "tests.length");
                 if let Some(t) = total {
                     if idx >= t {
@@ -357,6 +384,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             if let Err(e) = runtime.tick(0) {
                 drive_errors.push(format!("initial resource tasks: {e}"));
             }
+            acid3_debug_log(&format!("mode={mode:?} after initial tick"));
             // Invoke update() directly, once per subtest, bypassing setTimeout.
             let total = read_int(&mut runtime, "tests.length").unwrap_or(0);
             // Budget: one call per test plus a bounded retry allowance.
@@ -400,6 +428,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
         }
     }
 
+    acid3_debug_log(&format!("mode={mode:?} before result total"));
     let result = Acid3Run {
         mode,
         page_status,
@@ -417,22 +446,31 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
         log: eval_string(&mut runtime, "typeof log !== 'undefined' ? String(log) : null"),
         iterations,
     };
+    acid3_debug_log(&format!("mode={mode:?} after result"));
 
     // Boa's generational collector retains allocation indexes across runtime
     // teardown. Finish the runtime first, then run a major collection so the
     // next independent runtime in the same process cannot observe stale state.
+    eprintln!("[acid3-debug] mode={mode:?} before runtime drop");
+    acid3_debug_log(&format!("mode={mode:?} before runtime drop"));
     drop(runtime);
+    eprintln!("[acid3-debug] mode={mode:?} after runtime drop");
+    acid3_debug_log(&format!("mode={mode:?} after runtime drop"));
     boa_gc::force_collect();
+    eprintln!("[acid3-debug] mode={mode:?} after force_collect");
+    acid3_debug_log(&format!("mode={mode:?} after force_collect"));
     result
 }
 
 /// Evaluates `expr` and returns it coerced to a Rust `String`. Any thrown error
 /// is captured as `<<eval-error: ...>>` rather than propagated.
 fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
+    acid3_debug_log(&format!("eval start expr={expr}"));
     let wrapped = format!(
         "(function(){{ try {{ var __v = ({expr}); return (__v === null || __v === undefined) ? '' : String(__v); }} catch (e) {{ return '<<eval-error: ' + e + '>>'; }} }})()"
     );
     let result = runtime.eval(&wrapped);
+    acid3_debug_log(&format!("eval after runtime expr={expr} ok={}", result.is_ok()));
     let value = match result {
         Ok(value) => value.as_string().map(|s| s.to_std_string_escaped()),
         Err(_) => None,
@@ -445,7 +483,9 @@ fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
         let next = count.get().saturating_add(1);
         if next >= EVALS_PER_GC {
             count.set(0);
+            acid3_debug_log(&format!("eval before periodic gc expr={expr}"));
             boa_gc::force_collect();
+            acid3_debug_log(&format!("eval after periodic gc expr={expr}"));
         } else {
             count.set(next);
         }
