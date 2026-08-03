@@ -16408,6 +16408,16 @@ mod tests {
         let mut runtime = runtime_from_html(
             r#"<html><body><p id="top">top</p><iframe id="frame"></iframe></body></html>"#,
         );
+        // runtime_from_html queues the connected iframe's initial resource
+        // load. Complete that navigation before retaining contentDocument so
+        // the selection callback below belongs to the live Document generation
+        // rather than a document that is about to be retired by the pending
+        // load task.
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime.take_task_errors().is_empty(),
+            "initial iframe resource load must not raise a task error"
+        );
         runtime
             .eval(
                 r#"(() => {
@@ -16465,7 +16475,7 @@ mod tests {
                 &mut runtime,
                 "[__issue558SelectionState.parentEvents, __issue558SelectionState.parentWindowEvents, __issue558SelectionState.childDocumentEvents, __issue558SelectionState.childEvents, __issue558SelectionState.parentSelection.rangeCount, __issue558SelectionState.childSelection.rangeCount, __issue558SelectionState.crossDocumentError].join(',')",
             ),
-            "0,0,0,0,0,1,WrongDocumentError"
+            "0,0,1,1,0,1,WrongDocumentError"
         );
     }
 
