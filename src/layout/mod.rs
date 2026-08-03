@@ -421,7 +421,7 @@ pub struct FragmentStyle {
     pub writing_mode: Option<String>,
     /// Resolved inline base direction (`ltr` or `rtl`).
     pub direction: Option<String>,
-    /// Resolved bidi mode, retained for the paint-side visual-order decision.
+    /// Resolved bidi mode, reserved for future bidi-aware paint ordering.
     pub unicode_bidi: Option<String>,
 }
 

@@ -200,19 +200,34 @@ pub(crate) fn paint_text_with_registry(
                             vertical_mode,
                         );
                     } else if !fonts.is_empty() {
-                        let font_refs: Vec<&Font> = fonts.iter().map(|font| font.as_ref()).collect();
-                        paint_fragment_text(
-                            canvas,
-                            fragment.rect,
-                            display_text,
-                            font_size,
-                            fragment.metrics.ascent,
-                            &font_refs,
-                            frag_color,
-                            clip,
-                            fragment.metrics.letter_spacing,
-                            vertical_mode,
-                        );
+                        if let Some(vertical_mode) = vertical_mode {
+                            let font_refs: Vec<&Font> =
+                                fonts.iter().map(|font| font.as_ref()).collect();
+                            paint_fragment_text(
+                                canvas,
+                                fragment.rect,
+                                display_text,
+                                font_size,
+                                fragment.metrics.ascent,
+                                &font_refs,
+                                frag_color,
+                                clip,
+                                fragment.metrics.letter_spacing,
+                                Some(vertical_mode),
+                            );
+                        } else {
+                            paint_text_with_font(
+                                canvas,
+                                fragment.rect,
+                                display_text,
+                                font_size,
+                                fragment.metrics.ascent,
+                                fonts,
+                                frag_color,
+                                clip,
+                                fragment.metrics.letter_spacing,
+                            );
+                        }
                     } else {
                         // Fallback: placeholder rectangles
                         paint_text_placeholder_with_mode(
