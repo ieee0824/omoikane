@@ -648,6 +648,73 @@ mod tests {
     }
 
     #[test]
+    fn iframe_keyboard_and_ime_stay_with_the_focused_child_document() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<input id='topField'><iframe id='frameEl'></iframe><script>\
+             globalThis.parentKeys=[]; document.addEventListener('keydown',e=>parentKeys.push(e.target.id));\
+             const child=frameEl.contentDocument; child.body.innerHTML='<input id=field>';\
+             globalThis.childEvents=[]; child.addEventListener('keydown',e=>childEvents.push('key:'+e.target.id));\
+             const field=child.getElementById('field');\
+             for(const type of ['compositionstart','compositionupdate','compositionend','beforeinput','input'])\
+               field.addEventListener(type,e=>childEvents.push(type+':' +(e.data||'')+':' +(e.inputType||'')));\
+             globalThis.childField=field;</script>",
+        );
+        let mut input = PlatformInput::new();
+
+        evaluate(&mut session, "childField.focus()");
+        input
+            .key_event(
+                &mut session,
+                PlatformKeyEvent {
+                    pressed: true,
+                    key: "x".into(),
+                    code: "KeyX".into(),
+                    text: Some("x".into()),
+                    repeat: false,
+                },
+            )
+            .unwrap();
+        input
+            .ime_event(
+                &mut session,
+                PlatformImeEvent::Preedit {
+                    text: "に".into(),
+                    selection: None,
+                },
+            )
+            .unwrap();
+        input
+            .ime_event(&mut session, PlatformImeEvent::Commit("日本".into()))
+            .unwrap();
+
+        assert_eq!(evaluate(&mut session, "childField.value"), json!("x日本"));
+        assert_eq!(evaluate(&mut session, "parentKeys.join('|')"), json!(""));
+        assert_eq!(
+            evaluate(&mut session, "childEvents.join('|')"),
+            json!("key:field|beforeinput:x:insertText|input:x:insertText|compositionstart::|compositionupdate:に:|beforeinput:に:insertCompositionText|input:に:insertCompositionText|compositionupdate:日本:|beforeinput:日本:insertCompositionText|input:日本:insertCompositionText|compositionend:日本:")
+        );
+
+        evaluate(&mut session, "topField.focus()");
+        input
+            .key_event(
+                &mut session,
+                PlatformKeyEvent {
+                    pressed: true,
+                    key: "y".into(),
+                    code: "KeyY".into(),
+                    text: Some("y".into()),
+                    repeat: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(evaluate(&mut session, "topField.value"), json!("y"));
+        assert_eq!(evaluate(&mut session, "parentKeys.join('|')"), json!("topField"));
+        assert_eq!(evaluate(&mut session, "childField.value"), json!("x日本"));
+    }
+
+    #[test]
     fn rejected_ime_preedit_does_not_suppress_later_keyboard_editing() {
         let mut session = CdpSession::new().unwrap();
         navigate(&mut session, "<input id='field'>");
