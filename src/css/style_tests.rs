@@ -913,6 +913,8 @@ fn css_supports_uses_parser_and_supported_property_table() {
     assert!(supports_declaration("backdrop-filter", "grayscale(1)"));
     assert!(supports_declaration("FILTER", "blur(2px)"));
     assert!(supports_declaration("--theme-color", "rgb(1, 2, 3)"));
+    assert!(supports_declaration("contain", "strict"));
+    assert!(supports_declaration("contain", "layout paint"));
 
     assert!(!supports_declaration("future-property", "value"));
     assert!(!supports_declaration("width", "12"));
@@ -920,6 +922,31 @@ fn css_supports_uses_parser_and_supported_property_table() {
     assert!(!supports_declaration("filter", "blur(-1px)"));
     assert!(!supports_declaration("color", "red; width: 10px"));
     assert!(!supports_declaration("display", ""));
+    assert!(!supports_declaration("contain", "none paint"));
+    assert!(!supports_declaration("contain", "size size"));
+}
+
+#[test]
+fn contain_computes_core_keywords_and_defaults_to_none() {
+    let (_document, body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { contain: content; } h1 { contain: size layout paint; }").unwrap(),
+    );
+    assert_eq!(
+        resolver.computed_style(&body).get("contain"),
+        Some(&ComputedValue::Keyword("content".to_string()))
+    );
+    assert_eq!(
+        resolver.computed_style(&title).get("contain"),
+        Some(&ComputedValue::Keyword("size layout paint".to_string()))
+    );
+    let detached = NodeHandle::element("div");
+    assert_eq!(
+        resolver.computed_style(&detached).get("contain"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
 }
 
 #[test]
