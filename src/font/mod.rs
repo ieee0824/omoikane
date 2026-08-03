@@ -81,6 +81,21 @@ pub enum ShapingDirection {
     BottomToTop,
 }
 
+/// Number of CSS letter-spacing boundaries in a source text run.
+///
+/// Shaping can fold multiple grapheme clusters into one glyph, so callers
+/// must derive spacing from source clusters rather than shaped glyph count.
+pub fn grapheme_spacing_boundaries(text: &str) -> usize {
+    text.graphemes(true)
+        .filter(|cluster| {
+            cluster
+                .chars()
+                .any(|ch| !is_zero_advance_character(ch))
+        })
+        .count()
+        .saturating_sub(1)
+}
+
 /// A shaped span whose complete grapheme clusters use one selected font.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapedRun {

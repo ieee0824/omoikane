@@ -8,7 +8,8 @@ use std::sync::Arc;
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{
     Font, FontError, FontStyle, FontWeight, GlyphRaster, ShapingDirection, WebFontRegistry,
-    is_zero_advance_character, load_default_text_fonts, shape_text_with_fallback,
+    grapheme_spacing_boundaries, is_zero_advance_character, load_default_text_fonts,
+    shape_text_with_fallback,
 };
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
@@ -1039,6 +1040,7 @@ pub(crate) fn paint_shaped_horizontal_text(
 
     let baseline_y = rect.y + layout_ascent;
     let mut cursor_x = rect.x;
+    let mut applied_spacing = 0usize;
     for (run_index, run) in runs.iter().enumerate() {
         let font = fonts[run.font_index];
         for (glyph_index, shaped) in run.glyphs.iter().enumerate() {
@@ -1065,9 +1067,15 @@ pub(crate) fn paint_shaped_horizontal_text(
                 .map(|glyph| glyph.cluster);
             if next_cluster.is_some_and(|cluster| cluster != shaped.cluster) {
                 cursor_x += letter_spacing;
+                applied_spacing += 1;
             }
         }
     }
+    // A ligature may absorb several source grapheme boundaries into one
+    // shaped glyph/cluster. Keep the painted advance aligned with layout even
+    // when no glyph boundary exists at which to apply that spacing.
+    cursor_x += letter_spacing
+        * grapheme_spacing_boundaries(text).saturating_sub(applied_spacing) as f32;
     Some(cursor_x - rect.x)
 }
 

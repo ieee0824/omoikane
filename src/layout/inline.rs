@@ -8,8 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
-    Font, FontFamilyKey, FontStyle, FontWeight, ShapingDirection, is_zero_advance_character,
-    load_default_text_fonts, shape_text_with_fallback,
+    Font, FontFamilyKey, FontStyle, FontWeight, ShapingDirection, grapheme_spacing_boundaries,
+    is_zero_advance_character, load_default_text_fonts, shape_text_with_fallback,
 };
 use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
@@ -2406,32 +2406,17 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                     primary,
                     &context.system_fonts,
                 );
-                let cluster_count = text
-                    .graphemes(true)
-                    .filter(|cluster| {
-                        cluster.chars().any(|ch| !is_zero_advance_character(ch))
-                    })
-                    .count();
-                let spacing = if cluster_count > 1 {
-                    metrics.letter_spacing * (cluster_count - 1) as f32
-                } else {
-                    0.0
-                };
+                // Shaped paint inserts spacing between extended grapheme
+                // clusters, not between the scalars that form one cluster.
+                let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
                 return base + spacing;
             }
         }
 
         // Fallback to approximation when no font is available
-        let char_count = text
-            .chars()
-            .filter(|ch| !is_zero_advance_character(*ch))
-            .count();
+        let char_count = text.chars().filter(|ch| !is_zero_advance_character(*ch)).count();
         let base = char_count as f32 * metrics.average_advance;
-        let spacing = if char_count > 1 {
-            metrics.letter_spacing * (char_count - 1) as f32
-        } else {
-            0.0
-        };
+        let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
         base + spacing
     })
 }
