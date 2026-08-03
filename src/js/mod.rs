@@ -1629,13 +1629,19 @@ impl HostState {
                 Some(srcdoc) => ("srcdoc", srcdoc.clone()),
                 None => (
                     "src",
-                    attributes.get("src").cloned().unwrap_or_default(),
+                    attributes
+                        .get("src")
+                        .map(|src| src.trim().to_string())
+                        .unwrap_or_default(),
                 ),
             }
         } else {
             (
                 resource_attr,
-                attributes.get(resource_attr).cloned().unwrap_or_default(),
+                attributes
+                    .get(resource_attr)
+                    .map(|resource| resource.trim().to_string())
+                    .unwrap_or_default(),
             )
         };
         if self
@@ -33352,6 +33358,45 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn connected_iframe_set_attribute_src_with_whitespace_only_change_is_noop() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="loaded">same-doc</p></body></html>"#,
+        );
+        let url = format!("http://127.0.0.1:{port}/child.html");
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><iframe id="f" src="{url}"></iframe></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/parent.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   document.getElementById('f').addEventListener('load', () => loads++);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+
+        runtime
+            .eval(&format!(
+                "document.getElementById('f').setAttribute('src', '  {url}  ');"
+            ))
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(1.0),
+            "whitespace-only src changes must not enqueue a new iframe navigation"
+        );
+    }
+
+    #[test]
     fn removing_empty_srcdoc_navigates_to_the_underlying_src() {
         use crate::html::TreeBuilder;
         let port = spawn_static_http_server(
@@ -33625,6 +33670,53 @@ b</textarea></form>"#);
             .as_deref(),
             Some("second"),
             "re-navigating the object must load the second sub-document's content"
+        );
+    }
+
+    #[test]
+    fn connected_object_set_attribute_data_with_whitespace_only_change_is_noop() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><p id="loaded">same-doc</p></body></html>"#,
+        );
+        let url = format!("http://127.0.0.1:{port}/child.html");
+        let doc = TreeBuilder::parse(&format!(
+            r#"<html><body><object id="o" data="{url}"></object></body></html>"#
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            doc,
+            &format!("http://127.0.0.1:{port}/parent.html"),
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.loads = 0;
+                   document.getElementById('o').addEventListener('load', () => loads++);"#,
+            )
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
+        assert_eq!(
+            eval_string_value(
+                &mut runtime,
+                "document.getElementById('o').contentDocument.getElementById('loaded').textContent"
+            )
+            .as_deref(),
+            Some("same-doc")
+        );
+
+        runtime
+            .eval(&format!(
+                "document.getElementById('o').setAttribute('data', '\\n{url}\\t');"
+            ))
+            .unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        assert_eq!(
+            runtime.eval("loads").unwrap().as_number(),
+            Some(1.0),
+            "whitespace-only data changes must not enqueue a new object navigation"
         );
     }
 
