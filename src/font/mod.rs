@@ -121,8 +121,10 @@ pub(crate) fn shape_text_with_fallback(
 
     // Most runs are fully covered by the primary font. Shape them once and
     // avoid probing and shaping every grapheme cluster independently.
-    let primary_glyphs = fonts[0].shape_text(text, size_px, direction)?;
-    if primary_glyphs.iter().all(|glyph| glyph.glyph_id != 0) {
+    let primary_glyphs = fonts[0].shape_text(text, size_px, direction);
+    if let Ok(primary_glyphs) = primary_glyphs
+        && primary_glyphs.iter().all(|glyph| glyph.glyph_id != 0)
+    {
         return Ok(vec![ShapedRun {
             font_index: 0,
             text_range: 0..text.len(),
@@ -136,7 +138,12 @@ pub(crate) fn shape_text_with_fallback(
         let font_index = fonts
             .iter()
             .position(|font| cluster_supported_by_font(font, cluster, size_px, direction))
-            .unwrap_or(0);
+            .or_else(|| {
+                fonts
+                    .iter()
+                    .position(|font| font.shape_text(cluster, size_px, direction).is_ok())
+            })
+            .ok_or_else(|| FontError::Other("No usable font available for shaping".to_string()))?;
         if let Some((previous_font, range)) = selections.last_mut()
             && *previous_font == font_index
         {
