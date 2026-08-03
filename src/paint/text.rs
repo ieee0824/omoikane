@@ -703,32 +703,34 @@ fn fragment_text_for_paint<'a>(
 /// Layout continues to measure and expose the source string in logical DOM
 /// order. The paint cursor, however, advances along the physical inline axis,
 /// so mixed-direction runs must be reordered before glyphs are rasterized.
-/// `normal` uses UAX#9 resolution. Directional override modes force every
-/// grapheme cluster into the element's declared direction while preserving
-/// the logical DOM/layout string.
+/// `normal`, `embed`, and `isolate` use the declared base direction;
+/// `plaintext` lets UAX#9 derive each paragraph's level from its first strong
+/// character. Directional override modes force every grapheme cluster into
+/// the declared direction while preserving the logical DOM/layout string.
 fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
     if text.is_empty() {
         return Cow::Borrowed(text);
     }
 
-    match style.unicode_bidi.as_deref() {
+    let explicit_level = if style.direction.as_deref() == Some("rtl") {
+        Level::rtl()
+    } else {
+        Level::ltr()
+    };
+    let paragraph_level = match style.unicode_bidi.as_deref() {
         Some("bidi-override" | "isolate-override") => {
             return bidi_override_visual_text(text, style);
         }
-        None | Some("normal") => {}
+        Some("plaintext") => None,
+        None | Some("normal" | "embed" | "isolate") => Some(explicit_level),
         _ => return Cow::Borrowed(text),
-    }
+    };
 
     if !contains_bidi_rtl_candidate(text) {
         return Cow::Borrowed(text);
     }
 
-    let paragraph_level = if style.direction.as_deref() == Some("rtl") {
-        Level::rtl()
-    } else {
-        Level::ltr()
-    };
-    let bidi = BidiInfo::new(text, Some(paragraph_level));
+    let bidi = BidiInfo::new(text, paragraph_level);
     if !bidi.has_rtl() {
         return Cow::Borrowed(text);
     }
@@ -1646,15 +1648,45 @@ mod bidi_tests {
     }
 
     #[test]
-    fn non_override_modes_are_not_forced_into_directional_order() {
-        for mode in ["isolate", "embed", "plaintext"] {
+    fn embed_and_isolate_use_the_declared_base_direction() {
+        for mode in ["embed", "isolate"] {
             let style = FragmentStyle {
                 direction: Some("rtl".to_string()),
                 unicode_bidi: Some(mode.to_string()),
                 ..FragmentStyle::default()
             };
-            assert_eq!(bidi_visual_text("abc אבג", &style), "abc אבג");
+            assert_eq!(bidi_visual_text("abc אבג", &style), "גבא abc");
         }
+    }
+
+    #[test]
+    fn plaintext_uses_the_first_strong_character_instead_of_css_direction() {
+        let css_rtl = FragmentStyle {
+            direction: Some("rtl".to_string()),
+            unicode_bidi: Some("plaintext".to_string()),
+            ..FragmentStyle::default()
+        };
+        assert_eq!(bidi_visual_text("abc אבג", &css_rtl), "abc גבא");
+
+        let css_ltr = FragmentStyle {
+            direction: Some("ltr".to_string()),
+            unicode_bidi: Some("plaintext".to_string()),
+            ..FragmentStyle::default()
+        };
+        assert_eq!(bidi_visual_text("אבג abc", &css_ltr), "abc גבא");
+    }
+
+    #[test]
+    fn vertical_plaintext_uses_detected_level_and_keeps_vertical_cursor_mode() {
+        let style = FragmentStyle {
+            direction: Some("rtl".to_string()),
+            unicode_bidi: Some("plaintext".to_string()),
+            writing_mode: Some("vertical-lr".to_string()),
+            ..FragmentStyle::default()
+        };
+        let (visual_text, vertical_mode) = fragment_text_for_paint("abc אבג", &style);
+        assert_eq!(visual_text, "abc גבא");
+        assert_eq!(vertical_mode, Some((false, true)));
     }
 
     #[test]
