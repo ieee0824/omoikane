@@ -6115,6 +6115,18 @@ fn split_chars_handles_cjk_characters() {
 }
 
 #[test]
+fn split_chars_keeps_combining_and_variation_sequences_together() {
+    let pieces = super::split_chars("a\u{301}b\u{fe0f}");
+    assert_eq!(pieces, vec!["a\u{301}", "b\u{fe0f}"]);
+}
+
+#[test]
+fn split_chars_keeps_emoji_modifiers_and_zwj_sequences_together() {
+    let pieces = super::split_chars("👍🏽👩‍💻X");
+    assert_eq!(pieces, vec!["👍🏽", "👩‍💻", "X"]);
+}
+
+#[test]
 fn split_words_no_cjk_break_treats_cjk_as_word() {
     // CJK chars should NOT break between them — the whole run is one piece
     let pieces = super::split_words_no_cjk_break("日本語");
@@ -6209,6 +6221,38 @@ fn word_break_break_all_wraps_between_any_characters() {
 }
 
 #[test]
+fn word_break_break_all_never_splits_extended_grapheme_clusters() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    let text = NodeHandle::text("a\u{301}👩‍💻b");
+
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+    paragraph.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("p { word-break: break-all; line-height: 20px; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 1.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let fragments: Vec<&str> = layout.children[0]
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter_map(InlineFragment::text)
+        .collect();
+    assert_eq!(fragments, vec!["a\u{301}", "👩‍💻", "b"]);
+}
+
+#[test]
 fn word_break_keep_all_treats_cjk_as_unit() {
     // With word-break: keep-all, CJK text should NOT break between characters —
     // the whole run should remain on one line if it fits.
@@ -6294,6 +6338,38 @@ fn overflow_wrap_break_word_wraps_long_word() {
         "expected multiple lines with overflow-wrap: break-word, got {}",
         p_box.lines.len()
     );
+}
+
+#[test]
+fn overflow_wrap_break_word_never_splits_extended_grapheme_clusters() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    let text = NodeHandle::text("a\u{301}👩‍💻b");
+
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+    paragraph.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("p { overflow-wrap: break-word; line-height: 20px; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 1.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let fragments: Vec<&str> = layout.children[0]
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter_map(InlineFragment::text)
+        .collect();
+    assert_eq!(fragments, vec!["a\u{301}", "👩‍💻", "b"]);
 }
 
 #[test]

@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
@@ -2032,32 +2034,11 @@ fn split_text_segment(
     }
 }
 
-/// Split text into individual characters for `word-break: break-all`.
+/// Split text into extended grapheme clusters for `word-break: break-all`.
 /// Exported for tests.
 /// Spaces remain as their own piece so that trailing-space collapsing still works.
 pub(crate) fn split_chars(text: &str) -> Vec<String> {
-    let mut pieces: Vec<String> = Vec::new();
-    let mut current = String::new();
-
-    for ch in text.chars() {
-        if ch == ' ' {
-            if !current.is_empty() {
-                pieces.push(std::mem::take(&mut current));
-            }
-            // keep space as its own piece
-            pieces.push(" ".to_string());
-        } else {
-            if !current.is_empty() {
-                // Each non-space character becomes its own breakable unit
-                pieces.push(std::mem::take(&mut current));
-            }
-            current.push(ch);
-        }
-    }
-    if !current.is_empty() {
-        pieces.push(current);
-    }
-    pieces
+    text.graphemes(true).map(str::to_string).collect()
 }
 
 /// Split text without allowing breaks between CJK characters (`word-break: keep-all`).
