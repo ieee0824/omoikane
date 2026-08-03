@@ -98,7 +98,7 @@ pub fn grapheme_spacing_boundaries(text: &str) -> usize {
 
 /// A shaped span whose complete grapheme clusters use one selected font.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ShapedRun {
+pub(crate) struct ShapedRun {
     pub font_index: usize,
     pub text_range: std::ops::Range<usize>,
     pub glyphs: Vec<ShapedGlyph>,
@@ -106,7 +106,7 @@ pub struct ShapedRun {
 
 /// Selects fallback fonts at extended grapheme-cluster boundaries and shapes
 /// adjacent clusters that chose the same font as one contextual run.
-pub fn shape_text_with_fallback(
+pub(crate) fn shape_text_with_fallback(
     fonts: &[&Font],
     text: &str,
     size_px: f32,
@@ -117,6 +117,17 @@ pub fn shape_text_with_fallback(
     }
     if fonts.is_empty() {
         return Err(FontError::Other("No fonts available for shaping".to_string()));
+    }
+
+    // Most runs are fully covered by the primary font. Shape them once and
+    // avoid probing and shaping every grapheme cluster independently.
+    let primary_glyphs = fonts[0].shape_text(text, size_px, direction)?;
+    if primary_glyphs.iter().all(|glyph| glyph.glyph_id != 0) {
+        return Ok(vec![ShapedRun {
+            font_index: 0,
+            text_range: 0..text.len(),
+            glyphs: primary_glyphs,
+        }]);
     }
 
     let mut selections = Vec::<(usize, std::ops::Range<usize>)>::new();
