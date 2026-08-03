@@ -44,8 +44,8 @@ crc32fast = "1.5"
 # (ieee0824/boa#67), and monomorphic property shape/slot native execution
 # (ieee0824/boa#68), and baseline-JIT compile-cost diagnostics
 # (ieee0824/boa#69). The pinned commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "c79e46ea83be7f1f9fcb37f25a08bad5db75bd9a", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "c79e46ea83be7f1f9fcb37f25a08bad5db75bd9a" }
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "ec60199920c3a2a5332dd043489922e2491a0a9f", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "ec60199920c3a2a5332dd043489922e2491a0a9f" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
