@@ -2715,6 +2715,12 @@ impl JsRuntime {
         self.host_state
             .borrow_mut()
             .canonical_node_identity_resolver = previous_resolver;
+        #[cfg(test)]
+        if let Err(error) = &setup {
+            eprintln!(
+                "[iframe realm setup] iframe={iframe_id} document={document_id} same_origin={same_origin} error={error}"
+            );
+        }
         setup?;
 
         let mut state = self.host_state.borrow_mut();
@@ -2748,6 +2754,12 @@ impl JsRuntime {
         let _ = self.eval("__omoikane_set_current_script(null)");
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.context.enter_realm(old_realm);
+        #[cfg(test)]
+        if let Err(error) = &result {
+            eprintln!(
+                "[iframe script] iframe={iframe_id} document={document_id} script={script_id} error={error}"
+            );
+        }
         result.map(|_| ())
     }
 
