@@ -23,9 +23,10 @@
 //! operation at two string lengths within a single run, which the machine's speed
 //! divides out of. Anything else added here belongs under the reported rule.
 //!
-//! Omoikane baselines are the median of five independent processes on an idle
-//! machine. This estimates the typical runtime used by the report and is stable
-//! because the interpreter has no optimizing-tier transition.
+//! Omoikane baselines are the median of five runs with a fresh `JsRuntime` for
+//! each run on an idle machine. This estimates the typical runtime used by the
+//! report and is stable because the interpreter has no optimizing-tier
+//! transition.
 //!
 //! SpiderMonkey references use the **minimum of five independent Firefox
 //! processes**, recorded by `scripts/record-spidermonkey-reference.sh`. A JIT run

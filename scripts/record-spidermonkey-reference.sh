@@ -70,12 +70,52 @@ if [[ "$show_samples" == 1 ]]; then
   cat "$raw"
 fi
 
-expected_rows=$((runs * 11 * 2))
-actual_rows="$(awk -F'|' 'NF == 6 { count++ } END { print count + 0 }' "$raw")"
-if [[ "$actual_rows" -ne "$expected_rows" ]]; then
-  echo "expected $expected_rows benchmark rows, got $actual_rows" >&2
-  exit 1
-fi
+awk -F'|' -v runs="$runs" '
+  BEGIN {
+    shape_list = "arith prop-mono prop-mega call closure-alloc object-alloc string-concat array primitive-string-property primitive-string-method proto-method"
+    shape_count = split(shape_list, shape_ids, " ")
+    for (shape_pos = 1; shape_pos <= shape_count; shape_pos++) {
+      expected[shape_ids[shape_pos]] = 1
+    }
+  }
+  NF != 6 {
+    print "malformed benchmark row: " $0 > "/dev/stderr"
+    invalid = 1
+    next
+  }
+  {
+    mode = $1
+    run = $2
+    shape = $3
+    if ((mode != "interpreter" && mode != "jit") || run < 1 || run > runs || !(shape in expected)) {
+      print "unexpected benchmark identity: " mode "|" run "|" shape > "/dev/stderr"
+      invalid = 1
+      next
+    }
+    key = mode "|" run "|" shape
+    if (key in seen) {
+      print "duplicate benchmark shape: " key > "/dev/stderr"
+      invalid = 1
+    }
+    seen[key] = 1
+  }
+  END {
+    modes[1] = "interpreter"
+    modes[2] = "jit"
+    for (mode_index = 1; mode_index <= 2; mode_index++) {
+      for (run = 1; run <= runs; run++) {
+        for (shape_index = 1; shape_index <= shape_count; shape_index++) {
+          key = modes[mode_index] "|" run "|" shape_ids[shape_index]
+          if (!(key in seen)) {
+            print "missing benchmark shape: " key > "/dev/stderr"
+            invalid = 1
+          }
+        }
+      }
+    }
+    if (invalid) exit 1
+  }
+' "$raw"
 
 echo "reference_engine|$($firefox_bin --version 2>/dev/null | head -n 1)"
 echo "measurement_runs|$runs"

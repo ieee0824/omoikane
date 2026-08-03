@@ -51,8 +51,9 @@ enabled for JIT mode, verifies all 11 shapes were emitted, and prints the minimu
 two sets must remain in the same performance cluster for every shape; a
 multi-fold difference means the reference must not be committed. Raw
 per-process samples are printed by default. Omoikane's own
-`baseline_ns_per_op` remains a five-process median because it estimates typical
-report runtime and has no optimizing-tier bimodality.
+`baseline_ns_per_op` remains the median of five in-process runs, each with a
+fresh `JsRuntime`, because it estimates typical report runtime and has no
+optimizing-tier bimodality.
 
 ## Result and dominant costs
 
