@@ -33076,6 +33076,18 @@ b</textarea></form>"#);
                 .into_iter()
                 .find(|node| node.node_type() == NodeType::Element)
                 .expect("same-origin child must have a root");
+            eprintln!(
+                "[iframe frame test] iframe={} child={} scripts={} attrs={:?} task_errors={:?}",
+                iframe.identity(),
+                child.identity(),
+                state
+                    .document_script_executions
+                    .get(&child.identity())
+                    .copied()
+                    .unwrap_or_default(),
+                root.attributes(),
+                state.task_errors,
+            );
             (root, iframe)
         };
         assert_eq!(
