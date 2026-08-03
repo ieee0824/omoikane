@@ -90,7 +90,7 @@ fn shape_transitions_keep_own_prototype_and_accessor_semantics() {
           const accessorBefore = accessor.value;
           accessor.value = 7;
 
-          globalThis.__issue525Result = {
+          globalThis.__shapeTransitionResult = {
             values: [fromPrototype, ownValue, afterPrototypeMutation],
             accessor: [accessorBefore, accessor.value],
           };
@@ -100,7 +100,7 @@ fn shape_transitions_keep_own_prototype_and_accessor_semantics() {
     .expect("shape transition fixture should evaluate without throwing");
 
     let result = rt
-        .eval("JSON.stringify(globalThis.__issue525Result)")
+        .eval("JSON.stringify(globalThis.__shapeTransitionResult)")
         .expect("shape transition result should serialize")
         .as_string()
         .expect("shape transition result should be a string")
@@ -126,7 +126,7 @@ fn shared_shape_branches_do_not_cross_contaminate_property_reads() {
           const warm = [read(left), read(right), read(left), read(right)];
           left.extra = 3;
           right.other = 4;
-          globalThis.__issue525Shapes = [
+          globalThis.__sharedShapeResult = [
             warm,
             read(left),
             read(right),
@@ -139,7 +139,7 @@ fn shared_shape_branches_do_not_cross_contaminate_property_reads() {
     .expect("shape branch fixture should evaluate without throwing");
 
     let result = rt
-        .eval("JSON.stringify(globalThis.__issue525Shapes)")
+        .eval("JSON.stringify(globalThis.__sharedShapeResult)")
         .expect("shape branch result should serialize")
         .as_string()
         .expect("shape branch result should be a string")
