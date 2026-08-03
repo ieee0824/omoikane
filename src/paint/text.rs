@@ -178,12 +178,12 @@ pub(crate) fn paint_text_with_registry(
 
                     let transformed = apply_text_transform(text, text_transform);
                     let transformed_text = transformed.as_deref().unwrap_or(text.as_str());
-                    let vertical_mode = vertical_paint_mode(&fragment.style);
                     // Resolve bidi before selecting the physical paint axis.
                     // The vertical painter already maps the resulting visual
                     // sequence onto its direction-aware column cursor, so it
                     // must consume the same UAX#9 order as horizontal paint.
-                    let visual_text = bidi_visual_text(transformed_text, &fragment.style);
+                    let (visual_text, vertical_mode) =
+                        fragment_text_for_paint(transformed_text, &fragment.style);
                     let display_text = visual_text.as_ref();
 
                     // Try to resolve the best web font variant for this fragment.
@@ -684,6 +684,17 @@ fn vertical_paint_mode(style: &FragmentStyle) -> Option<(bool, bool)> {
     let vertical_rl = matches!(writing_mode, "vertical-rl" | "sideways-rl");
     let vertical = vertical_rl || matches!(writing_mode, "vertical-lr" | "sideways-lr");
     vertical.then_some((vertical_rl, style.direction.as_deref() == Some("rtl")))
+}
+
+/// Resolves the text and physical inline axis as one paint-time decision.
+///
+/// Keeping these values together prevents a writing-mode-specific call site
+/// from bypassing bidi resolution while the horizontal path still uses it.
+fn fragment_text_for_paint<'a>(
+    text: &'a str,
+    style: &FragmentStyle,
+) -> (Cow<'a, str>, Option<(bool, bool)>) {
+    (bidi_visual_text(text, style), vertical_paint_mode(style))
 }
 
 /// Reorders one inline text fragment into Unicode visual order for painting.
@@ -1499,7 +1510,7 @@ fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
 
 #[cfg(test)]
 mod bidi_tests {
-    use super::{FragmentStyle, bidi_visual_text};
+    use super::{FragmentStyle, bidi_visual_text, fragment_text_for_paint};
 
     #[test]
     fn mixed_ltr_text_is_reordered_into_visual_runs() {
@@ -1529,7 +1540,9 @@ mod bidi_tests {
             writing_mode: Some("vertical-rl".to_string()),
             ..FragmentStyle::default()
         };
-        assert_eq!(bidi_visual_text("abc אבג", &style), "abc גבא");
+        let (visual_text, vertical_mode) = fragment_text_for_paint("abc אבג", &style);
+        assert_eq!(vertical_mode, Some((true, false)));
+        assert_eq!(visual_text, "abc גבא");
     }
 
     #[test]
@@ -1540,7 +1553,9 @@ mod bidi_tests {
             writing_mode: Some("vertical-lr".to_string()),
             ..FragmentStyle::default()
         };
-        assert_eq!(bidi_visual_text("abc אבג", &style), "גבא abc");
+        let (visual_text, vertical_mode) = fragment_text_for_paint("abc אבג", &style);
+        assert_eq!(vertical_mode, Some((false, true)));
+        assert_eq!(visual_text, "גבא abc");
     }
 
     #[test]
