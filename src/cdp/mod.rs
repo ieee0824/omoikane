@@ -1,7 +1,7 @@
 //! CDP transport primitives: WebSocket upgrade, frame handling, and JSON-RPC routing.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -14,6 +14,9 @@ use boa_engine::JsValue;
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
+use crate::accessibility::{
+    AccessibilityNode, AccessibilityProperty, AccessibilityTree, AccessibilityValue,
+};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::{Client, HttpRequest, Method};
@@ -657,7 +660,8 @@ pub(crate) struct SessionSettleTimings {
     pub animation_frames: Duration,
 }
 
-/// Minimal stateful CDP session spanning Page, DOM, Network, Runtime, Target, and Input.
+/// Minimal stateful CDP session spanning Accessibility, Page, DOM, Network,
+/// Runtime, Target, and Input.
 #[derive(Debug)]
 pub struct CdpSession {
     runtime: JsRuntime,
@@ -672,10 +676,6 @@ pub struct CdpSession {
     node_to_id: HashMap<usize, u64>,
     id_to_node: HashMap<u64, NodeHandle>,
     next_object_id: u64,
-    /// Document generation which owns each live Runtime remote-object handle.
-    /// Cross-document commits clear the table; same-document history changes
-    /// intentionally preserve it.
-    remote_object_generations: HashMap<String, u64>,
     next_browser_context_id: u64,
     browser_context_ids: Vec<String>,
     pending_events: Vec<CdpEvent>,
@@ -687,6 +687,7 @@ pub struct CdpSession {
     history_entries: Vec<SessionHistoryEntry>,
     history_index: usize,
     document_generation: u64,
+    accessibility_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -748,7 +749,6 @@ impl CdpSession {
             node_to_id: HashMap::new(),
             id_to_node: HashMap::new(),
             next_object_id: 0,
-            remote_object_generations: HashMap::new(),
             next_browser_context_id: 0,
             browser_context_ids: Vec::new(),
             pending_events: Vec::new(),
@@ -763,6 +763,7 @@ impl CdpSession {
             }],
             history_index: 0,
             document_generation: 0,
+            accessibility_enabled: false,
         };
         session
             .install_runtime_helpers()
@@ -770,6 +771,8 @@ impl CdpSession {
         session.rebuild_node_index();
         Ok(session)
     }
+
+    fn runtime_timeout(&self) -> Duration { self.runtime.sandbox_timeout() }
 
     /// Dispatches a CDP domain method and returns the result payload.
     pub fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, JsonRpcError> {
@@ -781,8 +784,25 @@ impl CdpSession {
             "DOM.getAttributes" => self.dom_get_attributes(&params),
             "DOM.querySelector" => self.dom_query_selector(&params),
             "DOM.getOuterHTML" => self.dom_get_outer_html(&params),
+            "Accessibility.enable" => {
+                self.accessibility_enabled = true;
+                Ok(json!({}))
+            }
+            "Accessibility.disable" => {
+                self.accessibility_enabled = false;
+                Ok(json!({}))
+            }
+            "Accessibility.getFullAXTree" => self.accessibility_get_full_tree(&params),
+            "Accessibility.getRootAXNode" => self.accessibility_get_root_node(&params),
+            "Accessibility.getPartialAXTree" => self.accessibility_get_partial_tree(&params),
+            "Accessibility.getAXNodeAndAncestors" => {
+                self.accessibility_get_node_and_ancestors(&params)
+            }
+            "Accessibility.getChildAXNodes" => self.accessibility_get_child_nodes(&params),
+            "Accessibility.queryAXTree" => self.accessibility_query_tree(&params),
             "Runtime.evaluate" => self.runtime_evaluate(&params),
             "Runtime.callFunctionOn" => self.runtime_call_function_on(&params),
+            "Runtime.releaseObject" => self.runtime_release_object(&params),
             "Target.createBrowserContext" => Ok(self.target_create_browser_context()),
             "Target.getBrowserContexts" => Ok(self.target_get_browser_contexts()),
             "Target.disposeBrowserContext" => self.target_dispose_browser_context(&params),
@@ -1313,6 +1333,471 @@ impl CdpSession {
         }))
     }
 
+    fn accessibility_tree(&mut self) -> AccessibilityTree {
+        let document = self.runtime.document();
+        let title = document
+            .query_selector("title")
+            .map(|title| dom_text_content(&title))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| self.current_url.clone());
+        let focused_identity = self.runtime.accessibility_focused_node_identity();
+        let snapshot_state = self.runtime.accessibility_snapshot_state();
+        AccessibilityTree::build(
+            &document,
+            title,
+            self.document_generation,
+            focused_identity,
+            &snapshot_state,
+            |node| self.runtime.accessibility_render_state(node),
+        )
+    }
+
+    fn accessibility_inspected_node(&mut self, target: &NodeHandle) -> Option<AccessibilityNode> {
+        let document = self.runtime.document();
+        let focused_identity = self.runtime.accessibility_focused_node_identity();
+        let snapshot_state = self.runtime.accessibility_snapshot_state();
+        AccessibilityTree::build_inspected_node(
+            &document,
+            target,
+            self.document_generation,
+            focused_identity,
+            &snapshot_state,
+            |node| self.runtime.accessibility_render_state(node),
+        )
+    }
+
+    fn accessibility_get_full_tree(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        self.validate_accessibility_frame(params)?;
+        let depth = accessibility_depth(params)?;
+        let tree = self.accessibility_tree();
+        let mut nodes = Vec::new();
+        self.serialize_ax_subtree(&tree.root, None, depth, &mut nodes);
+        Ok(json!({ "nodes": nodes }))
+    }
+
+    fn accessibility_get_root_node(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        self.require_accessibility_enabled()?;
+        self.validate_accessibility_frame(params)?;
+        let tree = self.accessibility_tree();
+        Ok(json!({
+            "node": self.serialize_ax_node(&tree.root, None, false),
+        }))
+    }
+
+    fn accessibility_get_partial_tree(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let target = accessibility_tree_target(self.accessibility_dom_node(params, false)?);
+        let tree = self.accessibility_tree();
+        let fetch_relatives = params
+            .get("fetchRelatives")
+            .map(Value::as_bool)
+            .unwrap_or(Some(true))
+            .ok_or_else(|| invalid_params("fetchRelatives must be a boolean".to_string()))?;
+        let Some(path) = tree.path_to_dom_identity(target.identity()) else {
+            let reason = self
+                .accessibility_inspected_node(&target)
+                .and_then(|node| node.ignored_reasons.first().cloned())
+                .unwrap_or_else(|| "notRendered".to_string());
+            let ancestor_path = fetch_relatives
+                .then(|| nearest_ax_ancestor_path(&tree, &target))
+                .flatten();
+            let parent_id = ancestor_path
+                .as_ref()
+                .and_then(|path| path.last())
+                .map(|parent| parent.node_id.as_str());
+            let mut nodes = vec![self.serialize_synthetic_ax_node(&target, &reason, parent_id)];
+            if let Some(path) = ancestor_path {
+                let parent_ids = ax_parent_ids(&tree.root);
+                for (index, ancestor) in path.into_iter().rev().enumerate() {
+                    let parent_id = parent_ids.get(&ancestor.node_id);
+                    let mut serialized =
+                        self.serialize_ax_node(ancestor, parent_id.map(String::as_str), false);
+                    if index == 0 {
+                        let mut child_ids = serialized["childIds"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        if !child_ids.iter().any(|id| id == "0") {
+                            child_ids.insert(0, Value::String("0".to_string()));
+                        }
+                        serialized["childIds"] = Value::Array(child_ids);
+                    }
+                    nodes.push(serialized);
+                }
+            }
+            return Ok(json!({ "nodes": nodes }));
+        };
+        let target_ax = *path.last().expect("accessibility path contains target");
+        let mut ordered = vec![target_ax];
+        if fetch_relatives {
+            collect_reachable_ax_children(target_ax, &mut ordered);
+            if path.len() > 1 {
+                for sibling in &path[path.len() - 2].children {
+                    if sibling.node_id == target_ax.node_id {
+                        continue;
+                    }
+                    ordered.push(sibling);
+                    if sibling.ignored {
+                        collect_reachable_ax_children(sibling, &mut ordered);
+                    }
+                }
+            }
+            ordered.extend(path[..path.len() - 1].iter().rev().copied());
+        }
+        let mut seen = HashSet::new();
+        ordered.retain(|node| seen.insert(node.node_id.clone()));
+        Ok(json!({
+            "nodes": self.serialize_ax_nodes_in_order(&tree, ordered, false),
+        }))
+    }
+
+    fn accessibility_get_node_and_ancestors(
+        &mut self,
+        params: &Value,
+    ) -> Result<Value, JsonRpcError> {
+        self.require_accessibility_enabled()?;
+        let target = accessibility_tree_target(self.accessibility_dom_node(params, false)?);
+        let tree = self.accessibility_tree();
+        let Some(path) = tree.path_to_dom_identity(target.identity()) else {
+            let reason = self
+                .accessibility_inspected_node(&target)
+                .and_then(|node| node.ignored_reasons.first().cloned())
+                .unwrap_or_else(|| "notRendered".to_string());
+            let ancestor_path = nearest_ax_ancestor_path(&tree, &target);
+            let parent_id = ancestor_path
+                .as_ref()
+                .and_then(|path| path.last())
+                .map(|parent| parent.node_id.as_str());
+            let mut nodes = vec![self.serialize_synthetic_ax_node(&target, &reason, parent_id)];
+            if let Some(path) = ancestor_path {
+                let parent_ids = ax_parent_ids(&tree.root);
+                for (index, ancestor) in path.into_iter().rev().enumerate() {
+                    let parent_id = parent_ids.get(&ancestor.node_id);
+                    let mut serialized =
+                        self.serialize_ax_node(ancestor, parent_id.map(String::as_str), false);
+                    if index == 0 {
+                        let mut child_ids = serialized["childIds"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        if !child_ids.iter().any(|id| id == "0") {
+                            child_ids.insert(0, Value::String("0".to_string()));
+                        }
+                        serialized["childIds"] = Value::Array(child_ids);
+                    }
+                    nodes.push(serialized);
+                }
+            }
+            return Ok(json!({
+                "nodes": nodes,
+            }));
+        };
+        Ok(json!({
+            "nodes": self.serialize_ax_nodes_in_order(
+                &tree,
+                path.into_iter().rev().collect(),
+                false,
+            ),
+        }))
+    }
+
+    fn accessibility_get_child_nodes(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        self.require_accessibility_enabled()?;
+        self.validate_accessibility_frame(params)?;
+        let node_id = require_string(params, "id")?;
+        let tree = self.accessibility_tree();
+        let node = tree.find_by_node_id(&node_id).ok_or(JsonRpcError {
+            code: -32000,
+            message: format!("Unknown accessibility node: {node_id}"),
+        })?;
+        let mut children = Vec::new();
+        collect_reachable_ax_children(node, &mut children);
+        let nodes = self.serialize_ax_nodes_in_order(&tree, children, false);
+        Ok(json!({ "nodes": nodes }))
+    }
+
+    fn accessibility_query_tree(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let target = accessibility_tree_target(self.accessibility_dom_node(params, false)?);
+        let accessible_name = optional_string(params, "accessibleName")?;
+        let role = optional_string(params, "role")?.map(|role| role.to_ascii_lowercase());
+        let full_tree = self.accessibility_tree();
+        let Some(root) = full_tree.find_by_dom_identity(target.identity()).cloned() else {
+            return Ok(json!({ "nodes": [] }));
+        };
+        let tree = AccessibilityTree { root };
+        let mut candidates = Vec::new();
+        collect_ax_nodes(&tree.root, &mut candidates);
+        let selected = candidates
+            .into_iter()
+            .filter(|node| {
+                accessible_name
+                    .as_ref()
+                    .is_none_or(|expected| node.name == *expected)
+            })
+            .filter(|node| {
+                role.as_ref()
+                    .is_none_or(|expected| node.role.eq_ignore_ascii_case(expected))
+            })
+            .map(|node| node.node_id.clone())
+            .collect::<HashSet<_>>();
+        Ok(json!({
+            "nodes": self.serialize_query_ax_nodes(&tree, &full_tree, &selected),
+        }))
+    }
+
+    fn require_accessibility_enabled(&self) -> Result<(), JsonRpcError> {
+        if self.accessibility_enabled {
+            Ok(())
+        } else {
+            Err(JsonRpcError {
+                code: -32000,
+                message: "Accessibility has not been enabled".to_string(),
+            })
+        }
+    }
+
+    fn validate_accessibility_frame(&self, params: &Value) -> Result<(), JsonRpcError> {
+        let Some(frame_id) = params.get("frameId") else {
+            return Ok(());
+        };
+        let frame_id = frame_id
+            .as_str()
+            .ok_or_else(|| invalid_params("frameId must be a string".to_string()))?;
+        if frame_id == self.frame_id {
+            Ok(())
+        } else {
+            Err(invalid_params(format!(
+                "Frame with the given frameId is not found: {frame_id}"
+            )))
+        }
+    }
+
+    fn accessibility_dom_node(
+        &mut self,
+        params: &Value,
+        allow_document_default: bool,
+    ) -> Result<NodeHandle, JsonRpcError> {
+        if let Some(object_id) = params.get("objectId") {
+            let object_id = object_id.as_str().ok_or_else(|| {
+                invalid_params("Accessibility objectId must be a string".to_string())
+            })?;
+            return self
+                .runtime
+                .node_for_remote_object_id(object_id)
+                .ok_or(JsonRpcError {
+                    code: -32000,
+                    message: format!("Remote object is not a DOM node: {object_id}"),
+                });
+        }
+        let node_id = params
+            .get("nodeId")
+            .or_else(|| params.get("backendNodeId"))
+            .and_then(Value::as_u64);
+        match node_id {
+            Some(node_id) => self.lookup_node(node_id),
+            None if allow_document_default => Ok(self.runtime.document()),
+            None => Err(invalid_params(
+                "Missing nodeId or backendNodeId".to_string(),
+            )),
+        }
+    }
+
+    fn serialize_ax_subtree(
+        &mut self,
+        node: &AccessibilityNode,
+        parent_id: Option<&str>,
+        depth: i64,
+        output: &mut Vec<Value>,
+    ) {
+        output.push(self.serialize_ax_node(node, parent_id, false));
+        if depth == 0 {
+            return;
+        }
+        let next_depth = if depth < 0 { -1 } else { depth - 1 };
+        for child in &node.children {
+            self.serialize_ax_subtree(child, Some(&node.node_id), next_depth, output);
+        }
+    }
+
+    fn serialize_ax_nodes_in_order(
+        &mut self,
+        tree: &AccessibilityTree,
+        nodes: Vec<&AccessibilityNode>,
+        force_computed_ignored: bool,
+    ) -> Vec<Value> {
+        let parent_ids = ax_parent_ids(&tree.root);
+        nodes
+            .into_iter()
+            .map(|node| {
+                let parent_id = parent_ids.get(&node.node_id).map(String::as_str);
+                self.serialize_ax_node(node, parent_id, force_computed_ignored)
+            })
+            .collect()
+    }
+
+    fn serialize_query_ax_nodes(
+        &mut self,
+        query_tree: &AccessibilityTree,
+        full_tree: &AccessibilityTree,
+        selected: &HashSet<String>,
+    ) -> Vec<Value> {
+        let query_parent_ids = ax_parent_ids(&query_tree.root);
+        let full_parent_ids = ax_parent_ids(&full_tree.root);
+        query_tree
+            .nodes_preorder()
+            .into_iter()
+            .filter(|node| selected.contains(&node.node_id))
+            .map(|node| {
+                let parent_id = query_parent_ids
+                    .get(&node.node_id)
+                    .or_else(|| full_parent_ids.get(&node.node_id))
+                    .cloned()
+                    .or_else(|| {
+                        nearest_ax_ancestor_path(full_tree, &node.dom_node)
+                            .and_then(|path| path.last().map(|parent| parent.node_id.clone()))
+                    });
+                self.serialize_ax_node(node, parent_id.as_deref(), true)
+            })
+            .collect()
+    }
+
+    fn serialize_synthetic_ax_node(
+        &mut self,
+        node: &NodeHandle,
+        reason: &str,
+        parent_id: Option<&str>,
+    ) -> Value {
+        let mut payload = json!({
+            "nodeId": "0",
+            "ignored": true,
+            "ignoredReasons": [{
+                "name": reason,
+                "value": { "type": "boolean", "value": true },
+            }],
+            "role": { "type": "role", "value": "none" },
+            "backendDOMNodeId": self.ensure_node_id(node),
+        });
+        if let Some(parent_id) = parent_id {
+            payload["parentId"] = Value::String(parent_id.to_string());
+        }
+        payload
+    }
+
+    fn serialize_ax_node(
+        &mut self,
+        node: &AccessibilityNode,
+        parent_id: Option<&str>,
+        force_computed_ignored: bool,
+    ) -> Value {
+        let backend_node_id = self.ensure_node_id(&node.dom_node);
+        let mut payload = json!({
+            "nodeId": node.node_id,
+            "ignored": node.ignored,
+            "childIds": node.children.iter().map(|child| child.node_id.clone()).collect::<Vec<_>>(),
+            "backendDOMNodeId": backend_node_id,
+        });
+        if let Some(parent_id) = parent_id {
+            payload["parentId"] = Value::String(parent_id.to_string());
+        } else {
+            payload["frameId"] = Value::String(self.frame_id.clone());
+        }
+        if node.ignored && !force_computed_ignored {
+            payload["role"] = json!({ "type": "role", "value": "none" });
+        }
+        if !node.ignored {
+            payload["role"] = json!({ "type": "role", "value": node.role });
+            payload["name"] = json!({ "type": "computedString", "value": node.name });
+            payload["properties"] = Value::Array(
+                node.properties
+                    .iter()
+                    .map(|property| self.serialize_ax_property(property))
+                    .collect(),
+            );
+            if !node.description.is_empty() {
+                payload["description"] = json!({
+                    "type": "computedString",
+                    "value": node.description,
+                });
+            }
+            if let Some(value) = node.value.as_ref() {
+                payload["value"] = self.serialize_ax_value(value, "string");
+            }
+        } else if force_computed_ignored {
+            payload["role"] = json!({ "type": "role", "value": node.role });
+            payload["name"] = json!({ "type": "computedString", "value": node.name });
+        }
+        if node.ignored {
+            payload["ignoredReasons"] = Value::Array(
+                node.ignored_reasons
+                    .iter()
+                    .map(|reason| {
+                        json!({
+                            "name": reason,
+                            "value": { "type": "boolean", "value": true },
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        payload
+    }
+
+    fn serialize_ax_property(&mut self, property: &AccessibilityProperty) -> Value {
+        json!({
+            "name": property.name,
+            "value": self.serialize_ax_value(&property.value, "string"),
+        })
+    }
+
+    fn serialize_ax_value(&mut self, value: &AccessibilityValue, string_type: &str) -> Value {
+        match value {
+            AccessibilityValue::Boolean(value) => {
+                json!({ "type": "boolean", "value": value })
+            }
+            AccessibilityValue::Integer(value) => {
+                json!({ "type": "integer", "value": value })
+            }
+            AccessibilityValue::Number(value) => json!({ "type": "number", "value": value }),
+            AccessibilityValue::String(value) => {
+                json!({ "type": string_type, "value": value })
+            }
+            AccessibilityValue::Token(value) => json!({ "type": "token", "value": value }),
+            AccessibilityValue::TokenList(value) => {
+                json!({ "type": "tokenList", "value": value })
+            }
+            AccessibilityValue::Tristate(value) => {
+                json!({ "type": "tristate", "value": value })
+            }
+            AccessibilityValue::IdRef {
+                value,
+                related_nodes,
+            } => json!({
+                "type": "idref",
+                "value": value,
+                "relatedNodes": related_nodes.iter().map(|related| {
+                    json!({
+                        "backendDOMNodeId": self.ensure_node_id(&related.dom_node),
+                        "idref": related.idref,
+                        "text": related.text,
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+            AccessibilityValue::IdRefList {
+                value,
+                related_nodes,
+            } => json!({
+                "type": "idrefList",
+                "value": value,
+                "relatedNodes": related_nodes.iter().map(|related| {
+                    json!({
+                        "backendDOMNodeId": self.ensure_node_id(&related.dom_node),
+                        "idref": related.idref,
+                        "text": related.text,
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
     fn runtime_evaluate(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let expression = require_string(params, "expression")?;
         let return_by_value = params
@@ -1331,52 +1816,59 @@ impl CdpSession {
             .get("returnByValue")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let object_id = params.get("objectId").and_then(Value::as_str);
-        if let Some(object_id) = object_id {
-            self.validate_remote_object(object_id)?;
-        }
-        let object_expr = object_id
-            .map(|id| format!("globalThis[{id:?}]"))
-            .unwrap_or_else(|| "undefined".to_string());
-        let argument_expr = params
+
+        let this_value = match params.get("objectId").and_then(Value::as_str) {
+            Some(object_id) => self.runtime.remote_object(object_id).ok_or_else(|| {
+                JsonRpcError {
+                    code: -32000,
+                    message: format!("Cannot find remote object: {object_id}"),
+                }
+            })?,
+            None => JsValue::undefined(),
+        };
+
+        let mut arguments = Vec::new();
+        for argument in params
             .get("arguments")
             .and_then(Value::as_array)
-            .map(|arguments| {
-                arguments
-                    .iter()
-                    .map(|argument| {
-                        if let Some(object_id) = argument.get("objectId").and_then(Value::as_str) {
-                            self.validate_remote_object(object_id)?;
-                        }
-                        argument_to_js(argument)
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default()
-            .join(", ");
+            .into_iter()
+            .flatten()
+        {
+            if let Some(object_id) = argument.get("objectId").and_then(Value::as_str) {
+                arguments.push(self.runtime.remote_object(object_id).ok_or_else(|| {
+                    JsonRpcError {
+                        code: -32000,
+                        message: format!("Cannot find remote object: {object_id}"),
+                    }
+                })?);
+            } else if let Some(value) = argument.get("value") {
+                // The value came from serde_json, so its textual form is a
+                // data literal rather than page-provided source. Parentheses
+                // keep object literals from being parsed as statement blocks.
+                let source = format!("({value})");
+                arguments.push(self.runtime.eval(&source).map_err(js_error)?);
+            } else {
+                return Err(invalid_params(
+                    "Each Runtime.callFunctionOn argument must include value or objectId"
+                        .to_string(),
+                ));
+            }
+        }
 
-        let expression = format!(
-            "(() => {{ const __fn = ({function_declaration}); return __fn.call({object_expr}{comma}{argument_expr}); }})()",
-            comma = if argument_expr.is_empty() { "" } else { ", " }
-        );
-        let result = self.evaluate_expression(&expression, return_by_value)?;
+        let value = self
+            .runtime
+            .call_function_with_arguments(&function_declaration, this_value, arguments)
+            .map_err(js_error)?;
+        self.runtime.run_until_idle().map_err(js_error)?;
+        let result = self.serialize_evaluation_value(value, return_by_value)?;
         self.drive_navigation_requests()?;
         Ok(result)
     }
 
-    fn validate_remote_object(&self, object_id: &str) -> Result<(), JsonRpcError> {
-        if self
-            .remote_object_generations
-            .get(object_id)
-            .is_some_and(|generation| *generation == self.document_generation)
-        {
-            return Ok(());
-        }
-        Err(JsonRpcError {
-            code: -32000,
-            message: format!("Could not find object with given id: {object_id}"),
-        })
+    fn runtime_release_object(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let object_id = require_string(params, "objectId")?;
+        self.runtime.release_remote_object(&object_id);
+        Ok(json!({}))
     }
 
     fn target_create_browser_context(&mut self) -> Value {
@@ -1655,21 +2147,23 @@ impl CdpSession {
         value: JsValue,
         return_by_value: bool,
     ) -> Result<Value, JsonRpcError> {
-        let remote_object_id = if return_by_value {
+        let object_id = if return_by_value {
             None
         } else {
-            let object_id = format!("__cdp_object_{}", self.next_object_id);
-            self.next_object_id = self.next_object_id.checked_add(1).ok_or(JsonRpcError {
-                code: -32000,
-                message: "Runtime remote object id space exhausted".to_string(),
-            })?;
+            let object_id = format!("remote-{}", self.next_object_id);
+            self.next_object_id += 1;
             Some(object_id)
         };
-        let serialization_function = match remote_object_id.as_ref() {
-            None => "value => JSON.stringify({ result: __cdpSerializeValue(value) })".to_string(),
-            Some(object_id) => format!(
-                "value => {{ globalThis[{object_id:?}] = value; return JSON.stringify({{ result: __cdpRemoteObject(value, {object_id:?}) }}); }}"
-            ),
+        let retained_value = object_id.as_ref().map(|_| value.clone());
+        let serialization_function = if return_by_value {
+            "value => JSON.stringify({ result: __cdpSerializeValue(value) })".to_string()
+        } else {
+            let object_id = object_id
+                .as_deref()
+                .expect("non-value serialization always has a remote object id");
+            format!(
+                "value => JSON.stringify({{ result: __cdpRemoteObject(value, {object_id:?}) }})"
+            )
         };
         let raw = self
             .runtime
@@ -1690,11 +2184,17 @@ impl CdpSession {
             code: -32000,
             message: error.to_string(),
         })?;
-        if let Some(object_id) = remote_object_id
-            && result["result"]["objectId"].as_str() == Some(object_id.as_str())
-        {
-            self.remote_object_generations
-                .insert(object_id, self.document_generation);
+        if let Some(object_id) = object_id {
+            if result
+                .get("result")
+                .and_then(|result| result.get("objectId"))
+                .is_some()
+            {
+                self.runtime.retain_remote_object(
+                    object_id,
+                    retained_value.expect("remote object value was cloned above"),
+                );
+            }
         }
         Ok(result)
     }
@@ -1821,7 +2321,6 @@ impl CdpSession {
         self.drag_candidate = false;
         self.drag_active = false;
         self.document_generation = self.document_generation.saturating_add(1);
-        self.remote_object_generations.clear();
         self.current_url = url.to_string();
         self.last_html = html.to_string();
         self.rebuild_node_index();
@@ -1885,8 +2384,14 @@ impl CdpSession {
         {
             return Err("stale page startup task completion".to_string());
         }
-        if completed.result == Err(PageTaskError::Cancelled) {
-            return Err("page startup task was cancelled".to_string());
+        match &completed.result {
+            Err(PageTaskError::Cancelled) => {
+                return Err("page startup task was cancelled".to_string());
+            }
+            Err(PageTaskError::TimedOut) => {
+                return Err("page startup task exceeded its wall-clock timeout".to_string());
+            }
+            Ok(_) => {}
         }
 
         let script_error_lines = take_page_task_script_error_lines(&mut completed);
@@ -1915,7 +2420,6 @@ impl CdpSession {
         self.drag_candidate = false;
         self.drag_active = false;
         self.document_generation = pending.generation;
-        self.remote_object_generations.clear();
         self.current_url = pending.url;
         self.last_html = pending.html;
         self.rebuild_node_index();
@@ -2068,6 +2572,100 @@ impl CdpSession {
     }
 }
 
+fn accessibility_depth(params: &Value) -> Result<i64, JsonRpcError> {
+    match params.get("depth") {
+        None => Ok(-1),
+        Some(depth) => depth
+            .as_u64()
+            .and_then(|depth| i64::try_from(depth).ok())
+            .ok_or_else(|| {
+                invalid_params("Accessibility depth must be a non-negative integer".to_string())
+            }),
+    }
+}
+
+fn dom_text_content(node: &NodeHandle) -> String {
+    if node.node_type() == NodeType::Text {
+        return node.data().unwrap_or_default();
+    }
+    node.child_nodes()
+        .iter()
+        .map(dom_text_content)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn collect_ax_nodes<'a>(node: &'a AccessibilityNode, output: &mut Vec<&'a AccessibilityNode>) {
+    output.push(node);
+    for child in &node.children {
+        collect_ax_nodes(child, output);
+    }
+}
+
+fn collect_reachable_ax_children<'a>(
+    node: &'a AccessibilityNode,
+    output: &mut Vec<&'a AccessibilityNode>,
+) {
+    for child in &node.children {
+        output.push(child);
+        if child.ignored {
+            collect_reachable_ax_children(child, output);
+        }
+    }
+}
+
+fn ax_parent_ids(root: &AccessibilityNode) -> HashMap<String, String> {
+    fn collect(node: &AccessibilityNode, parent_ids: &mut HashMap<String, String>) {
+        for child in &node.children {
+            parent_ids.insert(child.node_id.clone(), node.node_id.clone());
+            collect(child, parent_ids);
+        }
+    }
+
+    let mut parent_ids = HashMap::new();
+    collect(root, &mut parent_ids);
+    parent_ids
+}
+
+fn accessibility_tree_target(node: NodeHandle) -> NodeHandle {
+    if node.node_type() == NodeType::DocumentFragment {
+        node.shadow_host().unwrap_or(node)
+    } else {
+        node
+    }
+}
+
+fn ax_composed_parent(node: &NodeHandle) -> Option<NodeHandle> {
+    if node.node_type() == NodeType::DocumentFragment {
+        return node.shadow_host();
+    }
+    node.assigned_slot().or_else(|| {
+        node.parent_node().and_then(|parent| {
+            if parent.node_type() == NodeType::DocumentFragment {
+                parent.shadow_host()
+            } else {
+                Some(parent)
+            }
+        })
+    })
+}
+
+fn nearest_ax_ancestor_path<'a>(
+    tree: &'a AccessibilityTree,
+    target: &NodeHandle,
+) -> Option<Vec<&'a AccessibilityNode>> {
+    let mut current = ax_composed_parent(target);
+    while let Some(ancestor) = current {
+        if let Some(path) = tree.path_to_dom_identity(ancestor.identity()) {
+            return Some(path);
+        }
+        current = ax_composed_parent(&ancestor);
+    }
+    None
+}
+
 type SessionEvaluation = Pin<
     Box<dyn Future<Output = (CdpSession, Result<Value, JsonRpcError>)>>,
 >;
@@ -2078,6 +2676,7 @@ struct PendingSessionEvaluation {
     cancelled: Rc<Cell<bool>>,
     page_url: String,
     opened: Option<JavaScriptDialog>,
+    timeout_deadline: Instant,
     future: SessionEvaluation,
 }
 
@@ -2086,6 +2685,7 @@ struct PendingPageNavigation {
     controller: JavaScriptDialogController,
     page_url: String,
     opened: Option<JavaScriptDialog>,
+    timeout_deadline: Instant,
     task: Pin<Box<OwnedPageTask>>,
     commit: PendingDocumentCommit,
     response: Value,
@@ -2101,6 +2701,11 @@ struct BrowserSessionState {
     pending: Option<PendingSessionEvaluation>,
     pending_page: Option<PendingPageNavigation>,
     actions: Vec<BrowserSessionAction>,
+}
+
+fn deadline_after(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout).unwrap_or(now)
 }
 
 fn page_task_script_error_lines(
@@ -2172,6 +2777,7 @@ impl BrowserSessionState {
         // older suspension.
         let controller = session.runtime.javascript_dialog_controller();
         let page_url = session.current_url.clone();
+        let timeout_deadline = deadline_after(session.runtime_timeout());
         let cancelled = Rc::new(Cell::new(false));
         let evaluation_cancelled = Rc::clone(&cancelled);
         let future = Box::pin(async move {
@@ -2198,6 +2804,7 @@ impl BrowserSessionState {
             cancelled,
             page_url,
             opened: None,
+            timeout_deadline,
             future,
         });
         self.poll_evaluation();
@@ -2223,6 +2830,7 @@ impl BrowserSessionState {
             code: -32000,
             message: "Browser session is unavailable".to_string(),
         })?;
+        let timeout_deadline = deadline_after(session.runtime_timeout());
         let prepared = if method == "Page.reload" {
             session.prepare_page_reload()?
         } else {
@@ -2245,6 +2853,7 @@ impl BrowserSessionState {
             controller,
             page_url,
             opened: None,
+            timeout_deadline,
             task: Box::pin(task),
             commit,
             response,
@@ -2258,14 +2867,16 @@ impl BrowserSessionState {
             let Some(mut pending) = self.pending_page.take() else {
                 return;
             };
-            if pending.opened.is_some() {
-                self.pending_page = Some(pending);
-                return;
-            }
             let waker: &'static Waker = Waker::noop();
             let mut context = TaskContext::from_waker(waker);
             match pending.task.as_mut().poll(&mut context) {
                 Poll::Ready(completed) => {
+                    if pending.opened.take().is_some() {
+                        self.actions.push(BrowserSessionAction::Notify(
+                            "Page.javascriptDialogClosed",
+                            json!({ "result": false, "userInput": "" }),
+                        ));
+                    }
                     let result = self
                         .session
                         .as_mut()
@@ -2283,7 +2894,9 @@ impl BrowserSessionState {
                     return;
                 }
                 Poll::Pending => {
-                    if let Some(dialog) = pending.controller.pending() {
+                    if pending.opened.is_none()
+                        && let Some(dialog) = pending.controller.pending()
+                    {
                         self.actions.push(BrowserSessionAction::Notify(
                             "Page.javascriptDialogOpening",
                             dialog_opening_params(&dialog, &pending.page_url),
@@ -2307,6 +2920,12 @@ impl BrowserSessionState {
         match pending.future.as_mut().poll(&mut context) {
             Poll::Ready((session, result)) => {
                 self.session = Some(session);
+                if pending.opened.take().is_some() {
+                    self.actions.push(BrowserSessionAction::Notify(
+                        "Page.javascriptDialogClosed",
+                        json!({ "result": false, "userInput": "" }),
+                    ));
+                }
                 self.actions
                     .push(BrowserSessionAction::Complete(pending.token, result));
             }
@@ -2323,6 +2942,19 @@ impl BrowserSessionState {
                 self.pending = Some(pending);
             }
         }
+    }
+
+    fn next_pending_timeout_deadline(&self) -> Option<Instant> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.timeout_deadline)
+            .into_iter()
+            .chain(
+                self.pending_page
+                    .as_ref()
+                    .map(|pending| pending.timeout_deadline),
+            )
+            .min()
     }
 
     fn handle_dialog(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
@@ -2459,6 +3091,14 @@ impl BrowserSession {
             "DOM.getAttributes",
             "DOM.querySelector",
             "DOM.getOuterHTML",
+            "Accessibility.enable",
+            "Accessibility.disable",
+            "Accessibility.getFullAXTree",
+            "Accessibility.getRootAXNode",
+            "Accessibility.getPartialAXTree",
+            "Accessibility.getAXNodeAndAncestors",
+            "Accessibility.getChildAXNodes",
+            "Accessibility.queryAXTree",
             "Runtime.callFunctionOn",
             "Target.createBrowserContext",
             "Target.getBrowserContexts",
@@ -2530,11 +3170,32 @@ impl BrowserSession {
         self.server.drain_outgoing(client_id)
     }
 
+    /// Waits for queued output or the next pending timeout deadline, then drains
+    /// the current outbound frames for a client.
+    pub fn wait_for_outgoing(
+        &mut self,
+        client_id: u64,
+    ) -> Result<Vec<WebSocketFrame>, CdpError> {
+        self.flush_actions()?;
+        let mut outgoing = self.server.drain_outgoing(client_id)?;
+        if !outgoing.is_empty() || self.server.pending_response_count() == 0 {
+            return Ok(outgoing);
+        }
+        let deadline = { self.state.borrow().next_pending_timeout_deadline() };
+        if let Some(deadline) = deadline {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            self.flush_actions()?;
+            outgoing.extend(self.server.drain_outgoing(client_id)?);
+        }
+        Ok(outgoing)
+    }
+
     pub fn pending_response_count(&self) -> usize {
         self.server.pending_response_count()
     }
 
     fn flush_actions(&mut self) -> Result<(), CdpError> {
+        self.state.borrow_mut().poll_evaluation();
         self.state.borrow_mut().poll_page_navigation();
         let actions = std::mem::take(&mut self.state.borrow_mut().actions);
         for action in actions {
@@ -2592,6 +3253,16 @@ fn require_string(params: &Value, key: &'static str) -> Result<String, JsonRpcEr
         })
 }
 
+fn optional_string(params: &Value, key: &'static str) -> Result<Option<String>, JsonRpcError> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|value| Some(value.to_string()))
+            .ok_or_else(|| invalid_params(format!("Invalid string parameter: {key}"))),
+    }
+}
+
 fn require_u64(params: &Value, key: &'static str) -> Result<u64, JsonRpcError> {
     params.get(key).and_then(Value::as_u64).ok_or(JsonRpcError {
         code: -32602,
@@ -2631,21 +3302,6 @@ fn button_mask(button: i32) -> u64 {
         4 => 16,
         _ => 0,
     }
-}
-
-fn argument_to_js(argument: &Value) -> Result<String, JsonRpcError> {
-    if let Some(object_id) = argument.get("objectId").and_then(Value::as_str) {
-        return Ok(format!("globalThis[{object_id:?}]"));
-    }
-
-    if let Some(value) = argument.get("value") {
-        return Ok(value.to_string());
-    }
-
-    Err(JsonRpcError {
-        code: -32602,
-        message: "Each Runtime.callFunctionOn argument must include value or objectId".to_string(),
-    })
 }
 
 fn percent_decode(input: &str) -> String {
@@ -2767,6 +3423,29 @@ mod tests {
     use std::net::TcpListener;
     use std::rc::Rc;
     use std::thread;
+
+    fn ax_node_by_name<'a>(nodes: &'a [Value], name: &str) -> &'a Value {
+        nodes
+            .iter()
+            .find(|node| node["name"]["value"] == name)
+            .unwrap_or_else(|| panic!("missing accessibility node named {name:?}: {nodes:?}"))
+    }
+
+    fn ax_node_by_role_and_name<'a>(nodes: &'a [Value], role: &str, name: &str) -> &'a Value {
+        nodes
+            .iter()
+            .find(|node| node["role"]["value"] == role && node["name"]["value"] == name)
+            .unwrap_or_else(|| {
+                panic!("missing accessibility node with role {role:?} and name {name:?}: {nodes:?}")
+            })
+    }
+
+    fn ax_property<'a>(node: &'a Value, name: &str) -> &'a Value {
+        node["properties"]
+            .as_array()
+            .and_then(|properties| properties.iter().find(|property| property["name"] == name))
+            .unwrap_or_else(|| panic!("missing accessibility property {name:?}: {node:?}"))
+    }
 
     #[test]
     fn evaluation_busy_message_distinguishes_navigation_from_evaluation() {
@@ -2966,9 +3645,32 @@ mod tests {
             .unwrap();
     }
 
+    fn browser_session_with_timeout(timeout: Duration) -> BrowserSession {
+        let session = BrowserSession::new().unwrap();
+        session.state.borrow_mut().session.as_mut().unwrap().runtime =
+            JsRuntime::with_document_and_sandbox(
+                TreeBuilder::parse("<html><head></head><body></body></html>").document(),
+                crate::js::SandboxConfig {
+                    timeout,
+                    max_loop_iterations: u64::MAX,
+                },
+            )
+            .unwrap();
+        session
+    }
+
     fn browser_payloads(session: &mut BrowserSession, client_id: u64) -> Vec<Value> {
         session
             .drain_outgoing(client_id)
+            .unwrap()
+            .iter()
+            .map(|frame| serde_json::from_str(&decode_text(frame)).unwrap())
+            .collect()
+    }
+
+    fn browser_payloads_waiting(session: &mut BrowserSession, client_id: u64) -> Vec<Value> {
+        session
+            .wait_for_outgoing(client_id)
             .unwrap()
             .iter()
             .map(|frame| serde_json::from_str(&decode_text(frame)).unwrap())
@@ -2990,6 +3692,32 @@ mod tests {
         assert_eq!(response[0]["id"], "document");
         assert_eq!(response[0]["result"]["root"]["nodeName"], "#document");
         assert!(response[0].get("error").is_none());
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"enable-ax","method":"Accessibility.enable","params":{}}"#,
+        );
+        let response = browser_payloads(&mut session, client.client_id);
+        assert_eq!(response[0]["id"], "enable-ax");
+        assert_eq!(response[0]["result"], json!({}));
+
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"ax-root","method":"Accessibility.getRootAXNode","params":{}}"#,
+        );
+        let response = browser_payloads(&mut session, client.client_id);
+        assert_eq!(response[0]["id"], "ax-root");
+        assert_eq!(
+            response[0]["result"]["node"]["role"]["value"],
+            "RootWebArea"
+        );
+        assert!(
+            response[0]["result"]["node"]["backendDOMNodeId"]
+                .as_u64()
+                .is_some()
+        );
     }
 
     #[test]
@@ -3070,6 +3798,33 @@ mod tests {
         assert_eq!(completed[1]["params"]["result"], false);
         assert_eq!(completed[2]["id"], "eval");
         assert_eq!(completed[2]["result"]["result"]["value"], false);
+        assert_eq!(session.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn browser_session_times_out_a_suspended_runtime_evaluation() {
+        let mut session = browser_session_with_timeout(Duration::from_millis(2));
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"alert('timeout')","returnByValue":true}}"#,
+        );
+        let mut payloads = browser_payloads(&mut session, client.client_id);
+        assert_eq!(payloads[0]["method"], "Page.javascriptDialogOpening");
+        assert!(browser_payloads(&mut session, client.client_id).is_empty());
+        payloads.extend(browser_payloads_waiting(&mut session, client.client_id));
+        assert_eq!(session.pending_response_count(), 0, "{payloads:#?}");
+        assert!(payloads.iter().any(|value| {
+            value["method"] == "Page.javascriptDialogClosed"
+                && value["params"]["result"] == false
+        }));
+        assert!(payloads.iter().any(|value| {
+            value["id"] == "eval"
+                && value["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("wall-clock timeout"))
+        }));
         assert_eq!(session.pending_response_count(), 0);
     }
 
@@ -3482,6 +4237,99 @@ mod tests {
         assert!(state.iter().any(|value| {
             value["id"] == "state" && value["result"]["result"]["value"] == "new:undefined"
         }));
+    }
+
+    #[test]
+    fn pending_page_navigation_times_out_while_a_dialog_is_open() {
+        let runtime = JsRuntime::with_document_and_sandbox(
+            crate::dom::NodeHandle::document(),
+            crate::js::SandboxConfig {
+                timeout: Duration::from_millis(2),
+                max_loop_iterations: u64::MAX,
+            },
+        )
+        .unwrap();
+        let task = runtime.into_page_task(
+            1,
+            vec![PageTaskSource::Classic {
+                source: "alert('startup-timeout')".to_string(),
+                label: "startup".to_string(),
+                script_node_id: None,
+            }],
+        );
+        let controller = task.dialog_controller();
+        let mut state = BrowserSessionState {
+            session: Some(CdpSession::new().unwrap()),
+            pending: None,
+            pending_page: Some(PendingPageNavigation {
+                token: DeferredResponseToken(1),
+                controller,
+                page_url: "about:blank".to_string(),
+                opened: None,
+                timeout_deadline: deadline_after(Duration::from_millis(2)),
+                task: Box::pin(task),
+                commit: PendingDocumentCommit {
+                    url: "about:blank".to_string(),
+                    html: "<html><head></head><body></body></html>".to_string(),
+                    generation: 1,
+                    history_commit: NavigationCommit::Push,
+                    loader_id: "1".to_string(),
+                    status: 200,
+                },
+                response: json!({ "frameId": "frame-0", "loaderId": "1" }),
+            }),
+            actions: Vec::new(),
+        };
+
+        state.poll_page_navigation();
+        assert!(matches!(
+            state.actions.first(),
+            Some(BrowserSessionAction::Notify("Page.javascriptDialogOpening", _))
+        ));
+        state.actions.clear();
+
+        for _ in 0..8 {
+            if state.pending_page.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            state.poll_page_navigation();
+        }
+
+        assert!(state.pending_page.is_none());
+        assert!(state.actions.iter().any(|action| matches!(
+            action,
+            BrowserSessionAction::Notify("Page.javascriptDialogClosed", params)
+                if params["result"] == false
+        )));
+        assert!(state.actions.iter().any(|action| matches!(
+            action,
+            BrowserSessionAction::Complete(_, Err(error))
+                if error.message.contains("wall-clock timeout")
+        )));
+    }
+
+    #[test]
+    fn drain_outgoing_returns_immediately_while_dialog_is_pending() {
+        let mut session = BrowserSession::new().unwrap();
+        let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+        browser_request(
+            &mut session,
+            client.client_id,
+            r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"alert('still-open')","returnByValue":true}}"#,
+        );
+        let opening = browser_payloads(&mut session, client.client_id);
+        assert_eq!(opening.len(), 1);
+        assert_eq!(opening[0]["method"], "Page.javascriptDialogOpening");
+
+        let start = Instant::now();
+        let queued = session.drain_outgoing(client.client_id).unwrap();
+        assert!(queued.is_empty());
+        assert!(
+            start.elapsed() < Duration::from_millis(250),
+            "drain_outgoing must not block while only a deferred response is pending"
+        );
+        assert_eq!(session.pending_response_count(), 1);
     }
 
     #[test]
@@ -4457,6 +5305,685 @@ mod tests {
     }
 
     #[test]
+    fn accessibility_domain_exposes_semantics_relations_state_and_css_visibility() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({
+                    "url": "data:text/html,<html><head><title>Settings</title><style>.gone{display:none}</style></head><body>\
+                    <main aria-label='Preferences'><h2 id='heading'>Account</h2>\
+                    <button id='save' aria-labelledby='heading' aria-describedby='help' aria-expanded='false'>Save</button>\
+                    <span id='help' hidden>Stores changes</span>\
+                    <input id='agree' type='checkbox' checked aria-label='Accept'>\
+                    <img src='x' alt='Avatar'><button id='hidden-action' class='gone'>Hidden action</button>\
+                    <div role='slider' aria-label='Volume' aria-valuemin='0' aria-valuemax='10' aria-valuenow='5' aria-valuetext='Medium'></div>\
+                    </main></body></html>"
+                }),
+            )
+            .unwrap();
+
+        let disabled_error = session
+            .dispatch("Accessibility.getRootAXNode", json!({}))
+            .unwrap_err();
+        assert_eq!(disabled_error.code, -32000);
+        assert!(
+            session
+                .dispatch("Accessibility.getFullAXTree", json!({ "depth": -1 }))
+                .is_err()
+        );
+
+        session.dispatch("Accessibility.enable", json!({})).unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "document.querySelector('#save').focus()" }),
+            )
+            .unwrap();
+        let full = session
+            .dispatch("Accessibility.getFullAXTree", json!({}))
+            .unwrap();
+        let nodes = full["nodes"].as_array().unwrap();
+        let root = &nodes[0];
+        assert_eq!(root["role"]["value"], "RootWebArea");
+        assert_eq!(root["name"]["value"], "Settings");
+        assert_eq!(root["frameId"], "frame-0");
+        assert!(root["backendDOMNodeId"].as_u64().is_some());
+        assert!(!root["childIds"].as_array().unwrap().is_empty());
+        let root_ax_id = root["nodeId"].as_str().unwrap().to_string();
+        let root_children = session
+            .dispatch(
+                "Accessibility.getChildAXNodes",
+                json!({ "id": root_ax_id, "frameId": "frame-0" }),
+            )
+            .unwrap();
+        assert!(!root_children["nodes"].as_array().unwrap().is_empty());
+        assert!(
+            root_children["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|node| node.get("frameId").is_none())
+        );
+
+        let button = ax_node_by_role_and_name(nodes, "button", "Account");
+        assert_eq!(button["role"]["value"], "button");
+        assert_eq!(button["description"]["value"], "Stores changes");
+        assert!(button.get("frameId").is_none());
+        assert!(button["parentId"].as_str().is_some());
+        assert_eq!(ax_property(button, "expanded")["value"]["value"], false);
+        assert_eq!(ax_property(button, "focused")["value"]["value"], true);
+        let labelledby = ax_property(button, "labelledby");
+        assert_eq!(labelledby["value"]["type"], "idrefList");
+        assert_eq!(labelledby["value"]["value"], "heading");
+        assert_eq!(labelledby["value"]["relatedNodes"][0]["idref"], "heading");
+        assert!(
+            labelledby["value"]["relatedNodes"][0]["backendDOMNodeId"]
+                .as_u64()
+                .is_some()
+        );
+        let describedby = ax_property(button, "describedby");
+        assert_eq!(
+            describedby["value"]["relatedNodes"][0]["text"],
+            "Stores changes"
+        );
+
+        let checkbox = ax_node_by_name(nodes, "Accept");
+        assert_eq!(checkbox["role"]["value"], "checkbox");
+        assert_eq!(
+            ax_property(checkbox, "checked")["value"]["type"],
+            "tristate"
+        );
+        assert_eq!(ax_property(checkbox, "checked")["value"]["value"], "true");
+        assert_eq!(ax_node_by_name(nodes, "Avatar")["role"]["value"], "image");
+
+        let slider = ax_node_by_name(nodes, "Volume");
+        assert_eq!(slider["value"]["value"], "Medium");
+        assert_eq!(ax_property(slider, "valuemin")["value"]["type"], "number");
+        assert_eq!(ax_property(slider, "valuemax")["value"]["value"], 10.0);
+        assert_eq!(ax_property(slider, "valuetext")["value"]["value"], "Medium");
+        assert!(
+            slider["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|property| property["name"] != "valuenow")
+        );
+
+        assert!(
+            !nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Hidden action")
+        );
+        let document = session.dispatch("DOM.getDocument", json!({})).unwrap();
+        let root_dom_id = document["root"]["nodeId"].as_u64().unwrap();
+        let hidden_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({ "nodeId": root_dom_id, "accessibleName": "Hidden action" }),
+            )
+            .unwrap();
+        assert!(hidden_query["nodes"].as_array().unwrap().is_empty());
+        let hidden_dom_id = session
+            .dispatch(
+                "DOM.querySelector",
+                json!({ "nodeId": root_dom_id, "selector": "#hidden-action" }),
+            )
+            .unwrap()["nodeId"]
+            .as_u64()
+            .unwrap();
+        let hidden_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": hidden_dom_id, "fetchRelatives": false }),
+            )
+            .unwrap();
+        let hidden = &hidden_partial["nodes"][0];
+        assert_eq!(hidden["ignored"], true);
+        assert_eq!(hidden["ignoredReasons"][0]["name"], "notRendered");
+        assert_eq!(hidden["role"]["value"], "none");
+        let direct_hidden_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({ "nodeId": hidden_dom_id, "role": "button" }),
+            )
+            .unwrap();
+        assert!(direct_hidden_query["nodes"].as_array().unwrap().is_empty());
+        assert!(
+            session
+                .dispatch(
+                    "Accessibility.getFullAXTree",
+                    json!({ "frameId": "missing" }),
+                )
+                .is_err()
+        );
+        assert!(
+            session
+                .dispatch("Accessibility.getRootAXNode", json!({ "frameId": 1 }),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn accessibility_partial_query_and_dynamic_snapshots_use_stable_generation_ids() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({
+                    "url": "data:text/html,<html><head><title>First</title><style>.gone{display:none}</style></head>\
+                    <body><main id='scope'><button id='target'>Before</button><button>Sibling</button>\
+                    <button aria-hidden='true'>Ignored match</button></main></body></html>"
+                }),
+            )
+            .unwrap();
+        let document = session.dispatch("DOM.getDocument", json!({})).unwrap();
+        let root_dom_id = document["root"]["nodeId"].as_u64().unwrap();
+        let target_dom_id = session
+            .dispatch(
+                "DOM.querySelector",
+                json!({ "nodeId": root_dom_id, "selector": "#target" }),
+            )
+            .unwrap()["nodeId"]
+            .as_u64()
+            .unwrap();
+        let target_object_id = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.querySelector('#target')",
+                    "returnByValue": false,
+                }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let non_node_object_id = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "({ __id: document.querySelector('#target').__id })",
+                    "returnByValue": false,
+                }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "globalThis.Node = function ReplacedNode() {}" }),
+            )
+            .unwrap();
+        boa_gc::force_collect();
+
+        let partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": target_dom_id, "fetchRelatives": true }),
+            )
+            .unwrap();
+        let partial_nodes = partial["nodes"].as_array().unwrap();
+        let target = ax_node_by_role_and_name(partial_nodes, "button", "Before");
+        let stable_target_id = target["nodeId"].as_str().unwrap().to_string();
+        assert_eq!(partial_nodes[0]["nodeId"], stable_target_id);
+        assert!(stable_target_id.starts_with("ax-1-"));
+        assert!(
+            partial_nodes
+                .iter()
+                .any(|node| node["role"]["value"] == "RootWebArea")
+        );
+        assert!(
+            partial_nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Sibling")
+        );
+        let object_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "objectId": target_object_id, "fetchRelatives": false }),
+            )
+            .unwrap();
+        assert_eq!(object_partial["nodes"][0]["nodeId"], stable_target_id);
+        assert!(
+            session
+                .dispatch(
+                    "Accessibility.getPartialAXTree",
+                    json!({ "objectId": non_node_object_id }),
+                )
+                .is_err()
+        );
+
+        assert!(
+            session
+                .dispatch(
+                    "Accessibility.getAXNodeAndAncestors",
+                    json!({ "backendNodeId": target_dom_id }),
+                )
+                .is_err()
+        );
+        session.dispatch("Accessibility.enable", json!({})).unwrap();
+        let ancestors = session
+            .dispatch(
+                "Accessibility.getAXNodeAndAncestors",
+                json!({ "backendNodeId": target_dom_id }),
+            )
+            .unwrap();
+        assert_eq!(ancestors["nodes"][0]["nodeId"], stable_target_id);
+        assert!(
+            ancestors["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["nodeId"] == stable_target_id)
+        );
+        let rooted_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": target_dom_id,
+                    "accessibleName": "Before",
+                    "role": "button",
+                }),
+            )
+            .unwrap();
+        assert!(rooted_query["nodes"][0]["parentId"].as_str().is_some());
+        assert!(rooted_query["nodes"][0].get("frameId").is_none());
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.querySelector('#target').textContent = 'After'; const button = document.createElement('button'); button.textContent = 'Added'; document.querySelector('#scope').appendChild(button)"
+                }),
+            )
+            .unwrap();
+        let updated = session
+            .dispatch("Accessibility.getFullAXTree", json!({}))
+            .unwrap();
+        let updated_nodes = updated["nodes"].as_array().unwrap();
+        assert_eq!(
+            ax_node_by_role_and_name(updated_nodes, "button", "After")["nodeId"],
+            stable_target_id
+        );
+        assert!(
+            updated_nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Added")
+        );
+
+        let query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": root_dom_id,
+                    "accessibleName": "Added",
+                    "role": "button"
+                }),
+            )
+            .unwrap();
+        assert_eq!(query["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(query["nodes"][0]["name"]["value"], "Added");
+        let ignored_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": root_dom_id,
+                    "accessibleName": "Ignored match",
+                    "role": "button",
+                }),
+            )
+            .unwrap();
+        assert_eq!(ignored_query["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(ignored_query["nodes"][0]["ignored"], true);
+        assert_eq!(ignored_query["nodes"][0]["role"]["value"], "button");
+        assert!(ignored_query["nodes"][0].get("properties").is_none());
+        assert!(
+            session
+                .dispatch("Accessibility.queryAXTree", json!({ "role": "button" }))
+                .is_err()
+        );
+
+        let first_root = session
+            .dispatch("Accessibility.getRootAXNode", json!({}))
+            .unwrap()["node"]["nodeId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<html><head><title>Second</title></head><body></body></html>" }),
+            )
+            .unwrap();
+        let second_root = session
+            .dispatch("Accessibility.getRootAXNode", json!({}))
+            .unwrap()["node"]
+            .clone();
+        assert_eq!(second_root["name"]["value"], "Second");
+        assert!(second_root["nodeId"].as_str().unwrap().starts_with("ax-2-"));
+        assert_ne!(second_root["nodeId"], first_root);
+        assert!(
+            session
+                .dispatch(
+                    "Accessibility.getPartialAXTree",
+                    json!({ "objectId": target_object_id }),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn accessibility_dom_targets_synthesize_missing_nodes_and_preserve_relatives() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({
+                    "url": "data:text/html,<html><body><div id='host'><button id='unassigned'>Light only</button></div>\
+                    <img id='empty' alt=''><section id='owner' aria-owns='owned'></section>\
+                    <section id='second-owner' aria-owns='owned'></section>\
+                    <button id='owned'>Owned</button><script>const root = document.querySelector('#host').attachShadow({mode:'open'});\
+                    const child = document.createElement('span'); child.textContent = 'Shadow child'; root.appendChild(child);</script>\
+                    </body></html>"
+                }),
+            )
+            .unwrap();
+        let document = session.dispatch("DOM.getDocument", json!({})).unwrap();
+        let root_dom_id = document["root"]["nodeId"].as_u64().unwrap();
+        let query_dom = |session: &mut CdpSession, selector: &str| {
+            session
+                .dispatch(
+                    "DOM.querySelector",
+                    json!({ "nodeId": root_dom_id, "selector": selector }),
+                )
+                .unwrap()["nodeId"]
+                .as_u64()
+                .unwrap()
+        };
+        let host_dom_id = query_dom(&mut session, "#host");
+        let target_dom_id = query_dom(&mut session, "#unassigned");
+        let empty_dom_id = query_dom(&mut session, "#empty");
+        let owner_dom_id = query_dom(&mut session, "#owner");
+        let second_owner_dom_id = query_dom(&mut session, "#second-owner");
+        let shadow_root_object_id = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.querySelector('#host').shadowRoot",
+                    "returnByValue": false,
+                }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let full = session
+            .dispatch("Accessibility.getFullAXTree", json!({}))
+            .unwrap();
+        let full_nodes = full["nodes"].as_array().unwrap();
+        let empty = full_nodes
+            .iter()
+            .find(|node| node["backendDOMNodeId"] == empty_dom_id)
+            .unwrap();
+        assert_eq!(empty["ignored"], true);
+        assert_eq!(empty["role"]["value"], "none");
+        assert!(empty.get("name").is_none());
+        assert!(empty.get("properties").is_none());
+
+        let host_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": host_dom_id, "fetchRelatives": false }),
+            )
+            .unwrap();
+        let shadow_root_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "objectId": shadow_root_object_id, "fetchRelatives": false }),
+            )
+            .unwrap();
+        assert_eq!(shadow_root_partial["nodes"], host_partial["nodes"]);
+        assert_ne!(shadow_root_partial["nodes"][0]["nodeId"], "0");
+
+        let ignored_host_partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": host_dom_id, "fetchRelatives": true }),
+            )
+            .unwrap();
+        let ignored_host_nodes = ignored_host_partial["nodes"].as_array().unwrap();
+        assert_eq!(ignored_host_nodes[0]["ignored"], true);
+        assert!(
+            ignored_host_nodes[0]["childIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|child_id| ignored_host_nodes
+                    .iter()
+                    .any(|node| node["nodeId"] == *child_id))
+        );
+        assert!(
+            ignored_host_nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Shadow child")
+        );
+
+        let partial = session
+            .dispatch(
+                "Accessibility.getPartialAXTree",
+                json!({ "nodeId": target_dom_id, "fetchRelatives": true }),
+            )
+            .unwrap();
+        let nodes = partial["nodes"].as_array().unwrap();
+        assert_eq!(nodes[0]["nodeId"], "0");
+        assert_eq!(nodes[0]["ignored"], true);
+        assert_eq!(nodes[0]["role"]["value"], "none");
+        assert_eq!(nodes[0]["ignoredReasons"][0]["name"], "notRendered");
+        assert_eq!(nodes[0]["backendDOMNodeId"], target_dom_id);
+        let parent_id = nodes[0]["parentId"].as_str().unwrap();
+        assert_eq!(nodes[1]["nodeId"], parent_id);
+        let parent_children = nodes[1]["childIds"].as_array().unwrap();
+        assert_eq!(parent_children[0], "0");
+        assert!(parent_children.len() > 1);
+
+        session.dispatch("Accessibility.enable", json!({})).unwrap();
+        let host_ancestors = session
+            .dispatch(
+                "Accessibility.getAXNodeAndAncestors",
+                json!({ "nodeId": host_dom_id }),
+            )
+            .unwrap();
+        let shadow_root_ancestors = session
+            .dispatch(
+                "Accessibility.getAXNodeAndAncestors",
+                json!({ "objectId": shadow_root_object_id }),
+            )
+            .unwrap();
+        assert_eq!(shadow_root_ancestors["nodes"], host_ancestors["nodes"]);
+
+        let ancestors = session
+            .dispatch(
+                "Accessibility.getAXNodeAndAncestors",
+                json!({ "nodeId": target_dom_id }),
+            )
+            .unwrap();
+        let ancestor_nodes = ancestors["nodes"].as_array().unwrap();
+        assert_eq!(ancestor_nodes[0]["nodeId"], "0");
+        assert_eq!(ancestor_nodes[0]["parentId"], ancestor_nodes[1]["nodeId"]);
+        assert!(
+            ancestor_nodes
+                .iter()
+                .any(|node| node["role"]["value"] == "RootWebArea")
+        );
+
+        let owned_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": owner_dom_id,
+                    "accessibleName": "Owned",
+                    "role": "button",
+                }),
+            )
+            .unwrap();
+        assert_eq!(owned_query["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(owned_query["nodes"][0]["name"]["value"], "Owned");
+        assert!(owned_query["nodes"][0]["parentId"].as_str().is_some());
+        assert!(owned_query["nodes"][0].get("frameId").is_none());
+        let second_owner_query = session
+            .dispatch(
+                "Accessibility.queryAXTree",
+                json!({
+                    "nodeId": second_owner_dom_id,
+                    "accessibleName": "Owned",
+                    "role": "button",
+                }),
+            )
+            .unwrap();
+        assert!(second_owner_query["nodes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn accessibility_snapshot_internals_are_not_page_visible() {
+        let mut session = CdpSession::new().unwrap();
+        let result = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "(() => {\
+                      const names = ['__omoikane_accessibility_snapshot',\
+                        '__omoikane_register_canonical_node_identity',\
+                        '__omoikane_get_option_selected',\
+                        '__omoikane_set_option_selected'];\
+                      const originalMapHas = Map.prototype.has;\
+                      const originalMapSet = Map.prototype.set;\
+                      let leakedCache = null;\
+                      Map.prototype.has = function(key) {\
+                        leakedCache = this; return originalMapHas.call(this, key);\
+                      };\
+                      Map.prototype.set = function(key, value) {\
+                        leakedCache = this; return originalMapSet.call(this, key, value);\
+                      };\
+                      const option = document.createElement('option');\
+                      const accessors = Object.getOwnPropertyDescriptor(\
+                        HTMLOptionElement.prototype, 'selected');\
+                      const forged = { __id: option.__id };\
+                      const originalMapGet = Map.prototype.get;\
+                      Map.prototype.get = function() { return forged; };\
+                      document.body.appendChild(option);\
+                      const cacheHitPreserved = document.querySelector('option') === option;\
+                      if (leakedCache) {\
+                        originalMapSet.call(leakedCache, option.__id, forged);\
+                      }\
+                      let getterRejected = false; let setterRejected = false;\
+                      try { accessors.get.call(forged); }\
+                      catch (error) { getterRejected = error instanceof TypeError; }\
+                      try { accessors.set.call(forged, true); }\
+                      catch (error) { setterRejected = error instanceof TypeError; }\
+                      Map.prototype.has = originalMapHas;\
+                      Map.prototype.get = originalMapGet;\
+                      Map.prototype.set = originalMapSet;\
+                      return names.map(name => typeof globalThis[name]).join('|') + '|' +\
+                        (leakedCache === null) + '|' + cacheHitPreserved + '|' + getterRejected + '|' +\
+                        setterRejected + '|' + option.selected;\
+                    })()",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            result["result"]["value"],
+            "undefined|undefined|undefined|undefined|true|true|true|true|false"
+        );
+    }
+
+    #[test]
+    fn accessibility_uses_live_form_disclosure_and_closed_shadow_state() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({
+                    "url": "data:text/html,<html><body><input id='password' type='password' value='old' aria-label='Password'>\
+                    <select id='choice' aria-label='Choice'><option>First</option><option>Second</option></select>\
+                    <details id='details'><summary>More</summary><p>Body</p></details><div id='host'></div></body></html>"
+                }),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.querySelector('#password').value = 's😀';\
+                      document.querySelector('#choice').selectedIndex = 1;\
+                      document.querySelector('#details').open = true;\
+                      const root = document.querySelector('#host').attachShadow({mode:'closed'});\
+                      const select = document.createElement('select'); select.setAttribute('aria-label', 'Shadow choice');\
+                      const first = document.createElement('option'); first.textContent = 'Alpha';\
+                      const second = document.createElement('option'); second.textContent = 'Beta';\
+                      select.appendChild(first); select.appendChild(second); second.selected = true; root.appendChild(select);\
+                      const details = document.createElement('details'); const summary = document.createElement('summary');\
+                      summary.textContent = 'Shadow details'; details.appendChild(summary);\
+                      const body = document.createElement('p'); body.textContent = 'Shadow body'; details.appendChild(body);\
+                      details.open = true; root.appendChild(details);\
+                      globalThis.accessibilitySelectedGetterCalls = 0;\
+                      Object.defineProperty(HTMLOptionElement.prototype, 'selected', {\
+                        configurable: true, get() { accessibilitySelectedGetterCalls++; return false; }\
+                      });\
+                      globalThis.__omoikane_accessibility_snapshot = () => '{\"selectedOptions\":[],\"openDetails\":[]}';"
+                }),
+            )
+            .unwrap();
+        boa_gc::force_collect();
+        let full = session
+            .dispatch("Accessibility.getFullAXTree", json!({}))
+            .unwrap();
+        let nodes = full["nodes"].as_array().unwrap();
+
+        assert_eq!(ax_node_by_name(nodes, "Password")["value"]["value"], "•••");
+        assert_eq!(ax_node_by_name(nodes, "Choice")["value"]["value"], "Second");
+        assert_eq!(
+            ax_property(
+                ax_node_by_role_and_name(nodes, "button", "More"),
+                "expanded"
+            )["value"]["value"],
+            true
+        );
+        assert!(nodes.iter().any(|node| node["name"]["value"] == "Body"));
+        assert_eq!(
+            ax_node_by_name(nodes, "Shadow choice")["value"]["value"],
+            "Beta"
+        );
+        assert_eq!(
+            ax_property(
+                ax_node_by_role_and_name(nodes, "button", "Shadow details"),
+                "expanded"
+            )["value"]["value"],
+            true
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["name"]["value"] == "Shadow body")
+        );
+        let getter_calls = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "accessibilitySelectedGetterCalls",
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(getter_calls["result"]["value"], 0);
+    }
+
+    #[test]
     fn navigation_invalidates_old_document_node_ids_without_reusing_them() {
         let mut session = CdpSession::new().unwrap();
         session
@@ -4510,6 +6037,20 @@ mod tests {
             )
             .unwrap();
         let object_id = object["result"]["objectId"].as_str().unwrap().to_string();
+        assert!(object_id.starts_with("remote-"));
+
+        // Remote handles are host-owned. A page-visible property with the
+        // legacy predictable name must not be able to replace or delete the
+        // value retained for the protocol client.
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "globalThis.__cdp_object_0 = { count: 99 }; delete globalThis.__cdp_object_0; Object.prototype.__cdp_object_0 = { count: 777 }"
+                }),
+            )
+            .unwrap();
+        boa_gc::force_collect();
 
         let called = session
             .dispatch(
@@ -4524,31 +6065,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(called["result"]["value"], 6);
-    }
-
-    #[test]
-    fn remote_objects_survive_same_document_history_but_expire_on_document_commit() {
-        let mut session = CdpSession::new().unwrap();
-        let object = session
-            .dispatch(
-                "Runtime.evaluate",
-                json!({
-                    "expression": "({ count: 7 })",
-                    "returnByValue": false,
-                }),
-            )
-            .unwrap();
-        let object_id = object["result"]["objectId"].as_str().unwrap().to_string();
-        let initial_generation = session.document_generation;
-
         session
             .dispatch(
                 "Runtime.evaluate",
-                json!({ "expression": "history.pushState({ same: true }, '')" }),
+                json!({ "expression": "delete Object.prototype.__cdp_object_0" }),
             )
             .unwrap();
-        assert_eq!(session.document_generation, initial_generation);
-        let same_document_call = session
+
+        let multiplier = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "({ factor: 3 })", "returnByValue": false }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let called_with_remote_argument = session
+            .dispatch(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": "function(other) { return this.count * other.factor; }",
+                    "arguments": [{ "objectId": multiplier }],
+                    "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(called_with_remote_argument["result"]["value"], 6);
+
+        session
+            .dispatch("Runtime.releaseObject", json!({ "objectId": object_id }))
+            .unwrap();
+        assert!(session
             .dispatch(
                 "Runtime.callFunctionOn",
                 json!({
@@ -4557,60 +6106,39 @@ mod tests {
                     "returnByValue": true,
                 }),
             )
-            .unwrap();
-        assert_eq!(same_document_call["result"]["value"], 7);
+            .is_err());
+    }
+
+    #[test]
+    fn runtime_remote_object_handles_expire_when_navigation_replaces_runtime() {
+        let mut session = CdpSession::new().unwrap();
+        let object_id = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "({ old: true })", "returnByValue": false }),
+            )
+            .unwrap()["result"]["objectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         session
             .dispatch(
                 "Page.navigate",
-                json!({ "url": "data:text/html,<p>replacement</p>" }),
+                json!({ "url": "data:text/html,<html><body>new</body></html>" }),
             )
             .unwrap();
-        let stale = session
+
+        assert!(session
             .dispatch(
                 "Runtime.callFunctionOn",
                 json!({
                     "objectId": object_id,
-                    "functionDeclaration": "function() { return this.count; }",
-                }),
-            )
-            .unwrap_err();
-        assert_eq!(stale.code, -32000);
-        assert_eq!(
-            stale.message,
-            format!("Could not find object with given id: {object_id}")
-        );
-
-        let replacement = session
-            .dispatch(
-                "Runtime.evaluate",
-                json!({
-                    "expression": "({ fresh: true })",
-                    "returnByValue": false,
-                }),
-            )
-            .unwrap();
-        let replacement_id = replacement["result"]["objectId"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        session.dispatch("Page.reload", json!({})).unwrap();
-        let stale_argument = session
-            .dispatch(
-                "Runtime.callFunctionOn",
-                json!({
-                    "functionDeclaration": "function(value) { return value; }",
-                    "arguments": [{ "objectId": replacement_id }],
+                    "functionDeclaration": "function() { return this.old; }",
                     "returnByValue": true,
                 }),
             )
-            .unwrap_err();
-        assert_eq!(stale_argument.code, -32000);
-        assert_eq!(
-            stale_argument.message,
-            format!("Could not find object with given id: {replacement_id}")
-        );
-        assert!(session.remote_object_generations.is_empty());
+            .is_err());
     }
 
     #[test]
