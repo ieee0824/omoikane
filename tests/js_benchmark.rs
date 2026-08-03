@@ -57,6 +57,38 @@ use serde::{Deserialize, Serialize};
 const SHAPES_PATH: &str = "tests/js_benchmark/shapes.js";
 const BASELINE_PATH: &str = "tests/js_benchmark/baseline.json";
 const GATE2_SNAPSHOT_PATH: &str = "docs/jit/gate2-performance-snapshot.json";
+const GATE3_SNAPSHOTS: &[(&str, bool, &str)] = &[
+    (
+        "docs/jit/gate3-performance-linux-local-jit-off.json",
+        false,
+        "linux",
+    ),
+    (
+        "docs/jit/gate3-performance-linux-local-jit-on.json",
+        true,
+        "linux",
+    ),
+    (
+        "docs/jit/gate3-performance-ubuntu-jit-off.json",
+        false,
+        "linux",
+    ),
+    (
+        "docs/jit/gate3-performance-ubuntu-jit-on.json",
+        true,
+        "linux",
+    ),
+    (
+        "docs/jit/gate3-performance-macos-intel-jit-off.json",
+        false,
+        "macos",
+    ),
+    (
+        "docs/jit/gate3-performance-macos-intel-jit-on.json",
+        true,
+        "macos",
+    ),
+];
 
 /// How far a measurement may drift from the baseline before it is called an
 /// improvement or a regression.
@@ -641,6 +673,70 @@ fn gate2_snapshot_preserves_five_finite_samples_for_every_shape() {
                 .as_f64()
                 .is_some_and(|value| value.is_finite() && value > 0.0)
         }));
+    }
+}
+
+#[test]
+fn gate3_snapshots_preserve_matched_samples_and_native_diagnostics() {
+    let baseline = load_baseline();
+    let expected_ids = baseline
+        .shapes
+        .iter()
+        .map(|shape| shape.id.as_str())
+        .collect::<HashSet<_>>();
+    for &(path, jit_enabled, target_os) in GATE3_SNAPSHOTS {
+        let snapshot: serde_json::Value = serde_json::from_slice(
+            &fs::read(path).unwrap_or_else(|error| panic!("read {path}: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("parse {path}: {error}"));
+        assert_eq!(snapshot["measurement_runs"], 5, "{path}");
+        assert_eq!(snapshot["measured_passes"], 4, "{path}");
+        assert_eq!(snapshot["target_arch"], "x86_64", "{path}");
+        assert_eq!(snapshot["target_os"], target_os, "{path}");
+        assert_eq!(
+            snapshot["jit_diagnostics"]["enabled"], jit_enabled,
+            "{path}"
+        );
+
+        let shapes = snapshot["shapes"].as_array().expect("snapshot shapes");
+        assert_eq!(shapes.len(), expected_ids.len(), "{path}");
+        let actual_ids = shapes
+            .iter()
+            .map(|shape| shape["id"].as_str().expect("shape id"))
+            .collect::<HashSet<_>>();
+        assert_eq!(actual_ids, expected_ids, "{path}");
+        for shape in shapes {
+            let samples = shape["samples_ns_per_op"]
+                .as_array()
+                .expect("shape samples");
+            assert_eq!(samples.len(), 5, "{path}");
+            assert!(samples.iter().all(|sample| {
+                sample
+                    .as_f64()
+                    .is_some_and(|value| value.is_finite() && value > 0.0)
+            }));
+        }
+
+        let diagnostics = &snapshot["jit_diagnostics"];
+        if jit_enabled {
+            assert!(
+                diagnostics["successful_compilations"].as_u64().unwrap_or(0) > 0,
+                "{path}"
+            );
+            assert!(
+                diagnostics["generated_code_bytes"].as_u64().unwrap_or(0) > 0,
+                "{path}"
+            );
+            assert!(
+                diagnostics["property_guard_hits"].as_u64().unwrap_or(0) > 0,
+                "{path}"
+            );
+            assert_eq!(diagnostics["property_guard_misses"], 0, "{path}");
+            assert_eq!(diagnostics["property_bailouts"], 0, "{path}");
+        } else {
+            assert_eq!(diagnostics["compile_requests"], 0, "{path}");
+            assert_eq!(diagnostics["generated_code_bytes"], 0, "{path}");
+        }
     }
 }
 

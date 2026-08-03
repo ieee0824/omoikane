@@ -12,7 +12,7 @@
   "measured_passes": 4,
   "measured_profile": "dev",
   "measurement_runs": 5,
-  "revision": "ec601999",
+  "revision": "97b2ff2+boa-ec601999",
   "environment": "linux-x86_64 CPU0, idle 2026-08-03 gate3 jit-off set2",
   "baseline_comparable": false,
   "total": 11,
