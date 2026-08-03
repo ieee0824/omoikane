@@ -6341,6 +6341,38 @@ fn overflow_wrap_break_word_wraps_long_word() {
 }
 
 #[test]
+fn overflow_wrap_break_word_never_splits_extended_grapheme_clusters() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    let text = NodeHandle::text("a\u{301}👩‍💻b");
+
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+    paragraph.append_child(text);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("p { overflow-wrap: break-word; line-height: 20px; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 1.0, height: 0.0 },
+    )
+    .unwrap();
+
+    let fragments: Vec<&str> = layout.children[0]
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter_map(InlineFragment::text)
+        .collect();
+    assert_eq!(fragments, vec!["a\u{301}", "👩‍💻", "b"]);
+}
+
+#[test]
 fn word_wrap_alias_behaves_like_overflow_wrap() {
     // word-wrap is a legacy alias for overflow-wrap and should behave identically.
     let document = NodeHandle::document();
