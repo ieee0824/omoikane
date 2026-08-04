@@ -26,8 +26,9 @@ mod enabled {
             .eval(Source::from_bytes(
                 "globalThis.weak = new WeakRef({marker: 42}); weak.deref()",
             ))
-            .expect("create weakly observed target");
-        let target = target.as_object().expect("target object");
+            .expect("create weakly observed target")
+            .as_object()
+            .expect("target object");
         // WeakRef construction/deref adds the target to the current job's kept
         // objects. Clear that host root so only the generated frame spill keeps
         // it alive during the collections below.
@@ -76,8 +77,8 @@ mod enabled {
         for _ in 0..2 {
             runtime
                 .collect_minor_for_test(&[parent.clone().into()], &mut context)
-                .unwrap()
-                .unwrap();
+                .expect("enter parent promotion helper")
+                .expect("parent promotion result");
         }
 
         let child = JsObject::with_null_proto();
