@@ -116,17 +116,19 @@ fn property_store_before_deopt_is_committed_exactly_once() {
 #[test]
 #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 fn explicit_interrupt_matches_interpreter_failure() {
-    fn run(jit_enabled: bool) -> (bool, boa_engine::jit::ArithmeticJitDiagnostics) {
+    fn run(jit_enabled: bool) -> (String, boa_engine::jit::ArithmeticJitDiagnostics) {
         let mut context = Context::default();
         context.set_baseline_jit_enabled(jit_enabled);
         context.runtime_limits_mut().set_loop_iteration_limit(100);
-        let result = context.eval(Source::from_bytes(
-            "(function(n){let s=0;for(let i=0;i<n;i++)s+=i;return s})(200)",
-        ));
-        (result.is_err(), context.arithmetic_jit_diagnostics())
+        let error = context
+            .eval(Source::from_bytes(
+                "(function(n){let s=0;for(let i=0;i<n;i++)s+=i;return s})(200)",
+            ))
+            .expect_err("the loop iteration limit must interrupt execution");
+        (error.to_string(), context.arithmetic_jit_diagnostics())
     }
-    assert!(run(false).0);
-    let (failed, diagnostics) = run(true);
-    assert!(failed);
+    let (expected, _) = run(false);
+    let (actual, diagnostics) = run(true);
+    assert_eq!(actual, expected);
     assert!(diagnostics.interrupt_deopts >= 1);
 }
