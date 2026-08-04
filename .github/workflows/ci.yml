@@ -42,6 +42,8 @@ jobs:
         run: cargo test --features baseline-jit --test jit_stack_map
       - name: Run Gate 4 JIT runtime-call contract
         run: cargo test --features baseline-jit --test jit_runtime_call
+      - name: Run Gate 4 generational JIT-root contract
+        run: cargo test --features baseline-jit --test jit_gc_roots
       - run: cargo build
       # Re-run the JS benchmark with output shown: libtest swallows stdout for
       # passing tests, so the per-shape table and the drift classification would
