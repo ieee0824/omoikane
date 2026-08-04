@@ -9,7 +9,7 @@ fn evaluate(source: &str) -> JsValue {
 }
 
 #[test]
-fn jit_off_interpreter_allocation_and_exception_semantics_remain_unchanged() {
+fn interpreter_allocation_and_exception_semantics_remain_unchanged() {
     assert_eq!(
         evaluate(
             "var o={x:1}; var a=[o,2]; var f=()=>a[0].x+a[1]; \
