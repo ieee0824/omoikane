@@ -2,9 +2,20 @@
 
 #[cfg(feature = "baseline-jit")]
 mod enabled {
+    #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+    use boa_engine::jit::RuntimeCallError;
     use boa_engine::{
         jit::JitRuntimeCall, js_string, property::Attribute, Context, JsObject, JsValue, Source,
     };
+
+    #[test]
+    #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+    fn unsupported_target_reports_an_error_instead_of_running_zero_tests() {
+        assert!(matches!(
+            JitRuntimeCall::new(1, 1),
+            Err(RuntimeCallError::Jit(_))
+        ));
+    }
 
     #[test]
     #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
