@@ -46,9 +46,10 @@ crc32fast = "1.5"
 # (ieee0824/boa#69), and JIT frame/safepoint/stack-map metadata
 # (ieee0824/boa#70), the JIT runtime-call/allocation boundary
 # (ieee0824/boa#72), and generational JIT frame root scanning
-# (ieee0824/boa#73). The pinned commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "d0dce50f3edb274300176631f3762ed77b422322", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "d0dce50f3edb274300176631f3762ed77b422322" }
+# (ieee0824/boa#73), and verified interpreter deoptimization
+# (ieee0824/boa#75). The pinned commit contains all listed fork changes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "2dc1557eb9775b7289b1b526d945a261ce332c88", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "2dc1557eb9775b7289b1b526d945a261ce332c88" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"

@@ -44,6 +44,8 @@ jobs:
         run: cargo test --features baseline-jit --test jit_runtime_call
       - name: Run Gate 4 generational JIT-root contract
         run: cargo test --features baseline-jit --test jit_gc_roots
+      - name: Run Gate 4 deoptimization contract
+        run: cargo test --features baseline-jit --test jit_deopt
       - run: cargo build
       # Re-run the JS benchmark with output shown: libtest swallows stdout for
       # passing tests, so the per-shape table and the drift classification would
