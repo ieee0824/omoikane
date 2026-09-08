@@ -107,6 +107,18 @@ impl CspPolicy {
         }
     }
 
+    /// Adds this srcdoc Document's policies to an inherited snapshot. The
+    /// parent and sibling policy lists remain independent.
+    pub(crate) fn with_document_meta(&self, document: &NodeHandle, base_url: &str) -> Self {
+        let own = Self::from_headers_and_document(&[], document, base_url);
+        let mut combined = self.clone();
+        combined.policies.extend(own.policies);
+        if combined.base_url.is_none() {
+            combined.base_url = own.base_url;
+        }
+        combined
+    }
+
     pub(crate) fn allows_inline(&self, resource_type: ResourceType) -> bool {
         self.policies
             .iter()
@@ -114,15 +126,38 @@ impl CspPolicy {
     }
 
     pub(crate) fn allows_url(&self, resource_type: ResourceType, url: &Url) -> bool {
-        self.policies
-            .iter()
-            .all(|policy| policy.allows_url(resource_type, &self.base_url, &ResourceUrl::from(url)))
+        self.allows_url_after_redirects(resource_type, url, 0)
+    }
+
+    pub(crate) fn allows_url_after_redirects(
+        &self,
+        resource_type: ResourceType,
+        url: &Url,
+        redirects: usize,
+    ) -> bool {
+        self.policies.iter().all(|policy| {
+            policy.allows_url(
+                resource_type,
+                &self.base_url,
+                &ResourceUrl::from(url),
+                redirects,
+            )
+        })
     }
 
     /// Checks an HTML/network reference before it is fetched.  This accepts
     /// websocket schemes and data URLs in addition to the HTTP URL type used by
     /// the network client.
     pub(crate) fn allows_reference(&self, resource_type: ResourceType, reference: &str) -> bool {
+        self.allows_reference_after_redirects(resource_type, reference, 0)
+    }
+
+    pub(crate) fn allows_reference_after_redirects(
+        &self,
+        resource_type: ResourceType,
+        reference: &str,
+        redirects: usize,
+    ) -> bool {
         let Some(resource_url) = ResourceUrl::parse(reference, self.base_url.as_ref()) else {
             // With no base URL (for example, an opaque `data:` Document), a
             // relative reference cannot be checked against the policy. A
@@ -130,9 +165,9 @@ impl CspPolicy {
             // CSP, leave the eventual resource-loader error unchanged.
             return self.policies.is_empty();
         };
-        self.policies
-            .iter()
-            .all(|policy| policy.allows_url(resource_type, &self.base_url, &resource_url))
+        self.policies.iter().all(|policy| {
+            policy.allows_url(resource_type, &self.base_url, &resource_url, redirects)
+        })
     }
 }
 
@@ -158,6 +193,7 @@ impl ParsedPolicy {
         resource_type: ResourceType,
         base_url: &Option<Url>,
         url: &ResourceUrl,
+        redirects: usize,
     ) -> bool {
         let Some(sources) = self.sources_for(resource_type) else {
             return true;
@@ -205,11 +241,12 @@ impl ParsedPolicy {
                 if port.is_some_and(|expected| expected != url.port) {
                     return false;
                 }
-                path.as_ref().is_none_or(|prefix| {
-                    prefix == "/"
-                        || url.path == *prefix
-                        || url.path.starts_with(&format!("{prefix}/"))
-                })
+                // CSP3 ignores a host source's path after a redirect, while
+                // retaining its scheme, host and port restrictions above.
+                redirects > 0
+                    || path
+                        .as_ref()
+                        .is_none_or(|source| path_part_matches(source, &url.path))
             }
         })
     }
@@ -281,6 +318,49 @@ impl ResourceUrl {
             && self.host.eq_ignore_ascii_case(&other.host)
             && self.port == other.port
     }
+}
+
+/// CSP3 path-part matching splits before percent-decoding. An encoded slash
+/// belongs to one component and cannot turn into a directory boundary.
+fn path_part_matches(source: &str, target: &str) -> bool {
+    if source.is_empty() || (source == "/" && target.is_empty()) {
+        return true;
+    }
+    let exact = !source.ends_with('/');
+    let mut source_parts: Vec<_> = source.split('/').collect();
+    let target_parts: Vec<_> = target.split('/').collect();
+    if source_parts.len() > target_parts.len()
+        || (exact && source_parts.len() != target_parts.len())
+    {
+        return false;
+    }
+    if !exact {
+        source_parts.pop();
+    }
+    source_parts
+        .iter()
+        .zip(&target_parts)
+        .all(|(left, right)| percent_decode_segment(left) == percent_decode_segment(right))
+}
+
+fn percent_decode_segment(segment: &str) -> Vec<u8> {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Some(high) = (bytes[index + 1] as char).to_digit(16)
+            && let Some(low) = (bytes[index + 2] as char).to_digit(16)
+        {
+            decoded.push((high * 16 + low) as u8);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    decoded
 }
 
 fn scheme_matches(expected: &str, actual: &str) -> bool {
@@ -548,7 +628,7 @@ mod tests {
     #[test]
     fn host_source_paths_keep_case_sensitive_matching() {
         let policy = policy(
-            "script-src https://example.test/CasePath",
+            "script-src https://example.test/CasePath/",
             "https://example.test/",
         );
         assert!(
@@ -557,6 +637,85 @@ mod tests {
         assert!(
             !policy.allows_reference(ResourceType::Script, "https://example.test/casepath/app.js")
         );
+    }
+
+    #[test]
+    fn path_source_directory_prefix_and_exact_file_are_distinct() {
+        for (source, path, allowed) in [
+            ("/allowed/", "/allowed/file.js", true),
+            ("/allowed/", "/allowed/deeper/file.js", true),
+            ("/allowed/", "/allowed", false),
+            ("/allowed/", "/allowed-suffix/file.js", false),
+            ("/allowed", "/allowed", true),
+            ("/allowed", "/allowed/file.js", false),
+            ("/allowed.js", "/allowed.js?query=ignored", true),
+            ("/allowed.js", "/allowed.js/child", false),
+            ("/", "/any/path", true),
+        ] {
+            let policy = policy(
+                &format!("script-src https://example.test{source}"),
+                "https://example.test/",
+            );
+            assert_eq!(
+                policy
+                    .allows_reference(ResourceType::Script, &format!("https://example.test{path}")),
+                allowed,
+                "source={source}, path={path}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_source_percent_decoding_keeps_segment_boundaries_and_case() {
+        for (source, path, allowed) in [
+            ("/%61llowed/", "/allowed/file.js", true),
+            ("/allowed/", "/%61llowed/file.js", true),
+            ("/caf%C3%A9.js", "/caf%c3%a9.js", true),
+            ("/a%2Fb.js", "/a%2fb.js", true),
+            ("/a%2Fb.js", "/a/b.js", false),
+            ("/a/b.js", "/a%2Fb.js", false),
+            ("/%252F", "/%2F", false),
+            ("/Case/", "/case/file.js", false),
+            ("/literal%xx", "/literal%xx", true),
+            ("/%FF", "/%FE", false),
+        ] {
+            let policy = policy(
+                &format!("script-src https://example.test{source}"),
+                "https://example.test/",
+            );
+            assert_eq!(
+                policy
+                    .allows_reference(ResourceType::Script, &format!("https://example.test{path}")),
+                allowed,
+                "source={source}, path={path}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirects_skip_paths_but_still_check_scheme_host_and_port() {
+        let policy = policy(
+            "script-src https://example.test:8443/entry.js",
+            "https://example.test/",
+        );
+        for (url, count, allowed) in [
+            ("https://example.test:8443/other.js", 0, false),
+            ("https://example.test:8443/other.js", 1, true),
+            ("https://example.test:8443/other.js", 3, true),
+            ("https://other.test:8443/entry.js", 1, false),
+            ("https://example.test:9443/entry.js", 1, false),
+            ("http://example.test:8443/entry.js", 1, false),
+        ] {
+            assert_eq!(
+                policy.allows_url_after_redirects(
+                    ResourceType::Script,
+                    &url.parse().unwrap(),
+                    count
+                ),
+                allowed,
+                "{url} after {count} redirects"
+            );
+        }
     }
 
     #[test]

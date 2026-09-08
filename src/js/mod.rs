@@ -368,11 +368,22 @@ impl ModuleLoader for HttpModuleLoader {
                 .or_else(active_document_id)
                 .unwrap_or(0);
             self.ensure_document_is_live(module_document_id)?;
+            // Classic-script/eval imports can have no registered module root.
+            // Their Realm still identifies the Document whose base and CSP
+            // govern the request; absence of a graph entry must not bypass CSP.
+            let document_context = self.owner.upgrade().map(|owner| {
+                let state = owner.borrow();
+                (
+                    state.base_url_for_document(module_document_id),
+                    state.document_csp.get(&module_document_id).cloned(),
+                )
+            });
             let specifier = specifier.to_std_string_escaped();
             let referrer_url = referrer
                 .path()
                 .and_then(|path| path.to_str())
-                .and_then(|path| path.parse::<crate::http::Url>().ok());
+                .and_then(|path| path.parse::<crate::http::Url>().ok())
+                .or_else(|| document_context.as_ref().and_then(|(base, _)| base.clone()));
             let resolved = if specifier.starts_with("http://") || specifier.starts_with("https://")
             {
                 specifier
@@ -401,6 +412,12 @@ impl ModuleLoader for HttpModuleLoader {
                         .get(&(document_id, path.to_owned()))
                         .cloned()
                         .map(|policy| (document_id, policy))
+                })
+                .or_else(|| {
+                    document_context
+                        .as_ref()
+                        .and_then(|(_, policy)| policy.clone())
+                        .map(|policy| (module_document_id, policy))
                 });
 
             if let Some((document_id, policy)) = csp_context.as_ref()
@@ -475,7 +492,11 @@ impl ModuleLoader for HttpModuleLoader {
             }
             if let Some(effective_url) = response.effective_url()
                 && let Some((document_id, policy)) = csp_context.as_ref()
-                && !policy.allows_url(ResourceType::Script, effective_url)
+                && !policy.allows_url_after_redirects(
+                    ResourceType::Script,
+                    effective_url,
+                    response.redirect_count(),
+                )
             {
                 let blocked_uri = effective_url.to_string();
                 self.record_csp_violation(*document_id, blocked_uri.clone());
@@ -1909,6 +1930,13 @@ impl HostState {
                 .get(&owner_document.identity())
                 .cloned()
                 .unwrap_or_default()
+                .with_document_meta(
+                    &document,
+                    &child_base_url
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                )
         } else {
             CspPolicy::from_headers_and_document(&csp_headers, &document, &policy_base)
         };
@@ -2183,10 +2211,37 @@ impl HostState {
         if document_id == self.document.identity() {
             return self.base_url.clone();
         }
-        self.iframe_documents
-            .values()
-            .find(|entry| entry.document.identity() == document_id)
-            .and_then(|entry| entry.document_url.parse().ok())
+        // about:blank/srcdoc keep their inherited HTTP base in this registry.
+        // Their visible document URL cannot be parsed as an HTTP URL.
+        self.document_base_urls.get(&document_id).cloned()
+    }
+
+    /// Network CSP belongs to the calling Window Realm, including srcdoc.
+    /// JavaScript expandos cannot select another Document's policy.
+    fn csp_document_for_context(&self, context: &Context) -> JsResult<NodeHandle> {
+        let document_id = context
+            .realm()
+            .host_defined()
+            .get::<ModuleDocumentId>()
+            .map(|owner| owner.0)
+            .unwrap_or_else(|| self.document.identity());
+        if document_id != self.document.identity()
+            && !self
+                .iframe_documents
+                .values()
+                .any(|entry| entry.document.identity() == document_id)
+        {
+            return Err(JsNativeError::reference()
+                .with_message("network document is no longer live")
+                .into());
+        }
+        self.get_node(document_id)
+            .filter(|node| node.node_type() == NodeType::Document)
+            .ok_or_else(|| {
+                JsNativeError::reference()
+                    .with_message("network document is no longer live")
+                    .into()
+            })
     }
 
     fn csp_policy_for_document(&self, document: &NodeHandle) -> CspPolicy {
@@ -4031,17 +4086,23 @@ impl JsRuntime {
                         &mut state.http_client,
                     )
                 };
-                let (effective_url, source) = match fetched {
-                    Some((effective_url, source)) => (Some(effective_url), source),
+                let (effective_url, source, redirect_count) = match fetched {
+                    Some((effective_url, source, redirect_count)) => {
+                        (Some(effective_url), source, redirect_count)
+                    }
                     None => {
                         let message = format!("failed to fetch script: {src}");
                         let quoted = serde_json::to_string(&message)
                             .expect("JavaScript error messages must serialize as JSON strings");
-                        (None, format!("throw new Error({quoted})"))
+                        (None, format!("throw new Error({quoted})"), 0)
                     }
                 };
                 if let Some(effective_url) = effective_url
-                    && !policy.allows_reference(ResourceType::Script, &effective_url)
+                    && !policy.allows_reference_after_redirects(
+                        ResourceType::Script,
+                        &effective_url,
+                        redirect_count,
+                    )
                 {
                     self.host_state.borrow_mut().record_csp_violation_for_node(
                         script,
@@ -4345,7 +4406,9 @@ impl JsRuntime {
 
     /// Runs pending promise jobs.
     pub fn run_jobs(&mut self) -> JsResult<()> {
-        self.with_active_host(|context| context.run_jobs())
+        let result = self.with_active_host(|context| context.run_jobs());
+        self.sync_module_csp_violations();
+        result
     }
 
     /// Schedules a timeout task from Rust that evaluates `source` as code.
@@ -4929,7 +4992,7 @@ impl JsRuntime {
             fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
         };
         let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
-        let Some((effective_url, source)) = fetched else {
+        let Some((effective_url, source, redirect_count)) = fetched else {
             self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
             let dispatch = dispatch_resource_timing_script(
                 "error", node_id, &timing_name, false, elapsed_ms,
@@ -4950,7 +5013,7 @@ impl JsRuntime {
             .host_state
             .borrow()
             .csp_policy_for_node(&script_node)
-            .allows_reference(ResourceType::Script, &effective_url)
+            .allows_reference_after_redirects(ResourceType::Script, &effective_url, redirect_count)
         {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 &script_node,
@@ -6167,12 +6230,16 @@ impl JsRuntime {
                                 );
                                 self.record_error_from(&src, dispatched);
                             }
-                            Some((effective_url, _source))
+                            Some((effective_url, _source, redirect_count))
                                 if !self
                                     .host_state
                                     .borrow()
                                     .csp_policy_for_node(&script_node)
-                                    .allows_reference(ResourceType::Script, &effective_url) =>
+                                    .allows_reference_after_redirects(
+                                        ResourceType::Script,
+                                        &effective_url,
+                                        redirect_count,
+                                    ) =>
                             {
                                 let redirected = resource_reference_was_redirected(
                                     &src,
@@ -6193,7 +6260,7 @@ impl JsRuntime {
                                 );
                                 self.record_error_from(&src, dispatched);
                             }
-                            Some((effective_url, source)) => {
+                            Some((effective_url, source, _redirect_count)) => {
                                 let redirected = resource_reference_was_redirected(
                                     &src,
                                     &effective_url,
@@ -6398,8 +6465,12 @@ impl JsRuntime {
                     )
                 };
                 match fetched {
-                    Some((effective_url, code)) => {
-                        if !policy.allows_reference(ResourceType::Script, &effective_url) {
+                    Some((effective_url, code, redirect_count)) => {
+                        if !policy.allows_reference_after_redirects(
+                            ResourceType::Script,
+                            &effective_url,
+                            redirect_count,
+                        ) {
                             self.host_state.borrow_mut().record_csp_violation_for_node(
                                 script,
                                 ResourceType::Script,
@@ -7040,10 +7111,10 @@ fn requires_public_fetch(url: &crate::http::Url, base_url: Option<&crate::http::
 #[cfg(test)]
 fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option<String> {
     fetch_script_resource_with_client(src, base_url, &mut Client::new())
-        .map(|(_, source)| source)
+        .map(|(_, source, _)| source)
 }
 
-/// Fetches an external script and retains the response's effective URL.
+/// Fetches an external script and retains its effective URL and redirect count.
 ///
 /// The effective URL matters for CSP: an initially permitted script may follow
 /// a redirect into a source that the policy does not permit, in which case its
@@ -7052,7 +7123,7 @@ fn fetch_script_resource_with_client(
     src: &str,
     base_url: Option<&crate::http::Url>,
     client: &mut Client,
-) -> Option<(String, String)> {
+) -> Option<(String, String, usize)> {
     match resolve_resource_ref(src, base_url)? {
         // data: URI scripts are decoded inline without a network fetch. Only
         // JavaScript media types are executed as classic scripts; any other
@@ -7062,7 +7133,7 @@ fn fetch_script_resource_with_client(
             if !is_javascript_mime_type(&mime_type) {
                 return None;
             }
-            Some((src.to_string(), String::from_utf8(data).ok()?))
+            Some((src.to_string(), String::from_utf8(data).ok()?, 0))
         }
         ResolvedResource::Url(url) => {
             let resolved = url.parse::<crate::http::Url>().ok()?;
@@ -7085,6 +7156,7 @@ fn fetch_script_resource_with_client(
             Some((
                 effective_url,
                 std::str::from_utf8(response.body()).ok()?.to_string(),
+                response.redirect_count(),
             ))
         }
     }
@@ -11542,7 +11614,7 @@ fn worklet_add_module_native(
                 &mut state.http_client,
             )
         };
-        let (effective_url, source) = match fetched {
+        let (effective_url, source, _) = match fetched {
             Some(value) => value,
             None => {
                 return Ok(worklet_status(
@@ -11791,8 +11863,12 @@ fn create_shared_worker_for_owner_state(
     } else {
         let source = {
             let mut state = owner_state.borrow_mut();
-            fetch_script_resource_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
-                .map(|(_, source)| source)
+            fetch_script_resource_with_client(
+                requested_url,
+                base_url.as_ref(),
+                &mut state.http_client,
+            )
+            .map(|(_, source, _)| source)
         };
         let shared_id = next_shared_worker_id();
         let mut runtime = JsRuntime::with_document_url_and_storage(
@@ -11906,7 +11982,7 @@ fn create_worker_for_owner_state(
     let source = {
         let mut state = owner_state.borrow_mut();
         fetch_script_resource_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
-            .map(|(_, source)| source)
+            .map(|(_, source, _)| source)
     };
     let mut worker_runtime = JsRuntime::with_document_url_and_storage(
         blank_html_document(),
@@ -12260,7 +12336,7 @@ fn websocket_connect_native(
     })?;
     let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let document = state.document.clone();
+        let document = state.csp_document_for_context(context)?;
         if !state
             .csp_policy_for_document(&document)
             .allows_reference(ResourceType::Connect, &url)
@@ -12364,7 +12440,7 @@ fn event_source_fetch_native(
         let mut state = state.borrow_mut();
         let parsed = url.parse::<crate::http::Url>()
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
-        let document = state.document.clone();
+        let document = state.csp_document_for_context(context)?;
         if !state
             .csp_policy_for_document(&document)
             .allows_reference(ResourceType::Connect, &url)
@@ -12387,7 +12463,11 @@ fn event_source_fetch_native(
         if let Some(effective_url) = fetched.response.effective_url()
             && !state
                 .csp_policy_for_document(&document)
-                .allows_url(ResourceType::Connect, effective_url)
+                .allows_url_after_redirects(
+                    ResourceType::Connect,
+                    effective_url,
+                    fetched.response.redirect_count(),
+                )
         {
             let blocked_uri = effective_url.to_string();
             state.record_csp_violation(&document, ResourceType::Connect, &blocked_uri);
@@ -12495,7 +12575,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             JsError::from(JsNativeError::typ().with_message(error.to_string()))
         })?;
         let normalized_url = parsed_url.to_string();
-        let document = state.document.clone();
+        let document = state.csp_document_for_context(context)?;
         if !state
             .csp_policy_for_document(&document)
             .allows_reference(ResourceType::Connect, &normalized_url)
@@ -12544,7 +12624,11 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         if let Some(effective_url) = fetched.response.effective_url()
             && !state
                 .csp_policy_for_document(&document)
-                .allows_url(ResourceType::Connect, effective_url)
+                .allows_url_after_redirects(
+                    ResourceType::Connect,
+                    effective_url,
+                    fetched.response.redirect_count(),
+                )
         {
             let blocked_uri = effective_url.to_string();
             state.record_csp_violation(&document, ResourceType::Connect, &blocked_uri);

@@ -26,6 +26,7 @@ pub struct HttpResponse {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     effective_url: Option<Url>,
+    redirect_count: usize,
 }
 
 impl HttpResponse {
@@ -41,6 +42,7 @@ impl HttpResponse {
             headers,
             body,
             effective_url: None,
+            redirect_count: 0,
         }
     }
 
@@ -75,6 +77,16 @@ impl HttpResponse {
     /// Returns the final URL after redirects when the response came from [`Client`](super::Client).
     pub fn effective_url(&self) -> Option<&Url> {
         self.effective_url.as_ref()
+    }
+
+    /// Returns the number of HTTP redirects followed to obtain this response.
+    /// Responses parsed directly from a stream have a count of zero.
+    pub fn redirect_count(&self) -> usize {
+        self.redirect_count
+    }
+
+    pub(crate) fn set_redirect_count(&mut self, count: usize) {
+        self.redirect_count = count;
     }
 
     pub(crate) fn set_effective_url(&mut self, url: Url) {

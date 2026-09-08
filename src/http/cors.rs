@@ -200,6 +200,7 @@ pub fn fetch_with_timeout(
                 RedirectMode::Error => return Err(CorsError::Redirect),
                 RedirectMode::Manual => {
                     response.set_effective_url(request.url().clone());
+                    response.set_redirect_count(redirect_count);
                     return Ok(FetchResponse {
                         response,
                         response_type: ResponseType::OpaqueRedirect,
@@ -250,6 +251,7 @@ pub fn fetch_with_timeout(
             ResponseType::Basic
         };
         response.set_effective_url(request.url().clone());
+        response.set_redirect_count(redirect_count);
         return Ok(FetchResponse {
             response,
             response_type,

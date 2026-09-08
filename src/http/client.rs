@@ -162,6 +162,7 @@ impl Client {
             // Check for redirect
             if !is_redirect(response.status_code()) {
                 response.set_effective_url(request.url().clone());
+                response.set_redirect_count((self.max_redirects - redirects_remaining) as usize);
                 return Ok(response);
             }
 
@@ -487,6 +488,72 @@ mod tests {
         assert_eq!(resp.status_code(), 200);
         assert_eq!(resp.body(), b"done");
         assert_eq!(resp.effective_url().unwrap().path(), "/final");
+    }
+
+    #[test]
+    fn redirect_counts_survive_returning_to_the_original_url_and_reset_per_request() {
+        use crate::http::cors::{
+            self, CredentialsMode, Origin, PreflightCache, RedirectMode, RequestMode,
+        };
+
+        for cors_fetch in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url: Url = format!("http://{}/start", listener.local_addr().unwrap())
+                .parse()
+                .unwrap();
+            let worker = std::thread::spawn(move || {
+                for (path, response) in [
+                    ("/start", "302 Found\r\nLocation: /other"),
+                    ("/other", "307 Temporary Redirect\r\nLocation: /start"),
+                    ("/start", "200 OK"),
+                    ("/start", "200 OK"),
+                ] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                        .unwrap();
+                    let mut reader = BufReader::new(&stream);
+                    let mut request = String::new();
+                    reader.read_line(&mut request).unwrap();
+                    assert_eq!(request.split_whitespace().nth(1), Some(path));
+                    loop {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).unwrap();
+                        assert!(!line.is_empty());
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    write!(
+                        stream,
+                        "HTTP/1.1 {response}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .unwrap();
+                }
+            });
+            let mut client = Client::new();
+            for expected in [2, 0] {
+                let response = if cors_fetch {
+                    let fetched = cors::fetch(
+                        &mut client,
+                        HttpRequest::new(Method::Get, url.clone()),
+                        &Origin::from_url(&url),
+                        RequestMode::Cors,
+                        CredentialsMode::SameOrigin,
+                        RedirectMode::Follow,
+                        &mut PreflightCache::default(),
+                    )
+                    .unwrap();
+                    assert_eq!(fetched.redirected, expected > 0);
+                    fetched.response
+                } else {
+                    client.get(&url.to_string()).unwrap()
+                };
+                assert_eq!(response.effective_url(), Some(&url));
+                assert_eq!(response.redirect_count(), expected, "cors={cors_fetch}");
+            }
+            worker.join().unwrap();
+        }
     }
 
     #[test]
