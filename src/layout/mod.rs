@@ -1005,6 +1005,20 @@ fn collect_container_contexts(
     }
 }
 
+/// A flex-assigned content height. A used size can remain indefinite for
+/// descendant percentages, for example with only a container min-height.
+#[derive(Debug, Clone, Copy)]
+struct UsedHeight {
+    value: f32,
+    definite: bool,
+}
+
+impl UsedHeight {
+    fn percentage_basis(self) -> Option<f32> {
+        self.definite.then_some(self.value)
+    }
+}
+
 fn layout_node(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -1045,6 +1059,7 @@ fn layout_node_with_subgrid(
             viewport,
             positioned_ancestor,
             subgrid,
+            None,
         ),
         _ => None,
     }
@@ -1370,6 +1385,7 @@ fn layout_element(
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
     subgrid: Option<grid::SubgridContext>,
+    used_height: Option<UsedHeight>,
 ) -> Option<LayoutBox> {
     if is_non_rendered_html_element(node) {
         return None;
@@ -1390,6 +1406,16 @@ fn layout_element(
     let padding = edge_sizes(&style, "padding");
     let border = edge_sizes(&style, "border");
     let mut margin = edge_sizes(&style, "margin");
+    let used_height = used_height.map(|height| UsedHeight {
+        value: clamp_content_height(
+            &style,
+            height.value,
+            containing_block.height,
+            padding,
+            border,
+        ),
+        ..height
+    });
 
     let mut width = compute_width(&style, containing_block.width, padding, border, &mut margin);
     if float_side(&style) != FloatSide::None
@@ -1457,14 +1483,16 @@ fn layout_element(
                 .last()
                 .map(|line| line.rect.y + line.rect.height)
                 .unwrap_or(y);
-            let content_height = resolve_content_height(
-                &style,
-                containing_block.height,
-                padding,
-                border,
-                y,
-                cursor_y,
-            );
+            let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
+                resolve_content_height(
+                    &style,
+                    containing_block.height,
+                    padding,
+                    border,
+                    y,
+                    cursor_y,
+                )
+            });
             let mut layout = LayoutBox {
                 node: node.clone(),
                 dimensions: BoxDimensions {
@@ -1505,18 +1533,31 @@ fn layout_element(
         return layout_table_container(
             node, resolver, style, margin, padding, border, x, y, width, viewport,
             is_shrink_to_fit,
+            used_height,
         );
     }
 
     if is_flex_container(&style) {
         return layout_flex_container(
-            node, resolver, style, margin, padding, border, x, y, width, viewport,
+            node,
+            resolver,
+            style,
+            margin,
+            padding,
+            border,
+            x,
+            y,
+            width,
+            viewport,
+            containing_block.height,
+            used_height,
         );
     }
     if is_grid_container(&style) {
         return layout_grid_container(
             node, resolver, style, margin, padding, border, x, y, width,
             containing_block.height, viewport, subgrid,
+            used_height,
         );
     }
 
@@ -1525,12 +1566,20 @@ fn layout_element(
     } = layout_block_children(
         node, resolver, &style, padding, border, margin,
         x, y, width, containing_block.height, viewport, positioned_ancestor,
+        used_height,
     );
 
     let effective_cursor_y = cursor_y.max(float_bottom);
-    let content_height = resolve_content_height(
-        &style, containing_block.height, padding, border, y, effective_cursor_y,
-    );
+    let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
+        resolve_content_height(
+            &style,
+            containing_block.height,
+            padding,
+            border,
+            y,
+            effective_cursor_y,
+        )
+    });
 
     let dimensions = BoxDimensions {
         content: Rect { x, y, width, height: content_height },
@@ -1596,6 +1645,7 @@ fn layout_block_children(
     containing_height: f32,
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
+    used_height: Option<UsedHeight>,
 ) -> BlockChildrenResult {
     if is_vertical_writing(style) {
         return layout_vertical_block_children(
@@ -1611,11 +1661,16 @@ fn layout_block_children(
             containing_height,
             viewport,
             positioned_ancestor,
+            used_height,
         );
     }
 
-    let child_height_basis = resolved_length(style, "height", containing_height)
-        .map(|height| border_box_adjust_height(style, height, &padding, &border))
+    let child_height_basis = used_height
+        .and_then(UsedHeight::percentage_basis)
+        .or_else(|| {
+            resolved_length(style, "height", containing_height)
+                .map(|height| border_box_adjust_height(style, height, &padding, &border))
+        })
         .unwrap_or(0.0);
     let mut children = Vec::new();
     let mut positioned_children = Vec::new();
@@ -1774,6 +1829,7 @@ fn layout_vertical_block_children(
     containing_height: f32,
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
+    used_height: Option<UsedHeight>,
 ) -> BlockChildrenResult {
     let vertical_rl = is_vertical_rl(style);
     let mut children = Vec::new();
@@ -1786,7 +1842,9 @@ fn layout_vertical_block_children(
     // Vertical inline layout still needs a finite line-breaking basis; use an
     // explicit height when present, otherwise a generous unbounded basis so
     // content can establish the auto height naturally.
-    let available_inline_height = resolved_length(style, "height", containing_height)
+    let available_inline_height = used_height
+        .and_then(UsedHeight::percentage_basis)
+        .or_else(|| resolved_length(style, "height", containing_height))
         .or_else(|| (containing_height > 0.0).then_some(containing_height))
         .unwrap_or(1_000_000.0);
 
@@ -1976,9 +2034,22 @@ fn resolve_content_height(
     } else {
         (cursor_y - y).max(0.0)
     };
-    let mut height = resolved_length(style, "height", containing_height)
+    let height = resolved_length(style, "height", containing_height)
         .map(|h| if border_box { (h - pb_vertical).max(0.0) } else { h })
         .unwrap_or(auto_height);
+    clamp_content_height(style, height, containing_height, padding, border)
+}
+
+/// Applies min/max-height in content-box coordinates to a resolved height.
+fn clamp_content_height(
+    style: &ComputedStyle,
+    mut height: f32,
+    containing_height: f32,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+) -> f32 {
+    let border_box = is_border_box(style);
+    let pb_vertical = padding.vertical() + border.vertical();
     let (min_h, max_h) =
         normalized_min_max_lengths(style, "min-height", "max-height", containing_height);
     if let Some(min_h) = min_h {
@@ -3184,3 +3255,6 @@ fn to_alpha_inner(mut n: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod flex_reflow_tests;
