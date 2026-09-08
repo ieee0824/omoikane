@@ -1870,14 +1870,17 @@ fn parses_text_and_png_data_uris() {
 #[test]
 fn parses_percent_encoded_base64_data_uri() {
     let image = parse_data_uri(
-            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr%2FAP8AAP9zftimAAAAAElFTkSuQmCC",
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr%2FAP8AAP8FAAH%2F+lyI0QAAAABJRU5ErkJggg==",
         )
         .unwrap();
 
     match image {
         DataUri::Binary { mime_type, data } => {
             assert_eq!(mime_type, "image/png");
-            assert_eq!(Image::decode_png(&data).unwrap().width(), 1);
+            let decoded = Image::decode_png(&data).unwrap();
+            assert_eq!(decoded.width(), 1);
+            assert_eq!(decoded.height(), 1);
+            assert_eq!(decoded.pixels(), &[255, 0, 0, 255]);
         }
         DataUri::Text { .. } => panic!("expected binary data uri"),
     }
@@ -2151,18 +2154,7 @@ fn renders_official_reference_fixture_to_png() {
 
 #[test]
 fn acid2_fixture_matches_local_baseline_png() {
-    let html = fs::read_to_string(acid2_fixture_path()).unwrap();
-    let document = TreeBuilder::parse(&html).document();
-    let actual = render_document(
-        &document,
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 800.0,
-            height: 600.0,
-        },
-    )
-    .unwrap();
+    let actual = render_acid2_baseline();
 
     let reference_path = acid2_baseline_path();
     assert!(
@@ -2173,14 +2165,13 @@ fn acid2_fixture_matches_local_baseline_png() {
     let expected_png = fs::read(reference_path).unwrap();
     let expected = Image::decode_png(&expected_png).unwrap();
     let mut expected_canvas = Canvas::new(expected.width(), expected.height());
-    expected_canvas.draw_image(&expected, 0.0, 0.0);
+    // Compare the decoded reference pixels directly, without resampling them.
+    expected_canvas.pixels.copy_from_slice(expected.pixels());
 
-    // Allow some pixel differences due to font/glyph rendering variations
-    // across different platforms (macOS vs Linux use different system fonts)
-    let (diff, changed) = diff_canvases_with_tolerance(&actual, &expected_canvas, 1);
-    let text_tolerance = 12000;
+    // Compare every pixel with the bundled font shared by layout and paint.
+    let (diff, changed) = diff_canvases(&actual, &expected_canvas);
 
-    if changed > text_tolerance {
+    if changed != 0 {
         fs::create_dir_all(acid2_output_dir()).unwrap();
         fs::write(
             fixture_output_image_path("acid2", "local-baseline", "actual"),
@@ -2198,8 +2189,8 @@ fn acid2_fixture_matches_local_baseline_png() {
         )
         .unwrap();
         panic!(
-            "acid2 rendering diverged from the checked-in local baseline ({} pixels differ, tolerance {}); wrote diff assets to tests/output/acid2",
-            changed, text_tolerance
+            "acid2 rendering diverged from the checked-in local baseline ({} pixels differ); wrote diff assets to tests/output/acid2",
+            changed
         );
     }
 }
@@ -3365,21 +3356,30 @@ fn refresh_acid2_baseline_png() {
         return;
     }
 
-    let html = fs::read_to_string(acid2_fixture_path()).unwrap();
-    let document = TreeBuilder::parse(&html).document();
-    let png = render_document_png(
-        &document,
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 800.0,
-            height: 600.0,
-        },
-    )
-    .unwrap();
+    let png = render_acid2_baseline().encode_png();
 
     fs::create_dir_all(acid2_fixture_dir()).unwrap();
     fs::write(acid2_baseline_path(), png).unwrap();
+}
+
+fn render_acid2_baseline() -> Canvas {
+    let font =
+        crate::font::Font::load_from_file(&acid2_fixture_dir().join("LiberationSans-Regular.ttf"))
+            .expect("load the bundled Acid2 baseline font");
+    super::text::with_test_text_fonts(vec![std::sync::Arc::new(font)], || {
+        let html = fs::read_to_string(acid2_fixture_path()).unwrap();
+        let document = TreeBuilder::parse(&html).document();
+        render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap()
+    })
 }
 
 fn acid2_fixture_dir() -> PathBuf {

@@ -1217,7 +1217,31 @@ fn draw_rotated_glyph_mask(
 /// Loads the default system text fonts, shared via `Arc` so that layout and
 /// paint can reuse a single set without re-reading font files from disk.
 pub(crate) fn load_text_fonts() -> Vec<Arc<Font>> {
+    #[cfg(test)]
+    if let Some(fonts) = TEST_TEXT_FONTS.with(|slot| slot.borrow().clone()) {
+        return fonts;
+    }
     load_default_text_fonts().into_iter().map(Arc::new).collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_TEXT_FONTS: RefCell<Option<Vec<Arc<Font>>>> = const { RefCell::new(None) };
+}
+
+/// Uses fixed fonts for one rendering test without changing other test threads.
+#[cfg(test)]
+pub(super) fn with_test_text_fonts<T>(fonts: Vec<Arc<Font>>, render: impl FnOnce() -> T) -> T {
+    struct RestoreFonts(Option<Vec<Arc<Font>>>);
+
+    impl Drop for RestoreFonts {
+        fn drop(&mut self) {
+            TEST_TEXT_FONTS.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+
+    let _restore = RestoreFonts(TEST_TEXT_FONTS.with(|slot| slot.replace(Some(fonts))));
+    render()
 }
 
 pub(crate) fn rasterize_with_fallback(
