@@ -291,7 +291,7 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 - CSS マスキング `mask` / `-webkit-mask` / `mask-image`（063）
 - インライン style 属性のカスケード統合（047: 全要素対応、!important 含めスタイル計算・レイアウト・getComputedStyle へ一貫反映）
 
-現在の open issue は [`issues/open`](/issues/open) を参照してください（open issue 9 件）。
+未解決の課題と進捗は [GitHub Issues](https://github.com/ieee0824/omoikane/issues) で管理します。ローカルIssueの運用は終了し、過去の記録と移行先は [アーカイブ](issues/README.md) に保存しています。
 
 ## 制約
 

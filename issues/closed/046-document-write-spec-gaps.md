@@ -2,7 +2,10 @@
 number: 046
 slug: document-write-spec-gaps
 parent:
-status: open
+status: closed
+closed_reason: migrated
+github_issue: https://github.com/ieee0824/omoikane/issues/618
+closed_at: 2026-09-08
 ---
 
 # document.write の仕様残差
@@ -46,3 +49,7 @@ status: open
 
 - 上記 1〜4 のうち対応する項目について、仕様準拠の挙動をテスト付きで実装する
 - 全対応が難しい場合は、対応項目と残す項目を明確にして本issueを分割する
+
+## GitHubへの移行（2026-09-08）
+
+このローカル記録は [GitHub Issue #618](https://github.com/ieee0824/omoikane/issues/618) への移行により閉じました。課題の進捗・議論・完了判定は移行先で管理します。
