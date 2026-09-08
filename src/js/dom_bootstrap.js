@@ -48,6 +48,7 @@
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
+  const nativeIframeGlobal = globalThis.__omoikane_iframe_global;
   const nativeIframeContextState = globalThis.__omoikane_iframe_context_state;
   const nativeIframeForceNavigation = globalThis.__omoikane_iframe_force_navigation;
   const nativeTakeDiscardedNodeIds = globalThis.__omoikane_take_discarded_node_ids;
@@ -73,6 +74,7 @@
   delete globalThis.__omoikane_set_attribute_ns;
   delete globalThis.__omoikane_remove_attribute_ns;
   delete globalThis.__omoikane_iframe_content_document;
+  delete globalThis.__omoikane_iframe_global;
   delete globalThis.__omoikane_iframe_context_state;
   delete globalThis.__omoikane_iframe_force_navigation;
   delete globalThis.__omoikane_take_discarded_node_ids;
@@ -3159,6 +3161,68 @@
     return intrinsicString(value);
   }
 
+  function ensureAppendValidity(parent, node) {
+    const parentType = internalNodeType(parent);
+    const nodeType = internalNodeType(node);
+    const fail = () => {
+      throw new DOMException("The operation would yield an incorrect node tree.", "HierarchyRequestError");
+    };
+    if (![1, 3, 4, 7, 8, 10, 11].includes(nodeType)) fail();
+    // Validate the entire fragment before inserting any of its children.
+    const children = nodeType === 11 ? internalChildNodes(node) : [node];
+    for (const child of [node, ...children]) {
+      for (let ancestor = parent; ancestor; ancestor = internalHostIncludingParent(ancestor)) {
+        if (internalNodeId(ancestor) === internalNodeId(child)) fail();
+      }
+    }
+    for (const child of children) {
+      const type = internalNodeType(child);
+      if (type === 9 || type === 2 || (type === 10 && parentType !== 9)) fail();
+      if ((type === 3 || type === 4) && parentType === 9) fail();
+    }
+    if (parentType !== 9) return;
+    const childIds = children.map(internalNodeId);
+    const resulting = internalChildNodes(parent)
+      .filter(child => !childIds.includes(internalNodeId(child))).concat(children);
+    let elementSeen = false;
+    let doctypeSeen = false;
+    for (const child of resulting) {
+      const type = internalNodeType(child);
+      if (type === 1) {
+        if (elementSeen) fail();
+        elementSeen = true;
+      } else if (type === 10) {
+        if (doctypeSeen || elementSeen) fail();
+        doctypeSeen = true;
+      }
+    }
+  }
+
+  function append(...values) {
+    requireNodeReceiver(this);
+    if (![1, 9, 11].includes(internalNodeType(this))) {
+      throw new IntrinsicTypeError("append called on an incompatible receiver");
+    }
+    // Complete Web IDL conversion before moving any argument out of its tree.
+    const converted = values.map(value => canonicalNodeId(value) === undefined
+      ? toDOMString(value) : value);
+    const document = nodeDocument(this);
+    const nodes = converted.map(value => typeof value === "string"
+      ? Document.prototype.createTextNode.call(document, value) : value);
+    let node;
+    if (nodes.length === 1) {
+      node = nodes[0];
+    } else {
+      node = Document.prototype.createDocumentFragment.call(document);
+      for (const child of nodes) {
+        ensureAppendValidity(node, child);
+        insertNodeBeforeInternal(node, child, null);
+      }
+    }
+    ensureAppendValidity(this, node);
+    insertNodeBeforeInternal(this, node, null);
+  }
+
   function elementNodeDocument(element) {
     return internalOwnerDocument(element) || globalThis.document;
   }
@@ -4944,6 +5008,14 @@
     "querySelector", "querySelectorAll", "children",
     "firstElementChild", "lastElementChild", "childElementCount",
   ]);
+  for (const prototype of [Element.prototype, Document.prototype, DocumentFragment.prototype]) {
+    Object.defineProperty(prototype, "append", {
+      value: append, writable: true, enumerable: true, configurable: true,
+    });
+    Object.defineProperty(prototype, Symbol.unscopables, {
+      value: Object.assign(Object.create(null), { append: true }), configurable: true,
+    });
+  }
   distributePrototypeMembers(Node.prototype, [Element.prototype, Document.prototype], [
     "getElementsByTagName", "getElementsByClassName", "innerHTML",
   ]);
@@ -5815,6 +5887,7 @@
         let activeGeneration = null;
         let access = "closed";
         let activeWindow = { __listeners: new Map() };
+        let activeRealmReady = false;
         let activeHistory = null;
         const historyEntries = [];
         let historyIndex = -1;
@@ -5924,9 +5997,23 @@
             commitHistoryEntry(generation);
             activeGeneration = generation;
             activeWindow = { __listeners: new Map() };
+            activeRealmReady = false;
             activeHistory = makeHistoryFacade(generation);
           }
           access = nextAccess;
+        };
+        // A connected about:blank frame already has a Realm, even before it
+        // executes a script. Forward ordinary properties to that Realm so its
+        // constructors, expandos, and reflection all describe the same global.
+        const getActiveWindow = () => {
+          if (!activeRealmReady) {
+            const global = nativeIframeGlobal(iframe.__id);
+            if (global !== null) {
+              activeWindow = global;
+              activeRealmReady = true;
+            }
+          }
+          return activeWindow;
         };
         const forceNavigation = () => {
           nativeIframeForceNavigation(iframe.__id);
@@ -6154,7 +6241,7 @@
             if (property === "history") return activeHistory;
             if (property === "getComputedStyle") return globalThis.getComputedStyle;
             if (Object.prototype.hasOwnProperty.call(methods, property)) return methods[property];
-            return Reflect.get(activeWindow, property, receiver);
+            return Reflect.get(getActiveWindow(), property, receiver);
           },
           set(_target, property, value, receiver) {
             refresh();
@@ -6163,13 +6250,13 @@
               return true;
             }
             if (access !== "same") throw securityError();
-            return Reflect.set(activeWindow, property, value, receiver);
+            return Reflect.set(getActiveWindow(), property, value, receiver);
           },
           has(_target, property) {
             refresh();
             if (safeCrossOriginProperties.has(property)) return true;
             if (access !== "same") throw securityError();
-            return property in activeWindow || Object.prototype.hasOwnProperty.call(methods, property);
+            return property in getActiveWindow() || Object.prototype.hasOwnProperty.call(methods, property);
           },
           defineProperty(_target, property, descriptor) {
             refresh();
@@ -6177,22 +6264,25 @@
             if (!descriptor || descriptor.configurable !== true) {
               throw new TypeError("WindowProxy does not support non-configurable properties");
             }
-            return Reflect.defineProperty(activeWindow, property, descriptor);
+            return Reflect.defineProperty(getActiveWindow(), property, descriptor);
           },
           deleteProperty(_target, property) {
             refresh();
             if (access !== "same") throw securityError();
-            return Reflect.deleteProperty(activeWindow, property);
+            return Reflect.deleteProperty(getActiveWindow(), property);
           },
           ownKeys() {
             refresh();
             if (access !== "same") throw securityError();
-            return Reflect.ownKeys(activeWindow);
+            return Reflect.ownKeys(getActiveWindow());
           },
           getOwnPropertyDescriptor(_target, property) {
             refresh();
             if (access !== "same") throw securityError();
-            return Reflect.getOwnPropertyDescriptor(activeWindow, property);
+            const descriptor = Reflect.getOwnPropertyDescriptor(getActiveWindow(), property);
+            // This JS Proxy has an empty, extensible target. Its forwarded
+            // descriptors must remain configurable across Window generations.
+            return descriptor ? { ...descriptor, configurable: true } : undefined;
           },
           preventExtensions() {
             throw new TypeError("WindowProxy cannot be made non-extensible");
@@ -6205,6 +6295,7 @@
           retired = true;
           access = "closed";
           activeWindow = { __listeners: new Map() };
+          activeRealmReady = false;
           historyEntries.splice(0);
           historyIndex = -1;
           pendingHistoryAction = null;

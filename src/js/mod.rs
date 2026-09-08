@@ -1294,9 +1294,8 @@ struct IframeDocument {
     loaded_src: String,
     /// Effective URL used to initialize the child browsing-context global.
     document_url: String,
-    /// Child browsing-context Realm. It is created lazily when the document's
-    /// XHTML inline scripts are about to run and dropped with the document on
-    /// navigation/detach.
+    /// Child browsing-context Realm. Same-origin WindowProxy access or script
+    /// execution creates it lazily; navigation/detach drops it with the document.
     realm: Option<Realm>,
     /// The resource attribute (`src`, `srcdoc`, or `data`) which created this
     /// active document.
@@ -2961,145 +2960,10 @@ impl JsRuntime {
         iframe_id: usize,
         document_id: usize,
     ) -> JsResult<Realm> {
-        if let Some(realm) = self
-            .host_state
-            .borrow()
-            .iframe_documents
-            .get(&iframe_id)
-            .filter(|entry| entry.document.identity() == document_id)
-            .and_then(|entry| entry.realm.clone())
-        {
-            return Ok(realm);
-        }
-
-        let (document_url, same_origin, owner_document_id) = {
-            let state = self.host_state.borrow();
-            let entry = state
-                .iframe_documents
-                .get(&iframe_id)
-                .filter(|entry| entry.document.identity() == document_id)
-                .ok_or_else(|| {
-                    JsNativeError::reference().with_message("iframe document is no longer live")
-                })?;
-            let sandbox = state
-                .document_sandbox
-                .get(&document_id)
-                .copied()
-                .unwrap_or_default();
-            let child_origin = state.document_origins.get(&document_id).cloned().flatten();
-            let owner_document = owner_document_for_node(
-                &state
-                    .get_node(iframe_id)
-                    .ok_or_else(|| JsNativeError::reference().with_message("iframe is detached"))?,
-            )
-            .ok_or_else(|| JsNativeError::reference().with_message("iframe owner is detached"))?;
-            let owner_origin = state
-                .document_origins
-                .get(&owner_document.identity())
-                .cloned()
-                .flatten();
-            // A non-sandboxed iframe is not automatically same-origin: the
-            // effective child origin must match the embedding Document's
-            // origin.  `about:blank` inherits that origin when it is loaded,
-            // while opaque resources (for example `data:`) deliberately carry
-            // `None` and can never match it.
-            let same_origin = (!sandbox.active || sandbox.allow_same_origin)
-                && child_origin.is_some()
-                && child_origin == owner_origin;
-            (entry.document_url.clone(), same_origin, owner_document.identity())
-        };
-
-        let top_global: JsValue = self.context.global_object().into();
-        // A nested same-origin frame's `parent` is the owning browsing
-        // context's global, not always the top-level global. Capture that
-        // Realm's global before entering the new child Realm. The owning
-        // Realm already exists whenever a nested frame is created by its
-        // parent script; if it does not, retain the top-level fallback so a
-        // detached/host-created frame still has a usable parent object.
-        let parent_global = if same_origin && owner_document_id != self.document().identity() {
-            let owner_realm = self
-                .host_state
-                .borrow()
-                .iframe_documents
-                .values()
-                .find(|entry| entry.document.identity() == owner_document_id)
-                .and_then(|entry| entry.realm.clone());
-            if let Some(owner_realm) = owner_realm {
-                let old_realm = self.context.enter_realm(owner_realm);
-                let global: JsValue = self.context.global_object().into();
-                self.context.enter_realm(old_realm);
-                global
-            } else {
-                top_global.clone()
-            }
-        } else {
-            top_global.clone()
-        };
-        let realm = self.with_active_host(|context| context.create_realm())?;
-        let old_realm = self.context.enter_realm(realm.clone());
-        let previous_resolver = self
-            .host_state
-            .borrow()
-            .canonical_node_identity_resolver
-            .clone();
-        let setup = (|| {
-            register_host_bindings(&mut self.context, &self.host_state)?;
-            let global = self.context.global_object();
-            global.set(
-                js_string!("__omoikane_document_id"),
-                JsValue::from(document_id as f64),
-                true,
-                &mut self.context,
-            )?;
-            global.set(
-                js_string!("__omoikane_location_href"),
-                JsValue::from(js_string!(document_url.as_str())),
-                true,
-                &mut self.context,
-            )?;
-            global.set(
-                js_string!("__omoikane_frame_element_id"),
-                if same_origin {
-                    JsValue::from(iframe_id as f64)
-                } else {
-                    JsValue::null()
-                },
-                true,
-                &mut self.context,
-            )?;
-            self.with_active_host(|context| context.eval(Source::from_bytes(DOM_BOOTSTRAP)))?;
-            self.with_active_host(|context| context.run_jobs())?;
-
-            let parent = if same_origin {
-                parent_global
-            } else {
-                self.context
-                    .eval(Source::from_bytes("Object.create(null)"))?
-            };
-            let top = if same_origin {
-                top_global.clone()
-            } else {
-                parent.clone()
-            };
-            let global = self.context.global_object();
-            global.set(js_string!("parent"), parent.clone(), true, &mut self.context)?;
-            global.set(js_string!("top"), top, true, &mut self.context)?;
-            Ok::<(), JsError>(())
-        })();
-        self.context.enter_realm(old_realm);
-        self.host_state
-            .borrow_mut()
-            .canonical_node_identity_resolver = previous_resolver;
-        setup?;
-
-        let mut state = self.host_state.borrow_mut();
-        let entry = state
-            .iframe_documents
-            .get_mut(&iframe_id)
-            .filter(|entry| entry.document.identity() == document_id)
-            .ok_or_else(|| JsNativeError::reference().with_message("iframe document was replaced"))?;
-        entry.realm = Some(realm.clone());
-        Ok(realm)
+        let host_state = Rc::clone(&self.host_state);
+        self.with_active_host(|context| {
+            ensure_iframe_realm(context, &host_state, iframe_id, document_id)
+        })
     }
 
     /// Evaluates one iframe inline script in its child Realm and restores the
@@ -6565,8 +6429,10 @@ impl JsRuntime {
             let script_context = script_source_context(&source_code);
             let (result, parse_elapsed, compile_elapsed, execute_elapsed) =
                 if let Some(module_url) = module_url {
+                    let module_document =
+                        document_root_for_node(&script).unwrap_or_else(|| self.document());
                     let (result, parse_elapsed, execute_elapsed) =
-                        self.eval_module_timed(&source_code, &module_url, script.clone());
+                        self.eval_module_timed(&source_code, &module_url, module_document);
                     (
                         result,
                         parse_elapsed,
@@ -7153,6 +7019,173 @@ fn is_javascript_mime_type(mime: &str) -> bool {
             | "text/x-ecmascript"
             | "text/x-javascript"
     )
+}
+
+/// Initializes the iframe Realm for both script execution and synchronous
+/// same-origin WindowProxy access. Bootstrap itself queues no Promise jobs;
+/// callers retain their existing microtask checkpoint instead of running the
+/// parent's pending jobs during a nested property lookup.
+fn ensure_iframe_realm(
+    context: &mut Context,
+    host_state: &Rc<RefCell<HostState>>,
+    iframe_id: usize,
+    document_id: usize,
+) -> JsResult<Realm> {
+    if let Some(realm) = host_state
+        .borrow()
+        .iframe_documents
+        .get(&iframe_id)
+        .filter(|entry| entry.document.identity() == document_id)
+        .and_then(|entry| entry.realm.clone())
+    {
+        return Ok(realm);
+    }
+
+    let (document_url, same_origin, owner_document_id) = {
+        let state = host_state.borrow();
+        let entry = state
+            .iframe_documents
+            .get(&iframe_id)
+            .filter(|entry| entry.document.identity() == document_id)
+            .ok_or_else(|| {
+                JsNativeError::reference().with_message("iframe document is no longer live")
+            })?;
+        let sandbox = state
+            .document_sandbox
+            .get(&document_id)
+            .copied()
+            .unwrap_or_default();
+        let child_origin = state.document_origins.get(&document_id).cloned().flatten();
+        let owner_document = owner_document_for_node(
+            &state
+                .get_node(iframe_id)
+                .ok_or_else(|| JsNativeError::reference().with_message("iframe is detached"))?,
+        )
+        .ok_or_else(|| JsNativeError::reference().with_message("iframe owner is detached"))?;
+        let owner_origin = state
+            .document_origins
+            .get(&owner_document.identity())
+            .cloned()
+            .flatten();
+        // A non-sandboxed iframe is not automatically same-origin: the
+        // effective child origin must match the embedding Document's
+        // origin.  `about:blank` inherits that origin when it is loaded,
+        // while opaque resources (for example `data:`) deliberately carry
+        // `None` and can never match it.
+        let same_origin = (!sandbox.active || sandbox.allow_same_origin)
+            && child_origin.is_some()
+            && child_origin == owner_origin;
+        (
+            entry.document_url.clone(),
+            same_origin,
+            owner_document.identity(),
+        )
+    };
+
+    let caller_global = context.global_object();
+    let top = caller_global.get(js_string!("top"), context)?;
+    let top_global: JsValue = if top.is_object() {
+        top
+    } else {
+        caller_global.into()
+    };
+    // A nested same-origin frame's `parent` is the owning browsing
+    // context's global, not always the top-level global. Capture that
+    // Realm's global before entering the new child Realm. The owning
+    // Realm already exists whenever a nested frame is created by its
+    // parent script; if it does not, retain the top-level fallback so a
+    // detached/host-created frame still has a usable parent object.
+    let parent_global =
+        if same_origin && owner_document_id != host_state.borrow().document.identity() {
+            let owner_realm = host_state
+                .borrow()
+                .iframe_documents
+                .values()
+                .find(|entry| entry.document.identity() == owner_document_id)
+                .and_then(|entry| entry.realm.clone());
+            if let Some(owner_realm) = owner_realm {
+                let old_realm = context.enter_realm(owner_realm);
+                let global: JsValue = context.global_object().into();
+                context.enter_realm(old_realm);
+                global
+            } else {
+                top_global.clone()
+            }
+        } else {
+            top_global.clone()
+        };
+    let realm = context.create_realm()?;
+    let old_realm = context.enter_realm(realm.clone());
+    let previous_resolver = host_state.borrow().canonical_node_identity_resolver.clone();
+    let setup = (|| {
+        register_host_bindings(context, host_state)?;
+        let global = context.global_object();
+        global.set(
+            js_string!("__omoikane_document_id"),
+            JsValue::from(document_id as f64),
+            true,
+            context,
+        )?;
+        global.set(
+            js_string!("__omoikane_location_href"),
+            JsValue::from(js_string!(document_url.as_str())),
+            true,
+            context,
+        )?;
+        global.set(
+            js_string!("__omoikane_frame_element_id"),
+            if same_origin {
+                JsValue::from(iframe_id as f64)
+            } else {
+                JsValue::null()
+            },
+            true,
+            context,
+        )?;
+        // A module starts with its own lexical environment. Nested Script
+        // evaluation inherits the caller's active environments in Boa, which
+        // would corrupt the parent bootstrap's captured wrapper state here.
+        // This static bootstrap has neither imports nor top-level await, so
+        // loading and evaluation must finish without a microtask checkpoint.
+        let complete = |promise: JsPromise| match promise.state() {
+            PromiseState::Fulfilled(_) => Ok(()),
+            PromiseState::Rejected(error) => Err(JsError::from_opaque(error)),
+            PromiseState::Pending => Err(JsNativeError::error()
+                .with_message("iframe bootstrap did not complete synchronously")
+                .into()),
+        };
+        let bootstrap = Module::parse(Source::from_bytes(DOM_BOOTSTRAP), None, context)?;
+        complete(bootstrap.load(context))?;
+        bootstrap.link(context)?;
+        complete(bootstrap.evaluate(context))?;
+
+        let parent = if same_origin {
+            parent_global
+        } else {
+            context.eval(Source::from_bytes("Object.create(null)"))?
+        };
+        let top = if same_origin {
+            top_global.clone()
+        } else {
+            parent.clone()
+        };
+        let global = context.global_object();
+        global.set(js_string!("parent"), parent.clone(), true, context)?;
+        global.set(js_string!("top"), top, true, context)?;
+        Ok::<(), JsError>(())
+    })();
+    context.enter_realm(old_realm);
+    host_state.borrow_mut().canonical_node_identity_resolver = previous_resolver;
+    setup?;
+
+    let mut state = host_state.borrow_mut();
+    let entry = state
+        .iframe_documents
+        .get_mut(&iframe_id)
+        .filter(|entry| entry.document.identity() == document_id)
+        .ok_or_else(|| JsNativeError::reference().with_message("iframe document was replaced"))?;
+    entry.realm = Some(realm.clone());
+    Ok(realm)
 }
 
 fn register_host_bindings(
@@ -7881,6 +7914,11 @@ fn register_host_bindings(
             js_string!("__omoikane_document_write"),
             2,
             NativeFunction::from_copy_closure(document_write_native),
+        ),
+        (
+            js_string!("__omoikane_iframe_global"),
+            1,
+            NativeFunction::from_copy_closure(iframe_global_native),
         ),
         (
             js_string!("__omoikane_iframe_content_document"),
@@ -14212,6 +14250,24 @@ fn iframe_content_document_native(
             Some(_) => Ok(JsValue::null()),
             None => Ok(JsValue::null()),
         }
+    })
+}
+
+/// Returns the live same-origin iframe global for the private WindowProxy
+/// forwarding path. Origin and sandbox checks also apply at this native boundary.
+fn iframe_global_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let document = iframe_content_document_native(&JsValue::undefined(), args, context)?;
+    if document.is_null() {
+        return Ok(JsValue::null());
+    }
+    let iframe_id = parse_node_id(args.first(), context)?;
+    let document_id = document.to_number(context)? as usize;
+    with_host_state(|state| {
+        let realm = ensure_iframe_realm(context, state, iframe_id, document_id)?;
+        let previous = context.enter_realm(realm);
+        let global = context.global_object();
+        context.enter_realm(previous);
+        Ok(global.into())
     })
 }
 

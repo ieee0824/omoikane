@@ -178,12 +178,12 @@ pub fn fetch_with_timeout(
             CredentialsMode::SameOrigin => !cross_origin,
             CredentialsMode::Include => true,
         };
-        let mut outbound = request.clone();
-        if !send_credentials {
-            outbound.remove_header("authorization");
-        }
+        // Credentials mode controls automatic credentials such as cookies.
+        // An Authorization header explicitly supplied by the caller remains
+        // part of the request, including a credentialless CORS request.
+        // Cross-origin redirects remove it below as required by Fetch.
         let mut response = client
-            .send_once_with_timeout(outbound, send_credentials, timeout)
+            .send_once_with_timeout(request.clone(), send_credentials, timeout)
             .map_err(|error| {
                 if error.is_timeout() {
                     CorsError::Timeout
