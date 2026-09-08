@@ -84,7 +84,7 @@ impl ModuleServer {
                         wake.notify_all();
                     }
                     active.fetch_sub(1, Ordering::SeqCst);
-                    let mime = if path.ends_with(".html") { "text/html" } else { "text/javascript" };
+                    let mime = if path.ends_with(".html") { "text/html" } else if path.ends_with(".events") { "text/event-stream" } else { "text/javascript" };
                     write!(stream, "HTTP/1.1 {} Result\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}", route.status, route.body.len(), route.headers, route.body).unwrap();
                 }));
             }
@@ -397,4 +397,279 @@ fn concurrent_iframe_imports_keep_separate_realms_and_csp() {
         2
     );
     assert!(server.peak.load(Ordering::SeqCst) >= 2);
+}
+
+#[test]
+fn csp_redirect_keeps_host_restrictions_but_ignores_source_path() {
+    let server = ModuleServer::new(HashMap::from([
+        (
+            "/allowed.js".into(),
+            Route {
+                status: 302,
+                headers: "Location: /other.js\r\n".into(),
+                ..route("")
+            },
+        ),
+        ("/other.js".into(), route("globalThis.redirectRan = true;")),
+    ]));
+    let policy = format!("script-src 'unsafe-inline' {}/allowed.js", server.origin);
+    let mut runtime = runtime_with_policy(&server.origin, "import './allowed.js';", &policy);
+    let errors = execute(&mut runtime, &server.origin);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(
+        runtime.eval("redirectRan").unwrap().as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn srcdoc_meta_csp_restricts_scripts_without_weakening_parent_or_siblings() {
+    let server = ModuleServer::new(HashMap::from([(
+        "/child.js".into(),
+        route("globalThis.childRan = true;"),
+    )]));
+    let document = TreeBuilder::parse("<html><body></body></html>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("{}/index.html", server.origin))
+            .unwrap();
+    runtime.install_csp_policy(&["script-src 'unsafe-inline' 'self'".to_string()]);
+    for (name, policy) in [
+        ("blocked", "script-src 'none'"),
+        ("allowed", "script-src 'unsafe-inline' *"),
+    ] {
+        let child = format!(
+            "<html><head><meta http-equiv='Content-Security-Policy' content=\"{policy}\"></head><body></body></html>"
+        );
+        runtime.eval(&format!("globalThis.{name} = document.createElement('iframe'); {name}.srcdoc = {}; document.body.appendChild({name});", serde_json::to_string(&child).unwrap())).unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval(&format!("(() => {{ const doc = {name}.contentDocument; const script = doc.createElement('script'); script.src = '{}/child.js'; doc.body.appendChild(script); }})()", server.origin)).unwrap();
+    }
+    runtime.run_until_idle().unwrap();
+    let observed = runtime.eval("JSON.stringify([typeof blocked.contentWindow.childRan, allowed.contentWindow.childRan, blocked.contentDocument.cspViolations.length, allowed.contentDocument.cspViolations.length, document.cspViolations.length])").unwrap().as_string().unwrap().to_std_string_escaped();
+    assert_eq!(
+        observed,
+        r#"["undefined",true,1,0,0]"#,
+        "requests={:?}, errors={:?}",
+        server.paths(),
+        runtime.take_task_errors()
+    );
+    assert_eq!(server.paths(), ["/child.js"]);
+
+    let state = runtime.host_state.borrow();
+    for entry in state.iframe_documents.values() {
+        let policy = state.csp_policy_for_document(&entry.document);
+        assert!(
+            !policy.allows_reference(super::ResourceType::Script, "https://other.test/app.js"),
+            "child meta must not relax inherited 'self'"
+        );
+    }
+}
+
+#[test]
+fn srcdoc_connect_csp_checks_and_violations_belong_to_the_calling_realm() {
+    let server = ModuleServer::new(HashMap::from([
+        (
+            "/child.js".into(),
+            route(
+                "globalThis.load = () => fetch(new URL('/body', location.href === 'about:srcdoc' ? parent.location.href : location.href).href).then(() => globalThis.loaded = true).catch(() => globalThis.loaded = false);",
+            ),
+        ),
+        ("/body".into(), route("ok")),
+    ]));
+    let document = TreeBuilder::parse("<html><body></body></html>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("{}/index.html", server.origin))
+            .unwrap();
+    runtime.install_csp_policy(&["script-src 'self'; connect-src 'self'".into()]);
+    for (name, policy) in [
+        ("blocked", "connect-src 'none'"),
+        ("allowed", "connect-src 'self'"),
+    ] {
+        let child = format!(
+            "<html><head><meta http-equiv='Content-Security-Policy' content=\"{policy}\"></head><body></body></html>"
+        );
+        runtime.eval(&format!("globalThis.{name} = document.createElement('iframe'); {name}.srcdoc = {}; document.body.appendChild({name});", serde_json::to_string(&child).unwrap())).unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval(&format!("(() => {{ const doc = {name}.contentDocument; const script = doc.createElement('script'); script.src = '{}/child.js'; doc.body.appendChild(script); }})()", server.origin)).unwrap();
+        runtime.run_until_idle().unwrap();
+    }
+    runtime
+        .eval("blocked.contentWindow.load(); allowed.contentWindow.load();")
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    let observed = runtime.eval("JSON.stringify([blocked.contentWindow.loaded, allowed.contentWindow.loaded, blocked.contentDocument.cspViolations.length, allowed.contentDocument.cspViolations.length, document.cspViolations.length])").unwrap().as_string().unwrap().to_std_string_escaped();
+    assert_eq!(observed, "[false,true,1,0,0]");
+    assert_eq!(
+        server
+            .paths()
+            .iter()
+            .filter(|path| *path == "/body")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn csp_connect_redirects_allow_new_paths_for_fetch_xhr_and_event_source() {
+    let server = ModuleServer::new(HashMap::from([
+        (
+            "/allowed/body".into(),
+            Route {
+                status: 302,
+                headers: "Location: /other/body\r\n".into(),
+                ..route("")
+            },
+        ),
+        ("/other/body".into(), route("ok")),
+        (
+            "/allowed/stream".into(),
+            Route {
+                status: 302,
+                headers: "Location: /other/stream.events\r\n".into(),
+                ..route("")
+            },
+        ),
+        ("/other/stream.events".into(), route("data: ready\n\n")),
+    ]));
+    let document = TreeBuilder::parse("<html><body></body></html>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("{}/index.html", server.origin))
+            .unwrap();
+    runtime.install_csp_policy(&[format!("connect-src {}/allowed/", server.origin)]);
+    runtime
+        .eval(&format!(
+            r#"
+        globalThis.result = {{}};
+        fetch('{0}/other/body').catch(() => result.directBlocked = true);
+        fetch('{0}/allowed/body').then(r => r.text()).then(body => result.fetch = body);
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '{0}/allowed/body');
+        xhr.onload = () => result.xhr = xhr.responseText;
+        xhr.send();
+        const events = new EventSource('{0}/allowed/stream');
+        events.onmessage = event => {{ result.event = event.data; events.close(); }};
+        events.onerror = () => {{ result.event = 'error'; events.close(); }};
+    "#,
+            server.origin
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(runtime.eval("JSON.stringify([result.directBlocked, result.fetch, result.xhr, result.event, document.cspViolations.length])").unwrap().as_string().unwrap().to_std_string_escaped(), r#"[true,"ok","ok","ready",1]"#);
+    assert_eq!(
+        server
+            .paths()
+            .iter()
+            .filter(|path| *path == "/other/body")
+            .count(),
+        2
+    );
+    assert_eq!(server.paths().len(), 6);
+}
+
+#[test]
+fn csp_classic_script_redirects_work_in_parser_and_dynamic_execution_paths() {
+    let server = ModuleServer::new(HashMap::from([
+        (
+            "/allowed.js".into(),
+            Route {
+                status: 302,
+                headers: "Location: /other.js\r\n".into(),
+                ..route("")
+            },
+        ),
+        (
+            "/other.js".into(),
+            route("globalThis.executions = (globalThis.executions || 0) + 1;"),
+        ),
+    ]));
+    for page_task in [false, true] {
+        let document = TreeBuilder::parse("<html><body><script src='/allowed.js'></script><script defer src='/allowed.js'></script></body></html>").document();
+        let url: crate::http::Url = format!("{}/index.html", server.origin).parse().unwrap();
+        let mut runtime = JsRuntime::with_document_and_url(document, &url.to_string()).unwrap();
+        runtime.install_csp_policy(&[format!("script-src {}/allowed.js", server.origin)]);
+        if page_task {
+            use std::future::Future;
+            use std::task::{Context, Poll, Waker};
+            let mut task = Box::pin(runtime.into_document_page_task(1, Some(url)));
+            let mut context = Context::from_waker(Waker::noop());
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let completed = loop {
+                if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                    break completed;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "page task did not settle"
+                );
+                thread::sleep(Duration::from_millis(1));
+            };
+            assert_eq!(completed.result, Ok(Vec::new()));
+            runtime = completed.runtime;
+        } else {
+            assert!(runtime.execute_document_scripts(Some(&url)).is_empty());
+        }
+        assert_eq!(runtime.eval("executions").unwrap().as_number(), Some(2.0));
+        runtime.eval("const inserted = document.createElement('script'); inserted.src = '/allowed.js'; document.body.appendChild(inserted);").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("executions").unwrap().as_number(), Some(3.0));
+        assert_eq!(
+            runtime
+                .eval("document.cspViolations.length")
+                .unwrap()
+                .as_number(),
+            Some(0.0)
+        );
+        assert!(runtime.take_task_errors().is_empty());
+    }
+}
+
+#[test]
+fn srcdoc_meta_csp_limits_dynamic_module_imports_to_the_owning_document() {
+    for kind in ["", "module"] {
+        let server = ModuleServer::new(HashMap::from([
+            (
+                "/bootstrap.js".into(),
+                route(
+                    "globalThis.load = () => import('./dependency.js').then(() => globalThis.loaded = true).catch(error => { globalThis.importError = String(error); globalThis.loaded = false; });",
+                ),
+            ),
+            (
+                "/dependency.js".into(),
+                route("globalThis.moduleRan = true;"),
+            ),
+        ]));
+        let document = TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, &format!("{}/index.html", server.origin))
+                .unwrap();
+        runtime.install_csp_policy(&["script-src 'self'".into()]);
+        for (name, policy) in [
+            (
+                "blocked",
+                format!("script-src {}/bootstrap.js", server.origin),
+            ),
+            ("allowed", "script-src *".to_string()),
+        ] {
+            let child = format!(
+                "<html><head><meta http-equiv='Content-Security-Policy' content=\"{policy}\"></head><body></body></html>"
+            );
+            runtime.eval(&format!("globalThis.{name} = document.createElement('iframe'); {name}.srcdoc = {}; document.body.appendChild({name});", serde_json::to_string(&child).unwrap())).unwrap();
+            runtime.run_until_idle().unwrap();
+            runtime.eval(&format!("(() => {{ const doc = {name}.contentDocument; const script = doc.createElement('script'); script.type = '{kind}'; script.src = '{}/bootstrap.js'; doc.body.appendChild(script); }})()", server.origin)).unwrap();
+            runtime.run_until_idle().unwrap();
+        }
+        runtime
+            .eval("blocked.contentWindow.load(); allowed.contentWindow.load();")
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(runtime.eval("JSON.stringify([blocked.contentWindow.loaded, allowed.contentWindow.loaded, typeof blocked.contentWindow.moduleRan, allowed.contentWindow.moduleRan, blocked.contentDocument.cspViolations.length, allowed.contentDocument.cspViolations.length, document.cspViolations.length])").unwrap().as_string().unwrap().to_std_string_escaped(), r#"[false,true,"undefined",true,1,0,0]"#, "errors={}, requests={:?}", runtime.eval("JSON.stringify([blocked.contentWindow.importError, allowed.contentWindow.importError])").unwrap().as_string().unwrap().to_std_string_escaped(), server.paths());
+        assert_eq!(
+            server
+                .paths()
+                .iter()
+                .filter(|path| *path == "/dependency.js")
+                .count(),
+            1
+        );
+    }
 }
