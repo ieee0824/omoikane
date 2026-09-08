@@ -43,6 +43,9 @@ use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
 #[cfg(test)]
 mod layout_metrics_tests;
+#[cfg(test)]
+mod document_write_tests;
+mod document_write;
 mod module_fetch;
 #[cfg(test)]
 mod module_loading_tests;
@@ -1050,16 +1053,19 @@ struct HostState {
     style_resolver_generation: u64,
     #[cfg(test)]
     document_script_executions: HashMap<usize, u64>,
-    /// Insertion reference for `document.write`.
-    ///
-    /// Models the HTML tokenizer's "insertion point". While a `<script>` runs,
-    /// this holds the node **after which** the next `document.write` fragment is
-    /// inserted (initially the script element itself, so written content lands
-    /// as the script's following siblings, exactly as a streaming parser would
-    /// place it). Each write advances the reference to the last node it
-    /// inserted, so consecutive writes stay in order. `None` means no script is
-    /// currently executing; a write then falls back to appending to `<body>`.
+    /// Currently executing parser script. A document's first write creates a
+    /// streaming parser immediately after this node; subsequent writes reuse
+    /// that parser's open-element stack and input state.
     write_insertion_ref: Option<NodeHandle>,
+    /// Streaming input and tree-builder state, isolated by owning Document.
+    write_parsers: HashMap<usize, Rc<RefCell<document_write::WriteState>>>,
+    /// Global to this runtime so cross-document recursion cannot evade the cap.
+    document_write_depth: usize,
+    written_script_queue: VecDeque<document_write::WrittenScript>,
+    /// Parser-inserted scripts must not run again as dynamic resource tasks.
+    parser_inserted_scripts: HashSet<usize>,
+    /// Explicit Realm root used when a child writes into the top Document.
+    main_realm: Option<Realm>,
     /// Base URL of the top-level document, used to resolve relative resource
     /// references such as `<iframe src="empty.html">`. Populated when the
     /// document's scripts run (see [`JsRuntime::execute_document_scripts`]) or
@@ -1629,6 +1635,11 @@ impl HostState {
             #[cfg(test)]
             document_script_executions: HashMap::new(),
             write_insertion_ref: None,
+            write_parsers: HashMap::new(),
+            document_write_depth: 0,
+            written_script_queue: VecDeque::new(),
+            parser_inserted_scripts: HashSet::new(),
+            main_realm: None,
             iframe_documents: HashMap::new(),
             next_iframe_generation: 1,
             iframe_context_ids: HashMap::new(),
@@ -2130,6 +2141,11 @@ impl HostState {
         let document_id = previous.document.identity();
         self.event_loop.cancel_tasks_for_document(document_id);
         self.document_styles.remove(&document_id);
+        self.write_parsers.remove(&document_id);
+        self.written_script_queue
+            .retain(|script| script.document.identity() != document_id);
+        self.parser_inserted_scripts
+            .retain(|id| !tree_ids.contains(id));
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_base_urls.remove(&document_id);
@@ -3078,6 +3094,8 @@ impl JsRuntime {
             .realm()
             .host_defined_mut()
             .insert(ModuleDocumentId(document.identity()));
+
+        host_state.borrow_mut().main_realm = Some(context.realm().clone());
 
         let host_roots_provider = unsafe {
             RootProvider::register(std::ptr::NonNull::from(&*host_state.borrow()))
@@ -4221,6 +4239,19 @@ impl JsRuntime {
                         script_node_id,
                     } => (source, url.clone(), script_node_id, Some(url)),
                 };
+                if let Some(node) =
+                    script_node_id.and_then(|id| self.host_state.borrow().get_node(id))
+                    && (module_url.is_some() || node.get_attribute("defer").is_some())
+                {
+                    if let Err(error) = self.run_written_scripts_before(&node) {
+                        errors.push(format!("[written scripts] {error}"));
+                    }
+                }
+                if label == "DOMContentLoaded" && script_node_id.is_none() {
+                    if let Err(error) = self.run_written_scripts(true) {
+                        errors.push(format!("[written scripts] {error}"));
+                    }
+                }
                 if let Some(node_id) = script_node_id {
                     let node = self.host_state.borrow().get_node(node_id);
                     self.host_state.borrow_mut().write_insertion_ref = node;
@@ -4425,6 +4456,9 @@ impl JsRuntime {
     /// Runs pending promise jobs.
     pub fn run_jobs(&mut self) -> JsResult<()> {
         let result = self.with_active_host(|context| context.run_jobs());
+        if result.is_ok() && self.host_state.borrow().document_write_depth == 0 {
+            self.run_written_scripts(false)?;
+        }
         self.sync_module_csp_violations();
         result
     }
@@ -4769,7 +4803,12 @@ impl JsRuntime {
             .is_some_and(|node| {
                 node.tag_name()
                     .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
-                    && node.get_attribute("src").is_some()
+                    && (node.get_attribute("src").is_some()
+                        || self
+                            .host_state
+                            .borrow()
+                            .parser_inserted_scripts
+                            .contains(&node_id))
             })
     }
 
@@ -4953,6 +4992,14 @@ impl JsRuntime {
     }
 
     async fn run_dynamic_script_resource_async(&mut self, node_id: usize) -> JsResult<()> {
+        if self
+            .host_state
+            .borrow()
+            .parser_inserted_scripts
+            .contains(&node_id)
+        {
+            return self.run_written_script(node_id);
+        }
         let Some((script_node, src, kind, base_url, document_id)) = ({
             let mut state = self.host_state.borrow_mut();
             state.pending_resource_loads.remove(&node_id);
@@ -6037,6 +6084,14 @@ impl JsRuntime {
                 Ok(())
             }
             TimerPayload::ResourceLoad { node_id } => {
+                if self
+                    .host_state
+                    .borrow()
+                    .parser_inserted_scripts
+                    .contains(&node_id)
+                {
+                    return self.run_written_script(node_id);
+                }
                 let (should_dispatch, xhtml_scripts, dynamic_script, resource_document_id) = {
                     let mut state = self.host_state.borrow_mut();
                     state.pending_resource_loads.remove(&node_id);
@@ -6343,6 +6398,7 @@ impl JsRuntime {
     /// and executing inline scripts). Listeners registered via
     /// `document.addEventListener('DOMContentLoaded', fn)` will be invoked.
     pub fn fire_dom_content_loaded(&mut self) -> JsResult<()> {
+        self.run_written_scripts(true)?;
         self.eval(DOM_CONTENT_LOADED_SCRIPT)?;
         self.run_jobs()
     }
@@ -6601,6 +6657,9 @@ impl JsRuntime {
         // lands as that script's following siblings — the same treatment the
         // inline path applies above.
         for (source_code, script, script_label, module_url) in deferred {
+            if let Err(error) = self.run_written_scripts_before(&script) {
+                errors.push(format!("[written scripts] {error}"));
+            }
             if log_scripts {
                 eprintln!("[omoikane][script] running deferred {script_label}");
             }
@@ -6687,6 +6746,9 @@ impl Drop for JsRuntime {
         state.event_loop = EventLoop::default();
         state.pending_resource_loads.clear();
         state.worker_owner_realm = None;
+        state.main_realm = None;
+        state.write_parsers.clear();
+        state.written_script_queue.clear();
     }
 }
 
@@ -8106,6 +8168,11 @@ fn register_host_bindings(
             js_string!("__omoikane_document_write"),
             2,
             NativeFunction::from_copy_closure(document_write_native),
+        ),
+        (
+            js_string!("__omoikane_document_close"),
+            1,
+            NativeFunction::from_copy_closure(document_close_native),
         ),
         (
             js_string!("__omoikane_iframe_global"),
@@ -13896,35 +13963,6 @@ fn create_comment_native(
     })
 }
 
-/// Inserts `child` into `parent` before `reference` when given, otherwise
-/// appends it. If `insert_before` fails — for example the reference node is no
-/// longer a child of `parent` — this falls back to appending.
-///
-/// This is not infallible, and the two operations fail differently.
-/// `insert_before` returns `Err` — `HierarchyRequest` if the insertion would
-/// create a cycle (`child` is an inclusive ancestor of `parent`), or
-/// `ReferenceChildNotFound` if `reference` is no longer a child of `parent`.
-/// `append_child`, by contrast, never returns an error: it silently no-ops on a
-/// cyclic insertion and otherwise appends. So a stale reference falls back to a
-/// successful append, but a genuinely cyclic `child` is dropped either way — the
-/// `insert_before` error falls through to `append_child`, which also refuses the
-/// cycle and does nothing. The guarantee is therefore narrow: **as long as the
-/// insertion would not create a cycle, the child lands in `parent`'s subtree**
-/// (via `insert_before` or the `append` fallback) rather than being silently
-/// dropped. Callers rely on this: `document.write` registers each inserted node
-/// and advances its insertion point, both of which are only valid for nodes that
-/// are actually in the tree.
-fn insert_or_append(parent: &NodeHandle, child: &NodeHandle, reference: Option<&NodeHandle>) {
-    match reference {
-        Some(reference) => {
-            if parent.insert_before(child.clone(), reference).is_err() {
-                parent.append_child(child.clone());
-            }
-        }
-        None => parent.append_child(child.clone()),
-    }
-}
-
 /// Returns whether a `<script>`'s `type` attribute selects a classic script
 /// that Omoikane executes.
 ///
@@ -13936,8 +13974,8 @@ fn insert_or_append(parent: &NodeHandle, child: &NodeHandle, reference: Option<&
 /// non-executable: [`ScriptKind::from_type_attribute`] routes `module` to module
 /// evaluation and only everything else to no execution at all.
 ///
-/// Both [`is_inline_classic_script`] (the `document.write` path) and
-/// `Runtime::execute_document_scripts` (the normal parse path) gate on this
+/// [`is_inline_classic_script`], [`ScriptKind::from_type_attribute`], and
+/// `JsRuntime::execute_document_scripts` gate on this
 /// helper, so a `<script>` element runs identically no matter which path
 /// reached it.
 fn is_executable_classic_script_type(type_attr: Option<&str>) -> bool {
@@ -14006,13 +14044,8 @@ fn is_inline_classic_script(node: &NodeHandle) -> bool {
 /// top-level document and to iframe sub-documents (an iframe's
 /// `contentDocument`).
 ///
-/// Only the main document owns the parser insertion point tracked by
-/// [`HostState::write_insertion_ref`], so that field is cleared **only** when
-/// the main document is the one being reset. Resetting a sub-document leaves it
-/// untouched: an outer `<script>` may be mid-write into the main document, and
-/// clearing the point here (as an earlier version did unconditionally) would
-/// silently redirect the rest of that script's `document.write` output to the
-/// `<body>` tail instead of the script's position.
+/// Reset only this Document's parser state. Opening an independent child
+/// document must preserve any outer script's insertion reference.
 fn document_reset_native(
     _: &JsValue,
     args: &[JsValue],
@@ -14028,6 +14061,14 @@ fn document_reset_native(
             let is_main_document = node == s.document;
             (node, is_main_document)
         };
+        if state
+            .borrow()
+            .write_parsers
+            .get(&id)
+            .is_some_and(|parser| parser.borrow().is_executing())
+        {
+            return Ok(JsValue::undefined());
+        }
         let removed_children = node.child_nodes();
         let removed_any = !removed_children.is_empty();
         {
@@ -14047,6 +14088,14 @@ fn document_reset_native(
         if removed_any {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         }
+        state.borrow_mut().write_parsers.insert(
+            id,
+            Rc::new(RefCell::new(document_write::WriteState::new(
+                node.clone(),
+                None,
+                true,
+            ))),
+        );
         if is_main_document {
             // The emptied main document has no insertion point; a following
             // write() appends into the now-childless document node.
@@ -14207,61 +14256,13 @@ fn submit_form_native(
     })
 }
 
-/// Backs `document.write` / `document.writeln`.
-///
-/// The written text is parsed one of two ways depending on the target
-/// document's state:
-///
-/// - **Complete document** — when the target document has no `documentElement`
-///   (a root `<html>`), as is the case immediately after `document.open()`
-///   emptied it. The text is parsed as a whole document with
-///   [`crate::html::TreeBuilder::parse`], and the parsed document's children
-///   (a `<!DOCTYPE>` plus the implicit `<html>`/`<head>`/`<body>` structure)
-///   are appended to the target document. This reproduces the doctype and the
-///   head/body split that Acid3 test 71 checks.
-/// - **Fragment** — while a `documentElement` already exists (a normal
-///   mid-parse write). The text is tokenized as an HTML fragment (in `<body>`
-///   context) and its nodes are spliced into the live tree at the current
-///   insertion point, preserving the streaming behaviour below.
-///
-/// For the fragment case:
-///
-/// - While a `<script>` is executing (see
-///   [`HostState::write_insertion_ref`]), the fragment is inserted as the
-///   script's following siblings, and the reference advances so subsequent
-///   writes stay in document order — mirroring a streaming parser resuming at
-///   the tokenizer insertion point.
-/// - Outside of script execution (e.g. from a timer), the fragment is appended
-///   to `<body>` rather than triggering the destructive `document.open()`
-///   reset, which no supported page relies on.
-///
-/// Newly inserted nodes are registered so they are reachable by id from JS.
-/// Returns an array of the ids of the *inline classic* `<script>` elements in
-/// the written fragment, in document order, so the JS wrapper can execute them
-/// synchronously (classic `document.write('<script>...')` behaviour). External
-/// (`src`) and `type="module"` scripts are inserted into the tree but not
-/// returned, because the JS wrapper only eval()s an element's text content:
-/// that text is empty for `src` scripts and must not run synchronously as a
-/// classic script for modules. See [`is_inline_classic_script`].
-///
-/// Known limitations (tracked as follow-ups, out of scope for 016-7):
-/// - When a single write fragment mixes a `<script>` with following nodes, the
-///   spec's streaming insertion point would run the script *before* parsing the
-///   later nodes. Here every node is spliced in first and the scripts run
-///   afterward, so the script sees siblings that a streaming parser would not
-///   yet have created, and a nested `document.write` from that script inserts
-///   after those later nodes rather than immediately after the script.
-/// - There is no recursion-depth guard: a written script that itself writes a
-///   script (and so on) recurses through the JS wrapper unbounded and can
-///   overflow the stack. No supported page does this today.
+/// Incrementally parses written input, executing each completed classic
+/// script before the following tokens become visible to page code.
 fn document_write_native(
     _: &JsValue,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    // `document.write` passes the target document's node id first, so a write to
-    // an iframe sub-document (`iframe.contentDocument.write(...)`) is routed to
-    // that sub-document rather than the top-level document.
     let target_id = parse_node_id(args.first(), context)?;
     let text = args
         .get(1)
@@ -14269,169 +14270,16 @@ fn document_write_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    with_host_state(|state| document_write::write(state, target_id, &text, false, context))
+}
 
-    with_host_state(|state| {
-        // The document being written to. `document.write` passes its id; an
-        // unresolved id falls back to the top-level document.
-        let (target_doc, is_main) = {
-            let s = state.borrow();
-            let target_doc = s.get_node(target_id).unwrap_or_else(|| s.document.clone());
-            let is_main = target_doc == s.document;
-            (target_doc, is_main)
-        };
-        // A `documentElement` (root `<html>`) exists unless `document.open()`
-        // just emptied the document. Its absence selects the complete-document
-        // parse; its presence keeps the fragment/insertion-point behaviour.
-        let has_document_element = target_doc
-            .child_nodes()
-            .iter()
-            .any(|n| n.tag_name().as_deref() == Some("html"));
-
-        // Parse the written text and decide where its nodes are spliced in.
-        // `parent == None` means there is nothing to insert (empty write).
-        let (parsed_children, parent, reference_child): (
-            Vec<NodeHandle>,
-            Option<NodeHandle>,
-            Option<NodeHandle>,
-        ) = if text.is_empty() {
-            (Vec::new(), None, None)
-        } else if !has_document_element {
-            // Complete-document parse into the emptied document: append the
-            // parsed throwaway document's children ([doctype, html]) to the
-            // target document itself, reproducing the implicit
-            // html/head/body structure a streaming parser would build.
-            let parsed = crate::html::TreeBuilder::parse(&text).document();
-            (parsed.child_nodes(), Some(target_doc.clone()), None)
-        } else {
-            // Fragment parse spliced at the insertion point. Parsing per-call
-            // matches the innerHTML path; a single write() call must contain
-            // balanced-enough markup (Acid3 writes its whole fragment in one
-            // call), which is the common case.
-            let parsed =
-                crate::html::TreeBuilder::parse(&format!("<body>{text}</body>")).document();
-            let children = parsed
-                .query_selector("body")
-                .map(|body| body.child_nodes())
-                .unwrap_or_default();
-            // Fallback target when there is no active insertion point: the
-            // target document's <body>, or the document node itself.
-            let fallback_parent = || {
-                target_doc
-                    .query_selector("body")
-                    .unwrap_or_else(|| target_doc.clone())
-            };
-            let (parent, reference_child) = if is_main {
-                let s = state.borrow();
-                match s.write_insertion_ref.clone() {
-                    // Active insertion point: insert right after the reference
-                    // node (i.e. before the reference node's next sibling).
-                    Some(anchor) => match anchor.parent_node() {
-                        Some(parent) => {
-                            let siblings = parent.child_nodes();
-                            let next = siblings
-                                .iter()
-                                .position(|n| n == &anchor)
-                                .and_then(|i| siblings.get(i + 1).cloned());
-                            (Some(parent), next)
-                        }
-                        // The anchor was detached from the tree; fall back.
-                        None => (Some(fallback_parent()), None),
-                    },
-                    // No script running: append to the fallback parent.
-                    None => (Some(fallback_parent()), None),
-                }
-            } else {
-                // Sub-browsing-context documents have no per-frame parser
-                // insertion point here; append the written fragment to the
-                // sub-document's <body>. The main document's insertion point is
-                // left untouched.
-                (Some(fallback_parent()), None)
-            };
-            (children, parent, reference_child)
-        };
-
-        let Some(parent) = parent else {
-            // No insertion target (empty write); nothing to do.
-            return Ok(JsValue::from(
-                boa_engine::object::builtins::JsArray::from_iter(Vec::<JsValue>::new(), context),
-            ));
-        };
-
-        // Splice the parsed nodes in, preserving order. `insert_or_append`
-        // lands each child in the tree even if `insert_before` fails on a stale
-        // reference — but only as long as the insertion would not create a cycle
-        // (see its docs). For `document.write` that proviso always holds:
-        // `parsed_children` is a freshly parsed fragment, so its nodes cannot be
-        // ancestors of `parent` and no cycle can form. Every child therefore
-        // lands in the tree, keeping the register/advance steps below consistent.
-        let mut last_inserted: Option<NodeHandle> = None;
-        for child in &parsed_children {
-            insert_or_append(&parent, child, reference_child.as_ref());
-            last_inserted = Some(child.clone());
-        }
-
-        // Register the freshly inserted subtree and advance the insertion point.
-        {
-            let mut s = state.borrow_mut();
-            for child in &parsed_children {
-                s.register_tree(child);
-                s.schedule_connected_resource_loads(child, true);
-            }
-            // `document.write` splices new nodes into the live tree, so the
-            // written document's cached resolver is now stale. Invalidate only
-            // that document (`target_doc`) so a write into an iframe sub-document
-            // does not pollute the main document's resolver and vice versa. A
-            // following `getComputedStyle` then re-collects the written `<style>`
-            // / element instead of returning pre-write results.
-            if !parsed_children.is_empty() {
-                s.mark_document_style_dirty(&target_doc);
-            }
-            // Only the top-level document's parser insertion point advances; a
-            // sub-document write must never repoint the main document's anchor
-            // at one of the sub-document's nodes.
-            if is_main
-                && let Some(last) = last_inserted
-                && s.write_insertion_ref.is_some()
-            {
-                s.write_insertion_ref = Some(last);
-            }
-        }
-
-        // Collect the inline classic <script> descendants in document order for
-        // the JS wrapper to execute. External (`src`) and module scripts are
-        // left in the tree but not returned (see `is_inline_classic_script`).
-        let mut script_nodes = Vec::new();
-        for child in &parsed_children {
-            collect_script_elements_recursive(child, &mut script_nodes);
-        }
-        let mut script_ids = Vec::new();
-        for script in script_nodes.iter().filter(|n| is_inline_classic_script(n)) {
-            let (sandbox_allowed, csp_allowed) = {
-                let state = state.borrow();
-                (
-                    state.sandbox_allows_scripts_for_node(script),
-                    state
-                        .csp_policy_for_node(script)
-                        .allows_inline(ResourceType::Script),
-                )
-            };
-            if !sandbox_allowed {
-                continue;
-            }
-            if csp_allowed {
-                script_ids.push(JsValue::from(script.identity() as f64));
-            } else {
-                state.borrow_mut().record_csp_violation_for_node(
-                    script,
-                    ResourceType::Script,
-                    "inline",
-                );
-            }
-        }
-        Ok(JsValue::from(
-            boa_engine::object::builtins::JsArray::from_iter(script_ids, context),
-        ))
-    })
+fn document_close_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let target_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| document_write::write(state, target_id, "", true, context))
 }
 
 /// `__omoikane_iframe_content_document(iframeId)` — returns the node id of the
@@ -37634,41 +37482,22 @@ b</textarea></form>"#);
         );
     }
 
-    /// `insert_or_append` must append the child when `insert_before` cannot
-    /// place it (here the reference node is not a child of the parent), so the
-    /// node still lands in the tree instead of being silently dropped.
+    /// Removing the parser's reference while a written script executes must
+    /// leave subsequent output parented at the end of the insertion parent.
     #[test]
-    fn insert_or_append_falls_back_when_reference_not_a_child() {
-        let parent = NodeHandle::element("div");
-        let existing = NodeHandle::element("span");
-        parent.append_child(existing.clone());
-
-        // A reference node that is NOT a child of `parent` makes insert_before
-        // fail with ReferenceChildNotFound.
-        let detached_reference = NodeHandle::element("p");
-        let child = NodeHandle::element("b");
-        insert_or_append(&parent, &child, Some(&detached_reference));
-
-        // The child was appended (fallback), landing at the end of the parent.
-        let tags: Vec<String> = parent
-            .child_nodes()
-            .iter()
-            .filter_map(|n| n.tag_name())
-            .collect();
-        assert_eq!(
-            tags,
-            vec!["span".to_string(), "b".to_string()],
-            "fallback must append the child so it stays in the tree"
-        );
-        assert_eq!(
-            child.parent_node(),
-            Some(parent),
-            "the appended child must actually be parented"
-        );
+    fn document_write_falls_back_when_reference_is_removed() {
+        let doc = crate::html::TreeBuilder::parse(r#"<body><script>
+            document.write('<script>document.getElementById("tail").remove(); document.write("<b id=written>kept</b>");<\/script>');
+            </script><p id=tail>tail</p>"#).document();
+        let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
+        assert!(runtime.execute_document_scripts(None).is_empty());
+        let body = doc.query_selector("body").unwrap();
+        let written = doc.query_selector("#written").unwrap();
+        assert_eq!(written.parent_node(), Some(body.clone()));
+        assert_eq!(body.child_nodes().last(), Some(&written));
     }
 
-    /// `is_inline_classic_script` gates which written `<script>`s run: inline
-    /// classic scripts do, but external (`src`) and module scripts do not.
+    /// The inline-classic gate excludes external, module, and data scripts.
     #[test]
     fn is_inline_classic_script_classifies_scripts() {
         // Inline classic: no src, no/empty/JS type.
@@ -37742,11 +37571,10 @@ b</textarea></form>"#);
         );
     }
 
-    /// A written external (`src`) `<script>` is inserted into the DOM but is
-    /// NOT executed — its inline text is ignored per the HTML spec, and only
-    /// inline classic scripts run synchronously via document.write.
+    /// A written external script ignores its inline fallback text even when
+    /// the external source cannot be fetched.
     #[test]
-    fn document_write_external_script_present_but_not_executed() {
+    fn document_write_external_script_ignores_inline_fallback() {
         use crate::html::TreeBuilder;
         // The inline text would set a global *if* it were (wrongly) executed.
         let html = r#"<html><body>
@@ -37779,7 +37607,7 @@ b</textarea></form>"#);
         assert_eq!(
             ran.as_deref(),
             Some("undefined"),
-            "an external (src) script must not run via document.write"
+            "an external script must not execute its inline fallback text"
         );
     }
 
@@ -37789,7 +37617,7 @@ b</textarea></form>"#);
     fn document_write_module_script_not_executed_as_classic() {
         use crate::html::TreeBuilder;
         let html = r#"<html><body>
-            <script>document.write('<script type="module" id="mod">globalThis.__mod_ran = true;<\/script>');</script>
+            <script>document.write('<script type="module" id="mod">export const moduleValue = 42; globalThis.__mod_ran = moduleValue;<\/script>'); globalThis.__before_module = typeof globalThis.__mod_ran;</script>
         </body></html>"#;
         let doc = TreeBuilder::parse(html).document();
         let mut runtime = JsRuntime::with_document(doc.clone()).unwrap();
@@ -37801,16 +37629,20 @@ b</textarea></form>"#);
             .expect("written module script must exist in the DOM");
         assert_eq!(module.tag_name().as_deref(), Some("script"));
 
-        let ran = runtime
-            .eval("typeof globalThis.__mod_ran")
-            .unwrap()
-            .as_string()
-            .map(|s| s.to_std_string_escaped());
         assert_eq!(
-            ran.as_deref(),
-            Some("undefined"),
-            "a module script must not run synchronously as a classic script"
+            runtime
+                .eval("globalThis.__before_module")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "undefined"
         );
+        assert_eq!(
+            runtime.eval("globalThis.__mod_ran").unwrap().as_number(),
+            Some(42.0)
+        );
+        assert!(runtime.take_task_errors().is_empty());
     }
 
     /// A `type="text/ecmascript"` script must be treated identically whether it

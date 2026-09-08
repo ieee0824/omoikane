@@ -8,5 +8,6 @@ mod tokenizer;
 mod tree_builder;
 
 pub(crate) use encoding::decode_html_response;
+pub(crate) use tree_builder::WriteParser;
 pub use tokenizer::{Attribute, DoctypeToken, HtmlParseError, Token, Tokenizer};
 pub use tree_builder::{InsertionMode, ParseResult, TreeBuilder};

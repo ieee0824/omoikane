@@ -59,6 +59,82 @@ impl TreeBuilder {
     }
 }
 
+/// Parser state for one document.write input stream. The same live nodes stay
+/// on the open-element stack across writes and script execution.
+#[derive(Debug)]
+pub(crate) struct WriteParser {
+    tokenizer: super::tokenizer::IncrementalTokenizer,
+    builder: Builder,
+}
+
+impl WriteParser {
+    pub(crate) fn new(document: NodeHandle, anchor: Option<NodeHandle>) -> Self {
+        let mut builder = Builder::new();
+        builder.document = document.clone();
+        builder.created_nodes = Some(std::cell::RefCell::new(Vec::new()));
+        if let Some(html) = document
+            .child_nodes()
+            .into_iter()
+            .find(|node| node.tag_name().as_deref() == Some("html"))
+        {
+            let parent = anchor
+                .as_ref()
+                .and_then(NodeHandle::parent_node)
+                .or_else(|| document.query_selector("body"))
+                .unwrap_or_else(|| html.clone());
+            let reference = anchor.as_ref().and_then(|anchor| {
+                let siblings = parent.child_nodes();
+                siblings
+                    .iter()
+                    .position(|node| node == anchor)
+                    .and_then(|index| siblings.get(index + 1).cloned())
+            });
+            let mut ancestors = Vec::new();
+            let mut current = Some(parent.clone());
+            while let Some(node) = current {
+                if node == document {
+                    break;
+                }
+                current = node.parent_node();
+                ancestors.push(node);
+            }
+            ancestors.reverse();
+            builder.open_elements = ancestors;
+            builder.reset_insertion_mode();
+            builder.write_boundary = Some((parent, reference));
+        }
+        Self {
+            tokenizer: super::tokenizer::IncrementalTokenizer::new(),
+            builder,
+        }
+    }
+
+    pub(crate) fn push_input(&mut self, input: &str) {
+        self.tokenizer.push_input(input);
+    }
+
+    pub(crate) fn take_pending_input(&mut self) -> String {
+        self.tokenizer.take_pending_input()
+    }
+
+    pub(crate) fn take_created_nodes(&mut self) -> Vec<NodeHandle> {
+        std::mem::take(self.builder.created_nodes.as_mut().unwrap().get_mut())
+    }
+
+    /// Parse through the next script end tag, leaving later input untouched.
+    pub(crate) fn advance(&mut self, eof: bool) -> Option<NodeHandle> {
+        let (tokens, mut errors) = self.tokenizer.drain(eof, true);
+        let mut script = None;
+        for token in tokens {
+            if matches!(&token, Token::EndTag { name } if name == "script") {
+                script = self.builder.find_open_element("script");
+            }
+            self.builder.process_token(token, &mut errors);
+        }
+        script
+    }
+}
+
 #[derive(Debug)]
 struct Builder {
     document: NodeHandle,
@@ -66,6 +142,8 @@ struct Builder {
     active_formatting_elements: Vec<NodeHandle>,
     template_insertion_modes: Vec<InsertionMode>,
     mode: InsertionMode,
+    write_boundary: Option<(NodeHandle, Option<NodeHandle>)>,
+    created_nodes: Option<std::cell::RefCell<Vec<NodeHandle>>>,
 }
 
 impl Builder {
@@ -76,6 +154,8 @@ impl Builder {
             active_formatting_elements: Vec::new(),
             template_insertion_modes: Vec::new(),
             mode: InsertionMode::Initial,
+            write_boundary: None,
+            created_nodes: None,
         }
     }
 
@@ -103,14 +183,17 @@ impl Builder {
 
     fn handle_initial(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
-            Token::Comment(data) => self.document.append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::Doctype(doctype) => {
                 if let Some(name) = doctype.name() {
-                    self.document.append_child(NodeHandle::document_type(
-                        name,
-                        doctype.public_id().unwrap_or(""),
-                        doctype.system_id().unwrap_or(""),
-                    ));
+                    self.append_node(
+                        &self.document,
+                        NodeHandle::document_type(
+                            name,
+                            doctype.public_id().unwrap_or(""),
+                            doctype.system_id().unwrap_or(""),
+                        ),
+                    );
                 }
             }
             Token::Character(data) if data.trim().is_empty() => {}
@@ -128,7 +211,7 @@ impl Builder {
 
     fn handle_before_html(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
-            Token::Comment(data) => self.document.append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::Character(data) if data.trim().is_empty() => {}
             Token::StartTag {
                 name, attributes, ..
@@ -153,7 +236,9 @@ impl Builder {
     fn handle_before_head(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::Character(data) if data.trim().is_empty() => {}
-            Token::Comment(data) => self.insertion_parent().append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => {
+                self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
+            }
             Token::StartTag { name, .. } if name == "head" => {
                 let head = self.insert_element("head");
                 self.open_elements.push(head);
@@ -176,7 +261,9 @@ impl Builder {
             Token::Character(data) => {
                 self.insert_text(&data);
             }
-            Token::Comment(data) => self.insertion_parent().append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => {
+                self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
+            }
             Token::Doctype(_) => {}
             Token::StartTag {
                 name,
@@ -232,7 +319,9 @@ impl Builder {
                     self.insert_text(&data);
                 }
             }
-            Token::Comment(data) => self.insertion_parent().append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => {
+                self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
+            }
             Token::Doctype(_) => {}
             Token::StartTag {
                 name,
@@ -344,7 +433,9 @@ impl Builder {
         match token {
             Token::Character(data) if data.trim().is_empty() => self.insert_text(&data),
             Token::Character(data) => self.foster_parent_text(&data),
-            Token::Comment(data) => self.insertion_parent().append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => {
+                self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
+            }
             Token::StartTag {
                 name,
                 attributes,
@@ -561,7 +652,7 @@ impl Builder {
     fn handle_after_body(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::Character(data) if data.trim().is_empty() => {}
-            Token::Comment(data) => self.document.append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::EndTag { name } if name == "html" => {
                 self.pop_matching("html");
                 self.mode = InsertionMode::AfterAfterBody;
@@ -576,7 +667,7 @@ impl Builder {
 
     fn handle_after_after_body(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
-            Token::Comment(data) => self.document.append_child(NodeHandle::comment(data)),
+            Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::Character(data) if data.trim().is_empty() => {}
             Token::Eof => {}
             other => {
@@ -682,7 +773,7 @@ impl Builder {
         for attribute in attributes {
             node.set_attribute(attribute.name(), attribute.value());
         }
-        self.document.append_child(node.clone());
+        self.append_node(&self.document, node.clone());
         node
     }
 
@@ -713,7 +804,7 @@ impl Builder {
         for attribute in attributes {
             element.set_attribute(attribute.name(), attribute.value());
         }
-        parent.append_child(element.clone());
+        self.append_node(parent, element.clone());
         element
     }
 
@@ -726,18 +817,54 @@ impl Builder {
         }
     }
 
+    fn append_node(&self, parent: &NodeHandle, child: NodeHandle) {
+        if let Some(created) = &self.created_nodes {
+            created.borrow_mut().push(child.clone());
+        }
+        if let Some((boundary, Some(reference))) = &self.write_boundary
+            && boundary == parent
+            && reference.parent_node().as_ref() == Some(parent)
+        {
+            let _ = parent.insert_before(child, reference);
+        } else {
+            parent.append_child(child);
+        }
+    }
+
     fn insert_text(&mut self, text: &str) {
         let parent = self.current_node_or_document();
-        parent.append_child(NodeHandle::text(text));
+        // Writes can split a character run at arbitrary input boundaries.
+        // Keep the live Text node when more characters arrive at the same point.
+        if self.created_nodes.is_some() {
+            let children = parent.child_nodes();
+            let index = self
+                .write_boundary
+                .as_ref()
+                .filter(|(boundary, _)| boundary == &parent)
+                .and_then(|(_, reference)| reference.as_ref())
+                .and_then(|reference| children.iter().position(|node| node == reference))
+                .unwrap_or(children.len());
+            if let Some(previous) = index.checked_sub(1).and_then(|index| children.get(index))
+                && previous.node_type() == crate::dom::NodeType::Text
+            {
+                previous.set_data(&(previous.data().unwrap_or_default() + text));
+                return;
+            }
+        }
+        self.append_node(&parent, NodeHandle::text(text));
     }
 
     fn foster_parent_text(&mut self, text: &str) {
         if let Some(table) = self.current_table()
-            && let Some(parent) = table.parent_node() {
-                let text_node = NodeHandle::text(text);
-                let _ = parent.insert_before(text_node.clone(), &table);
-                return;
+            && let Some(parent) = table.parent_node()
+        {
+            let text_node = NodeHandle::text(text);
+            if let Some(created) = &self.created_nodes {
+                created.borrow_mut().push(text_node.clone());
             }
+            let _ = parent.insert_before(text_node.clone(), &table);
+            return;
+        }
 
         self.insert_text(text);
     }
