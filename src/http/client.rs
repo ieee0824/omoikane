@@ -5,6 +5,7 @@ use super::cookie::CookieJar;
 use super::request::{HttpRequest, Method, default_user_agent};
 use super::response::{HttpParseError, HttpResponse};
 use super::url::Url;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// Maximum number of redirects to follow before aborting.
@@ -105,7 +106,25 @@ impl Client {
     /// headers in the response are stored in the jar. Redirects (301, 302,
     /// 303, 307, 308) are followed automatically up to
     /// [`Client::set_max_redirects`].
-    pub fn send(&mut self, mut request: HttpRequest) -> Result<HttpResponse, HttpParseError> {
+    pub fn send(&mut self, request: HttpRequest) -> Result<HttpResponse, HttpParseError> {
+        self.send_with_cookie_store(request, None)
+    }
+
+    /// Shares cookies between parallel clients while each client retains its
+    /// own reusable connections. No cookie lock is held during network I/O.
+    pub(crate) fn send_with_shared_cookies(
+        &mut self,
+        request: HttpRequest,
+        cookies: &Mutex<CookieJar>,
+    ) -> Result<HttpResponse, HttpParseError> {
+        self.send_with_cookie_store(request, Some(cookies))
+    }
+
+    fn send_with_cookie_store(
+        &mut self,
+        mut request: HttpRequest,
+        shared_cookies: Option<&Mutex<CookieJar>>,
+    ) -> Result<HttpResponse, HttpParseError> {
         let mut redirects_remaining = self.max_redirects;
         let built_in_user_agent = default_user_agent();
 
@@ -118,17 +137,25 @@ impl Client {
             }
 
             // Attach cookies
-            if let Some(cookie_header) = self.cookie_jar.cookie_header(request.url()) {
+            let cookie_header = match shared_cookies {
+                Some(cookies) => cookies.lock().unwrap().cookie_header(request.url()),
+                None => self.cookie_jar.cookie_header(request.url()),
+            };
+            if let Some(cookie_header) = cookie_header {
                 request.add_header("Cookie", cookie_header);
             }
 
             let mut response = self.connections.send(&request, self.insecure)?;
 
             // Store Set-Cookie headers
-            let origin = request.url().clone();
-            for (name, value) in response.headers() {
-                if name.eq_ignore_ascii_case("set-cookie") {
-                    self.cookie_jar.add_from_header_for_url(value, &origin);
+            {
+                let origin = request.url().clone();
+                let mut shared = shared_cookies.map(|cookies| cookies.lock().unwrap());
+                let cookies = shared.as_deref_mut().unwrap_or(&mut self.cookie_jar);
+                for (name, value) in response.headers() {
+                    if name.eq_ignore_ascii_case("set-cookie") {
+                        cookies.add_from_header_for_url(value, &origin);
+                    }
                 }
             }
 

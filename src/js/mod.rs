@@ -41,6 +41,11 @@ use crate::http::cors::{
 };
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
+mod module_fetch;
+#[cfg(test)]
+mod module_loading_tests;
+use module_fetch::{ModuleFetch, ModuleFetchPool};
+
 mod storage;
 mod event_loop;
 mod csp;
@@ -319,13 +324,18 @@ impl HostHooks for BrowserHostHooks {
     }
 }
 
+#[derive(Debug, Clone, Trace, Finalize, boa_engine::JsData)]
+struct ModuleDocumentId(usize);
+
 #[derive(Debug, Default)]
 struct HttpModuleLoader {
     /// Module records are scoped to the owning Document.  Boa can reuse a
     /// loader while iframe Documents execute in the same JS runtime, and a
     /// URL alone is not enough to identify the CSP context for an import.
     modules: RefCell<HashMap<(usize, String), Module>>,
-    client: RefCell<Client>,
+    fetch_pool: RefCell<Option<ModuleFetchPool>>,
+    pending: RefCell<HashMap<(usize, String), ModuleFetch>>,
+    owner: Weak<RefCell<HostState>>,
     /// CSP context propagated from a module graph's root URL to every module
     /// it imports.  The same runtime can host iframe Documents with different
     /// policies, so a single global policy would be incorrect for nested
@@ -342,7 +352,22 @@ impl ModuleLoader for HttpModuleLoader {
         specifier: JsString,
         context: &AsyncContext<'_>,
     ) -> impl Future<Output = JsResult<Module>> {
-        let result = (|| {
+        async move {
+            let realm = match &referrer {
+                Referrer::Module(module) => module.realm(),
+                Referrer::Script(script) => script.realm().clone(),
+                Referrer::Realm(realm) => realm.clone(),
+            };
+            // A fetch can yield while jobs from another iframe run. Keep the
+            // owning Document on its Realm instead of consulting thread-local
+            // execution state after a suspension.
+            let module_document_id = realm
+                .host_defined()
+                .get::<ModuleDocumentId>()
+                .map(|document| document.0)
+                .or_else(active_document_id)
+                .unwrap_or(0);
+            self.ensure_document_is_live(module_document_id)?;
             let specifier = specifier.to_std_string_escaped();
             let referrer_url = referrer
                 .path()
@@ -363,18 +388,20 @@ impl ModuleLoader for HttpModuleLoader {
             };
             let resolved_string = resolved.to_string();
 
-            let active_document_id = active_document_id();
-            let csp_context = referrer_url.as_ref().and_then(|url| {
-                let document_id = active_document_id?;
-                self.csp_contexts
-                    .borrow()
-                    .get(&(document_id, url.to_string()))
-                    .cloned()
-                    .map(|policy| (document_id, policy))
-            });
-            let module_document_id = active_document_id
-                .or_else(|| csp_context.as_ref().map(|(document_id, _)| *document_id))
-                .unwrap_or(0);
+            let csp_context = referrer
+                .path()
+                .and_then(|path| path.to_str())
+                .and_then(|path| {
+                    let document_id = module_document_id;
+                    // Inline roots include a fragment identifying their script.
+                    // HTTP URL normalization strips it; policy lookup must retain
+                    // the exact module path registered for that root.
+                    self.csp_contexts
+                        .borrow()
+                        .get(&(document_id, path.to_owned()))
+                        .cloned()
+                        .map(|policy| (document_id, policy))
+                });
 
             if let Some((document_id, policy)) = csp_context.as_ref()
                 && !policy.allows_url(ResourceType::Script, &resolved)
@@ -402,13 +429,42 @@ impl ModuleLoader for HttpModuleLoader {
             }
 
             let public_only = requires_public_fetch(&resolved, referrer_url.as_ref());
-            let fetch_start = std::time::Instant::now();
-            let response = if public_only {
-                self.client.borrow_mut().get_public(&resolved_string)
-            } else {
-                self.client.borrow_mut().get(&resolved_string)
+            let key = (module_document_id, resolved_string.clone());
+            let wait_start = Instant::now();
+            let fetch = {
+                let mut pending = self.pending.borrow_mut();
+                if let Some(fetch) = pending.get(&key) {
+                    fetch.clone()
+                } else {
+                    let mut pool = self.fetch_pool.borrow_mut();
+                    if pool.is_none() {
+                        *pool = Some(ModuleFetchPool::new().map_err(|error| {
+                            JsNativeError::typ().with_message(error.to_string())
+                        })?);
+                    }
+                    let fetch = pool
+                        .as_ref()
+                        .unwrap()
+                        .fetch(resolved_string.clone(), public_only);
+                    pending.insert(key.clone(), fetch.clone());
+                    fetch
+                }
+            };
+            let result = fetch.clone().await;
+            // A retry may already have replaced a failed request while another
+            // waiter was suspended. Only remove this particular download.
+            let mut pending = self.pending.borrow_mut();
+            if pending
+                .get(&key)
+                .is_some_and(|current| current.same_request(&fetch))
+            {
+                pending.remove(&key);
             }
-            .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+            drop(pending);
+            self.ensure_document_is_live(module_document_id)?;
+            let fetched =
+                result.map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+            let response = &fetched.response;
             if response.status_code() != 200 {
                 return Err(JsNativeError::typ()
                     .with_message(format!(
@@ -427,21 +483,27 @@ impl ModuleLoader for HttpModuleLoader {
                     .with_message(format!("CSP blocked module redirect: {blocked_uri}"))
                     .into());
             }
-            let fetch_elapsed = fetch_start.elapsed();
+            // Other waiters may already have parsed this shared response.
+            if let Some(module) = self.modules.borrow().get(&key) {
+                return Ok(module.clone());
+            }
+            let fetch_elapsed = fetched.elapsed;
+            let wait_elapsed = wait_start.elapsed();
             let source_bytes = response.body().len();
             let source = String::from_utf8_lossy(response.body());
             let parse_start = std::time::Instant::now();
             let module = Module::parse(
                 Source::from_reader(source.as_bytes(), Some(Path::new(&resolved_string))),
-                None,
+                Some(realm),
                 &mut context.borrow_mut(),
             )?;
             let parse_elapsed = parse_start.elapsed();
             if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
                 eprintln!(
-                    "[omoikane][module] loaded {resolved_string} bytes={source_bytes} fetch_ms={:.3} parse_ms={:.3}",
+                    "[omoikane][module] loaded {resolved_string} bytes={source_bytes} fetch_ms={:.3} parse_ms={:.3} wait_ms={:.3}",
                     fetch_elapsed.as_secs_f64() * 1_000.0,
                     parse_elapsed.as_secs_f64() * 1_000.0,
+                    wait_elapsed.as_secs_f64() * 1_000.0,
                 );
             }
             if let Some((document_id, policy)) = csp_context {
@@ -453,8 +515,7 @@ impl ModuleLoader for HttpModuleLoader {
                 .borrow_mut()
                 .insert((module_document_id, resolved_string), module.clone());
             Ok(module)
-        })();
-        async { result }
+        }
     }
 
     fn init_import_meta(
@@ -470,6 +531,24 @@ impl ModuleLoader for HttpModuleLoader {
 }
 
 impl HttpModuleLoader {
+    fn ensure_document_is_live(&self, document_id: usize) -> JsResult<()> {
+        let live = self.owner.upgrade().is_some_and(|owner| {
+            let state = owner.borrow();
+            state.document.identity() == document_id
+                || state
+                    .iframe_documents
+                    .values()
+                    .any(|entry| entry.document.identity() == document_id)
+        });
+        if live {
+            Ok(())
+        } else {
+            Err(JsNativeError::reference()
+                .with_message("module document is no longer live")
+                .into())
+        }
+    }
+
     fn set_csp_policy_for_module_graph(
         &self,
         document_id: usize,
@@ -482,6 +561,14 @@ impl HttpModuleLoader {
     }
 
     fn clear_csp_context_for_document(&self, document_id: usize) {
+        self.pending.borrow_mut().retain(|(owner_id, _), fetch| {
+            if *owner_id == document_id {
+                fetch.cancel();
+                false
+            } else {
+                true
+            }
+        });
         self.csp_contexts
             .borrow_mut()
             .retain(|(context_document_id, _), _| *context_document_id != document_id);
@@ -2905,12 +2992,19 @@ impl JsRuntime {
             storage_manager,
             storage_session_id,
         )));
-        let module_loader = Rc::new(HttpModuleLoader::default());
+        let module_loader = Rc::new(HttpModuleLoader {
+            owner: Rc::downgrade(&host_state),
+            ..HttpModuleLoader::default()
+        });
         host_state.borrow_mut().module_loader = Some(Rc::downgrade(&module_loader));
         let context = Context::builder()
             .module_loader(module_loader.clone())
             .host_hooks(Rc::new(BrowserHostHooks))
             .build()?;
+        context
+            .realm()
+            .host_defined_mut()
+            .insert(ModuleDocumentId(document.identity()));
 
         let host_roots_provider = unsafe {
             RootProvider::register(std::ptr::NonNull::from(&*host_state.borrow()))
@@ -7115,6 +7209,9 @@ fn ensure_iframe_realm(
             top_global.clone()
         };
     let realm = context.create_realm()?;
+    realm
+        .host_defined_mut()
+        .insert(ModuleDocumentId(document_id));
     let old_realm = context.enter_realm(realm.clone());
     let previous_resolver = host_state.borrow().canonical_node_identity_resolver.clone();
     let setup = (|| {
