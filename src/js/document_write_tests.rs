@@ -285,10 +285,11 @@ fn document_write_open_and_close_are_scoped_to_the_executing_document() {
     )
     .unwrap();
     runtime.eval(r#"
-        globalThis.child = document.querySelector('iframe').contentDocument;
+        globalThis.childWindow = document.querySelector('iframe').contentWindow;
+        globalThis.child = childWindow.document;
         document.write('<script>document.open(); child.open(); child.write("<body><b id=written>x</b>"); child.close(); document.write("<b id=kept>y</b>"); document.close();<\/script><i id=tail>tail</i>');
     "#).unwrap();
-    assert_eq!(runtime.eval("!!document.querySelector('iframe') && document.getElementById('kept').nextSibling.id === 'tail' && child.getElementById('written').textContent === 'x'").unwrap().as_boolean(), Some(true));
+    assert_eq!(runtime.eval("childWindow === child.defaultView && !childWindow.closed && childWindow.document === child && !!document.querySelector('iframe') && document.getElementById('kept').nextSibling.id === 'tail' && child.getElementById('written').textContent === 'x'").unwrap().as_boolean(), Some(true));
 }
 
 #[test]

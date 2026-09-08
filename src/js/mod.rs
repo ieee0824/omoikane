@@ -14067,7 +14067,7 @@ fn document_reset_native(
             .get(&id)
             .is_some_and(|parser| parser.borrow().is_executing())
         {
-            return Ok(JsValue::undefined());
+            return Ok(JsValue::from(false));
         }
         let removed_children = node.child_nodes();
         let removed_any = !removed_children.is_empty();

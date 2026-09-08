@@ -4939,7 +4939,7 @@
     // the currently executing parser's document leaves its stream intact.
     open() {
       const removedNodes = this.childNodes.slice();
-      __omoikane_document_reset(this.__id);
+      if (__omoikane_document_reset(this.__id) === false) return this;
       for (const child of removedNodes) retireIframeWindowProxies(child);
       forgetDiscardedNodeWrappers();
       return this;
