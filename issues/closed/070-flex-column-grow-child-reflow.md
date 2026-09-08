@@ -2,7 +2,10 @@
 number: 070
 slug: flex-column-grow-child-reflow
 parent:
-status: open
+status: closed
+closed_reason: migrated
+github_issue: https://github.com/ieee0824/omoikane/issues/621
+closed_at: 2026-09-08
 ---
 
 # flex column の flex-grow 分配後に子を再レイアウトする
@@ -45,3 +48,7 @@ containing rect の height として子に渡しているため、子自身が�
 - column flex コンテナで `flex-grow: 1` のアイテム内の `height: 100%` の子孫が、
   分配後の高さいっぱいに広がる（テストで期待値を明示する）
 - 既存の flex テスト（min-height 分配含む）が通り続ける
+
+## GitHubへの移行（2026-09-08）
+
+このローカル記録は [GitHub Issue #621](https://github.com/ieee0824/omoikane/issues/621) への移行により閉じました。課題の進捗・議論・完了判定は移行先で管理します。

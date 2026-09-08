@@ -1,8 +1,11 @@
 ---
 number: 086
 slug: optimize-es-module-graph-loading
-status: open
+status: closed
 priority: high
+closed_reason: migrated
+github_issue: https://github.com/ieee0824/omoikane/issues/622
+closed_at: 2026-09-08
 ---
 
 # ES module graphの取得・parseを高速化する
@@ -61,3 +64,7 @@ TLS session再利用だけでは各moduleのTCP接続と逐次待機が残った
 - 接続pool後: `render=41.7s`、`document-scripts=12.4s`
 
 表示結果はログインフォーム、Xロゴ、QRコードを含めて維持された。残る最大フェーズは約26.9秒のtimer実行。
+
+## GitHubへの移行（2026-09-08）
+
+このローカル記録は [GitHub Issue #622](https://github.com/ieee0824/omoikane/issues/622) への移行により閉じました。課題の進捗・議論・完了判定は移行先で管理します。

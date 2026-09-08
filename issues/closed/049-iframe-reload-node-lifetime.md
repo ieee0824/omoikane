@@ -2,7 +2,10 @@
 number: 049
 slug: iframe-reload-node-lifetime
 parent:
-status: open
+status: closed
+closed_reason: migrated
+github_issue: https://github.com/ieee0824/omoikane/issues/620
+closed_at: 2026-09-08
 ---
 
 # iframe 再ロード時の旧サブ文書ノードの寿命管理
@@ -61,3 +64,7 @@ JS ラッパの挙動を、実ブラウザの「detached だがアクセス可�
 低 — 実サイトで iframe src を動的に切り替えつつ旧文書参照を使い続けるケースは限定的。
 実サイト互換の問題が観測されたら着手する。ただし 066 で再ナビゲーション経路が増えたため、
 stale 参照が起きうる面は従来より広がっている点に留意。
+
+## GitHubへの移行（2026-09-08）
+
+このローカル記録は [GitHub Issue #620](https://github.com/ieee0824/omoikane/issues/620) への移行により閉じました。課題の進捗・議論・完了判定は移行先で管理します。

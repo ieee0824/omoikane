@@ -2,7 +2,10 @@
 number: 048
 slug: layout-metrics-caching
 parent:
-status: open
+status: closed
+closed_reason: migrated
+github_issue: https://github.com/ieee0824/omoikane/issues/619
+closed_at: 2026-09-08
 ---
 
 # レイアウトメトリクス・スタイル解決のキャッシュ（perf）
@@ -69,3 +72,7 @@ DOM 世代ベースのキャッシュで削減する。
 
 - 同一 DOM 状態での連続メトリクス取得が native 呼び出し1回に集約される
 - DOM 変更後は正しく無効化される（既存の forced reflow テストが通り続ける）
+
+## GitHubへの移行（2026-09-08）
+
+このローカル記録は [GitHub Issue #619](https://github.com/ieee0824/omoikane/issues/619) への移行により閉じました。課題の進捗・議論・完了判定は移行先で管理します。

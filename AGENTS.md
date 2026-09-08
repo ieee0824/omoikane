@@ -33,10 +33,10 @@ OmoikaneはRustで開発するブラウザエンジンです。HTTP、HTML/CSS�
 
 ## タスクの記録
 
-- 関連するGitHub Issue・PRと `issues/open/`、`issues/closed/` を確認し、既存の議論や設計判断を引き継ぐ。
-- ローカルIssueを追加する場合は `issues/open/{番号}-{slug}.md` とする。子Issueは `{番号}-{連番}-{slug}.md` とし、`parent` と親からのリンクを付ける。
-- 完了したローカルIssueは `issues/closed/` に移す。親Issueは子Issueがすべて完了してから閉じる。
-- 未解決の課題や設計判断は該当Issueへ記録する。ローカルIssueの相談は `## 相談` に日付・発言者・内容を残す。
+- タスク・未解決の課題・設計判断・相談はGitHub Issueで管理し、関連するIssue・PRの最新の議論を引き継ぐ。
+- ローカルIssueは今後作成・運用しない。`issues/` は過去の記録を参照するためのアーカイブとし、進捗は移行先のGitHub Issueへ記録する。
+- 子IssueはGitHub上で親Issueとの関係を明記し、親からリンクする。親Issueは子Issueがすべて完了してから閉じる。
+- Issueを追加する前にGitHubのopen/closed Issueを検索し、重複を避ける。完了条件と検証結果を該当Issue・PRへ記録して閉じる。
 
 ## 検証
 
