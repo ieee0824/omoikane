@@ -2096,7 +2096,7 @@ fn generated_data_uri_png_content_creates_image_fragment() {
     body.append_child(paragraph.clone());
     paragraph.append_child(span.clone());
 
-    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC";
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AP8AAP8FAAH/+lyI0QAAAABJRU5ErkJggg==";
     let stylesheet =
         format!("span::before {{ content: url(\"data:image/png;base64,{image_data}\"); }}");
     let mut resolver = StyleResolver::new();
@@ -2137,7 +2137,7 @@ fn object_fallback_data_png_creates_image_fragment() {
     outer_object.set_attribute("data", "data:application/x-unknown,ERROR");
     inner_object.set_attribute(
             "data",
-            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR4AQEFAPr/AP8AAP9zftimAAAAAElFTkSuQmCC",
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AP8AAP8FAAH/+lyI0QAAAABJRU5ErkJggg==",
         );
 
     let mut resolver = StyleResolver::new();
