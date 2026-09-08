@@ -170,6 +170,7 @@
     return id !== undefined && hasCanonicalElementId(ids, id);
   }
   const nativeNodeIds = new WeakMap();
+  const layoutMetricsCache = new WeakMap();
   const retiredNodeWrappers = new WeakSet();
   // Same-document history state is browser-owned. Keeping it off the public
   // Document wrapper prevents an author-created expando from spoofing the URL
@@ -2771,7 +2772,22 @@
     // synchronous reflow if the DOM changed since the last query.
     __layoutMetrics() {
       try {
-        return JSON.parse(__omoikane_layout_metrics(this.__id));
+        // CSSOM edits must reach the DOM before checking the native epoch.
+        flushStyleSheets();
+        const generation = __omoikane_layout_metrics_generation();
+        const cached = layoutMetricsCache.get(this);
+        if (cached && cached.generation === generation) return cached.metrics;
+        const metrics = JSON.parse(__omoikane_layout_metrics(this.__id));
+        if (metrics.clientRects) {
+          for (const rect of metrics.clientRects) Object.freeze(rect);
+          Object.freeze(metrics.clientRects);
+        }
+        Object.freeze(metrics);
+        // Reflow can itself clamp scrolling and advance the paint epoch.
+        layoutMetricsCache.set(this, {
+          generation: __omoikane_layout_metrics_generation(), metrics,
+        });
+        return metrics;
       } catch (e) {
         return {
           x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0,
@@ -2799,7 +2815,7 @@
       // which a zero-sized rect alone cannot.
       const m = this.__layoutMetrics();
       if (!m.hasBox) return [];
-      return m.clientRects || [{
+      return m.clientRects ? m.clientRects.map(rect => ({ ...rect })) : [{
         x: m.x, y: m.y, width: m.width, height: m.height,
         top: m.top, left: m.left, bottom: m.bottom, right: m.right,
       }];
