@@ -23,6 +23,7 @@ pub(super) fn layout_table_container(
     width: f32,
     viewport: Rect,
     shrink_to_fit: bool,
+    used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
     let spacing = table_border_spacing(&style);
     let collapse_spacing = spacing * 2.0;
@@ -202,8 +203,12 @@ pub(super) fn layout_table_container(
     } else {
         (cursor_y - y).max(spacing)
     };
-    let mut content_height = resolved_length(&style, "height", 0.0)
-        .map(|h| super::border_box_adjust_height(&style, h, &padding, &border))
+    let mut content_height = used_height
+        .map(|height| height.value)
+        .or_else(|| {
+            resolved_length(&style, "height", 0.0)
+                .map(|h| super::border_box_adjust_height(&style, h, &padding, &border))
+        })
         .unwrap_or(auto_height);
     let (min_height, max_height) =
         normalized_min_max_lengths(&style, "min-height", "max-height", 0.0);

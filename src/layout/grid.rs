@@ -145,6 +145,7 @@ pub(super) fn layout_grid_container(
     containing_block_height: f32,
     viewport: Rect,
     inherited_subgrid: Option<SubgridContext>,
+    used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
     let columns_are_subgrid = is_subgrid_axis(&style, "grid-template-columns");
     let rows_are_subgrid = is_subgrid_axis(&style, "grid-template-rows");
@@ -171,8 +172,12 @@ pub(super) fn layout_grid_container(
     } else {
         gap(&style, "row-gap")
     };
-    let specified_height = resolved_length(&style, "height", containing_block_height)
-        .map(|height| super::border_box_adjust_height(&style, height, &padding, &border));
+    let specified_height = used_height
+        .and_then(super::UsedHeight::percentage_basis)
+        .or_else(|| {
+            resolved_length(&style, "height", containing_block_height)
+                .map(|height| super::border_box_adjust_height(&style, height, &padding, &border))
+        });
     let row_basis = specified_height.unwrap_or(0.0);
     let (named_areas, area_row_count, area_column_count) = named_areas(&style);
     let mut columns = columns_are_subgrid
@@ -272,12 +277,24 @@ pub(super) fn layout_grid_container(
         &content_row_heights
     };
     let row_heights = resolve_tracks(&row_tracks, row_basis, row_gap, row_content_sizes);
-    let auto_height = row_heights.iter().sum::<f32>()
-        + row_gap * row_heights.len().saturating_sub(1) as f32;
-    let mut content_height = specified_height.unwrap_or(auto_height);
-    let (min_height, max_height) = normalized_min_max_lengths(&style, "min-height", "max-height", 0.0);
-    if let Some(value) = min_height { content_height = content_height.max(super::border_box_adjust_height(&style, value, &padding, &border)); }
-    if let Some(value) = max_height { content_height = content_height.min(super::border_box_adjust_height(&style, value, &padding, &border)); }
+    let auto_height =
+        row_heights.iter().sum::<f32>() + row_gap * row_heights.len().saturating_sub(1) as f32;
+    let mut content_height = used_height
+        .map(|height| height.value)
+        .or(specified_height)
+        .unwrap_or(auto_height);
+    let (min_height, max_height) =
+        normalized_min_max_lengths(&style, "min-height", "max-height", 0.0);
+    if let Some(value) = min_height {
+        content_height = content_height.max(super::border_box_adjust_height(
+            &style, value, &padding, &border,
+        ));
+    }
+    if let Some(value) = max_height {
+        content_height = content_height.min(super::border_box_adjust_height(
+            &style, value, &padding, &border,
+        ));
+    }
 
     let (column_widths, column_start, aligned_column_gap) = align_tracks(
         column_widths,
