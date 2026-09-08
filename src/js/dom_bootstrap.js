@@ -4919,36 +4919,11 @@
       );
     }
 
-    // Adds markup to the document at the parser's insertion point. During
-    // script execution the arguments are concatenated, tokenized as an HTML
-    // fragment, and spliced into the tree as the running script's following
-    // siblings (matching how a streaming parser resumes at the insertion
-    // point). Only inline classic <script> elements in the written markup run
-    // synchronously in global scope, in document order (external `src` and
-    // `type="module"` scripts are inserted but not executed here), as classic
-    // document.write() requires.
-    //
-    // Known limitations (follow-ups, out of scope for 016-7): when a fragment
-    // mixes a <script> with later nodes the spec would run the script before
-    // parsing those later nodes, but here all nodes are spliced in first and
-    // the scripts run afterward; and there is no recursion-depth guard, so a
-    // written script that writes another script recurses unbounded.
+    // Continue this document's input stream, pausing at each script end tag.
     write(...args) {
       let text = "";
-      for (let i = 0; i < args.length; i += 1) {
-        text += String(args[i]);
-      }
-      const scriptIds = __omoikane_document_write(this.__id, text);
-      if (scriptIds && scriptIds.length) {
-        for (let i = 0; i < scriptIds.length; i += 1) {
-          const el = wrapNode(scriptIds[i]);
-          const code = el ? el.textContent : "";
-          if (code) {
-            // Indirect eval runs the written script in global scope.
-            (0, eval)(code);
-          }
-        }
-      }
+      for (let i = 0; i < args.length; i += 1) text += String(args[i]);
+      __omoikane_document_write(this.__id, text);
     }
 
     // Like write(), but appends a newline after the concatenated arguments.
@@ -4960,23 +4935,18 @@
       return this.write(text + "\n");
     }
 
-    // document.open() replaces the document with an empty one: it removes every
-    // existing child so a following write() builds fresh content (HTML's
-    // "document open steps"). This works for any Document instance — the main
-    // document today, and sub-documents once iframe contentDocument lands in
-    // 016-9 — because the reset targets this document node by id. Returns the
-    // document, as the spec requires.
+    // Start an empty input stream for this Document. A reentrant open of
+    // the currently executing parser's document leaves its stream intact.
     open() {
       const removedNodes = this.childNodes.slice();
-      __omoikane_document_reset(this.__id);
+      if (__omoikane_document_reset(this.__id) === false) return this;
       for (const child of removedNodes) retireIframeWindowProxies(child);
       forgetDiscardedNodeWrappers();
       return this;
     }
 
-    // document.close() has nothing to flush: write() splices its markup
-    // synchronously, so there is no pending parser input to finish.
-    close() {}
+    // Finish the stream; incomplete input is only treated as EOF here.
+    close() { __omoikane_document_close(this.__id); }
   }
 
   class DocumentFragment extends Node {

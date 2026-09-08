@@ -212,31 +212,87 @@ impl<'a> Tokenizer<'a> {
 
     /// Tokenizes the full input and also returns recoverable parse errors.
     pub fn tokenize_with_errors(&self) -> (Vec<Token>, Vec<HtmlParseError>) {
-        let chars: Vec<char> = self.input.chars().collect();
-        let mut cursor = Cursor::new(chars);
+        let mut tokenizer = IncrementalTokenizer::new();
+        tokenizer.push_input(self.input);
+        tokenizer.drain(true, false)
+    }
+}
+
+/// Retains lexical state across writes; only an explicit finish emits EOF.
+#[derive(Debug)]
+pub(crate) struct IncrementalTokenizer {
+    pending: Vec<char>,
+    state: State,
+    text_buffer: String,
+    current_tag_name: String,
+    current_end_tag_name: String,
+    current_attributes: Vec<Attribute>,
+    current_attr_name: String,
+    current_attr_value: String,
+    current_self_closing: bool,
+    current_comment: String,
+    current_doctype_name: String,
+    current_doctype_public_id: Option<String>,
+    current_doctype_system_id: Option<String>,
+    current_doctype_force_quirks: bool,
+    temp_buffer: String,
+    last_start_tag_name: String,
+}
+
+impl IncrementalTokenizer {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            state: State::Data,
+            text_buffer: String::new(),
+            current_tag_name: String::new(),
+            current_end_tag_name: String::new(),
+            current_attributes: Vec::new(),
+            current_attr_name: String::new(),
+            current_attr_value: String::new(),
+            current_self_closing: false,
+            current_comment: String::new(),
+            current_doctype_name: String::new(),
+            current_doctype_public_id: None,
+            current_doctype_system_id: None,
+            current_doctype_force_quirks: false,
+            temp_buffer: String::new(),
+            last_start_tag_name: String::new(),
+        }
+    }
+
+    pub(crate) fn push_input(&mut self, input: &str) {
+        self.pending.extend(input.chars());
+    }
+
+    /// Temporarily hide the outer write's tail during reentrant parsing.
+    pub(crate) fn take_pending_input(&mut self) -> String {
+        std::mem::take(&mut self.pending).into_iter().collect()
+    }
+
+    pub(crate) fn drain(
+        &mut self,
+        eof: bool,
+        stop_at_script: bool,
+    ) -> (Vec<Token>, Vec<HtmlParseError>) {
+        let mut cursor = Cursor::new(std::mem::take(&mut self.pending));
         let mut tokens = Vec::new();
         let mut errors = Vec::new();
-        let mut state = State::Data;
-
-        let mut text_buffer = String::new();
-        let mut current_tag_name = String::new();
-        let mut current_end_tag_name = String::new();
-        let mut current_attributes = Vec::new();
-        let mut current_attr_name = String::new();
-        let mut current_attr_value = String::new();
-        let mut current_self_closing = false;
-        let mut current_comment = String::new();
-        let mut current_doctype_name = String::new();
-        // `None` until a PUBLIC/SYSTEM keyword opens the identifier; `Some("")`
-        // once the opening quote is seen, so an empty identifier is preserved.
-        let mut current_doctype_public_id: Option<String> = None;
-        let mut current_doctype_system_id: Option<String> = None;
-        let mut current_doctype_force_quirks = false;
-        // Scratch buffer for the tentative end-tag name in RAWTEXT/RCDATA/script
-        // states, and the name of the last start tag emitted (used to recognise
-        // the *appropriate* end tag that leaves those states).
-        let mut temp_buffer = String::new();
-        let mut last_start_tag_name = String::new();
+        let mut state = self.state;
+        let mut text_buffer = std::mem::take(&mut self.text_buffer);
+        let mut current_tag_name = std::mem::take(&mut self.current_tag_name);
+        let mut current_end_tag_name = std::mem::take(&mut self.current_end_tag_name);
+        let mut current_attributes = std::mem::take(&mut self.current_attributes);
+        let mut current_attr_name = std::mem::take(&mut self.current_attr_name);
+        let mut current_attr_value = std::mem::take(&mut self.current_attr_value);
+        let mut current_self_closing = self.current_self_closing;
+        let mut current_comment = std::mem::take(&mut self.current_comment);
+        let mut current_doctype_name = std::mem::take(&mut self.current_doctype_name);
+        let mut current_doctype_public_id = std::mem::take(&mut self.current_doctype_public_id);
+        let mut current_doctype_system_id = std::mem::take(&mut self.current_doctype_system_id);
+        let mut current_doctype_force_quirks = self.current_doctype_force_quirks;
+        let mut temp_buffer = std::mem::take(&mut self.temp_buffer);
+        let mut last_start_tag_name = std::mem::take(&mut self.last_start_tag_name);
 
         // Emits the current DOCTYPE token, moving the accumulated name and
         // identifiers into it and resetting the force-quirks flag for the next
@@ -253,7 +309,15 @@ impl<'a> Tokenizer<'a> {
             }};
         }
 
-        while let Some(ch) = cursor.consume() {
+        while let Some(ch) = cursor.peek() {
+            // A few tokenizer states consume lookahead as one operation. Wait
+            // until that operation is complete instead of mistaking a write
+            // boundary for EOF (notably &am + p; and <!DOC + TYPE).
+            if !eof && needs_more_input(state, ch, &cursor.chars[cursor.index..]) {
+                break;
+            }
+            cursor.consume();
+            let previous_token_count = tokens.len();
             match state {
                 State::Data => match ch {
                     '<' => {
@@ -1381,12 +1445,40 @@ impl<'a> Tokenizer<'a> {
                     }
                 },
             }
+            if stop_at_script
+                && tokens.len() > previous_token_count
+                && matches!(tokens.last(), Some(Token::EndTag { name }) if name == "script")
+            {
+                break;
+            }
         }
 
-        if !text_buffer.is_empty() {
-            tokens.push(Token::Character(text_buffer));
-        }
+        flush_text(&mut text_buffer, &mut tokens);
+        self.pending = cursor.chars.split_off(cursor.index);
+        self.state = state;
+        self.text_buffer = text_buffer;
+        self.current_tag_name = current_tag_name;
+        self.current_end_tag_name = current_end_tag_name;
+        self.current_attributes = current_attributes;
+        self.current_attr_name = current_attr_name;
+        self.current_attr_value = current_attr_value;
+        self.current_self_closing = current_self_closing;
+        self.current_comment = current_comment;
+        self.current_doctype_name = current_doctype_name;
+        self.current_doctype_public_id = current_doctype_public_id;
+        self.current_doctype_system_id = current_doctype_system_id;
+        self.current_doctype_force_quirks = current_doctype_force_quirks;
+        self.temp_buffer = temp_buffer;
+        self.last_start_tag_name = last_start_tag_name;
 
+        // A script boundary is not EOF even during document.close().
+        if !eof
+            || !self.pending.is_empty()
+            || (stop_at_script
+                && matches!(tokens.last(), Some(Token::EndTag { name }) if name == "script"))
+        {
+            return (tokens, errors);
+        }
         match state {
             State::Comment
             | State::CommentEnd
@@ -1461,6 +1553,90 @@ impl<'a> Tokenizer<'a> {
 
         tokens.push(Token::Eof);
         (tokens, errors)
+    }
+}
+
+/// Lookahead which cannot be committed at a non-final input boundary.
+fn needs_more_input(state: State, ch: char, remaining: &[char]) -> bool {
+    if ch == '&'
+        && matches!(
+            state,
+            State::Data
+                | State::RcData
+                | State::AttributeValueDoubleQuoted
+                | State::AttributeValueSingleQuoted
+                | State::AttributeValueUnquoted
+        )
+    {
+        return remaining[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == '#');
+    }
+    match state {
+        State::TagOpen if ch == '?' => !remaining.contains(&'>'),
+        State::MarkupDeclarationOpen if ch == '-' => remaining.len() < 2,
+        State::MarkupDeclarationOpen if ch.eq_ignore_ascii_case(&'d') => remaining.len() < 7,
+        State::AfterDoctypeName if !is_html_whitespace(ch) && ch != '>' => {
+            remaining.len() < 6 && remaining.iter().all(char::is_ascii_alphabetic)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::*;
+
+    fn coalesce(tokens: Vec<Token>) -> Vec<Token> {
+        let mut result = Vec::new();
+        for token in tokens {
+            if let Token::Character(text) = &token
+                && let Some(Token::Character(previous)) = result.last_mut()
+            {
+                previous.push_str(text);
+            } else {
+                result.push(token);
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn every_input_boundary_preserves_tokens() {
+        for source in [
+            "<!DOCTYPE html PUBLIC \"id\" \"sys\"><b a='&amp;'>x&#65;</b>",
+            "<!-- hello --><?bogus?><textarea>&lt;x</textarea><style>a>b{}</style>",
+            "<script><!-- <script>escaped</script> -->globalThis.x=1;</script>tail",
+            "<b",
+            "&amp;",
+            "<!DOCTYPE html SYSTEM 'sys'>",
+        ] {
+            let expected = Tokenizer::new(source).tokenize_with_errors();
+            for split in 0..=source.len() {
+                let mut tokenizer = IncrementalTokenizer::new();
+                tokenizer.push_input(&source[..split]);
+                let (mut tokens, mut errors) = tokenizer.drain(false, false);
+                assert!(!tokens.contains(&Token::Eof));
+                tokenizer.push_input(&source[split..]);
+                let (rest, rest_errors) = tokenizer.drain(true, false);
+                tokens.extend(rest);
+                errors.extend(rest_errors);
+                assert_eq!(
+                    coalesce(tokens),
+                    coalesce(expected.0.clone()),
+                    "{source} @ {split}"
+                );
+                assert_eq!(errors, expected.1, "{source} @ {split}");
+            }
+            let mut tokenizer = IncrementalTokenizer::new();
+            let mut tokens = Vec::new();
+            for ch in source.chars() {
+                tokenizer.push_input(&ch.to_string());
+                tokens.extend(tokenizer.drain(false, false).0);
+            }
+            tokens.extend(tokenizer.drain(true, false).0);
+            assert_eq!(coalesce(tokens), coalesce(expected.0));
+        }
     }
 }
 
