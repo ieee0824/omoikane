@@ -1,0 +1,139 @@
+{
+  "date": "2026-09-08",
+  "platform": "aarch64 Linux, Rust 1.98.0, dev profile debug=0",
+  "before_commit": "87653bd3d9e3b52db027245e47ca5fde6f4804a4",
+  "before_main_merge": "55b3f7c664b41cec631c42492cae5c165ac88889",
+  "concurrency": 4,
+  "viewport": [
+    1366,
+    900
+  ],
+  "url": "https://x.com/",
+  "user_agent": "--firefox-user-agent",
+  "runs": {
+    "before": [
+      {
+        "run": 1,
+        "normal_page": true,
+        "navigate_ms": 12072.0,
+        "render_ms": 19147.8,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 6061.962,
+        "module_parse_total_ms": 4771.242,
+        "entry_execute_ms": 9894.396,
+        "total_ms": 31219.8
+      },
+      {
+        "run": 2,
+        "normal_page": true,
+        "navigate_ms": 12043.6,
+        "render_ms": 18929.2,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 6158.425,
+        "module_parse_total_ms": 4690.424,
+        "entry_execute_ms": 9921.33,
+        "total_ms": 30972.8
+      },
+      {
+        "run": 3,
+        "normal_page": true,
+        "navigate_ms": 12294.5,
+        "render_ms": 19397.9,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 6353.929,
+        "module_parse_total_ms": 4816.506,
+        "entry_execute_ms": 10389.293,
+        "total_ms": 31692.4
+      },
+      {
+        "run": 4,
+        "normal_page": true,
+        "navigate_ms": 11741.7,
+        "render_ms": 19223.1,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 5976.767,
+        "module_parse_total_ms": 4711.325,
+        "entry_execute_ms": 9788.023,
+        "total_ms": 30964.8
+      },
+      {
+        "run": 5,
+        "normal_page": true,
+        "navigate_ms": 12105.0,
+        "render_ms": 18825.1,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 6113.781,
+        "module_parse_total_ms": 4736.461,
+        "entry_execute_ms": 10041.777,
+        "total_ms": 30930.1
+      }
+    ],
+    "after": [
+      {
+        "run": 1,
+        "normal_page": true,
+        "navigate_ms": 5657.2,
+        "render_ms": 19073.4,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 7089.125,
+        "module_parse_total_ms": 3999.194,
+        "entry_execute_ms": 3661.915,
+        "total_ms": 24730.6
+      },
+      {
+        "run": 2,
+        "normal_page": true,
+        "navigate_ms": 5439.9,
+        "render_ms": 19258.2,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 6273.889,
+        "module_parse_total_ms": 4015.039,
+        "entry_execute_ms": 3517.517,
+        "total_ms": 24698.1
+      },
+      {
+        "run": 3,
+        "normal_page": true,
+        "navigate_ms": 5352.4,
+        "render_ms": 18793.3,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 6431.92,
+        "module_parse_total_ms": 4049.24,
+        "entry_execute_ms": 3521.711,
+        "total_ms": 24145.7
+      },
+      {
+        "run": 4,
+        "normal_page": true,
+        "navigate_ms": 5601.7,
+        "render_ms": 18973.9,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 6642.68,
+        "module_parse_total_ms": 4088.866,
+        "entry_execute_ms": 3623.451,
+        "total_ms": 24575.6
+      },
+      {
+        "run": 5,
+        "normal_page": true,
+        "navigate_ms": 5536.5,
+        "render_ms": 18912.8,
+        "module_count": 452,
+        "module_bytes": 4852493,
+        "module_fetch_total_ms": 6748.415,
+        "module_parse_total_ms": 4038.432,
+        "entry_execute_ms": 3580.907,
+        "total_ms": 24449.3
+      }
+    ]
+  }
+}
