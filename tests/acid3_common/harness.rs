@@ -308,7 +308,10 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
     let document = TreeBuilder::parse(&html).document();
     acid3_debug_log(&format!("mode={mode:?} before runtime create"));
     let base: Url = acid3_url.parse().expect("parse base url");
-    let mut runtime = JsRuntime::with_document(document).expect("create runtime");
+    // Keep the tuple origin aligned with the fetched page: setting only a
+    // resource base later leaves the Document opaque and hides child Documents.
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &acid3_url).expect("create runtime");
     acid3_debug_log(&format!("mode={mode:?} after runtime create"));
 
     // 3. Execute all inline / external <script>s (fires DOMContentLoaded).

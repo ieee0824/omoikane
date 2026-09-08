@@ -41,6 +41,8 @@ use crate::http::cors::{
 };
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
+#[cfg(test)]
+mod layout_metrics_tests;
 mod module_fetch;
 #[cfg(test)]
 mod module_loading_tests;
@@ -1037,6 +1039,10 @@ struct HostState {
     layout_generation: u64,
     paint_generation: u64,
     scroll_generation: u64,
+    /// CSSOM geometry also observes child document roots and their lifetime.
+    /// Advance this from the existing invalidation paths without changing the
+    /// main document's public render generations for iframe-only mutations.
+    layout_metrics_generation: u64,
     adjusted_layout_cache: Option<AdjustedLayoutCache>,
     #[cfg(test)]
     adjusted_layout_builds: u64,
@@ -1614,6 +1620,7 @@ impl HostState {
             layout_generation: 0,
             paint_generation: 0,
             scroll_generation: 0,
+            layout_metrics_generation: 0,
             adjusted_layout_cache: None,
             #[cfg(test)]
             adjusted_layout_builds: 0,
@@ -2106,6 +2113,7 @@ impl HostState {
         let Some(previous) = self.iframe_documents.remove(&iframe_id) else {
             return;
         };
+        self.invalidate_layout_metrics_cache();
 
         let mut tree_ids = HashSet::new();
         Self::collect_tree_ids(&previous.document, &mut tree_ids);
@@ -2350,6 +2358,8 @@ impl HostState {
             self.capture_scroll_offsets_before_layout();
             self.layout_root = None;
             self.invalidate_paint_cache();
+        } else {
+            self.invalidate_layout_metrics_cache();
         }
     }
 
@@ -2368,14 +2378,21 @@ impl HostState {
             self.capture_scroll_offsets_before_layout();
             self.layout_root = None;
             self.invalidate_paint_cache();
+        } else {
+            self.invalidate_layout_metrics_cache();
         }
     }
 
     /// Invalidates the scroll-adjusted paint geometry while retaining the
     /// layout tree when the invalidation does not require reflow.
     fn invalidate_paint_cache(&mut self) {
+        self.invalidate_layout_metrics_cache();
         self.paint_generation = self.paint_generation.saturating_add(1);
         self.adjusted_layout_cache = None;
+    }
+
+    fn invalidate_layout_metrics_cache(&mut self) {
+        self.layout_metrics_generation = self.layout_metrics_generation.saturating_add(1);
     }
 
     /// Invalidates computed/selector results for a node mutation while keeping
@@ -2655,6 +2672,7 @@ impl HostState {
         // This is a generation of rebuild attempts, not only successful trees:
         // a failed rebuild must not leave an older adjusted tree reusable.
         self.layout_generation = self.layout_generation.saturating_add(1);
+        self.invalidate_layout_metrics_cache();
         self.layout_root = layout;
         let mut clamped_targets = Vec::new();
         let mut paint_invalidated = false;
@@ -8028,6 +8046,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(sample_css_transition_styles_native),
         ),
         (
+            js_string!("__omoikane_layout_metrics_generation"),
+            0,
+            NativeFunction::from_copy_closure(layout_metrics_generation_native),
+        ),
+        (
             js_string!("__omoikane_layout_metrics"),
             1,
             NativeFunction::from_copy_closure(layout_metrics_native),
@@ -9668,6 +9691,22 @@ fn is_actually_disabled_native(
             .get_node(node_id)
             .is_some_and(|node| is_actually_disabled(&node));
         Ok(JsValue::from(disabled))
+    })
+}
+
+/// Returns the epoch of the geometry exposed to CSSOM. Sampling transitions
+/// before reading it also invalidates cached metrics when time advances without
+/// a DOM mutation. BigInt preserves the existing u64 generation exactly.
+fn layout_metrics_generation_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let document = state.document.clone();
+        state.ensure_style_resolver(&document);
+        Ok(boa_engine::JsBigInt::from(state.layout_metrics_generation).into())
     })
 }
 
