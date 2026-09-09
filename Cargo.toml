@@ -94,3 +94,11 @@ cbindgen = "0.29"
 # dependencies running completely unoptimized during real-site testing.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Conformance tests exercise thousands of native DOM calls per script. Give
+# the host crate modest optimization too, while retaining the test profile's
+# debug assertions and overflow checks. Normal development builds stay at O0.
+[profile.test]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true

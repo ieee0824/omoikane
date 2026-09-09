@@ -52,6 +52,15 @@ uses separate Ubuntu 24.04 x86_64 runners with Rust 1.98.1:
 | `compatibility` | Required pinned WPT and standalone/embedded Web API surface |
 | `stress` | Deopt/exception/interrupt contracts and the generated stress corpus |
 
+The Cargo test profile uses optimization level 1 for Omoikane's native DOM
+operations and explicitly retains debug assertions and overflow checks.
+Dependencies keep their existing level 2 setting. Ordinary development builds
+retain their unoptimized host crate. This changes compilation and execution
+costs, without changing the test inputs or the runtime deadline.
+The CDP suspended-dialog fixture allows one second for script preparation,
+asserts the dialog is open with a pending evaluation, then waits for the real
+deadline and requires cancellation, an error response and complete cleanup.
+
 The unit test lists come from Cargo/libtest. The final aggregator verifies that
 all four lists agree and that their selections cover every test exactly once.
 New integration targets are discovered through Cargo metadata. Acid3 and Web API
@@ -130,5 +139,8 @@ Acid3 uses the normal five-second execution deadline. ID lookup and sibling
 position lookup read native DOM data without building JavaScript wrapper lists;
 Range removal shares the sibling position across affected ranges. Ordinary DOM
 mutations amortize weak-cache maintenance, while browsing-context retirement
-still processes discarded wrappers immediately. These remove repeated DOM
-walks without relaxing the deadline, score requirement or lifetime checks.
+still processes discarded wrappers immediately. Same-document insertion also
+avoids restamping an already-owned subtree; cross-document moves and newly
+parsed subtrees still update their shadow and template contents owners.
+These remove repeated DOM walks without relaxing the deadline, score requirement
+or lifetime checks.
