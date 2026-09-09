@@ -231,6 +231,10 @@ fn template_owner_documents_and_uninserted_contents_follow_their_creator() {
 #[test]
 fn nested_iframe_realms_and_detached_nodes_have_bounded_lifetimes() {
     let mut runtime = runtime();
+    // This finite reachability stress bootstraps 24 child realms in one eval.
+    // Give it an explicit budget now that synchronous eval enforces wall time;
+    // preserve the iteration count and all document/node lifetime assertions.
+    runtime.sandbox.timeout = Duration::from_secs(30);
     runtime.eval(r#"
         var frame = document.getElementById('f');
         for (var i = 0; i < 12; i++) {
@@ -251,6 +255,23 @@ fn nested_iframe_realms_and_detached_nodes_have_bounded_lifetimes() {
     assert!(state.node_lifetimes.node_count() < 40);
     assert!(state.nodes.len() < 40);
     assert!(state.document_styles.len() <= 2);
+}
+
+#[test]
+fn iframe_bootstrap_timeout_returns_an_error_and_preserves_runtime_recovery() {
+    let mut runtime = runtime();
+    runtime.sandbox.timeout = Duration::from_millis(1);
+    let error = runtime
+        .eval("document.getElementById('f').contentWindow.eval('21*2')")
+        .expect_err("child realm bootstrap must observe the short page deadline");
+    assert!(is_wall_clock_timeout(&error), "unexpected error: {error}");
+    runtime.sandbox.timeout = Duration::from_secs(5);
+    assert_eq!(runtime.eval("21*2").unwrap().as_number(), Some(42.0));
+    assert_eq!(
+        runtime.eval("var frame=document.getElementById('f');frame.srcdoc='<p>recovered</p>';frame.contentDocument.body.textContent")
+            .unwrap().as_string().unwrap().to_std_string_escaped(),
+        "recovered"
+    );
 }
 
 #[test]

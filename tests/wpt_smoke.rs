@@ -141,7 +141,11 @@ fn serve(mut stream: TcpStream, root: &Path) {
     let target = request_line.split_whitespace().nth(1).unwrap_or("/");
     let path = target.split("?").next().unwrap_or("/");
     if path == "/resources/testharnessreport.js" {
+        // This runner consumes result callbacks rather than the interactive
+        // HTML report. Disable that report before tests start so its DOM-heavy
+        // rendering cannot consume a page callback's execution budget.
         let body = br#"
+setup({output:false});
 globalThis.__wpt_results = [];
 globalThis.__wpt_harness_status = -1;
 globalThis.__wpt_complete = false;
@@ -714,15 +718,19 @@ fn selected_wpt_testharness_cases_match_expectations() {
         // Collect its short-lived initialization temporaries before page code
         // starts allocating, keeping each WPT case's GC pressure bounded.
         boa_gc::force_collect();
-        let errors = runtime.execute_document_scripts(Some(&base));
+        let mut errors = runtime.execute_document_scripts(Some(&base));
         runtime
             .wire_inline_event_handlers()
             .expect("wire WPT handlers");
         runtime.fire_load().expect("fire WPT load");
         runtime.run_timers(5_000, 10, 2_000);
         runtime.run_jobs().expect("drain WPT jobs");
+        errors.extend(runtime.take_task_errors());
         let complete = js_bool(&mut runtime, "globalThis.__wpt_complete === true");
-        let passed = js_bool(&mut runtime, "__wpt_complete===true && __wpt_harness_status===0 && __wpt_results.length>0 && __wpt_results.every(test=>test.status===0)");
+        let passed = js_bool(
+            &mut runtime,
+            "__wpt_complete===true && __wpt_harness_status===0 && __wpt_results.length>0 && __wpt_results.every(test=>test.status===0)",
+        );
         let actual = if !errors.is_empty() {
             ActualStatus::Error
         } else if passed {

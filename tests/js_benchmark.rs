@@ -296,13 +296,13 @@ fn run_benchmarks() -> BenchmarkRun {
     let source = fs::read_to_string(manifest_path(SHAPES_PATH)).expect("read benchmark shapes");
     // The benchmark intentionally executes tens of millions of loop
     // iterations across its four passes. Keep the production default strict,
-    // but give this measurement harness an explicit budget large enough for
-    // the workload it is designed to run.
+    // but give this measurement harness explicit iteration and wall-clock
+    // budgets for all four passes within a single evaluation.
     let mut runtime = JsRuntime::with_document_and_sandbox(
         NodeHandle::document(),
         SandboxConfig {
             max_loop_iterations: 100_000_000,
-            ..SandboxConfig::default()
+            timeout: std::time::Duration::from_secs(60),
         },
     )
     .expect("create benchmark runtime");

@@ -191,7 +191,12 @@ impl<F: Future> Future for ActiveHostFuture<F> {
 /// Error text used for the cooperative wall-clock interrupt. Keep this
 /// private and stable so page-task plumbing can distinguish a timeout from a
 /// normal JavaScript exception without exposing a second public error type.
-const WALL_CLOCK_TIMEOUT_MESSAGE: &str = "JavaScript evaluation exceeded wall-clock timeout";
+const WALL_CLOCK_TIMEOUT_MESSAGE: &str = boa_engine::vm::WALL_CLOCK_TIMEOUT_MESSAGE;
+
+fn execution_deadline(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout).unwrap_or(now)
+}
 
 fn wall_clock_timeout_error() -> JsError {
     JsNativeError::runtime_limit()
@@ -221,11 +226,10 @@ struct TimedJsFuture<F> {
 }
 
 impl<F> TimedJsFuture<F> {
-    fn new(future: F, timeout: Duration) -> Self {
-        let now = Instant::now();
+    fn new(future: F, deadline: Instant) -> Self {
         Self {
             future: Some(Box::pin(future)),
-            deadline: now.checked_add(timeout).unwrap_or(now),
+            deadline,
             deadline_wake_scheduled: false,
         }
     }
@@ -2912,11 +2916,11 @@ fn owner_document_for_node(node: &NodeHandle) -> Option<NodeHandle> {
 /// Sandbox configuration for JS execution.
 #[derive(Clone)]
 pub struct SandboxConfig {
-    /// Maximum execution time per eval() call (default: 5 seconds).
+    /// Cooperative wall-clock limit per evaluation or callback (default: 5 seconds).
     ///
-    /// Boa's synchronous evaluator cannot be interrupted by a wall-clock
-    /// callback, so this remains the embedder-facing time budget while the
-    /// deterministic VM iteration guard below provides the hard stop.
+    /// Interpreter and JIT execution share the deadline, including asynchronous
+    /// host suspension. A blocking native function is checked when it returns.
+    /// Trusted DOM bootstrap runs before the page's limits are installed.
     pub timeout: std::time::Duration,
     /// Maximum loop iterations executed by one JavaScript evaluation.
     ///
@@ -2967,6 +2971,8 @@ pub struct BaselineJitDiagnostics {
     pub exception_unwinds: u64,
     /// Catch/finally entries restored from generated-frame metadata.
     pub exception_handler_entries: u64,
+    /// Generated loop slices that restored the interpreter for a budget or deadline poll.
+    pub interrupt_deopts: u64,
 }
 
 impl BaselineJitDiagnostics {
@@ -3007,6 +3013,7 @@ impl BaselineJitDiagnostics {
         self.exception_handler_entries = self
             .exception_handler_entries
             .saturating_add(other.exception_handler_entries);
+        self.interrupt_deopts = self.interrupt_deopts.saturating_add(other.interrupt_deopts);
     }
 }
 
@@ -3147,7 +3154,10 @@ impl JsRuntime {
             sandbox,
         };
         register_host_bindings(&mut runtime.context, &runtime.host_state)?;
-        runtime.eval(DOM_BOOTSTRAP)?;
+        {
+            let _host = activate_host_state(Rc::clone(&runtime.host_state));
+            runtime.context.eval(Source::from_bytes(DOM_BOOTSTRAP))?;
+        }
         // DOM bootstrap is runtime initialization rather than page code. Apply
         // the caller's budget only after it has completed so a deliberately
         // small limit (for example in a test or a short-lived page task) cannot
@@ -4008,6 +4018,7 @@ impl JsRuntime {
             runtime_helper_entries: exceptions.generated_entries,
             exception_unwinds: exceptions.exception_unwinds,
             exception_handler_entries: exceptions.handler_entries,
+            interrupt_deopts: diagnostics.interrupt_deopts,
         }
     }
 
@@ -4022,10 +4033,10 @@ impl JsRuntime {
     ///
     /// Script errors are returned as `JsError`.
     ///
-    /// The configured deterministic loop-iteration limit is enforced by the
-    /// Boa VM. A synchronous wall-clock interrupt is intentionally not claimed
-    /// here: callers that need cooperative cancellation should use
-    /// [`Self::eval_async`] and drop its future or cancel the owning page task.
+    /// The VM enforces the configured loop limit and wall-clock deadline in
+    /// interpreter and generated execution. Native calls are checked when they
+    /// return; a blocking host function is not preempted. Use [`Self::eval_async`]
+    /// when host calls need to suspend or the owning page task may be cancelled.
     pub fn eval(&mut self, source: &str) -> JsResult<JsValue> {
         let result = self.with_active_host(|context| context.eval(Source::from_bytes(source)));
         // A synchronous evaluator cannot hand control to an embedder while a
@@ -4046,16 +4057,17 @@ impl JsRuntime {
         source: &str,
     ) -> impl Future<Output = JsResult<JsValue>> + 'a {
         let source = source.to_owned();
-        let timeout = self.sandbox.timeout;
+        let deadline = execution_deadline(self.sandbox.timeout);
         let host_state = Rc::clone(&self.host_state);
         let future = ActiveHostFuture {
             future: Box::pin(async move {
-                let script = Script::parse(Source::from_bytes(&source), None, &mut self.context)?;
-                script.evaluate_async(&mut self.context).await
+                let mut context = self.context.enter_runtime_deadline(deadline);
+                let script = Script::parse(Source::from_bytes(&source), None, &mut context)?;
+                script.evaluate_async(&mut context).await
             }),
             host_state,
         };
-        TimedJsFuture::new(future, timeout)
+        TimedJsFuture::new(future, deadline)
     }
 
     fn eval_async_for_document<'a>(
@@ -4093,18 +4105,19 @@ impl JsRuntime {
         let source = source.to_owned();
         let url = url.to_owned();
         let document_id = document.identity();
-        let timeout = self.sandbox.timeout;
+        let deadline = execution_deadline(self.sandbox.timeout);
         let host_state = Rc::clone(&self.host_state);
         let module_host_state = Rc::clone(&host_state);
         let future = ActiveHostFuture {
             future: Box::pin(async move {
+                let mut context = self.context.enter_runtime_deadline(deadline);
                 let module = Module::parse(
                     Source::from_reader(source.as_bytes(), Some(Path::new(&url))),
                     None,
-                    &mut self.context,
+                    &mut context,
                 )?;
                 let _module_document = activate_module_document(&module_host_state, document_id);
-                module.load_link_evaluate_async(&mut self.context).await
+                module.load_link_evaluate_async(&mut context).await
             }),
             host_state: Rc::clone(&host_state),
         };
@@ -4113,7 +4126,7 @@ impl JsRuntime {
             host_state,
             document_id,
         };
-        TimedJsFuture::new(document_future, timeout).await
+        TimedJsFuture::new(document_future, deadline).await
     }
 
     /// Collects document scripts in parser/defer order and moves the runtime
@@ -4784,13 +4797,13 @@ impl JsRuntime {
                 } => {
                     if let Some(callable) = callback.as_callable() {
                         let this = JsValue::undefined();
+                        let deadline = execution_deadline(self.sandbox.timeout);
                         let host_state = Rc::clone(&self.host_state);
                         let future = ActiveHostFuture {
-                            future: Box::pin(callable.call_async(
-                                &this,
-                                &args,
-                                &mut self.context,
-                            )),
+                            future: Box::pin(async {
+                                let mut context = self.context.enter_runtime_deadline(deadline);
+                                callable.call_async(&this, &args, &mut context).await
+                            }),
                             host_state: Rc::clone(&host_state),
                         };
                         let result = if let Some(document_id) = owner_document_id {
@@ -4799,9 +4812,9 @@ impl JsRuntime {
                                 host_state,
                                 document_id,
                             };
-                            TimedJsFuture::new(document_future, self.sandbox.timeout).await
+                            TimedJsFuture::new(document_future, deadline).await
                         } else {
-                            TimedJsFuture::new(future, self.sandbox.timeout).await
+                            TimedJsFuture::new(future, deadline).await
                         };
                         if let Err(error) = result {
                             if is_wall_clock_timeout(&error) {
@@ -5406,13 +5419,13 @@ impl JsRuntime {
             let result = if let Some(callable) = callback.as_callable() {
                 let args = [JsValue::from(timestamp)];
                 let this = JsValue::undefined();
+                let deadline = execution_deadline(self.sandbox.timeout);
                 let host_state = Rc::clone(&self.host_state);
                 let future = ActiveHostFuture {
-                    future: Box::pin(callable.call_async(
-                        &this,
-                        &args,
-                        &mut self.context,
-                    )),
+                    future: Box::pin(async {
+                        let mut context = self.context.enter_runtime_deadline(deadline);
+                        callable.call_async(&this, &args, &mut context).await
+                    }),
                     host_state: Rc::clone(&host_state),
                 };
                 if let Some(document_id) = document_id {
@@ -5421,13 +5434,11 @@ impl JsRuntime {
                         host_state,
                         document_id,
                     };
-                    TimedJsFuture::new(document_future, self.sandbox.timeout)
+                    TimedJsFuture::new(document_future, deadline)
                         .await
                         .map(|_| ())
                 } else {
-                    TimedJsFuture::new(future, self.sandbox.timeout)
-                        .await
-                        .map(|_| ())
+                    TimedJsFuture::new(future, deadline).await.map(|_| ())
                 }
             } else {
                 Err(JsNativeError::typ().with_message("animation frame callback is not callable").into())
@@ -6777,7 +6788,9 @@ impl JsRuntime {
     fn with_active_host_value<T>(&mut self, f: impl FnOnce(&mut Context) -> T) -> T {
         let _guard = activate_host_state(Rc::clone(&self.host_state));
         self.host_state.borrow_mut().sweep_node_lifetimes();
-        f(&mut self.context)
+        let deadline = execution_deadline(self.sandbox.timeout);
+        let mut context = self.context.enter_runtime_deadline(deadline);
+        f(&mut context)
     }
 }
 
