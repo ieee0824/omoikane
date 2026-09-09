@@ -1585,11 +1585,18 @@
 
   // Native tree insertion reparents nodes but cannot see the JavaScript-side
   // template contents owner-document bookkeeping. Stamp the inserted subtree
-  // after every DOM insertion so nodes moved into `template.content` adopt its
-  // inert owner document just like parser-created content does.
+  // when its owner changes so nodes moved into `template.content` adopt its
+  // inert owner document just like parser-created content does. A subtree
+  // already stamped for this owner needs no second walk on a same-document
+  // move; newly parsed roots have no stamp and still take the full path.
   function stampInsertedOwnerDocument(parent, nodes) {
     const owner = nodeDocument(parent);
-    for (const node of nodes) stampOwnerDoc(node, owner);
+    const ownerId = internalNodeId(owner);
+    for (const node of nodes) {
+      if (ownerId === undefined || getOwnerDocumentId(ownerDocumentIds, node) !== ownerId) {
+        stampOwnerDoc(node, owner);
+      }
+    }
   }
 
   function nodeRoot(node) {
