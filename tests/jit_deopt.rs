@@ -1,6 +1,9 @@
 //! Gate 4-4 integration contract for exact interpreter reconstruction.
 #![cfg(feature = "baseline-jit")]
 
+#[path = "jit_exception/mod.rs"]
+mod exceptions;
+
 use boa_engine::{Context, JsValue, Source};
 
 fn evaluate(
