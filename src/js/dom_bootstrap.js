@@ -138,8 +138,9 @@
     return ref ? safeApply(weakRefDeref, ref, []) : undefined;
   }
   let nodeCacheWrites = 0;
+  let nodeCacheSweepInterval = 128;
   function sweepNodeCache(force = false) {
-    if (!force && ++nodeCacheWrites < 128) return;
+    if (!force && ++nodeCacheWrites < nodeCacheSweepInterval) return;
     nodeCacheWrites = 0;
     const candidates = [];
     safeApply(mapForEachIntrinsic, cache, [(_ref, id) => { candidates[candidates.length] = id; }]);
@@ -154,6 +155,13 @@
       safeSetDelete(canonicalHtmlElementIds, id);
       safeSetDelete(canonicalHtmlSlotIds, id);
     }
+    // Charge the next full scan to at least as many intervening operations as
+    // there are surviving entries. A fixed interval makes building a large
+    // live DOM quadratic. Since every new wrapper counts as an operation,
+    // this also bounds cache growth between sweeps by the previous live size
+    // (with a 128-operation floor). Context retirement still forces a sweep.
+    const surviving = candidates.length - ids.length;
+    nodeCacheSweepInterval = surviving > 128 ? surviving : 128;
   }
   const canonicalNodeIds = new WeakMap();
   const wrapperNodeIds = canonicalNodeIds;
@@ -1657,10 +1665,13 @@
       }
     }
 
-    const childIds = __omoikane_child_node_ids(parentId) || [];
-    const previousSibling = refNode
-      ? internalPreviousSibling(refNode)
-      : (childIds.length ? wrapNode(childIds[childIds.length - 1]) : null);
+    let previousSibling;
+    if (refNode) {
+      previousSibling = internalPreviousSibling(refNode);
+    } else {
+      const childIds = __omoikane_child_node_ids(parentId) || [];
+      previousSibling = childIds.length ? wrapNode(childIds[childIds.length - 1]) : null;
+    }
 
     if (__omoikane_node_type(newId) === 11) {
       const children = internalChildNodes(newNode);
