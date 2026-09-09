@@ -4,6 +4,9 @@
 #[path = "jit_exception/mod.rs"]
 mod exceptions;
 
+#[path = "jit_interrupt/mod.rs"]
+mod interrupts;
+
 use boa_engine::{Context, JsValue, Source};
 
 fn evaluate(

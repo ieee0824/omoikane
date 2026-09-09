@@ -49,9 +49,11 @@ crc32fast = "1.5"
 # (ieee0824/boa#73), and verified interpreter deoptimization
 # (ieee0824/boa#75), collectible Realm prototype transitions
 # (ieee0824/boa#77), and live generated-frame exception handling
-# (ieee0824/boa#78). The pinned commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "06c5ee8626c93b870df012f12cfee0bf3a9cb047", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "06c5ee8626c93b870df012f12cfee0bf3a9cb047" }
+# (ieee0824/boa#78), and shared interpreter/JIT deadlines and async budgets
+# (ieee0824/boa#79), with safe deadline bookkeeping, job cancellation and module targets
+# (ieee0824/boa#81). The pinned commit contains all listed fork changes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "21dde73e068e2051fe63863d743e3e067731976c", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "21dde73e068e2051fe63863d743e3e067731976c" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"

@@ -87,10 +87,10 @@ Several statements in the original #307 text are now stale:
 - the current benchmark has 11 shapes in baseline.json, not the nine-shape
   table in the original issue text;
 - #315's GC-threshold work and #491's related close state are already on main;
-- synchronous evaluation has a deterministic Boa loop-iteration limit, while
-  eval_async/page-task paths have cooperative wall-clock deadline checks;
-  the old blanket statement that no execution-time enforcement exists is no
-  longer true, although a native JIT still needs interrupt/safepoint support;
+- Gate 1 had a deterministic synchronous loop limit and cooperative wall-clock
+  checks on eval_async/page-task paths. [Gate 4-6](gate4-interrupts.md) now shares
+  wall-clock deadlines and iteration limits with synchronous evaluation and
+  generated code, including native-call boundaries and asynchronous suspension;
 - the existing #057/#058/#059 work protects interpreter inline-cache
   correctness. It does not provide a machine-code IC or a JIT invalidation API.
 
