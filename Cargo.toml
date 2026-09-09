@@ -54,10 +54,11 @@ crc32fast = "1.5"
 # (ieee0824/boa#78), shared interpreter/JIT deadlines and async budgets
 # (ieee0824/boa#79), live JIT code metadata snapshots (ieee0824/boa#80),
 # safe deadline bookkeeping, job cancellation and module targets (ieee0824/boa#81),
-# plus the focused Test262/ASAN CI diagnostics (ieee0824/boa#82).
+# plus the focused Test262/ASAN CI diagnostics (ieee0824/boa#82)
+# and bounded small-stack parsing in dev/release (ieee0824/boa#83).
 # The pinned commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "4a7083782952ab8891ea4f0b8a9463e406e357d7", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "4a7083782952ab8891ea4f0b8a9463e406e357d7" }
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "7574396db036b0b670ec881f67c72986096b3e21", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "7574396db036b0b670ec881f67c72986096b3e21" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
