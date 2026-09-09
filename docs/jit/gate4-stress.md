@@ -39,29 +39,62 @@ The existing native CI deoptimization target keeps the baseline JIT deopt,
 exception and interrupt contracts lightweight. The `jit-stress` feature adds
 this corpus, the Acid3 harness and Web API surface checks without changing the
 default build. The complete gate runs every test with JIT enabled, including
-ignored tests and the required pinned WPT subset, followed by a build. The full
-suite is serialized with `--test-threads=1` because the Gate 4 feature enables
-GC/JIT diagnostics that share process-wide counters and timeout state. Stress
-continues through new seeds until it has completed at least 64 seeds and run for
-at least ten minutes:
+ignored tests and the required pinned WPT subset, as well as a build.
+Every test process still uses `--test-threads=1`: the Gate 4 feature enables
+GC/JIT diagnostics with process-wide counters and timeout state. CI parallelism
+uses separate Ubuntu 24.04 x86_64 runners with Rust 1.98.1:
+
+| Partition | Coverage |
+| --- | --- |
+| `unit-0` through `unit-3` | All library tests, assigned by a stable hash of each exact test name |
+| `integration` | Remaining integration targets, examples, enabled binaries, doctests, and build |
+| `acid3` | Standalone and embedded Acid3 harness, both drive modes |
+| `compatibility` | Required pinned WPT and standalone/embedded Web API surface |
+| `stress` | Deopt/exception/interrupt contracts and the generated stress corpus |
+
+The unit test lists come from Cargo/libtest. The final aggregator verifies that
+all four lists agree and that their selections cover every test exactly once.
+New integration targets are discovered through Cargo metadata. Acid3 and Web API
+modules embedded in `jit_deopt` run in their corresponding partitions, so its
+stress partition does not duplicate those heavy tests.
+
+One preparation job resolves `Cargo.lock` and distributes it to every runner.
+Each partition records its revision, compiler, target, lockfile digest, tracked
+working-tree status, commands, exit codes, timings and test counts. Unit runners
+share a build cache with one writer; other partitions have separate caches,
+including on failure. The matrix disables fail-fast so a failure in Acid3 does
+not prevent WPT or the ten-minute stress from running. This reduces elapsed time
+at the cost of more concurrent runners and compilation on an initially cold
+cache; measured timings must distinguish cold and warm runs.
+
+The final `jit-stress` job always runs and retains the existing required-check
+name. It collects the partition reports and writes `gate.json`. A missing,
+incomplete, failed or cancelled partition, mismatched input, dirty source, or
+incomplete unit coverage produces `no-go`. A `go` also requires both Acid3 modes
+to reach 100/100, zero WPT/Web API regressions, and all 64 or more profiled stress
+seeds to succeed over at least ten minutes. Stress continues generating new
+seeds until both limits are met; it does not sleep to satisfy the duration.
+
+Run the same partitions sequentially on one local Cargo target directory with:
 
 ```sh
 scripts/check-jit-gate4.sh
 ```
 
-The `jit-stress` CI job runs this full gate on Ubuntu 24.04 x86_64 with Rust
-1.98.1 and uploads the decision and failure artifacts even when a test fails.
-
-The script accepts no test filters. It saves the exact revision, full test/build
-logs, compiler version, dependency lockfile, tracked working-tree status, Acid3
-scores, WPT and Web API reports, stress results, and `gate.json` in
-a new `.artifacts/js-benchmark/gate4-*` directory. A `go` requires the full
-suite and build to pass, both Acid3 drive modes to reach 100/100, zero WPT/Web
-API regressions, and all 64 or more profiled stress seeds to succeed over at
-least ten minutes. The seed loop does not sleep to satisfy the duration target.
+This accepts no test filters and creates a new
+`.artifacts/js-benchmark/gate4-*` directory. A failed partition does not suppress
+later partitions. CI uploads each partition's logs and failure artifacts as
+`jit-gate4-partition-*`, and the combined decision as `jit-gate4-report`.
+Stress snapshots remain under `.artifacts/js-benchmark/jit-stress/`.
 `OMOIKANE_JIT_STRESS_MIN_SECONDS` controls duration for local experiments; a
-shorter run cannot produce a full-gate `go`. Unsupported
-JIT architectures do not produce a native gate result.
+shorter run cannot produce a full-gate `go`. Unsupported JIT architectures do
+not produce a native gate result.
+
+The partition and aggregation regression tests run before the CI matrix:
+
+```sh
+python3 -m unittest discover -s scripts/tests -p 'test_jit_gate4.py'
+```
 
 For a particular failing seed, run the parent matrix with a one-seed range;
 this creates a fresh artifact directory without overwriting the original:

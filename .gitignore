@@ -28,3 +28,6 @@ Thumbs.db
 
 # Claude
 /.claude/
+
+# Python CI tooling
+__pycache__/
