@@ -2961,6 +2961,12 @@ pub struct BaselineJitDiagnostics {
     pub property_guard_misses: u64,
     /// Property-enabled entries that resumed the interpreter.
     pub property_bailouts: u64,
+    /// Calls that entered a generated runtime-helper site.
+    pub runtime_helper_entries: u64,
+    /// Exceptions resolved through generated-frame metadata.
+    pub exception_unwinds: u64,
+    /// Catch/finally entries restored from generated-frame metadata.
+    pub exception_handler_entries: u64,
 }
 
 impl BaselineJitDiagnostics {
@@ -2992,6 +2998,15 @@ impl BaselineJitDiagnostics {
         self.property_bailouts = self
             .property_bailouts
             .saturating_add(other.property_bailouts);
+        self.runtime_helper_entries = self
+            .runtime_helper_entries
+            .saturating_add(other.runtime_helper_entries);
+        self.exception_unwinds = self
+            .exception_unwinds
+            .saturating_add(other.exception_unwinds);
+        self.exception_handler_entries = self
+            .exception_handler_entries
+            .saturating_add(other.exception_handler_entries);
     }
 }
 
@@ -3977,6 +3992,7 @@ impl JsRuntime {
     #[doc(hidden)]
     pub fn baseline_jit_diagnostics(&self) -> BaselineJitDiagnostics {
         let diagnostics = self.context.arithmetic_jit_diagnostics();
+        let exceptions = self.context.jit_exception_diagnostics();
         BaselineJitDiagnostics {
             enabled: true,
             compile_requests: diagnostics.compile_requests,
@@ -3989,7 +4005,17 @@ impl JsRuntime {
             property_guard_hits: diagnostics.property_guard_hits,
             property_guard_misses: diagnostics.property_guard_misses,
             property_bailouts: diagnostics.property_bailouts,
+            runtime_helper_entries: exceptions.generated_entries,
+            exception_unwinds: exceptions.exception_unwinds,
+            exception_handler_entries: exceptions.handler_entries,
         }
+    }
+
+    /// Selects generated entry or interpreter execution for differential verification.
+    #[cfg(feature = "baseline-jit")]
+    #[doc(hidden)]
+    pub fn set_baseline_jit_enabled(&mut self, enabled: bool) {
+        self.context.set_baseline_jit_enabled(enabled);
     }
 
     /// Evaluates JavaScript source code.
