@@ -17,6 +17,8 @@ jit-differential = []
 # Test-only Gate 3 substrate. Enabling this exposes Boa's native code-memory
 # probe but does not select JIT execution for production JavaScript.
 baseline-jit = ["boa_engine/baseline-jit"]
+# Gate 4 stress records automatic collections as well as generated execution.
+jit-stress = ["baseline-jit", "boa_gc/gc-profile"]
 
 [dependencies]
 ab_glyph = "0.2"
@@ -49,11 +51,13 @@ crc32fast = "1.5"
 # (ieee0824/boa#73), and verified interpreter deoptimization
 # (ieee0824/boa#75), collectible Realm prototype transitions
 # (ieee0824/boa#77), and live generated-frame exception handling
-# (ieee0824/boa#78), and shared interpreter/JIT deadlines and async budgets
-# (ieee0824/boa#79), with safe deadline bookkeeping, job cancellation and module targets
-# (ieee0824/boa#81). The pinned commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "21dde73e068e2051fe63863d743e3e067731976c", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "21dde73e068e2051fe63863d743e3e067731976c" }
+# (ieee0824/boa#78), shared interpreter/JIT deadlines and async budgets
+# (ieee0824/boa#79), live JIT code metadata snapshots (ieee0824/boa#80),
+# safe deadline bookkeeping, job cancellation and module targets (ieee0824/boa#81),
+# plus the focused Test262/ASAN CI diagnostics (ieee0824/boa#82).
+# The pinned commit contains all listed fork changes.
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "4a7083782952ab8891ea4f0b8a9463e406e357d7", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "4a7083782952ab8891ea4f0b8a9463e406e357d7" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
@@ -90,3 +94,11 @@ cbindgen = "0.29"
 # dependencies running completely unoptimized during real-site testing.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Conformance tests exercise thousands of native DOM calls per script. Give
+# the host crate modest optimization too, while retaining the test profile's
+# debug assertions and overflow checks. Normal development builds stay at O0.
+[profile.test]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true

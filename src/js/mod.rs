@@ -2973,6 +2973,12 @@ pub struct BaselineJitDiagnostics {
     pub exception_handler_entries: u64,
     /// Generated loop slices that restored the interpreter for a budget or deadline poll.
     pub interrupt_deopts: u64,
+    /// Generated entries that resumed the interpreter after a shape mismatch.
+    pub shape_deopts: u64,
+    /// Generated entries that resumed the interpreter after a type mismatch.
+    pub type_deopts: u64,
+    /// Generated entries that resumed the interpreter after an arithmetic guard failed.
+    pub arithmetic_deopts: u64,
 }
 
 impl BaselineJitDiagnostics {
@@ -3014,6 +3020,11 @@ impl BaselineJitDiagnostics {
             .exception_handler_entries
             .saturating_add(other.exception_handler_entries);
         self.interrupt_deopts = self.interrupt_deopts.saturating_add(other.interrupt_deopts);
+        self.shape_deopts = self.shape_deopts.saturating_add(other.shape_deopts);
+        self.type_deopts = self.type_deopts.saturating_add(other.type_deopts);
+        self.arithmetic_deopts = self
+            .arithmetic_deopts
+            .saturating_add(other.arithmetic_deopts);
     }
 }
 
@@ -4019,7 +4030,17 @@ impl JsRuntime {
             exception_unwinds: exceptions.exception_unwinds,
             exception_handler_entries: exceptions.handler_entries,
             interrupt_deopts: diagnostics.interrupt_deopts,
+            shape_deopts: diagnostics.shape_deopts,
+            type_deopts: diagnostics.type_deopts,
+            arithmetic_deopts: diagnostics.arithmetic_deopts,
         }
+    }
+
+    /// Returns an owned snapshot of generated code, stack maps and deoptimization metadata.
+    #[cfg(feature = "baseline-jit")]
+    #[doc(hidden)]
+    pub fn baseline_jit_debug_snapshot(&self) -> String {
+        self.context.jit_debug_snapshot()
     }
 
     /// Selects generated entry or interpreter execution for differential verification.
@@ -7672,6 +7693,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(cache_storage_native),
         ),
         (
+            js_string!("__omoikane_get_element_by_id"),
+            2,
+            NativeFunction::from_copy_closure(get_element_by_id_native),
+        ),
+        (
+            js_string!("__omoikane_node_index"),
+            1,
+            NativeFunction::from_copy_closure(node_index_native),
+        ),
+        (
             js_string!("__omoikane_query_selector"),
             2,
             NativeFunction::from_copy_closure(query_selector_native),
@@ -10239,6 +10270,58 @@ fn schedule_timer_from_js(
             state.event_loop.clear_timer(id);
         }
         Ok(JsValue::from(id as f64))
+    })
+}
+
+// Inspect the DOM without creating wrappers or invoking user-replaceable
+// childNodes/getAttribute properties for every descendant. A stack keeps deep
+// trees off both the JavaScript and Rust call stacks.
+fn get_element_by_id_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let expected = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    // An empty id attribute does not give the element an ID.
+    if expected.is_empty() {
+        return Ok(JsValue::null());
+    }
+    with_host_state(|state| {
+        let Some(root) = state.borrow().get_node(node_id) else {
+            return Ok(JsValue::null());
+        };
+        let mut pending = root.child_nodes();
+        pending.reverse();
+        while let Some(node) = pending.pop() {
+            if node.node_type() == NodeType::Element
+                && node.get_attribute("id").as_deref() == Some(expected.as_str())
+            {
+                return Ok(node_to_js_value(Some(node)));
+            }
+            // Ordinary children exclude shadow trees, template contents and
+            // iframe Documents. Reverse insertion preserves document order.
+            pending.extend(node.child_nodes().into_iter().rev());
+        }
+        Ok(JsValue::null())
+    })
+}
+
+fn node_index_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let index = state.borrow().get_node(node_id).and_then(|node| {
+            node.parent_node()?
+                .child_nodes()
+                .iter()
+                .position(|child| child.identity() == node_id)
+        });
+        Ok(JsValue::from(index.map_or(-1.0, |index| index as f64)))
     })
 }
 

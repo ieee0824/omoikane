@@ -42,6 +42,10 @@
   const nativeDoctypePublicId = globalThis.__omoikane_doctype_public_id;
   const nativeDoctypeSystemId = globalThis.__omoikane_doctype_system_id;
   const nativeChildNodeIds = globalThis.__omoikane_child_node_ids;
+  const nativeGetElementById = globalThis.__omoikane_get_element_by_id;
+  const nativeNodeIndex = globalThis.__omoikane_node_index;
+  delete globalThis.__omoikane_get_element_by_id;
+  delete globalThis.__omoikane_node_index;
   const nativeGetTextContent = globalThis.__omoikane_get_text_content;
   const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
   const nativeCreateElementNS = globalThis.__omoikane_create_element_ns;
@@ -134,8 +138,9 @@
     return ref ? safeApply(weakRefDeref, ref, []) : undefined;
   }
   let nodeCacheWrites = 0;
+  let nodeCacheSweepInterval = 128;
   function sweepNodeCache(force = false) {
-    if (!force && ++nodeCacheWrites < 128) return;
+    if (!force && ++nodeCacheWrites < nodeCacheSweepInterval) return;
     nodeCacheWrites = 0;
     const candidates = [];
     safeApply(mapForEachIntrinsic, cache, [(_ref, id) => { candidates[candidates.length] = id; }]);
@@ -150,6 +155,13 @@
       safeSetDelete(canonicalHtmlElementIds, id);
       safeSetDelete(canonicalHtmlSlotIds, id);
     }
+    // Charge the next full scan to at least as many intervening operations as
+    // there are surviving entries. A fixed interval makes building a large
+    // live DOM quadratic. Since every new wrapper counts as an operation,
+    // this also bounds cache growth between sweeps by the previous live size
+    // (with a 128-operation floor). Context retirement still forces a sweep.
+    const surviving = candidates.length - ids.length;
+    nodeCacheSweepInterval = surviving > 128 ? surviving : 128;
   }
   const canonicalNodeIds = new WeakMap();
   const wrapperNodeIds = canonicalNodeIds;
@@ -214,8 +226,11 @@
   // used by subsequent same-origin checks.
   const documentHistoryURLs = new WeakMap();
   function forgetDiscardedNodeWrappers() {
-    sweepNodeCache(true);
     const ids = nativeTakeDiscardedNodeIds() || [];
+    // Ordinary insert/remove operations do not retire a browsing context.
+    // Keep their weak-index maintenance amortized instead of rescanning every
+    // wrapper after every mutation. Actual retirement still cleans up now.
+    sweepNodeCache(ids.length > 0);
     for (let index = 0; index < ids.length; index += 1) {
       const id = ids[index];
       // If teardown retired the browsing context which currently owns focus,
@@ -1570,11 +1585,18 @@
 
   // Native tree insertion reparents nodes but cannot see the JavaScript-side
   // template contents owner-document bookkeeping. Stamp the inserted subtree
-  // after every DOM insertion so nodes moved into `template.content` adopt its
-  // inert owner document just like parser-created content does.
+  // when its owner changes so nodes moved into `template.content` adopt its
+  // inert owner document just like parser-created content does. A subtree
+  // already stamped for this owner needs no second walk on a same-document
+  // move; newly parsed roots have no stamp and still take the full path.
   function stampInsertedOwnerDocument(parent, nodes) {
     const owner = nodeDocument(parent);
-    for (const node of nodes) stampOwnerDoc(node, owner);
+    const ownerId = internalNodeId(owner);
+    for (const node of nodes) {
+      if (ownerId === undefined || getOwnerDocumentId(ownerDocumentIds, node) !== ownerId) {
+        stampOwnerDoc(node, owner);
+      }
+    }
   }
 
   function nodeRoot(node) {
@@ -1591,8 +1613,8 @@
   }
 
   function indexOfNode(node) {
-    const parent = node && node.parentNode;
-    return parent ? parent.childNodes.indexOf(node) : -1;
+    const id = canonicalWrapperId(node);
+    return id === undefined ? -1 : nativeNodeIndex(id);
   }
 
   function preRemove(parent, removed) {
@@ -1600,7 +1622,11 @@
     const state = traversalByDocument.get(traversalDocumentKey(doc));
     if (!state) return;
     for (const iterator of traversalEntries(state.iterators)) iterator.__preRemove(removed);
-    for (const range of traversalEntries(state.ranges)) range.__preRemove(parent, removed);
+    const ranges = traversalEntries(state.ranges);
+    if (ranges.length) {
+      const index = indexOfNode(removed);
+      for (const range of ranges) range.__preRemove(parent, removed, index);
+    }
   }
 
   function notifyImplicitRemoval(node) {
@@ -1646,10 +1672,13 @@
       }
     }
 
-    const childIds = __omoikane_child_node_ids(parentId) || [];
-    const previousSibling = refNode
-      ? internalPreviousSibling(refNode)
-      : (childIds.length ? wrapNode(childIds[childIds.length - 1]) : null);
+    let previousSibling;
+    if (refNode) {
+      previousSibling = internalPreviousSibling(refNode);
+    } else {
+      const childIds = __omoikane_child_node_ids(parentId) || [];
+      previousSibling = childIds.length ? wrapNode(childIds[childIds.length - 1]) : null;
+    }
 
     if (__omoikane_node_type(newId) === 11) {
       const children = internalChildNodes(newNode);
@@ -4185,8 +4214,7 @@
       visit(root); return result;
     }
     detach() { unregisterTraversal(this.__doc, "ranges", this); }
-    __preRemove(parent, removed) {
-      const index = indexOfNode(removed);
+    __preRemove(parent, removed, index) {
       const adjust = (container, offset) => {
         if (isInclusiveDescendant(container, removed)) return [parent,index];
         if (container === parent && offset > index) return [container,offset-1];
@@ -4516,17 +4544,7 @@
   }
 
   function findElementById(root, id) {
-    const expected = String(id);
-    const visit = (node) => {
-      for (const child of node.childNodes) {
-        if (child.nodeType !== 1) continue;
-        if (child.getAttribute("id") === expected) return child;
-        const found = visit(child);
-        if (found) return found;
-      }
-      return null;
-    };
-    return visit(root);
+    return wrapNode(nativeGetElementById(root.__id, String(id)));
   }
 
   class Document extends Node {
@@ -4549,8 +4567,8 @@
       // by falling back to the top-level document when `this` is not a
       // Document instance.
       const scope = this instanceof Document ? this : globalThis.document;
-      // Plain tree walk with an id equality check: getElementById needs no
-      // selector parsing/matching and no full-document snapshot.
+      // Search internal DOM data directly, with exact ID matching and without
+      // materializing wrappers for the rest of the document.
       return findElementById(scope, id);
     }
 

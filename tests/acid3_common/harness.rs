@@ -347,14 +347,18 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             let mut stalled = 0usize;
             for _ in 0..max_ticks {
                 iterations += 1;
-                acid3_debug_log(&format!("mode={mode:?} tick start iteration={iterations} index={last_index}"));
+                acid3_debug_log(&format!(
+                    "mode={mode:?} tick start iteration={iterations} index={last_index}"
+                ));
                 if let Err(e) = runtime.tick(delay_ms) {
                     drive_errors.push(format!("tick: {e}"));
                     break;
                 }
                 acid3_debug_log(&format!("mode={mode:?} tick after iteration={iterations}"));
                 let idx = read_int(&mut runtime, "index").unwrap_or(last_index);
-                acid3_debug_log(&format!("mode={mode:?} tick index={idx} iteration={iterations}"));
+                acid3_debug_log(&format!(
+                    "mode={mode:?} tick index={idx} iteration={iterations}"
+                ));
                 let total = read_int(&mut runtime, "tests.length");
                 if let Some(t) = total {
                     if idx >= t {
@@ -446,7 +450,10 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             &mut runtime,
             "(document.getElementById('score') && document.getElementById('score').firstChild) ? String(document.getElementById('score').firstChild.data) : null",
         ),
-        log: eval_string(&mut runtime, "typeof log !== 'undefined' ? String(log) : null"),
+        log: eval_string(
+            &mut runtime,
+            "typeof log !== 'undefined' ? String(log) : null",
+        ),
         iterations,
     };
     acid3_debug_log(&format!("mode={mode:?} after result"));
@@ -473,7 +480,10 @@ fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
         "(function(){{ try {{ var __v = ({expr}); return (__v === null || __v === undefined) ? '' : String(__v); }} catch (e) {{ return '<<eval-error: ' + e + '>>'; }} }})()"
     );
     let result = runtime.eval(&wrapped);
-    acid3_debug_log(&format!("eval after runtime expr={expr} ok={}", result.is_ok()));
+    acid3_debug_log(&format!(
+        "eval after runtime expr={expr} ok={}",
+        result.is_ok()
+    ));
     let value = match result {
         Ok(value) => value.as_string().map(|s| s.to_std_string_escaped()),
         Err(_) => None,
@@ -500,7 +510,9 @@ fn eval_string(runtime: &mut JsRuntime, expr: &str) -> Option<String> {
 fn read_int(runtime: &mut JsRuntime, expr: &str) -> Option<i64> {
     let s = eval_string(
         runtime,
-        &format!("(function(){{ var v = ({expr}); return (typeof v === 'number' && isFinite(v)) ? v : NaN; }})()"),
+        &format!(
+            "(function(){{ var v = ({expr}); return (typeof v === 'number' && isFinite(v)) ? v : NaN; }})()"
+        ),
     )?;
     let trimmed = s.trim();
     if trimmed.is_empty() || trimmed == "NaN" || trimmed.starts_with("<<") {

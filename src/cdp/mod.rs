@@ -3831,7 +3831,11 @@ mod tests {
 
     #[test]
     fn browser_session_times_out_a_suspended_runtime_evaluation() {
-        let mut session = browser_session_with_timeout(Duration::from_millis(2));
+        // A two-millisecond budget can expire during parsing or scheduling on
+        // a loaded runner, before alert suspends. Allow the setup to finish,
+        // then wait for the real evaluation deadline below. The contract here
+        // is cancellation of a suspended dialog, not script startup speed.
+        let mut session = browser_session_with_timeout(Duration::from_secs(1));
         let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
         browser_request(
             &mut session,
@@ -3839,13 +3843,16 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":"eval","method":"Runtime.evaluate","params":{"expression":"alert('timeout')","returnByValue":true}}"#,
         );
         let mut payloads = browser_payloads(&mut session, client.client_id);
-        assert_eq!(payloads[0]["method"], "Page.javascriptDialogOpening");
+        assert_eq!(
+            payloads[0]["method"], "Page.javascriptDialogOpening",
+            "{payloads:?}"
+        );
+        assert_eq!(session.pending_response_count(), 1);
         assert!(browser_payloads(&mut session, client.client_id).is_empty());
         payloads.extend(browser_payloads_waiting(&mut session, client.client_id));
         assert_eq!(session.pending_response_count(), 0, "{payloads:#?}");
         assert!(payloads.iter().any(|value| {
-            value["method"] == "Page.javascriptDialogClosed"
-                && value["params"]["result"] == false
+            value["method"] == "Page.javascriptDialogClosed" && value["params"]["result"] == false
         }));
         assert!(payloads.iter().any(|value| {
             value["id"] == "eval"

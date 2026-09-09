@@ -64,6 +64,101 @@ jobs:
           if-no-files-found: error
 
 
+  gate4-prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      shards: ${{ steps.matrix.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - name: Verify partitioning and gate aggregation
+        run: python3 -m unittest discover -s scripts/tests -p 'test_jit_gate4.py'
+      - name: Define fixed gate partitions
+        id: matrix
+        run: echo "shards=$(python3 scripts/jit-gate4.py matrix)" >> "$GITHUB_OUTPUT"
+      - name: Resolve one dependency lockfile for every partition
+        run: python3 scripts/jit-gate4.py prepare .artifacts/js-benchmark/gate4/inputs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jit-gate4-inputs
+          path: .artifacts/js-benchmark/gate4/inputs/
+          if-no-files-found: error
+
+  gate4-partition:
+    needs: gate4-prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      # An Acid3 failure must not cancel the ten-minute stress or other suites.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.gate4-prepare.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: actions/download-artifact@v4
+        with:
+          name: jit-gate4-inputs
+          path: .artifacts/js-benchmark/gate4/inputs
+      - name: Use the shared dependency lockfile
+        run: cp .artifacts/js-benchmark/gate4/inputs/Cargo.lock Cargo.lock
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Unit partitions compile the same binary; only one writes that cache.
+          shared-key: gate4-parallel-v1-${{ startsWith(matrix.shard, 'unit-') && 'unit' || matrix.shard }}
+          save-if: ${{ !startsWith(matrix.shard, 'unit-') || matrix.shard == 'unit-0' }}
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - uses: actions/cache@v4
+        if: matrix.shard == 'compatibility'
+        with:
+          path: .cache/wpt
+          key: wpt-${{ hashFiles('tests/wpt/revision.txt') }}
+      - name: Install system fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core
+      - name: Run gate partition
+        env:
+          GATE_SHARD: ${{ matrix.shard }}
+        run: python3 scripts/jit-gate4.py run "$GATE_SHARD" .artifacts/js-benchmark/gate4
+      - name: Upload partition results and failure artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-gate4-partition-${{ matrix.shard }}
+          path: .artifacts/js-benchmark/
+          if-no-files-found: error
+
+  # Preserve the existing required-check name; missing/failed partitions are no-go.
+  jit-stress:
+    needs: [gate4-prepare, gate4-partition]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jit-gate4-partition-*
+          merge-multiple: true
+          path: .artifacts/js-benchmark/
+      - name: Require the full gate across all partitions
+        if: always()
+        env:
+          GATE_JOBS_RESULT: ${{ needs.gate4-partition.result }}
+        run: python3 scripts/jit-gate4.py aggregate .artifacts/js-benchmark/gate4 --jobs-result "$GATE_JOBS_RESULT"
+      - name: Upload combined gate decision
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-gate4-report
+          path: .artifacts/js-benchmark/gate4/gate.json
+          if-no-files-found: error
+
   wpt-smoke:
     runs-on: ubuntu-latest
     steps:

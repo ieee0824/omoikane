@@ -1,12 +1,7 @@
 //! Integration tests for the Acid3 harness.
 //!
-//! These assertions are engine-independent: they verify that the fixture
-//! server serves the vendored resources with the exact HTTP status and
-//! Content-Type Acid3 depends on, and that the Acid3 page can be fetched over
-//! HTTP and parsed into a DOM containing the expected structural elements.
-//! They do NOT assert a particular Acid3 score, so they stay green regardless
-//! of the engine's current JS/DOM completeness. Use `cargo run --example acid3`
-//! to observe the live baseline score.
+//! The fixture checks verify status, headers and DOM structure. With baseline
+//! JIT enabled, both drive modes must additionally score 100/100 for Gate 4.
 
 #[path = "acid3_common/harness.rs"]
 mod harness;
@@ -111,9 +106,7 @@ fn acid3_page_parses_to_dom_with_scoreboard() {
     );
 }
 
-/// The runner must complete both drive modes without panicking and return a
-/// readable result snapshot. This captures a baseline signal (page loads, score
-/// is extractable) without asserting a specific score.
+/// Both drive modes must complete; Gate 4 additionally requires 100/100.
 #[test]
 fn runner_completes_without_panicking() {
     let server = FixtureServer::start();
@@ -124,4 +117,47 @@ fn runner_completes_without_panicking() {
 
     let direct = run_acid3(&server.base_url(), DriveMode::DirectDrive);
     assert_eq!(direct.page_status, 200);
+
+    #[cfg(all(
+        feature = "jit-stress",
+        target_arch = "x86_64",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    {
+        let row = |run: &harness::Acid3Run| {
+            serde_json::json!({
+                "score":run.score,"total":run.total,"index":run.index,
+                "script_errors":run.script_errors,"drive_errors":run.drive_errors,
+                "log":run.log,
+            })
+        };
+        let report = serde_json::json!({"faithful":row(&faithful),"direct":row(&direct)});
+        let directory = std::env::var_os("OMOIKANE_JIT_GATE_REPORT_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| ".artifacts/js-benchmark/jit-gate4".into());
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("acid3.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        for (name, run) in [("faithful", faithful), ("direct", direct)] {
+            assert_eq!(
+                (run.score, run.total),
+                (Some(100), Some(100)),
+                "{name}: {report}"
+            );
+            assert!(
+                run.script_errors.is_empty(),
+                "{name}: {:?}",
+                run.script_errors
+            );
+            assert!(
+                run.drive_errors.is_empty(),
+                "{name}: {:?}",
+                run.drive_errors
+            );
+        }
+        println!("Acid3 JIT gate: {report}");
+    }
 }

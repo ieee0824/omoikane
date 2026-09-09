@@ -28,9 +28,11 @@ mod differential {
 
     impl StandaloneBoa {
         fn new() -> Self {
-            Self {
-                context: Context::default(),
-            }
+            #[allow(unused_mut)]
+            let mut context = Context::default();
+            #[cfg(feature = "baseline-jit")]
+            context.set_baseline_jit_enabled(false);
+            Self { context }
         }
     }
 
