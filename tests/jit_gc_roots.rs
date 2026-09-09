@@ -2,14 +2,20 @@
 
 #[cfg(feature = "baseline-jit")]
 mod enabled {
-    #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(not(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    )))]
     use boa_engine::jit::RuntimeCallError;
     use boa_engine::{
-        jit::JitRuntimeCall, js_string, property::Attribute, Context, JsObject, JsValue, Source,
+        Context, JsObject, JsValue, Source, jit::JitRuntimeCall, js_string, property::Attribute,
     };
 
     #[test]
-    #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(not(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    )))]
     fn unsupported_target_reports_an_error_instead_of_running_zero_tests() {
         assert!(matches!(
             JitRuntimeCall::new(1, 1),
@@ -18,7 +24,10 @@ mod enabled {
     }
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn jit_only_root_survives_minor_and_major_then_weak_ref_clears() {
         let mut context = Context::default();
         let runtime = JitRuntimeCall::new(1, 1).expect("compile runtime-call boundary");
@@ -69,7 +78,10 @@ mod enabled {
     }
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn old_to_young_store_and_nested_frames_survive_collection() {
         let mut context = Context::default();
         let runtime = JitRuntimeCall::new(1, 0).expect("compile runtime-call boundary");
@@ -102,10 +114,12 @@ mod enabled {
             .as_object()
             .expect("parent object");
         assert!(JsObject::equals(&retained_parent, &parent));
-        assert!(retained_parent
-            .get(js_string!("child"), &mut context)
-            .expect("remembered young child")
-            .is_object());
+        assert!(
+            retained_parent
+                .get(js_string!("child"), &mut context)
+                .expect("remembered young child")
+                .is_object()
+        );
 
         context
             .register_global_property(js_string!("afterGc"), 42, Attribute::all())

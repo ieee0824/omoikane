@@ -27,11 +27,17 @@ mod enabled {
     use boa_engine::jit::{BaselineBlockKind, BaselineIr, BytecodeCodeMap};
     use boa_engine::{Context, Script, Source};
 
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     use boa_engine::jit::{
         BaselineController, BaselineEntry, CompileDecision, JitCacheKey, JitCodeCache,
     };
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     use boa_engine::vm::BYTECODE_CONTRACT_VERSION;
 
     fn lower(source: &str) -> BaselineIr {
@@ -96,7 +102,10 @@ mod enabled {
         );
     }
 
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     #[test]
     fn hotness_entry_invalidation_and_recompile_use_generation_checked_code() {
         let key = JitCacheKey {
