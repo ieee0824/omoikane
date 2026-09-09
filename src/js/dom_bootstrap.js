@@ -107,41 +107,30 @@
   // poisoning.
   const safeApply = Reflect.apply;
   const mapForEachIntrinsic = Map.prototype.forEach;
-  const mapHasIntrinsic = Map.prototype.has;
-  const mapGetIntrinsic = Map.prototype.get;
-  const mapSetIntrinsic = Map.prototype.set;
-  const mapDeleteIntrinsic = Map.prototype.delete;
-  const weakMapHasIntrinsic = WeakMap.prototype.has;
-  const weakMapGetIntrinsic = WeakMap.prototype.get;
-  const weakMapSetIntrinsic = WeakMap.prototype.set;
-  const weakMapDeleteIntrinsic = WeakMap.prototype.delete;
-  const setDeleteIntrinsic = Set.prototype.delete;
-  const safeSetDelete = (target, key) => safeApply(setDeleteIntrinsic, target, [key]);
-  const weakSetAddIntrinsic = WeakSet.prototype.add;
-  const weakSetHasIntrinsic = WeakSet.prototype.has;
-  const safeMapHas = (target, key) => safeApply(mapHasIntrinsic, target, [key]);
-  const safeMapGet = (target, key) => safeApply(mapGetIntrinsic, target, [key]);
-  const safeMapSet = (target, key, value) =>
-    safeApply(mapSetIntrinsic, target, [key, value]);
-  const safeMapDelete = (target, key) => safeApply(mapDeleteIntrinsic, target, [key]);
-  const safeWeakMapHas = (target, key) => safeApply(weakMapHasIntrinsic, target, [key]);
-  const safeWeakMapGet = (target, key) => safeApply(weakMapGetIntrinsic, target, [key]);
-  const safeWeakMapSet = (target, key, value) =>
-    safeApply(weakMapSetIntrinsic, target, [key, value]);
-  const safeWeakMapDelete = (target, key) =>
-    safeApply(weakMapDeleteIntrinsic, target, [key]);
-  const safeWeakSetAdd = (target, key) => safeApply(weakSetAddIntrinsic, target, [key]);
-  const safeWeakSetHas = (target, key) => safeApply(weakSetHasIntrinsic, target, [key]);
+  // Bind the receiver argument once at bootstrap. An arrow calling
+  // Reflect.apply would allocate an argument array and enter a JS frame for
+  // every identity/cache lookup during DOM operations.
+  const safeMapHas = Function.prototype.call.bind(Map.prototype.has);
+  const safeMapGet = Function.prototype.call.bind(Map.prototype.get);
+  const safeMapSet = Function.prototype.call.bind(Map.prototype.set);
+  const safeMapDelete = Function.prototype.call.bind(Map.prototype.delete);
+  const safeWeakMapHas = Function.prototype.call.bind(WeakMap.prototype.has);
+  const safeWeakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
+  const safeWeakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
+  const safeWeakMapDelete = Function.prototype.call.bind(WeakMap.prototype.delete);
+  const safeSetDelete = Function.prototype.call.bind(Set.prototype.delete);
+  const safeWeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+  const safeWeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
   const safeDefineProperty = Object.defineProperty;
   const cache = new Map();
   // Native document groups trace their wrappers. This index is weak so an
   // unreachable retired or inert document can be collected with its wrappers.
   const IntrinsicWeakRef = WeakRef;
-  const weakRefDeref = WeakRef.prototype.deref;
+  const weakRefDeref = Function.prototype.call.bind(WeakRef.prototype.deref);
   const nodeLeases = new WeakMap();
   function cachedNode(id) {
     const ref = safeMapGet(cache, id);
-    return ref ? safeApply(weakRefDeref, ref, []) : undefined;
+    return ref ? weakRefDeref(ref) : undefined;
   }
   let nodeCacheWrites = 0;
   let nodeCacheSweepInterval = 128;
@@ -398,7 +387,7 @@
     Promise.resolve().then(() => {
       slotAssignmentRefreshQueued = false;
       for (let index = 0; index < knownSlots.length; index += 1) {
-        const node = safeApply(weakRefDeref, knownSlots[index], []);
+        const node = weakRefDeref(knownSlots[index]);
         if (!node) { knownSlots.splice(index--, 1); continue; }
         if (!hasCanonicalWrapperId(canonicalHtmlSlotIds, node)) {
           continue;
@@ -6049,7 +6038,7 @@
         // constructors, expandos, and reflection all describe the same global.
         const getActiveWindow = () => {
           if (activeRealmReady) {
-            const global = safeApply(weakRefDeref, activeWindow, []);
+            const global = weakRefDeref(activeWindow);
             if (global) return global;
             activeRealmReady = false;
             activeWindow = { __listeners: new Map() };

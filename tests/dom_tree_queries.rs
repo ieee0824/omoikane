@@ -50,6 +50,39 @@ fn fallback_notification_includes_a_slot_that_was_not_previously_wrapped() {
 }
 
 #[test]
+fn node_identity_uses_captured_call_and_collection_methods() {
+    let document = TreeBuilder::parse("<html><body><p id='target'></p></body></html>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+                    const target = document.getElementById('target');
+                    const methods = [
+                        [Function.prototype, 'call'], [Function.prototype, 'bind'],
+                        [Map.prototype, 'get'], [WeakMap.prototype, 'get'],
+                        [WeakRef.prototype, 'deref'], [Reflect, 'apply']
+                    ];
+                    const originals = methods.map(([object, key]) => object[key]);
+                    const fail = () => { throw new Error('observable collection lookup'); };
+                    try {
+                        for (const [object, key] of methods) object[key] = fail;
+                        return document.getElementById('target') === target &&
+                            target.ownerDocument === document && target.isConnected;
+                    } finally {
+                        for (let i = 0; i < methods.length; i++) {
+                            methods[i][0][methods[i][1]] = originals[i];
+                        }
+                    }
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn deep_connectivity_does_not_spend_the_script_loop_budget() {
     let mut runtime = deep_runtime();
     assert_eq!(

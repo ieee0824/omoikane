@@ -154,3 +154,9 @@ allocating temporary result arrays. `tests/dom_tree_queries.rs` checks deep
 trees with a small JavaScript loop budget, live range removal, shadow-host
 connectivity and template isolation. These native operations do not change the
 page's execution deadline.
+
+Private Map/WeakMap/WeakSet operations and WeakRef reads bind their pristine
+receiver-call adapter once during bootstrap. Repeated node identity/cache
+lookups therefore avoid allocating argument arrays or entering a JavaScript
+adapter frame. Page changes to collection methods, `call`, `bind` or
+`Reflect.apply` still cannot replace those captured operations.
