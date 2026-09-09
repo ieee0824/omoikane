@@ -64,6 +64,36 @@ jobs:
           if-no-files-found: error
 
 
+  jit-stress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gate4-stress-v1
+          cache-workspace-crates: true
+      - uses: actions/cache@v4
+        with:
+          path: .cache/wpt
+          key: wpt-${{ hashFiles('tests/wpt/revision.txt') }}
+      - name: Install system fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core
+      - name: Run full JIT compatibility and ten-minute stress gate
+        run: scripts/check-jit-gate4.sh
+      - name: Upload gate decision and failure artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-gate4-report
+          path: .artifacts/js-benchmark/
+          if-no-files-found: error
+
   wpt-smoke:
     runs-on: ubuntu-latest
     steps:

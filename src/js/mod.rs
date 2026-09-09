@@ -2973,6 +2973,12 @@ pub struct BaselineJitDiagnostics {
     pub exception_handler_entries: u64,
     /// Generated loop slices that restored the interpreter for a budget or deadline poll.
     pub interrupt_deopts: u64,
+    /// Generated entries that resumed the interpreter after a shape mismatch.
+    pub shape_deopts: u64,
+    /// Generated entries that resumed the interpreter after a type mismatch.
+    pub type_deopts: u64,
+    /// Generated entries that resumed the interpreter after an arithmetic guard failed.
+    pub arithmetic_deopts: u64,
 }
 
 impl BaselineJitDiagnostics {
@@ -3014,6 +3020,11 @@ impl BaselineJitDiagnostics {
             .exception_handler_entries
             .saturating_add(other.exception_handler_entries);
         self.interrupt_deopts = self.interrupt_deopts.saturating_add(other.interrupt_deopts);
+        self.shape_deopts = self.shape_deopts.saturating_add(other.shape_deopts);
+        self.type_deopts = self.type_deopts.saturating_add(other.type_deopts);
+        self.arithmetic_deopts = self
+            .arithmetic_deopts
+            .saturating_add(other.arithmetic_deopts);
     }
 }
 
@@ -4019,7 +4030,17 @@ impl JsRuntime {
             exception_unwinds: exceptions.exception_unwinds,
             exception_handler_entries: exceptions.handler_entries,
             interrupt_deopts: diagnostics.interrupt_deopts,
+            shape_deopts: diagnostics.shape_deopts,
+            type_deopts: diagnostics.type_deopts,
+            arithmetic_deopts: diagnostics.arithmetic_deopts,
         }
+    }
+
+    /// Returns an owned snapshot of generated code, stack maps and deoptimization metadata.
+    #[cfg(feature = "baseline-jit")]
+    #[doc(hidden)]
+    pub fn baseline_jit_debug_snapshot(&self) -> String {
+        self.context.jit_debug_snapshot()
     }
 
     /// Selects generated entry or interpreter execution for differential verification.
