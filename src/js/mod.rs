@@ -46,6 +46,9 @@ mod layout_metrics_tests;
 #[cfg(test)]
 mod document_write_tests;
 mod document_write;
+mod node_lifetime;
+#[cfg(test)]
+mod node_lifetime_tests;
 mod module_fetch;
 #[cfg(test)]
 mod module_loading_tests;
@@ -978,6 +981,7 @@ struct HostState {
     event_loop: EventLoop,
     document: NodeHandle,
     nodes: HashMap<usize, NodeHandle>,
+    node_lifetimes: node_lifetime::NodeLifetimes,
     /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
     /// returns their native node identity.
     canonical_node_identity_resolver: Option<JsValue>,
@@ -1176,6 +1180,7 @@ impl Finalize for HostState {}
 unsafe impl Trace for HostState {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.event_loop.trace(tracer) };
+        unsafe { self.node_lifetimes.trace(tracer) };
         // `IframeDocument.realm` and rendering callbacks retained by the event
         // loop are Boa `Realm` handles backed by `Rooted<RealmInner>`. They are
         // explicit native GC roots rather than JsValue edges, so retaining the
@@ -1592,6 +1597,7 @@ impl HostState {
             event_loop: EventLoop::default(),
             document: document.clone(),
             nodes: HashMap::new(),
+            node_lifetimes: node_lifetime::NodeLifetimes::default(),
             canonical_node_identity_resolver: None,
             remote_objects: HashMap::new(),
             console_logs: Vec::new(),
@@ -1697,6 +1703,9 @@ impl HostState {
     /// Queue loads for iframe and data-bearing object descendants when a
     /// detached subtree first becomes connected to a document.
     fn schedule_connected_resource_loads(&mut self, root: &NodeHandle, include_scripts: bool) {
+        if !self.node_is_in_active_document(root) {
+            return;
+        }
         fn visit(state: &mut HostState, node: &NodeHandle, include_scripts: bool) {
             let tag = node.tag_name().unwrap_or_default();
             let is_resource = tag.eq_ignore_ascii_case("iframe")
@@ -1742,7 +1751,7 @@ impl HostState {
         node: &NodeHandle,
         resource_attr: &str,
     ) {
-        if document_root_for_node(node).is_none() {
+        if !self.node_is_in_active_document(node) {
             return;
         }
         let attributes = node.attributes().unwrap_or_default();
@@ -1797,6 +1806,9 @@ impl HostState {
     /// parsed as HTML or XML (including SVG) according to their content type;
     /// unsupported content types and load failures yield the empty skeleton.
     fn iframe_content_document(&mut self, iframe: &NodeHandle) -> Result<NodeHandle, String> {
+        if !self.node_is_in_active_document(iframe) {
+            return Err("iframe owner document is no longer active".into());
+        }
         let attributes = iframe.attributes().unwrap_or_default();
         let is_iframe = iframe
             .tag_name()
@@ -2089,16 +2101,20 @@ impl HostState {
     }
 
     fn register_tree(&mut self, node: &NodeHandle) {
-        self.nodes.insert(node.identity(), node.clone());
-        if let Some(content) = node.template_content() {
-            self.register_tree(&content);
+        fn register(nodes: &mut HashMap<usize, NodeHandle>, node: &NodeHandle) {
+            nodes.insert(node.identity(), node.clone());
+            if let Some(content) = node.template_content() {
+                register(nodes, &content);
+            }
+            if let Some(root) = node.shadow_root() {
+                register(nodes, &root);
+            }
+            for child in node.child_nodes() {
+                register(nodes, &child);
+            }
         }
-        if let Some(root) = node.shadow_root() {
-            self.register_tree(&root);
-        }
-        for child in node.child_nodes() {
-            self.register_tree(&child);
-        }
+        register(&mut self.nodes, node);
+        self.enroll_registered_tree(node, None);
     }
 
     fn collect_tree_ids(node: &NodeHandle, ids: &mut HashSet<usize>) {
@@ -2118,8 +2134,9 @@ impl HostState {
 
     /// Destroys one iframe's active document and every descendant browsing
     /// context. All document-scoped policy/cache state and queued resource
-    /// tasks are removed in the same transition; JS node wrappers are queued
-    /// for invalidation before a replacement document can be observed.
+    /// tasks are removed in the same transition. DOM wrappers keep their old
+    /// document data through GC leases; WindowProxy teardown is queued before
+    /// a replacement document can be observed.
     fn retire_iframe_document(&mut self, iframe_id: usize) {
         let Some(previous) = self.iframe_documents.remove(&iframe_id) else {
             return;
@@ -2139,6 +2156,10 @@ impl HostState {
         }
 
         let document_id = previous.document.identity();
+        tree_ids.extend(self.retired_document_node_ids(document_id));
+        for id in &tree_ids {
+            self.nodes.remove(id);
+        }
         self.event_loop.cancel_tasks_for_document(document_id);
         self.document_styles.remove(&document_id);
         self.write_parsers.remove(&document_id);
@@ -2167,6 +2188,7 @@ impl HostState {
         self.event_loop.cancel_resource_loads_for_nodes(&tree_ids);
         self.discarded_node_ids.extend(tree_ids.iter().copied());
         self.unregister_tree(&previous.document);
+        self.sweep_node_lifetimes();
         self.prune_document_sandbox();
     }
 
@@ -2195,15 +2217,13 @@ impl HostState {
             .cancel_resource_loads_for_nodes(&subtree_ids);
     }
 
-    /// Removes `node` and all its descendants from the id→node registry.
-    ///
-    /// Called when an iframe reloads (its `src` changed) so the previous
-    /// sub-document tree is released and its ids can no longer be resolved,
-    /// preventing stale nodes and adopted stylesheet snapshots from
-    /// accumulating across reloads.
+    /// Removes a retired tree from the strong registry. GC leases and the weak
+    /// registry keep retained DOM references usable until their group dies.
     fn unregister_tree(&mut self, node: &NodeHandle) {
         self.nodes.remove(&node.identity());
-        self.adopted_stylesheets.remove(&node.identity());
+        if self.retained_node(node.identity()).is_none() {
+            self.adopted_stylesheets.remove(&node.identity());
+        }
         if let Some(content) = node.template_content() {
             self.unregister_tree(&content);
         }
@@ -2225,7 +2245,10 @@ impl HostState {
     }
 
     fn get_node(&self, id: usize) -> Option<NodeHandle> {
-        self.nodes.get(&id).cloned()
+        self.nodes
+            .get(&id)
+            .cloned()
+            .or_else(|| self.retained_node(id))
     }
 
     /// Returns the URL base belonging to the Document that owns `node`.
@@ -3855,7 +3878,9 @@ impl JsRuntime {
             // Module loading is the one CSP path that runs inside Boa's
             // ModuleLoader callback, so retain its blocked target here while
             // sharing the same per-document deduplication as native paths.
-            if let Some(document) = state.get_node(document_id) {
+            if state.document_is_active(document_id)
+                && let Some(document) = state.get_node(document_id)
+            {
                 state.record_csp_violation(&document, ResourceType::Script, blocked_uri);
             }
         }
@@ -5004,6 +5029,9 @@ impl JsRuntime {
             let mut state = self.host_state.borrow_mut();
             state.pending_resource_loads.remove(&node_id);
             state.get_node(node_id).and_then(|node| {
+                if !state.node_is_in_active_document(&node) {
+                    return None;
+                }
                 let document_id = document_root_for_node(&node)?.identity();
                 let src = node.get_attribute("src")?;
                 Some((
@@ -6101,7 +6129,7 @@ impl JsRuntime {
                     let resource_document_id = document_root_for_node(&node)
                         .map(|document| document.identity())
                         .unwrap_or_else(|| state.document.identity());
-                    if document_root_for_node(&node).is_none() {
+                    if !state.node_is_in_active_document(&node) {
                         (false, Vec::new(), None, resource_document_id)
                     } else {
                         let mut xhtml_scripts: Vec<NodeHandle> = Vec::new();
@@ -6722,6 +6750,7 @@ impl JsRuntime {
 
     fn with_active_host_value<T>(&mut self, f: impl FnOnce(&mut Context) -> T) -> T {
         let _guard = activate_host_state(Rc::clone(&self.host_state));
+        self.host_state.borrow_mut().sweep_node_lifetimes();
         f(&mut self.context)
     }
 }
@@ -6743,6 +6772,7 @@ impl Drop for JsRuntime {
         let mut state = self.host_state.borrow_mut();
         state.iframe_documents.clear();
         state.iframe_context_ids.clear();
+        state.node_lifetimes = node_lifetime::NodeLifetimes::default();
         state.event_loop = EventLoop::default();
         state.pending_resource_loads.clear();
         state.worker_owner_realm = None;
@@ -7456,6 +7486,21 @@ fn register_host_bindings(
         js_string!("__omoikane_navigator_user_agent"),
         js_string!(state.navigator_user_agent.as_str()),
         boa_engine::property::Attribute::all(),
+    )?;
+    context.register_global_callable(
+        js_string!("__omoikane_retain_node"),
+        2,
+        NativeFunction::from_copy_closure(node_lifetime::retain_node_native),
+    )?;
+    context.register_global_callable(
+        js_string!("__omoikane_set_node_owner"),
+        2,
+        NativeFunction::from_copy_closure(node_lifetime::set_owner_native),
+    )?;
+    context.register_global_callable(
+        js_string!("__omoikane_collected_nodes"),
+        1,
+        NativeFunction::from_copy_closure(node_lifetime::collected_nodes_native),
     )?;
     context.register_global_property(
         js_string!("__omoikane_performance_time_origin"),
@@ -9695,6 +9740,9 @@ fn is_rendered_for_focus_native(
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let Some(node) = node else { return Ok(JsValue::from(false)); };
+        if !state.borrow().node_is_in_active_document(&node) {
+            return Ok(JsValue::from(false));
+        }
         if node.node_type() != NodeType::Element {
             return Ok(JsValue::from(false));
         }
@@ -9792,6 +9840,9 @@ fn layout_metrics_native(
         let Some(node) = node else {
             return Ok(js_string!(LayoutMetrics::zero().to_json().as_str()).into());
         };
+        if !state.borrow().node_is_in_active_document(&node) {
+            return Ok(js_string!(LayoutMetrics::zero().to_json().as_str()).into());
+        }
         let is_root_element = node
             .parent_node()
             .is_some_and(|parent| parent.node_type() == NodeType::Document);
@@ -10055,21 +10106,24 @@ fn request_animation_frame_native(
     // Resolve ownership from the executing Context Realm first. Inline child
     // scripts run in a cached iframe Realm even when no asynchronous module
     // guard is active; deriving the Document here keeps their timers scoped
-    // without leaking a thread-local owner into unrelated host work.
-    let owner_document_id = current_iframe_realm(context)
-        .map(|(_, document_id)| document_id)
+    // without leaking a thread-local owner into unrelated host work. The
+    // immutable Realm owner also identifies an already-retired child.
+    let owner_document_id = context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|owner| owner.0)
         .or_else(active_document_id);
     with_host_state(|state| {
         let (realm, document_id) = binding
             .map(|(realm, document_id)| (Some(realm), Some(document_id)))
             .unwrap_or((None, owner_document_id));
-        let owner_is_live = document_id
-            .is_none_or(|document_id| state.borrow().nodes.contains_key(&document_id));
-        let id = state.borrow_mut().event_loop.schedule_animation_frame_with_realm(
-            callback,
-            realm,
-            document_id,
-        );
+        let owner_is_live =
+            document_id.is_none_or(|document_id| state.borrow().document_is_active(document_id));
+        let id = state
+            .borrow_mut()
+            .event_loop
+            .schedule_animation_frame_with_realm(callback, realm, document_id);
         if !owner_is_live {
             state.borrow_mut().event_loop.cancel_animation_frame(id);
         }
@@ -10128,13 +10182,17 @@ fn schedule_timer_from_js(
     // run after the host task's module-document guard has been restored, so
     // relying on the thread-local owner alone would leave timers created by a
     // child callback unowned and uncancellable when its iframe is retired.
-    let owner_document_id = current_iframe_realm(context)
-        .map(|(_, document_id)| document_id)
+    // Read the immutable owner even after its active iframe entry is gone.
+    let owner_document_id = context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|owner| owner.0)
         .or_else(active_document_id);
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let owner_is_live = owner_document_id
-            .is_none_or(|document_id| state.nodes.contains_key(&document_id));
+        let owner_is_live =
+            owner_document_id.is_none_or(|document_id| state.document_is_active(document_id));
         let id = state
             .event_loop
             .schedule_timer(payload, delay_ms, repeat, owner_document_id);
@@ -14295,7 +14353,7 @@ fn iframe_content_document_native(
     with_host_state(|state| {
         let iframe = state.borrow().get_node(node_id);
         match iframe {
-            Some(iframe) if document_root_for_node(&iframe).is_some() => {
+            Some(iframe) if state.borrow().node_is_in_active_document(&iframe) => {
                 let document = state
                     .borrow_mut()
                     .iframe_content_document(&iframe)
@@ -14363,7 +14421,7 @@ fn iframe_context_state_native(
         let Some(iframe) = state.borrow().get_node(iframe_id) else {
             return Ok(js_string!("closed").into());
         };
-        if document_root_for_node(&iframe).is_none() {
+        if !state.borrow().node_is_in_active_document(&iframe) {
             return Ok(js_string!("closed").into());
         }
         let document = state
@@ -14410,7 +14468,7 @@ fn iframe_force_navigation_native(
         let Some(iframe) = iframe else {
             return Ok(JsValue::from(false));
         };
-        if document_root_for_node(&iframe).is_none() {
+        if !state.borrow().node_is_in_active_document(&iframe) {
             return Ok(JsValue::from(false));
         }
         let mut state = state.borrow_mut();
@@ -14420,9 +14478,8 @@ fn iframe_force_navigation_native(
     })
 }
 
-/// Drains native node identities retired by iframe navigation or teardown so
-/// the bootstrap can invalidate its JS wrapper cache before an address is
-/// reused by a replacement node.
+/// Drains identities whose browsing-context behavior was retired. Their
+/// monotonic DOM identities remain valid while JavaScript retains the nodes.
 fn take_discarded_node_ids_native(
     _: &JsValue,
     _: &[JsValue],
@@ -35761,7 +35818,7 @@ b</textarea></form>"#);
     }
 
     #[test]
-    fn discarded_iframe_wrappers_cannot_resurrect_after_later_generations() {
+    fn retained_iframe_wrappers_never_alias_later_document_generations() {
         use crate::html::TreeBuilder;
         let port = spawn_path_http_server(&[
             (
@@ -35803,27 +35860,25 @@ b</textarea></form>"#);
                   const currentDocument = frame.contentDocument;
                   const currentNode = currentDocument.getElementById('value');
 
-                  let staleLookup = null;
-                  try { staleLookup = firstDocument.getElementById('value'); }
-                  catch (_) {}
+                  const oldId = firstNode.__id;
+                  const oldLookup = firstDocument.getElementById('value');
                   firstNode.__id = currentNode.__id;
-                  try { firstNode.textContent = 'stale mutation'; }
-                  catch (_) {}
+                  firstNode.textContent = 'old document mutation';
                   return [
                     firstDocument.__retired === true,
-                    firstDocument.__id === null,
+                    firstDocument.nodeType === 9,
                     firstNode.__retired === true,
-                    firstNode.__id === null,
+                    firstNode.__id === oldId && firstNode.textContent === "old document mutation",
                     firstDocument !== currentDocument,
                     firstNode !== currentNode,
-                    staleLookup !== currentNode,
+                    oldLookup === firstNode && oldLookup !== currentNode,
                     currentNode.textContent,
                   ].join('|');
                 })()"#
             )
             .as_deref(),
             Some("true|true|true|true|true|true|true|three"),
-            "discarded wrappers must stay retired even if a native pointer identity is reused"
+            "retained wrappers must keep their old immutable identities and never mutate a later document"
         );
     }
 
@@ -37860,14 +37915,14 @@ b</textarea></form>"#);
                   return [
                     // document.open() detaches nodes owned by the still-live
                     // main Document; retained wrappers for those nodes remain
-                    // valid. Only the destroyed child browsing-context tree
-                    // is permanently retired.
+                    // valid, including child DOM nodes. The destroyed child
+                    // WindowProxy remains closed.
                     staleNode.__id !== null,
                     frame.__id !== null,
                     staleWindow.closed,
                     staleWindow.document === null,
-                    staleDocument.__id === null,
-                    staleChildNode.__id === null,
+                    staleDocument.nodeType === 9,
+                    staleChildNode.nodeName === "HTML" && staleChildNode.ownerDocument === staleDocument,
                     staleDocument.defaultView === null,
                   ].join('|');
                 })()"#,

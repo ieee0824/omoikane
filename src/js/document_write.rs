@@ -223,15 +223,15 @@ fn prepare_script(
     }
     {
         let mut host = state.borrow_mut();
-        if !host.parser_inserted_scripts.insert(script.identity()) {
-            return None;
-        }
         if document != &host.document
             && !host
                 .iframe_documents
                 .values()
                 .any(|entry| entry.document == *document)
         {
+            return None;
+        }
+        if !host.parser_inserted_scripts.insert(script.identity()) {
             return None;
         }
         if !host.sandbox_allows_scripts_for_node(script) {

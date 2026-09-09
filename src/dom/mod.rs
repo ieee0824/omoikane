@@ -92,6 +92,11 @@ pub struct NodeHandle(Rc<RefCell<NodeInner>>);
 pub(crate) struct WeakNodeHandle(Weak<RefCell<NodeInner>>);
 
 impl WeakNodeHandle {
+    /// Retains the native node while a weak registry lookup is in use.
+    pub(crate) fn upgrade(&self) -> Option<NodeHandle> {
+        self.0.upgrade().map(NodeHandle)
+    }
+
     pub(crate) fn is_alive(&self) -> bool {
         self.0.strong_count() != 0
     }
