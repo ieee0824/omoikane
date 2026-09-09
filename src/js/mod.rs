@@ -7693,6 +7693,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(cache_storage_native),
         ),
         (
+            js_string!("__omoikane_get_element_by_id"),
+            2,
+            NativeFunction::from_copy_closure(get_element_by_id_native),
+        ),
+        (
+            js_string!("__omoikane_node_index"),
+            1,
+            NativeFunction::from_copy_closure(node_index_native),
+        ),
+        (
             js_string!("__omoikane_query_selector"),
             2,
             NativeFunction::from_copy_closure(query_selector_native),
@@ -10260,6 +10270,58 @@ fn schedule_timer_from_js(
             state.event_loop.clear_timer(id);
         }
         Ok(JsValue::from(id as f64))
+    })
+}
+
+// Inspect the DOM without creating wrappers or invoking user-replaceable
+// childNodes/getAttribute properties for every descendant. A stack keeps deep
+// trees off both the JavaScript and Rust call stacks.
+fn get_element_by_id_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let expected = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    // An empty id attribute does not give the element an ID.
+    if expected.is_empty() {
+        return Ok(JsValue::null());
+    }
+    with_host_state(|state| {
+        let Some(root) = state.borrow().get_node(node_id) else {
+            return Ok(JsValue::null());
+        };
+        let mut pending = root.child_nodes();
+        pending.reverse();
+        while let Some(node) = pending.pop() {
+            if node.node_type() == NodeType::Element
+                && node.get_attribute("id").as_deref() == Some(expected.as_str())
+            {
+                return Ok(node_to_js_value(Some(node)));
+            }
+            // Ordinary children exclude shadow trees, template contents and
+            // iframe Documents. Reverse insertion preserves document order.
+            pending.extend(node.child_nodes().into_iter().rev());
+        }
+        Ok(JsValue::null())
+    })
+}
+
+fn node_index_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let index = state.borrow().get_node(node_id).and_then(|node| {
+            node.parent_node()?
+                .child_nodes()
+                .iter()
+                .position(|child| child.identity() == node_id)
+        });
+        Ok(JsValue::from(index.map_or(-1.0, |index| index as f64)))
     })
 }
 

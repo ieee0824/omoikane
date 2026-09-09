@@ -120,6 +120,15 @@ scripts/check-jit-gate4.sh
 
 ## Decision
 
-The final decision and observed counts are recorded here after the complete
-gate has run on the integrated revision. A partial or unsupported-target run
-does not establish Gate 4 completion.
+The authoritative decision and observed counts are in `gate.json`, uploaded as
+`jit-gate4-report` for the exact CI revision. The associated
+[Issue #540](https://github.com/ieee0824/omoikane/issues/540) and
+[PR #635](https://github.com/ieee0824/omoikane/pull/635) record that run and its
+outcome. A partial or unsupported-target run does not establish Gate 4 completion.
+
+Acid3 uses the normal five-second execution deadline. ID lookup and sibling
+position lookup read native DOM data without building JavaScript wrapper lists;
+Range removal shares the sibling position across affected ranges. Ordinary DOM
+mutations amortize weak-cache maintenance, while browsing-context retirement
+still processes discarded wrappers immediately. These remove repeated DOM
+walks without relaxing the deadline, score requirement or lifetime checks.
