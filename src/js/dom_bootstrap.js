@@ -44,8 +44,14 @@
   const nativeChildNodeIds = globalThis.__omoikane_child_node_ids;
   const nativeGetElementById = globalThis.__omoikane_get_element_by_id;
   const nativeNodeIndex = globalThis.__omoikane_node_index;
+  const nativeNodeIsConnected = globalThis.__omoikane_node_is_connected;
+  const nativeNodeIsInclusiveDescendant = globalThis.__omoikane_node_is_inclusive_descendant;
+  const nativeNodeHasSlotAncestor = globalThis.__omoikane_node_has_slot_ancestor;
   delete globalThis.__omoikane_get_element_by_id;
   delete globalThis.__omoikane_node_index;
+  delete globalThis.__omoikane_node_is_connected;
+  delete globalThis.__omoikane_node_is_inclusive_descendant;
+  delete globalThis.__omoikane_node_has_slot_ancestor;
   const nativeGetTextContent = globalThis.__omoikane_get_text_content;
   const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
   const nativeCreateElementNS = globalThis.__omoikane_create_element_ns;
@@ -363,6 +369,11 @@
   }
 
   function signalFallbackSlotChanges(node) {
+    // Consult the native tree, including slots without wrappers yet. Keeping
+    // the existing notification path for candidates preserves namespace and
+    // shadow-root checks without wrapping every ordinary ancestor.
+    const nodeId = internalNodeId(node);
+    if (nodeId === undefined || !nativeNodeHasSlotAncestor(nodeId)) return;
     for (let current = node; current; current = internalParentNode(current)) {
       const id = internalNodeId(current);
       if (id === undefined || __omoikane_node_type(id) !== 1 ||
@@ -560,9 +571,7 @@
   function internalIsConnected(node) {
     const id = internalNodeId(node);
     if (id === undefined) return false;
-    const ownerId = __omoikane_owner_document(id);
-    return __omoikane_node_type(id) === 9 ||
-      (ownerId !== null && ownerId !== undefined);
+    return nativeNodeIsConnected(id);
   }
 
   function internalOwnerDocument(node) {
@@ -1606,10 +1615,11 @@
   }
 
   function isInclusiveDescendant(node, ancestor) {
-    for (let n = node; n; n = internalParentNode(n)) {
-      if (n === ancestor) return true;
-    }
-    return false;
+    if (!node || !ancestor) return false;
+    const nodeId = internalNodeId(node);
+    const ancestorId = internalNodeId(ancestor);
+    return nodeId !== undefined && ancestorId !== undefined &&
+      nativeNodeIsInclusiveDescendant(nodeId, ancestorId);
   }
 
   function indexOfNode(node) {
@@ -2682,13 +2692,7 @@
       // to prevent pointer reuse; answer from that retirement snapshot without
       // passing the null sentinel through native node lookups.
       if (this.__id === null) return true;
-      let current = this;
-      while (current) {
-        if (current.nodeType === 9) return true;
-        current = current.parentNode ||
-          (current instanceof ShadowRoot ? current.host : null);
-      }
-      return false;
+      return internalIsConnected(this);
     }
 
     get attributes() {
@@ -4215,13 +4219,20 @@
     }
     detach() { unregisterTraversal(this.__doc, "ranges", this); }
     __preRemove(parent, removed, index) {
-      const adjust = (container, offset) => {
-        if (isInclusiveDescendant(container, removed)) return [parent,index];
-        if (container === parent && offset > index) return [container,offset-1];
-        return [container,offset];
-      };
-      [this.__startContainer,this.__startOffset]=adjust(this.__startContainer,this.__startOffset);
-      [this.__endContainer,this.__endOffset]=adjust(this.__endContainer,this.__endOffset);
+      // Update boundary fields directly instead of allocating a closure and
+      // two result arrays for every live range on every DOM removal.
+      if (isInclusiveDescendant(this.__startContainer, removed)) {
+        this.__startContainer = parent;
+        this.__startOffset = index;
+      } else if (this.__startContainer === parent && this.__startOffset > index) {
+        this.__startOffset--;
+      }
+      if (isInclusiveDescendant(this.__endContainer, removed)) {
+        this.__endContainer = parent;
+        this.__endOffset = index;
+      } else if (this.__endContainer === parent && this.__endOffset > index) {
+        this.__endOffset--;
+      }
       selectionRangeMutated(this);
     }
     __mergeText(target, removed, offset, parent, index) {

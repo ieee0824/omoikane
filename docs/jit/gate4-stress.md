@@ -144,3 +144,13 @@ avoids restamping an already-owned subtree; cross-document moves and newly
 parsed subtrees still update their shadow and template contents owners.
 These remove repeated DOM walks without relaxing the deadline, score requirement
 or lifetime checks.
+
+Connectivity, Range/iterator ancestry and the preliminary slot-ancestor check
+also query native DOM data. Connectivity crosses shadow hosts; Range ancestry
+stops at an ordinary tree root. Potential slot ancestors still take the existing
+namespace, shadow-root and assignment notification path, including slots that
+have not been wrapped yet. Range removal updates its boundary fields without
+allocating temporary result arrays. `tests/dom_tree_queries.rs` checks deep
+trees with a small JavaScript loop budget, live range removal, shadow-host
+connectivity and template isolation. These native operations do not change the
+page's execution deadline.
