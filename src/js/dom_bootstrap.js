@@ -52,6 +52,12 @@
   const nativeIframeContextState = globalThis.__omoikane_iframe_context_state;
   const nativeIframeForceNavigation = globalThis.__omoikane_iframe_force_navigation;
   const nativeTakeDiscardedNodeIds = globalThis.__omoikane_take_discarded_node_ids;
+  const nativeRetainNode = globalThis.__omoikane_retain_node;
+  const nativeSetNodeOwner = globalThis.__omoikane_set_node_owner;
+  const nativeCollectedNodes = globalThis.__omoikane_collected_nodes;
+  delete globalThis.__omoikane_retain_node;
+  delete globalThis.__omoikane_set_node_owner;
+  delete globalThis.__omoikane_collected_nodes;
   const nativeDocumentURL = globalThis.__omoikane_document_url;
   const nativeDocumentBaseURL = globalThis.__omoikane_document_base_url;
   delete globalThis.__omoikane_clipboard_read_text;
@@ -90,13 +96,17 @@
   // must continue to retire stale native identities even under prototype
   // poisoning.
   const safeApply = Reflect.apply;
+  const mapForEachIntrinsic = Map.prototype.forEach;
   const mapHasIntrinsic = Map.prototype.has;
   const mapGetIntrinsic = Map.prototype.get;
   const mapSetIntrinsic = Map.prototype.set;
   const mapDeleteIntrinsic = Map.prototype.delete;
+  const weakMapHasIntrinsic = WeakMap.prototype.has;
   const weakMapGetIntrinsic = WeakMap.prototype.get;
   const weakMapSetIntrinsic = WeakMap.prototype.set;
   const weakMapDeleteIntrinsic = WeakMap.prototype.delete;
+  const setDeleteIntrinsic = Set.prototype.delete;
+  const safeSetDelete = (target, key) => safeApply(setDeleteIntrinsic, target, [key]);
   const weakSetAddIntrinsic = WeakSet.prototype.add;
   const weakSetHasIntrinsic = WeakSet.prototype.has;
   const safeMapHas = (target, key) => safeApply(mapHasIntrinsic, target, [key]);
@@ -104,6 +114,7 @@
   const safeMapSet = (target, key, value) =>
     safeApply(mapSetIntrinsic, target, [key, value]);
   const safeMapDelete = (target, key) => safeApply(mapDeleteIntrinsic, target, [key]);
+  const safeWeakMapHas = (target, key) => safeApply(weakMapHasIntrinsic, target, [key]);
   const safeWeakMapGet = (target, key) => safeApply(weakMapGetIntrinsic, target, [key]);
   const safeWeakMapSet = (target, key, value) =>
     safeApply(weakMapSetIntrinsic, target, [key, value]);
@@ -113,23 +124,45 @@
   const safeWeakSetHas = (target, key) => safeApply(weakSetHasIntrinsic, target, [key]);
   const safeDefineProperty = Object.defineProperty;
   const cache = new Map();
-  // Platform-object identity and insert-adjacent conversions must not depend on
-  // page-mutable expandos, constructors, or prototypes. `cache` already owns
-  // canonical wrappers strongly, so keep all added private state in ordinary
-  // collections with primitive values and native ids. This avoids adding Boa
-  // weak-table or object-valued GC edges.
-  const canonicalNodeIds = new Map();
+  // Native document groups trace their wrappers. This index is weak so an
+  // unreachable retired or inert document can be collected with its wrappers.
+  const IntrinsicWeakRef = WeakRef;
+  const weakRefDeref = WeakRef.prototype.deref;
+  const nodeLeases = new WeakMap();
+  function cachedNode(id) {
+    const ref = safeMapGet(cache, id);
+    return ref ? safeApply(weakRefDeref, ref, []) : undefined;
+  }
+  let nodeCacheWrites = 0;
+  function sweepNodeCache(force = false) {
+    if (!force && ++nodeCacheWrites < 128) return;
+    nodeCacheWrites = 0;
+    const candidates = [];
+    safeApply(mapForEachIntrinsic, cache, [(_ref, id) => { candidates[candidates.length] = id; }]);
+    // Query native liveness instead of dereferencing every WeakRef: a cleanup
+    // pass must not keep otherwise unreachable documents alive for this job.
+    const ids = nativeCollectedNodes(candidates) || [];
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      safeMapDelete(cache, id);
+      safeSetDelete(templateContentsDocumentIds, id);
+      safeSetDelete(canonicalElementIds, id);
+      safeSetDelete(canonicalHtmlElementIds, id);
+      safeSetDelete(canonicalHtmlSlotIds, id);
+    }
+  }
+  const canonicalNodeIds = new WeakMap();
   const wrapperNodeIds = canonicalNodeIds;
-  const canonicalCdataNodes = new Map();
-  const canonicalCharacterDataOverrides = new Map();
-  const wrapperLocalNames = new Map();
-  const ownerDocumentIds = new Map();
-  // Keep the inert-document relationship keyed by native ids rather than
-  // page-visible expandos.  A template contents owner document is shared by
+  const canonicalCdataNodes = new WeakMap();
+  const canonicalCharacterDataOverrides = new WeakMap();
+  const wrapperLocalNames = new WeakMap();
+  const ownerDocumentIds = new WeakMap();
+  // Keep the inert-document relationship in a private weak map so it follows
+  // the creator document's lifetime. A template contents owner is shared by
   // every template from one document, and an inert document is its own
   // appropriate owner document (so nested templates do not create another
   // inert document).
-  const templateContentsOwnerDocumentIds = new Map();
+  const templateContentsOwnerDocuments = new WeakMap();
   const templateContentsDocumentIds = new Set();
   const canonicalElementIds = new Set();
   const canonicalHtmlElementIds = new Set();
@@ -137,12 +170,16 @@
   const mapHas = Function.prototype.call.bind(Map.prototype.has);
   const mapGet = Function.prototype.call.bind(Map.prototype.get);
   const mapSet = Function.prototype.call.bind(Map.prototype.set);
-  const getWrapperNodeId = mapGet;
-  const setWrapperNodeId = mapSet;
-  const getWrapperLocalName = mapGet;
-  const setWrapperLocalName = mapSet;
-  const getOwnerDocumentId = mapGet;
-  const setOwnerDocumentId = mapSet;
+  const getWrapperNodeId = safeWeakMapGet;
+  const setWrapperNodeId = safeWeakMapSet;
+  const getWrapperLocalName = safeWeakMapGet;
+  const setWrapperLocalName = safeWeakMapSet;
+  const getOwnerDocumentId = safeWeakMapGet;
+  function setOwnerDocumentId(target, node, id) {
+    safeWeakMapSet(target, node, id);
+    const nodeId = canonicalWrapperId(node);
+    if (nodeId !== undefined) nativeSetNodeOwner(nodeId, id);
+  }
   const hasSetValue = Function.prototype.call.bind(Set.prototype.has);
   const addSetValue = Function.prototype.call.bind(Set.prototype.add);
   const addCanonicalElementId = Function.prototype.call.bind(Set.prototype.add);
@@ -177,6 +214,7 @@
   // used by subsequent same-origin checks.
   const documentHistoryURLs = new WeakMap();
   function forgetDiscardedNodeWrappers() {
+    sweepNodeCache(true);
     const ids = nativeTakeDiscardedNodeIds() || [];
     for (let index = 0; index < ids.length; index += 1) {
       const id = ids[index];
@@ -184,14 +222,10 @@
       // hand focus back to the top Document before any later hasFocus() walk
       // attempts to wrap the now-unregistered Document identity.
       if (focusedDocumentId === id) focusedDocumentId = null;
-      const wrapper = safeMapGet(cache, id);
+      const wrapper = cachedNode(id);
       if (wrapper) {
-        // A native node identity is pointer-based and may be reused by a later
-        // Document generation. Permanently sever retained wrappers from that
-        // identity before dropping the cache entry so stale page references
-        // cannot resurrect as wrappers for an unrelated new node.
-        // Retire a nested iframe's WindowProxy first, while its wrapper still
-        // carries the native id needed by the live facade.
+        // Navigation retires browsing-context behavior; the immutable native
+        // identity and DOM data stay valid for wrappers retained by script.
         retireIframeWindowProxy(wrapper);
         safeWeakSetAdd(retiredNodeWrappers, wrapper);
         try {
@@ -202,7 +236,6 @@
           });
         } catch (_) {}
       }
-      safeMapDelete(cache, id);
     }
   }
   safeDefineProperty(globalThis, "__omoikane_forget_discarded_node_wrappers", {
@@ -339,7 +372,8 @@
     Promise.resolve().then(() => {
       slotAssignmentRefreshQueued = false;
       for (let index = 0; index < knownSlots.length; index += 1) {
-        const node = knownSlots[index];
+        const node = safeApply(weakRefDeref, knownSlots[index], []);
+        if (!node) { knownSlots.splice(index--, 1); continue; }
         if (!hasCanonicalWrapperId(canonicalHtmlSlotIds, node)) {
           continue;
         }
@@ -406,9 +440,9 @@
     if (id === null || id === undefined) {
       return null;
     }
-    if (safeMapHas(cache, id)) {
-      return safeMapGet(cache, id);
-    }
+    const cached = cachedNode(id);
+    if (cached) return cached;
+    sweepNodeCache();
     const nodeType = nativeNodeType(id);
     const interfaceType = nativeInterfaceTypeForNodeId(id, nodeType);
     let node;
@@ -428,14 +462,15 @@
       }
       if (interfaceType === HTMLSlotElement) {
         addCanonicalWrapperId(canonicalHtmlSlotIds, node);
-        knownSlots.push(node);
+        knownSlots.push(new IntrinsicWeakRef(node));
       }
     }
     if (nodeType === 9 || id === __omoikane_document_id) {
       const committed = nativeDocumentURL(id);
       if (committed !== null) node.__documentURL = String(committed);
     }
-    safeMapSet(cache, id, node);
+    safeWeakMapSet(nodeLeases, node, nativeRetainNode(id, node));
+    safeMapSet(cache, id, new IntrinsicWeakRef(node));
     return node;
   }
 
@@ -529,7 +564,7 @@
     if ((typeof node !== "object" && typeof node !== "function") || node === null) {
       return undefined;
     }
-    return mapGet(canonicalNodeIds, node);
+    return safeWeakMapGet(canonicalNodeIds, node);
   }
 
   function canonicalNodeIdentity(receiver) {
@@ -537,7 +572,7 @@
       throw new IntrinsicTypeError("Illegal invocation");
     }
     const id = canonicalNodeId(receiver);
-    if (id === undefined || mapGet(cache, id) !== receiver) {
+    if (id === undefined || cachedNode(id) !== receiver) {
       throw new IntrinsicTypeError("Illegal invocation");
     }
     return id;
@@ -549,7 +584,7 @@
 
   function markCanonicalCdata(node) {
     if (canonicalNodeId(node) !== undefined) {
-      mapSet(canonicalCdataNodes, node, true);
+      safeWeakMapSet(canonicalCdataNodes, node, true);
     }
   }
 
@@ -569,8 +604,7 @@
   }
 
   function cachedCanonicalNode(id) {
-    if (!mapHas(cache, id)) return undefined;
-    return mapGet(cache, id);
+    return cachedNode(id);
   }
 
   function namespacedAttributeRecord(id, namespace, localName) {
@@ -584,13 +618,13 @@
   }
 
   function canonicalCharacterData(id, node) {
-    return node && mapHas(canonicalCharacterDataOverrides, node)
-      ? mapGet(canonicalCharacterDataOverrides, node)
+    return node && safeWeakMapHas(canonicalCharacterDataOverrides, node)
+      ? safeWeakMapGet(canonicalCharacterDataOverrides, node)
       : (nativeGetTextContent(id) || "");
   }
 
   function canonicalInterfaceType(id, nodeType, node) {
-    return node && mapHas(canonicalCdataNodes, node)
+    return node && safeWeakMapHas(canonicalCdataNodes, node)
       ? CDATASection
       : nativeInterfaceTypeForNodeId(id, nodeType);
   }
@@ -721,15 +755,13 @@
         hasSetValue(templateContentsDocumentIds, documentId)) {
       return doc;
     }
-    if (documentId !== undefined &&
-        mapHas(templateContentsOwnerDocumentIds, documentId)) {
-      return wrapNode(mapGet(templateContentsOwnerDocumentIds, documentId));
-    }
+    const previous = safeWeakMapGet(templateContentsOwnerDocuments, doc);
+    if (previous) return previous;
     const owner = wrapNode(__omoikane_create_document());
     owner.__documentURL = "about:blank";
     const ownerId = internalNodeId(owner);
     if (documentId !== undefined && ownerId !== undefined) {
-      mapSet(templateContentsOwnerDocumentIds, documentId, ownerId);
+      safeWeakMapSet(templateContentsOwnerDocuments, doc, owner);
     }
     if (ownerId !== undefined) addSetValue(templateContentsDocumentIds, ownerId);
     return owner;
@@ -1830,9 +1862,7 @@
         enumerable: true,
         configurable: false,
         get() {
-          return safeWeakSetHas(retiredNodeWrappers, this)
-            ? null
-            : safeWeakMapGet(nativeNodeIds, this);
+          return safeWeakMapGet(nativeNodeIds, this);
         },
       });
       this.__listeners = new Map();
@@ -2297,7 +2327,7 @@
       if (canonicalType === 3 || canonicalType === 7 || canonicalType === 8) {
         // Keep the private WTF-16 override coherent even when callers invoke
         // this base-class descriptor setter directly on CharacterData.
-        mapSet(canonicalCharacterDataOverrides, this, text);
+        safeWeakMapSet(canonicalCharacterDataOverrides, this, text);
       }
       if (wasConnected) {
         for (const child of removedNodes) retireIframeWindowProxies(child);
@@ -3617,8 +3647,8 @@
   class CharacterData extends Node {
     remove() { removeChildNode.call(this); }
     get textContent() {
-      if (mapHas(canonicalCharacterDataOverrides, this)) {
-        return mapGet(canonicalCharacterDataOverrides, this);
+      if (safeWeakMapHas(canonicalCharacterDataOverrides, this)) {
+        return safeWeakMapGet(canonicalCharacterDataOverrides, this);
       }
       return super.textContent;
     }
@@ -4505,10 +4535,7 @@
     // detached (before it is inserted into any tree). Once the node is inserted,
     // its tree root wins (see the ownerDocument getter), matching DOM adoption.
     __own(node) {
-      if (node) {
-        const docId = internalNodeId(this);
-        if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
-      }
+      if (node) stampOwnerDoc(node, this);
       return node;
     }
 
@@ -5992,12 +6019,20 @@
         // executes a script. Forward ordinary properties to that Realm so its
         // constructors, expandos, and reflection all describe the same global.
         const getActiveWindow = () => {
-          if (!activeRealmReady) {
-            const global = nativeIframeGlobal(iframe.__id);
-            if (global !== null) {
-              activeWindow = global;
-              activeRealmReady = true;
-            }
+          if (activeRealmReady) {
+            const global = safeApply(weakRefDeref, activeWindow, []);
+            if (global) return global;
+            activeRealmReady = false;
+            activeWindow = { __listeners: new Map() };
+          }
+          const global = nativeIframeGlobal(iframe.__id);
+          if (global !== null) {
+            // The native live Realm roots its global. Keeping only a weak
+            // cache here also releases the last backing Window immediately
+            // after navigation, even when no later proxy property is read.
+            activeWindow = new IntrinsicWeakRef(global);
+            activeRealmReady = true;
+            return global;
           }
           return activeWindow;
         };
