@@ -58,7 +58,7 @@ fn synchronous_and_asynchronous_jit_loops_share_the_sandbox_timeout() {
                 );
                 if enabled
                     && cfg!(all(
-                        target_arch = "x86_64",
+                        any(target_arch = "x86_64", target_arch = "aarch64"),
                         any(target_os = "linux", target_os = "macos")
                     ))
                 {

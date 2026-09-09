@@ -34,7 +34,10 @@ fn evaluate(
 }
 
 #[test]
-#[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+)))]
 fn unsupported_target_runs_the_interpreter_contract() {
     let (value, diagnostics) = evaluate(
         "(function(n){let s=0;for(let i=0;i<n;i++)s+=i;return s})(100)",
@@ -45,14 +48,12 @@ fn unsupported_target_runs_the_interpreter_contract() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
-fn shape_type_and_arithmetic_guards_match_jit_off() {
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+fn type_and_arithmetic_guards_match_jit_off() {
     let workloads = [
-        (
-            "function f(o,n){let s=0;for(let i=0;i<n;i++){s+=o.x;o.x+=1}return s+o.x}\
-             let a={x:1};f(a,200);let b={pad:0,x:7};f(b,100)",
-            "shape",
-        ),
         (
             "function f(n){let s=1;for(let i=0;i<n;i++)s=(s+i*3)%1000003;return s}\
              f(200);f('40')",
@@ -73,7 +74,6 @@ fn shape_type_and_arithmetic_guards_match_jit_off() {
             "{reason} never entered JIT"
         );
         match reason {
-            "shape" => assert!(diagnostics.shape_deopts >= 1),
             "type" => assert!(diagnostics.type_deopts >= 1),
             "arithmetic" => assert!(diagnostics.arithmetic_deopts >= 1),
             _ => unreachable!(),
@@ -82,7 +82,10 @@ fn shape_type_and_arithmetic_guards_match_jit_off() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn nested_caller_and_immediate_exception_observe_reconstructed_frame() {
     const SOURCE: &str = "function f(n,s){for(let i=0;i<n;i++)s=s+i*3;return s}\
          function nested(s){return f(100,s)}f(200,1);\
@@ -95,7 +98,10 @@ fn nested_caller_and_immediate_exception_observe_reconstructed_frame() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn collection_before_deopt_does_not_leave_stale_registers() {
     fn run(jit_enabled: bool) -> (JsValue, boa_engine::jit::ArithmeticJitDiagnostics) {
         let mut context = Context::default();
@@ -131,7 +137,10 @@ fn property_store_before_deopt_is_committed_exactly_once() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn explicit_interrupt_matches_interpreter_failure() {
     fn run(jit_enabled: bool) -> (String, boa_engine::jit::ArithmeticJitDiagnostics) {
         let mut context = Context::default();
@@ -153,4 +162,16 @@ fn explicit_interrupt_matches_interpreter_failure() {
     let (actual, diagnostics) = run(true);
     assert_eq!(actual, expected);
     assert!(diagnostics.interrupt_deopts >= 1);
+}
+
+#[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+fn shape_guards_match_jit_off() {
+    let source = "function f(o,n){let s=0;for(let i=0;i<n;i++){s+=o.x;o.x+=1}return s+o.x}\
+             let a={x:1};f(a,200);let b={pad:0,x:7};f(b,100)";
+    let (expected, _) = evaluate(source, false);
+    let (actual, diagnostics) = evaluate(source, true);
+    assert_eq!(actual, expected, "shape guard changed the result");
+    assert!(diagnostics.compiled_entries >= 1, "shape never entered JIT");
+    assert!(diagnostics.shape_deopts >= 1);
 }
