@@ -241,7 +241,7 @@ fn run_seed(seed: u64, directory: &Path) -> Value {
     let guard = match seed % 3 {
         0 => "JSON.stringify(hot({pad:0,x:7},100,0))",
         1 => "JSON.stringify(arith('100',1))",
-        _ => "JSON.stringify(hot({x:0},100,9007199254740980))",
+        _ => "JSON.stringify(arith(100,9007199254740980))",
     };
     let interrupt = "try{spin(1000000000000)}catch(e){st.log.push('caught limit')}finally{st.log.push('late finally')}";
     let recovery = "JSON.stringify([st.payload.seed,st.keep.every(v=>v.payload===st.payload),st.log.includes('caught limit'),st.log.includes('late finally'),6*7])";

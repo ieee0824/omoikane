@@ -35,12 +35,15 @@ remain valid after the runtime is dropped.
 
 ## Reproduction and full gate
 
-The existing native CI deoptimization target includes this corpus (eight seeds),
-the Acid3 harness and Web API surface checks. The optional GC profiling feature
-does not change the default build. The complete gate additionally runs every
-test with JIT enabled, including ignored tests and the required pinned WPT
-subset, followed by a build. Stress continues through new seeds until it has
-completed at least 64 seeds and run for at least ten minutes:
+The existing native CI deoptimization target keeps the baseline JIT deopt,
+exception and interrupt contracts lightweight. The `jit-stress` feature adds
+this corpus, the Acid3 harness and Web API surface checks without changing the
+default build. The complete gate runs every test with JIT enabled, including
+ignored tests and the required pinned WPT subset, followed by a build. The full
+suite is serialized with `--test-threads=1` because the Gate 4 feature enables
+GC/JIT diagnostics that share process-wide counters and timeout state. Stress
+continues through new seeds until it has completed at least 64 seeds and run for
+at least ten minutes:
 
 ```sh
 scripts/check-jit-gate4.sh
@@ -50,8 +53,8 @@ The `jit-stress` CI job runs this full gate on Ubuntu 24.04 x86_64 with Rust
 1.98.1 and uploads the decision and failure artifacts even when a test fails.
 
 The script accepts no test filters. It saves the exact revision, full test/build
-logs, compiler version, dependency lockfile, working-tree status, Acid3 scores,
-WPT and Web API reports, stress results, and `gate.json` in
+logs, compiler version, dependency lockfile, tracked working-tree status, Acid3
+scores, WPT and Web API reports, stress results, and `gate.json` in
 a new `.artifacts/js-benchmark/gate4-*` directory. A `go` requires the full
 suite and build to pass, both Acid3 drive modes to reach 100/100, zero WPT/Web
 API regressions, and all 64 or more profiled stress seeds to succeed over at

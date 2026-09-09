@@ -17,7 +17,7 @@ export WPT_ROOT=${WPT_ROOT:-.cache/wpt}
 export WPT_REQUIRED=1 WPT_REPORT="$gate_dir/wpt.json" WPT_JUNIT="$gate_dir/wpt.xml"
 export CI=1
 git rev-parse HEAD > "$gate_dir/revision.txt"
-git status --porcelain > "$gate_dir/source-status.txt"
+git status --porcelain --untracked-files=no > "$gate_dir/source-status.txt"
 rustc --version --verbose > "$gate_dir/rustc.txt"
 if [[ ! -f Cargo.lock ]]; then
   cargo generate-lockfile > "$gate_dir/lockfile.log" 2>&1
@@ -25,7 +25,7 @@ fi
 cp Cargo.lock "$gate_dir/Cargo.lock"
 scripts/fetch-wpt.sh > "$gate_dir/fetch-wpt.log" 2>&1
 suite_status=0
-cargo test --locked --features jit-stress,jit-differential -- --include-ignored --nocapture > "$gate_dir/full-suite.log" 2>&1 || suite_status=$?
+cargo test --locked --features jit-stress,jit-differential -- --include-ignored --nocapture --test-threads=1 > "$gate_dir/full-suite.log" 2>&1 || suite_status=$?
 build_status=0
 if ((suite_status == 0)); then
   cargo build --locked --features jit-stress > "$gate_dir/build.log" 2>&1 || build_status=$?

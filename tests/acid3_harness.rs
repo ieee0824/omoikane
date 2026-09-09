@@ -119,7 +119,7 @@ fn runner_completes_without_panicking() {
     assert_eq!(direct.page_status, 200);
 
     #[cfg(all(
-        feature = "baseline-jit",
+        feature = "jit-stress",
         target_arch = "x86_64",
         any(target_os = "linux", target_os = "macos")
     ))]

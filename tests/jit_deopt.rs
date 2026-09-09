@@ -7,12 +7,15 @@ mod exceptions;
 #[path = "jit_interrupt/mod.rs"]
 mod interrupts;
 
+#[cfg(feature = "jit-stress")]
 #[path = "jit_stress/mod.rs"]
 mod stress;
 
+#[cfg(feature = "jit-stress")]
 #[path = "acid3_harness.rs"]
 mod acid3;
 
+#[cfg(feature = "jit-stress")]
 #[path = "web_api_surface.rs"]
 mod web_api_surface;
 
