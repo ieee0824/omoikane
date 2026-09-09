@@ -7703,6 +7703,21 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(node_index_native),
         ),
         (
+            js_string!("__omoikane_node_is_connected"),
+            1,
+            NativeFunction::from_copy_closure(node_is_connected_native),
+        ),
+        (
+            js_string!("__omoikane_node_is_inclusive_descendant"),
+            2,
+            NativeFunction::from_copy_closure(node_is_inclusive_descendant_native),
+        ),
+        (
+            js_string!("__omoikane_node_has_slot_ancestor"),
+            1,
+            NativeFunction::from_copy_closure(node_has_slot_ancestor_native),
+        ),
+        (
             js_string!("__omoikane_query_selector"),
             2,
             NativeFunction::from_copy_closure(query_selector_native),
@@ -10322,6 +10337,65 @@ fn node_index_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
                 .position(|child| child.identity() == node_id)
         });
         Ok(JsValue::from(index.map_or(-1.0, |index| index as f64)))
+    })
+}
+
+fn node_is_connected_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let connected = state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| document_root_for_node(&node).is_some());
+        Ok(JsValue::from(connected))
+    })
+}
+
+fn node_is_inclusive_descendant_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let ancestor_id = parse_node_id(args.get(1), context)?;
+    with_host_state(|state| {
+        let mut current = state.borrow().get_node(node_id);
+        while let Some(node) = current {
+            if node.identity() == ancestor_id {
+                return Ok(JsValue::from(true));
+            }
+            // Range and traversal ancestry stops at ordinary tree roots;
+            // unlike connectivity it must not cross a shadow host.
+            current = node.parent_node();
+        }
+        Ok(JsValue::from(false))
+    })
+}
+
+fn node_has_slot_ancestor_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let mut current = state.borrow().get_node(node_id);
+        while let Some(node) = current {
+            // This is a conservative filter. The bootstrap still applies the
+            // exact HTML-slot, shadow-root and fallback-assignment checks.
+            if node
+                .local_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("slot"))
+            {
+                return Ok(JsValue::from(true));
+            }
+            current = node.parent_node();
+        }
+        Ok(JsValue::from(false))
     })
 }
 
