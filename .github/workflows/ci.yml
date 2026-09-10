@@ -32,20 +32,7 @@ jobs:
       - name: Run Gate 2 differential harness
         run: cargo test --features jit-differential --test jit_differential
 
-      - name: Run Gate 3 code-memory contract
-        run: cargo test --features baseline-jit --test jit_code_memory
-      - name: Run Gate 3 baseline-lowering contract
-        run: cargo test --features baseline-jit --test jit_baseline_lowering
-      - name: Run Gate 3 arithmetic native-execution contract
-        run: cargo test --features baseline-jit --test jit_arithmetic
-      - name: Run Gate 4 JIT stack-map contract
-        run: cargo test --features baseline-jit --test jit_stack_map
-      - name: Run Gate 4 JIT runtime-call contract
-        run: cargo test --features baseline-jit --test jit_runtime_call
-      - name: Run Gate 4 generational JIT-root contract
-        run: cargo test --features baseline-jit --test jit_gc_roots
-      - name: Run Gate 4 deoptimization contract
-        run: cargo test --features baseline-jit --test jit_deopt
+      # Native JIT contracts run in jit-native.yml on all four distribution targets.
       - run: cargo build
       # Re-run the JS benchmark with output shown: libtest swallows stdout for
       # passing tests, so the per-shape table and the drift classification would
