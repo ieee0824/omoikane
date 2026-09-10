@@ -53,6 +53,7 @@ use std::path::PathBuf;
 use omoikane::dom::NodeHandle;
 use omoikane::js::{BaselineJitDiagnostics as JitDiagnostics, JsRuntime, SandboxConfig};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const SHAPES_PATH: &str = "tests/js_benchmark/shapes.js";
 const BASELINE_PATH: &str = "tests/js_benchmark/baseline.json";
@@ -119,8 +120,23 @@ const JIT_DIAGNOSTIC_COUNTERS: &[&str] = &[
 /// number.
 const DRIFT_TOLERANCE: f64 = 0.20;
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+struct Fixture {
+    version: u32,
+    sha256: String,
+}
+
+fn fixture_identity(source: &str) -> Fixture {
+    Fixture {
+        version: 2,
+        sha256: format!("{:x}", Sha256::digest(source.as_bytes())),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Baseline {
+    fixture: Fixture,
+    jit_enabled: bool,
     version: u32,
     /// Build profile the baseline numbers were recorded under. Dependencies are
     /// compiled at `opt-level = 2` even in dev builds (see `Cargo.toml`), so the
@@ -152,6 +168,8 @@ struct BaselineShape {
     /// against what `shapes.js` actually ran, because that mismatch is exactly
     /// how the recorded ratios went wrong once already.
     iterations: u64,
+    /// Independently derived result, checked separately from elapsed time.
+    expected_result: f64,
     /// Boa's measured cost, in nanoseconds per iteration.
     baseline_ns_per_op: f64,
     /// The same shape measured in another engine, for context on how much of the
@@ -169,8 +187,9 @@ struct Reference {
 }
 
 /// One shape's measurement, as parsed from the benchmark's output line.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct Measurement {
+    result: f64,
     id: String,
     iterations: u64,
     elapsed_ms: f64,
@@ -187,6 +206,7 @@ enum Drift {
 
 #[derive(Debug, Serialize)]
 struct ShapeResult {
+    result: f64,
     id: String,
     description: String,
     ns_per_op: f64,
@@ -208,6 +228,8 @@ struct ShapeResult {
 
 #[derive(Debug, Serialize)]
 struct Report {
+    fixture: Fixture,
+    baseline_jit_enabled: bool,
     baseline_version: u32,
     baseline_profile: String,
     baseline_passes: u32,
@@ -266,27 +288,43 @@ fn manifest_path(path: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
-/// Parses the `name|iterations|elapsed_ms|ns_per_op` lines the benchmark emits.
+/// Parses the `name|iterations|elapsed_ms|ns_per_op|result` lines the benchmark emits.
 fn parse_measurements(output: &str) -> Vec<Measurement> {
     output
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let fields: Vec<&str> = line.split('|').collect();
-            assert_eq!(fields.len(), 4, "malformed benchmark line: {line}");
-            Measurement {
+            assert_eq!(fields.len(), 5, "malformed benchmark line: {line}");
+            let measurement = Measurement {
+                result: fields[4].parse().expect("computed result"),
                 id: fields[0].to_string(),
                 iterations: fields[1].parse().expect("iterations"),
                 elapsed_ms: fields[2].parse().expect("elapsed"),
                 ns_per_op: fields[3].parse().expect("ns per op"),
-            }
+            };
+            assert!(
+                measurement.result.is_finite(),
+                "non-finite benchmark result: {line}"
+            );
+            assert!(
+                measurement.iterations > 0
+                    && measurement.elapsed_ms.is_finite()
+                    && measurement.elapsed_ms > 0.0
+                    && measurement.ns_per_op.is_finite()
+                    && measurement.ns_per_op > 0.0,
+                "invalid benchmark timing: {line}"
+            );
+            measurement
         })
         .collect()
 }
 
 /// What one execution of `shapes.js` produced, including the conditions it ran
 /// under so they can be checked against the recorded ones.
+#[derive(Serialize)]
 struct BenchmarkRun {
+    fixture: Fixture,
     passes: u32,
     measurements: Vec<Measurement>,
     jit_diagnostics: JitDiagnostics,
@@ -307,6 +345,12 @@ fn run_benchmarks() -> BenchmarkRun {
     )
     .expect("create benchmark runtime");
     runtime.eval(&source).expect("load benchmark shapes");
+    let fixture = fixture_identity(&source);
+    assert_eq!(
+        runtime.eval("BENCH_FIXTURE_VERSION").unwrap().as_number(),
+        Some(f64::from(fixture.version)),
+        "fixture version must match the runner"
+    );
     // Validated rather than cast: `as u32` would turn 4.5 into 4 and NaN into 0,
     // and a zero pass count would surface as a baffling "timed 0 passes"
     // mismatch instead of pointing at the edit that caused it.
@@ -326,13 +370,49 @@ fn run_benchmarks() -> BenchmarkRun {
         .as_string()
         .expect("benchmark output is a string")
         .to_std_string_escaped();
+    let measurements = parse_measurements(&output);
+    // Recording a replacement baseline must enforce the same complete result
+    // contract as a normal report, without consulting historical timings.
+    let contract = runtime
+        .eval("JSON.stringify(BENCH_EXPECTED)")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    let contract: serde_json::Value = serde_json::from_str(&contract).unwrap();
+    let expected = contract.as_object().unwrap();
+    let ids = measurements
+        .iter()
+        .map(|m| m.id.as_str())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        ids.len(),
+        measurements.len(),
+        "duplicate benchmark workload"
+    );
+    assert_eq!(
+        ids,
+        expected.keys().map(String::as_str).collect::<HashSet<_>>(),
+        "benchmark workload set mismatch"
+    );
+    for measurement in &measurements {
+        assert_eq!(
+            Some(measurement.iterations),
+            expected[&measurement.id][0].as_u64()
+        );
+        assert_eq!(
+            Some(measurement.result),
+            expected[&measurement.id][1].as_f64()
+        );
+    }
     #[cfg(feature = "baseline-jit")]
     let jit_diagnostics = runtime.baseline_jit_diagnostics();
     #[cfg(not(feature = "baseline-jit"))]
     let jit_diagnostics = JitDiagnostics::default();
     BenchmarkRun {
+        fixture,
         passes,
-        measurements: parse_measurements(&output),
+        measurements,
         jit_diagnostics,
     }
 }
@@ -350,6 +430,26 @@ fn median(mut values: Vec<f64>) -> f64 {
 fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
     assert!(!runs.is_empty(), "at least one benchmark run is required");
     for run in runs {
+        assert_eq!(
+            run.fixture, baseline.fixture,
+            "fixture mismatch: re-record all engines; never compare old/new workloads"
+        );
+        let ids = run
+            .measurements
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<HashSet<_>>();
+        let expected_ids = baseline
+            .shapes
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, expected_ids, "benchmark workload set mismatch");
+        assert_eq!(
+            ids.len(),
+            run.measurements.len(),
+            "duplicate benchmark workload"
+        );
         assert_eq!(
             run.passes, baseline.passes,
             "shapes.js timed {} passes but the baseline and its reference numbers were \
@@ -370,6 +470,11 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
                     .iter()
                     .find(|measurement| measurement.id == expected.id)
                     .unwrap_or_else(|| panic!("baseline shape {} was not measured", expected.id));
+                assert_eq!(
+                    measurement.result, expected.expected_result,
+                    "incorrect computed result for {}",
+                    expected.id
+                );
                 assert_eq!(
                     measurement.iterations, expected.iterations,
                     "shape {} ran {} iterations but the baseline and its reference numbers \
@@ -419,6 +524,7 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
         };
 
         shapes.push(ShapeResult {
+            result: expected.expected_result,
             id: expected.id.clone(),
             description: expected.description.clone(),
             ns_per_op,
@@ -450,6 +556,8 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
         jit_diagnostics.saturating_add_assign(*diagnostics);
     }
     Report {
+        fixture: baseline.fixture.clone(),
+        baseline_jit_enabled: baseline.jit_enabled,
         baseline_version: baseline.version,
         baseline_profile: baseline.profile.clone(),
         baseline_passes: baseline.passes,
@@ -466,7 +574,8 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
         revision: std::env::var("OMOIKANE_BENCH_REVISION")
             .or_else(|_| std::env::var("GITHUB_SHA"))
             .unwrap_or_else(|_| "unknown".to_string()),
-        baseline_comparable: baseline.profile == measured_profile()
+        baseline_comparable: baseline.jit_enabled == jit_diagnostics.enabled
+            && baseline.profile == measured_profile()
             && baseline.passes == runs[0].passes
             && baseline.measurement_runs == runs.len()
             && baseline.target_arch == std::env::consts::ARCH
@@ -483,6 +592,10 @@ fn build_report(baseline: &Baseline, runs: &[BenchmarkRun]) -> Report {
 }
 
 fn print_report(report: &Report) {
+    println!(
+        "  fixture v{} sha256={} (all pass results validated)",
+        report.fixture.version, report.fixture.sha256
+    );
     println!(
         "JS benchmark: shapes={} runs={} profile={} passes={} target={}-{} (baseline v{}; reference: {})",
         report.total,
@@ -571,6 +684,10 @@ fn write_report_if_requested(report: &Report) {
 fn baseline_shapes_are_unique_and_well_formed() {
     let baseline = load_baseline();
     assert!(baseline.version > 0);
+    assert_eq!(
+        baseline.fixture,
+        fixture_identity(&fs::read_to_string(manifest_path(SHAPES_PATH)).unwrap())
+    );
     assert!(baseline.passes > 0);
     assert!(!baseline.reference_engine.trim().is_empty());
     assert!(!baseline.target_arch.trim().is_empty());
@@ -596,6 +713,7 @@ fn baseline_shapes_are_unique_and_well_formed() {
         );
         assert!(!shape.description.trim().is_empty());
         assert!(shape.iterations > 0);
+        assert!(shape.expected_result.is_finite());
         assert!(shape.baseline_ns_per_op > 0.0);
         assert!(shape.reference.spidermonkey_interpreter > 0.0);
         assert!(shape.reference.spidermonkey_jit > 0.0);
@@ -607,6 +725,117 @@ fn baseline_shapes_are_unique_and_well_formed() {
             "shape {} records a JIT slower than the interpreter",
             shape.id
         );
+    }
+}
+
+#[test]
+fn new_baseline_has_matching_results_and_samples_in_all_four_modes() {
+    let baseline = load_baseline();
+    let snapshot: serde_json::Value = serde_json::from_slice(
+        &fs::read(manifest_path(
+            "docs/jit/measurements/benchmark-v2-2026-09-10.json",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let fixture = serde_json::to_value(&baseline.fixture).unwrap();
+    assert_eq!(snapshot["fixture"], fixture);
+    for mode in ["interpreter", "jit"] {
+        let report = &snapshot["omoikane"][mode];
+        assert_eq!(report["fixture"], fixture);
+        let runs = report["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 5);
+        for run in runs {
+            assert_eq!(run["fixture"], fixture);
+            assert_eq!(run["passes"], 4);
+            assert_eq!(run["jit_diagnostics"]["enabled"], mode == "jit");
+            assert_eq!(
+                run["measurements"].as_array().unwrap().len(),
+                baseline.shapes.len()
+            );
+            for expected in &baseline.shapes {
+                let measurements = run["measurements"].as_array().unwrap();
+                let matches = measurements
+                    .iter()
+                    .filter(|m| m["id"] == expected.id)
+                    .collect::<Vec<_>>();
+                assert_eq!(matches.len(), 1);
+                let measured = matches[0];
+                assert_eq!(measured["iterations"].as_u64(), Some(expected.iterations));
+                assert_eq!(measured["result"].as_f64(), Some(expected.expected_result));
+                assert!(
+                    measured["ns_per_op"]
+                        .as_f64()
+                        .is_some_and(|n| n.is_finite() && n > 0.0)
+                );
+            }
+        }
+        for expected in &baseline.shapes {
+            let values = runs
+                .iter()
+                .map(|r| {
+                    r["measurements"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|m| m["id"] == expected.id)
+                        .unwrap()["ns_per_op"]
+                        .as_f64()
+                        .unwrap()
+                })
+                .collect();
+            if mode == "interpreter" {
+                assert_eq!(median(values), expected.baseline_ns_per_op);
+            }
+        }
+    }
+    for round in ["primary", "confirmation"] {
+        let report = &snapshot["spidermonkey"][round];
+        assert_eq!(report["fixture"], fixture);
+        assert_eq!(report["measurement_runs"], 5);
+        assert_eq!(report["passes"], 4);
+        let samples = report["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), baseline.shapes.len() * 10);
+        for mode in ["interpreter", "jit"] {
+            for expected in &baseline.shapes {
+                let values = samples
+                    .iter()
+                    .filter(|s| s["mode"] == mode && s["id"] == expected.id)
+                    .collect::<Vec<_>>();
+                assert_eq!(values.len(), 5);
+                let run_ids = values
+                    .iter()
+                    .map(|s| s["run"].as_u64().unwrap())
+                    .collect::<HashSet<_>>();
+                assert_eq!(run_ids, (1..=5).collect::<HashSet<_>>());
+                for sample in &values {
+                    assert_eq!(sample["iterations"].as_u64(), Some(expected.iterations));
+                    assert_eq!(sample["result"].as_f64(), Some(expected.expected_result));
+                    assert!(
+                        sample["ns_per_op"]
+                            .as_f64()
+                            .is_some_and(|n| n.is_finite() && n > 0.0)
+                    );
+                }
+                let minimum = values
+                    .iter()
+                    .map(|s| s["ns_per_op"].as_f64().unwrap())
+                    .min_by(f64::total_cmp)
+                    .unwrap();
+                assert_eq!(
+                    report["minimum_ns_per_op"][mode][&expected.id].as_f64(),
+                    Some(minimum)
+                );
+                if round == "primary" {
+                    let reference = if mode == "interpreter" {
+                        expected.reference.spidermonkey_interpreter
+                    } else {
+                        expected.reference.spidermonkey_jit
+                    };
+                    assert_eq!(reference, minimum);
+                }
+            }
+        }
     }
 }
 
@@ -723,6 +952,8 @@ fn gate3_snapshots_preserve_matched_samples_and_native_diagnostics() {
 #[test]
 fn report_classifies_drift_against_the_baseline() {
     let baseline = Baseline {
+        fixture: fixture_identity("test fixture"),
+        jit_enabled: false,
         version: 1,
         profile: "dev".to_string(),
         passes: 4,
@@ -736,6 +967,7 @@ fn report_classifies_drift_against_the_baseline() {
                 id: "faster".to_string(),
                 description: "got faster".to_string(),
                 iterations: 1000,
+                expected_result: 1.0,
                 baseline_ns_per_op: 100.0,
                 reference: Reference {
                     spidermonkey_interpreter: 50.0,
@@ -746,6 +978,7 @@ fn report_classifies_drift_against_the_baseline() {
                 id: "slower".to_string(),
                 description: "got slower".to_string(),
                 iterations: 1000,
+                expected_result: 1.0,
                 baseline_ns_per_op: 100.0,
                 reference: Reference {
                     spidermonkey_interpreter: 50.0,
@@ -756,6 +989,7 @@ fn report_classifies_drift_against_the_baseline() {
                 id: "steady".to_string(),
                 description: "within tolerance".to_string(),
                 iterations: 1000,
+                expected_result: 1.0,
                 baseline_ns_per_op: 100.0,
                 reference: Reference {
                     spidermonkey_interpreter: 50.0,
@@ -765,12 +999,14 @@ fn report_classifies_drift_against_the_baseline() {
         ],
     };
     let measurement = |id: &str, ns_per_op: f64| Measurement {
+        result: 1.0,
         id: id.to_string(),
         iterations: 1000,
         elapsed_ms: ns_per_op / 1000.0,
         ns_per_op,
     };
     let run = BenchmarkRun {
+        fixture: fixture_identity("test fixture"),
         passes: 4,
         jit_diagnostics: JitDiagnostics::default(),
         measurements: vec![
@@ -802,6 +1038,8 @@ fn report_classifies_drift_against_the_baseline() {
 #[test]
 fn report_uses_the_median_and_preserves_each_sample() {
     let baseline = Baseline {
+        fixture: fixture_identity("test fixture"),
+        jit_enabled: false,
         version: 1,
         profile: "dev".to_string(),
         passes: 4,
@@ -814,6 +1052,7 @@ fn report_uses_the_median_and_preserves_each_sample() {
             id: "arith".to_string(),
             description: "median probe".to_string(),
             iterations: 1_000,
+            expected_result: 1.0,
             baseline_ns_per_op: 100.0,
             reference: Reference {
                 spidermonkey_interpreter: 50.0,
@@ -822,6 +1061,7 @@ fn report_uses_the_median_and_preserves_each_sample() {
         }],
     };
     let run = |ns_per_op| BenchmarkRun {
+        fixture: fixture_identity("test fixture"),
         passes: 4,
         jit_diagnostics: JitDiagnostics {
             enabled: true,
@@ -834,6 +1074,7 @@ fn report_uses_the_median_and_preserves_each_sample() {
             ..JitDiagnostics::default()
         },
         measurements: vec![Measurement {
+            result: 1.0,
             id: "arith".to_string(),
             iterations: 1_000,
             elapsed_ms: ns_per_op / 1_000.0,
@@ -860,6 +1101,8 @@ fn report_uses_the_median_and_preserves_each_sample() {
 #[should_panic(expected = "were measured at 1000")]
 fn report_refuses_to_compare_across_iteration_counts() {
     let baseline = Baseline {
+        fixture: fixture_identity("test fixture"),
+        jit_enabled: false,
         version: 3,
         profile: "dev".to_string(),
         passes: 4,
@@ -872,6 +1115,7 @@ fn report_refuses_to_compare_across_iteration_counts() {
             id: "arith".to_string(),
             description: "recorded at a different count".to_string(),
             iterations: 1000,
+            expected_result: 1.0,
             baseline_ns_per_op: 100.0,
             reference: Reference {
                 spidermonkey_interpreter: 50.0,
@@ -880,9 +1124,11 @@ fn report_refuses_to_compare_across_iteration_counts() {
         }],
     };
     let run = BenchmarkRun {
+        fixture: fixture_identity("test fixture"),
         passes: 4,
         jit_diagnostics: JitDiagnostics::default(),
         measurements: vec![Measurement {
+            result: 1.0,
             id: "arith".to_string(),
             iterations: 200,
             elapsed_ms: 0.02,
@@ -897,6 +1143,8 @@ fn report_refuses_to_compare_across_iteration_counts() {
 #[should_panic(expected = "recorded over 2")]
 fn report_refuses_to_compare_across_pass_counts() {
     let baseline = Baseline {
+        fixture: fixture_identity("test fixture"),
+        jit_enabled: false,
         version: 3,
         profile: "dev".to_string(),
         passes: 2,
@@ -909,6 +1157,7 @@ fn report_refuses_to_compare_across_pass_counts() {
             id: "arith".to_string(),
             description: "recorded over fewer passes".to_string(),
             iterations: 1000,
+            expected_result: 1.0,
             baseline_ns_per_op: 100.0,
             reference: Reference {
                 spidermonkey_interpreter: 50.0,
@@ -917,9 +1166,11 @@ fn report_refuses_to_compare_across_pass_counts() {
         }],
     };
     let run = BenchmarkRun {
+        fixture: fixture_identity("test fixture"),
         passes: 4,
         jit_diagnostics: JitDiagnostics::default(),
         measurements: vec![Measurement {
+            result: 1.0,
             id: "arith".to_string(),
             iterations: 1000,
             elapsed_ms: 0.1,
@@ -931,20 +1182,79 @@ fn report_refuses_to_compare_across_pass_counts() {
 }
 
 #[test]
+fn reports_reject_different_fixtures_and_corrupted_measurements() {
+    let baseline = load_baseline();
+    let probe = || BenchmarkRun {
+        fixture: baseline.fixture.clone(),
+        passes: baseline.passes,
+        jit_diagnostics: JitDiagnostics::default(),
+        measurements: baseline
+            .shapes
+            .iter()
+            .map(|s| Measurement {
+                id: s.id.clone(),
+                iterations: s.iterations,
+                result: s.expected_result,
+                elapsed_ms: 1.0,
+                ns_per_op: s.baseline_ns_per_op,
+            })
+            .collect(),
+    };
+    // Establish that the original probe is accepted before corrupting one field.
+    assert_eq!(
+        build_report(&baseline, &[probe()]).total,
+        baseline.shapes.len()
+    );
+    for corruption in 0..5 {
+        let mut run = probe();
+        match corruption {
+            0 => run.fixture.version += 1,
+            1 => run.fixture.sha256 = "old fixture hash".to_string(),
+            2 => run.measurements[0].result += 1.0,
+            3 => {
+                run.measurements.pop();
+            }
+            _ => run.measurements.push(run.measurements[0].clone()),
+        }
+        assert!(
+            std::panic::catch_unwind(|| build_report(&baseline, &[run])).is_err(),
+            "accepted corruption {corruption}"
+        );
+    }
+}
+
+#[test]
+fn benchmark_parser_rejects_legacy_and_nonfinite_results() {
+    for row in [
+        "arith|2000000|1|1",
+        "arith|2000000|1|1|NaN",
+        "arith|2000000|1|1|inf",
+        "arith|2000000|0|0|64",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| parse_measurements(row)).is_err(),
+            "{row}"
+        );
+    }
+}
+
+#[test]
 fn benchmark_output_lines_are_parsed_into_measurements() {
     let parsed =
-        parse_measurements("arith|400000|12.5000|31.25\n\nprop-mono|200000|40.0000|200.00\n");
+        parse_measurements("arith|400000|12.5000|31.25|1\n\nprop-mono|200000|40.0000|200.00|1\n");
 
     assert_eq!(
         parsed,
         vec![
             Measurement {
+                result: 1.0,
                 id: "arith".to_string(),
                 iterations: 400_000,
                 elapsed_ms: 12.5,
                 ns_per_op: 31.25,
             },
             Measurement {
+                result: 1.0,
                 id: "prop-mono".to_string(),
                 iterations: 200_000,
                 elapsed_ms: 40.0,
@@ -956,10 +1266,27 @@ fn benchmark_output_lines_are_parsed_into_measurements() {
 
 #[test]
 fn js_execution_benchmark_reports_every_shape() {
-    let baseline = load_baseline();
     let runs = (0..measurement_run_count())
         .map(|_| run_benchmarks())
         .collect::<Vec<_>>();
+    // Explicit recording mode bootstraps a new fixture without using an older
+    // baseline for comparisons. Every pass still goes through result validation.
+    if let Ok(path) = std::env::var("OMOIKANE_JS_BENCH_RAW_REPORT") {
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "fixture": runs[0].fixture,
+                "target_arch": std::env::consts::ARCH,
+                "target_os": std::env::consts::OS,
+                "profile": measured_profile(),
+                "runs": runs,
+            }))
+            .unwrap(),
+        )
+        .expect("write raw benchmark measurements");
+        return;
+    }
+    let baseline = load_baseline();
     let report = build_report(&baseline, &runs);
 
     print_report(&report);

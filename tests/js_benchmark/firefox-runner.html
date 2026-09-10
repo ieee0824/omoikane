@@ -4,9 +4,13 @@
 <script src="shapes.js"></script>
 <script>
   addEventListener("load", function () {
-    dump("OMOIKANE_BENCH_BEGIN\n");
-    dump(runBenchmarks() + "\n");
-    dump("OMOIKANE_BENCH_END\n");
+    try {
+      // Emit a complete block only after every pass has validated its result.
+      var output = runBenchmarks();
+      dump("OMOIKANE_BENCH_BEGIN\n" + output + "\nOMOIKANE_BENCH_END\n");
+    } catch (error) {
+      dump("OMOIKANE_BENCH_ERROR " + String(error) + "\n");
+    }
     window.close();
   });
 </script>

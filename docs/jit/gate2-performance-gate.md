@@ -35,6 +35,10 @@ a wall-clock CI assertion.
 
 ### Recording the SpiderMonkey reference
 
+The current result-validating fixture and fresh baseline are documented in
+[benchmark v2](benchmark-v2.md). The Gate 2 snapshot below remains historical;
+do not compare its v1 timings against v2 as a speedup.
+
 Run the same `shapes.js` in five fresh Firefox profiles for both interpreter and
 JIT modes:
 

@@ -72,7 +72,7 @@ jobs:
           fi
           "${test_command[@]}" --test system_font_selection -- --nocapture --test-threads=1 2>&1 | tee .artifacts/browser/system-font-tests.log
           "${test_command[@]}" --lib font -- --include-ignored --nocapture --test-threads=1 2>&1 | tee .artifacts/browser/font-tests.log
-          "${test_command[@]}" --test float16_rounding --test browser_journeys --test acid3_harness -- --nocapture --test-threads=1 2>&1 | tee .artifacts/browser/tests.log
+          "${test_command[@]}" --test engine_benchmark_results --test float16_rounding --test browser_journeys --test acid3_harness -- --nocapture --test-threads=1 2>&1 | tee .artifacts/browser/tests.log
       - name: Upload logs, reports and painted frames
         if: always()
         uses: actions/upload-artifact@v4
