@@ -90,6 +90,10 @@ name = "omoikane"
 path = "src/bin/omoikane.rs"
 required-features = ["gui"]
 
+[[example]]
+name = "jit_release_probe"
+required-features = ["baseline-jit"]
+
 [dev-dependencies]
 rcgen = "0.13"
 

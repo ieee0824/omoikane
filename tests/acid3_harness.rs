@@ -106,7 +106,7 @@ fn acid3_page_parses_to_dom_with_scoreboard() {
     );
 }
 
-/// Both drive modes must complete; Gate 4 additionally requires 100/100.
+/// Both drive modes must complete; native JIT gates additionally require 100/100.
 #[test]
 fn runner_completes_without_panicking() {
     let server = FixtureServer::start();
@@ -119,8 +119,8 @@ fn runner_completes_without_panicking() {
     assert_eq!(direct.page_status, 200);
 
     #[cfg(all(
-        feature = "jit-stress",
-        target_arch = "x86_64",
+        feature = "baseline-jit",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         any(target_os = "linux", target_os = "macos")
     ))]
     {

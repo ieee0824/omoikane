@@ -1,0 +1,145 @@
+name: JIT release gate
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jit-release-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify incomplete or mismatched evidence cannot pass
+        run: python3 -m unittest discover -s scripts/tests -p test_jit_gate5.py
+      - name: Resolve one dependency set for all eight jobs
+        run: python3 scripts/jit-gate5.py prepare .artifacts/jit-gate5/inputs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jit-gate5-inputs
+          path: .artifacts/jit-gate5/inputs/
+          if-no-files-found: error
+
+  target:
+    needs: prepare
+    name: Gate 5 (${{ matrix.target }}, ${{ matrix.kind }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [suite, package]
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            archive: omoikane-linux-x86_64.tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: omoikane-linux-aarch64.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            archive: omoikane-macos-x86_64.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive: omoikane-macos-aarch64.tar.gz
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: jit-gate5-inputs
+          path: .artifacts/jit-gate5/inputs/
+      - name: Use the shared lockfile
+        run: cp .artifacts/jit-gate5/inputs/Cargo.lock Cargo.lock
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: jit-gate5-v1-${{ matrix.target }}-${{ matrix.kind }}
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - uses: actions/cache@v4
+        if: matrix.kind == 'suite'
+        with:
+          path: .cache/wpt
+          key: wpt-${{ hashFiles('tests/wpt/revision.txt') }}
+      - name: Install Linux system fonts
+        if: runner.os == 'Linux' && matrix.kind == 'suite'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core
+      - name: Run full suite or build and smoke-test the release archive
+        env:
+          GATE_KIND: ${{ matrix.kind }}
+          GATE_TARGET: ${{ matrix.target }}
+        run: python3 scripts/jit-gate5.py "$GATE_KIND" "$GATE_TARGET" .artifacts/jit-gate5
+      - name: Upload the verified distribution archive
+        if: matrix.kind == 'package'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: .artifacts/jit-gate5/${{ matrix.target }}/package/${{ matrix.archive }}
+          if-no-files-found: error
+      - name: Retain execution, benchmark and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-gate5-${{ matrix.target }}-${{ matrix.kind }}
+          path: |
+            .artifacts/jit-gate5/
+            !.artifacts/jit-gate5/inputs/**
+            !.artifacts/jit-gate5/**/staging/**
+            !.artifacts/jit-gate5/**/extracted/**
+            !.artifacts/jit-gate5/**/*.tar.gz
+          if-no-files-found: error
+
+  gate:
+    name: Gate 5 aggregate
+    needs: [prepare, target]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jit-gate5-*
+          path: .artifacts/jit-gate5/
+          merge-multiple: true
+      - name: Restore the shared identity directory
+        run: |
+          mkdir -p .artifacts/jit-gate5/inputs
+          if test -f .artifacts/jit-gate5/identity.json; then
+            mv .artifacts/jit-gate5/identity.json .artifacts/jit-gate5/inputs/
+            mv .artifacts/jit-gate5/Cargo.lock .artifacts/jit-gate5/inputs/
+          fi
+      - name: Require all targets, compatibility reports and actual native execution
+        if: always()
+        env:
+          GATE_JOBS_RESULT: ${{ needs.target.result }}
+        run: python3 scripts/jit-gate5.py aggregate .artifacts/jit-gate5 --jobs-result "$GATE_JOBS_RESULT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jit-gate5-report
+          path: .artifacts/jit-gate5/gate.json
+          if-no-files-found: error
