@@ -66,11 +66,11 @@ jobs:
           ENGINE_MODE: ${{ matrix.mode }}
         run: |
           set -euo pipefail
-          features=()
+          test_command=(cargo test --locked)
           if [ "$ENGINE_MODE" = baseline-jit ]; then
-            features=(--features baseline-jit)
+            test_command+=(--features baseline-jit)
           fi
-          cargo test --locked "${features[@]}" --test browser_journeys --test acid3_harness -- --nocapture --test-threads=1 2>&1 | tee .artifacts/browser/tests.log
+          "${test_command[@]}" --test browser_journeys --test acid3_harness -- --nocapture --test-threads=1 2>&1 | tee .artifacts/browser/tests.log
       - name: Upload logs, reports and painted frames
         if: always()
         uses: actions/upload-artifact@v4
