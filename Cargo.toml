@@ -59,10 +59,11 @@ crc32fast = "1.5"
 # plus native ARM64 entry ABI, code memory (ieee0824/boa#84),
 # ARM64 arithmetic lowering (ieee0824/boa#85), Promise resolution roots
 # (ieee0824/boa#86), ARM64 property/helper lowering (ieee0824/boa#87),
-# and bounded JIT completion copies/property-binding scans (ieee0824/boa#88).
+# bounded JIT completion copies/property-binding scans (ieee0824/boa#88),
+# and ASAN-independent native parser stack measurement (ieee0824/boa#89).
 # The pinned commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "267f8d9e59143523beb0be2600e386e14a0857e4", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "267f8d9e59143523beb0be2600e386e14a0857e4" }
+boa_engine = { git = "https://github.com/ieee0824/boa", rev = "ee98fdacffb38093d9d220c2ac21a4ed6839ce37", features = ["annex-b"] }
+boa_gc = { git = "https://github.com/ieee0824/boa", rev = "ee98fdacffb38093d9d220c2ac21a4ed6839ce37" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
@@ -88,6 +89,10 @@ winit = { version = "0.30.12", optional = true }
 name = "omoikane"
 path = "src/bin/omoikane.rs"
 required-features = ["gui"]
+
+[[example]]
+name = "jit_release_probe"
+required-features = ["baseline-jit"]
 
 [dev-dependencies]
 rcgen = "0.13"

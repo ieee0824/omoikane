@@ -2,7 +2,7 @@
 set -euo pipefail
 repo="https://github.com/web-platform-tests/wpt.git"
 revision="$(tr -d "[:space:]" < tests/wpt/revision.txt)"
-destination="$(realpath -m "${WPT_ROOT:-target/wpt}")"
+destination="$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve())' "${WPT_ROOT:-target/wpt}")"
 git_wpt() { git -c safe.directory="$destination" -C "$destination" "$@"; }
 if [[ ! -d "$destination/.git" ]]; then
   mkdir -p "$(dirname "$destination")"
