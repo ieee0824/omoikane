@@ -43,6 +43,9 @@ class GateTests(unittest.TestCase):
                         "diagnostic_features": ["baseline-jit"], "files": {
                             name: {"sha256": "c" * 64, "bytes": 10}
                             for name in (library, "omoikane.h", "omoikane-jit-smoke")}}
+            manifest["files"].update({name: {"sha256": gate.digest(source),
+                                            "bytes": source.stat().st_size}
+                                      for name, source in gate.ENGINE_NOTICES.items()})
             self.save(f"{target}/package/result.json", {
                 "identity": identity, "status": "passed", "archive": {
                     "name": archive, "bytes": 30, "manifest": manifest},
@@ -70,6 +73,22 @@ class GateTests(unittest.TestCase):
 
     def test_complete_evidence_passes(self):
         self.assertTrue(self.decision())
+
+    def test_missing_or_changed_engine_notices_reject_the_archive(self):
+        path = self.root / next(iter(gate.TARGETS)) / "package/result.json"
+        original = gate.read(path)
+        for name in gate.ENGINE_NOTICES:
+            for change in ("missing", "altered"):
+                with self.subTest(notice=name, change=change):
+                    result = copy.deepcopy(original)
+                    files = result["archive"]["manifest"]["files"]
+                    if change == "missing":
+                        del files[name]
+                    else:
+                        files[name]["sha256"] = "changed"
+                    gate.write(path, result)
+                    self.assertFalse(self.decision())
+        gate.write(path, original)
 
     def test_archive_preserves_executable_and_library_bytes(self):
         source = self.root / "packaged-probe"

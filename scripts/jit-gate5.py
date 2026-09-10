@@ -22,6 +22,11 @@ TARGETS = {
     "aarch64-unknown-linux-gnu": ("libomoikane.so", "omoikane-linux-aarch64.tar.gz"),
     "aarch64-apple-darwin": ("libomoikane.dylib", "omoikane-macos-aarch64.tar.gz"),
 }
+ENGINE_NOTICES = {
+    "boa-LICENSE-MIT": Path("engine/boa/LICENSE-MIT"),
+    "boa-LICENSE-UNLICENSE": Path("engine/boa/LICENSE-UNLICENSE"),
+    "boa-origin.json": Path("engine/boa-origin.json"),
+}
 SUITE_COMMAND = ["cargo", "test", "--locked", "--features", "baseline-jit,jit-differential",
                  "--", "--include-ignored", "--nocapture", "--test-threads=1"]
 
@@ -153,6 +158,8 @@ def run_target(kind, target, root):
             run("default-library", ["cargo", "build", "--locked", "--release", "--lib", "--target", target])
             shutil.copy2(target_dir / target / "release" / library, staging / library)
             shutil.copy2("include/omoikane.h", staging / "omoikane.h")
+            for name, source in ENGINE_NOTICES.items():
+                shutil.copy2(source, staging / name)
             run("jit-probe-build", ["cargo", "build", "--locked", "--release", "--target", target,
                                     "--features", "baseline-jit", "--example", "jit_release_probe"])
             shutil.copy2(target_dir / target / "release/examples/jit_release_probe", staging / "omoikane-jit-smoke")
@@ -253,7 +260,9 @@ def aggregate(root, jobs_result):
             and manifest.get("identity") == package.get("identity")
             and manifest.get("default_library_features") == []
             and manifest.get("diagnostic_features") == ["baseline-jit"]
-            and set(manifest.get("files", {})) == {library, "omoikane.h", "omoikane-jit-smoke"})
+            and set(manifest.get("files", {})) == {library, "omoikane.h", "omoikane-jit-smoke"} | set(ENGINE_NOTICES)
+            and all(manifest["files"][name] == {"sha256": digest(source), "bytes": source.stat().st_size}
+                    for name, source in ENGINE_NOTICES.items()))
         checks[target + ":probe"] = valid_probe(probe, target)
         metrics = {}
         if checks[target + ":probe"]:

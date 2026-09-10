@@ -1,0 +1,364 @@
+name: Continuous integration
+
+on:
+  pull_request:
+    branches:
+      - main
+      - releases/**
+  push:
+    branches:
+      - main
+      - releases/**
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  W_FLAGS: ${{ (github.ref == 'refs/heads/main' || github.base_ref == 'main') && '-D warnings' || '' }}
+
+jobs:
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ github.ref == 'refs/heads/main' || github.base_ref == 'main' }}
+    steps:
+      - name: Set environment
+        # Setting `RUSTFLAGS` overrides any flags set on .cargo/config.toml, so we need to
+        # set the target flags instead which are cumulative.
+        # Track https://github.com/rust-lang/cargo/issues/5376
+        run: |
+          target=$(rustc -vV | awk '/^host/ { print $2 }' | tr [:lower:] [:upper:] | tr '-' '_')
+          echo "CARGO_TARGET_${target}_RUSTFLAGS=$W_FLAGS" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-tarpaulin
+        uses: baptiste0928/cargo-install@v3.3.2
+        with:
+          crate: cargo-tarpaulin
+
+      - name: Run tarpaulin
+        run: cargo tarpaulin --workspace --features annex-b,intl_bundled,experimental --ignore-tests --engine llvm --out xml
+
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v5
+
+  tests:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      RUSTUP_WINDOWS_PATH_ADD_BIN: 1
+      # TODO: Make a small Rust tool that does this
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: ${{ (github.ref == 'refs/heads/main' || github.base_ref == 'main') && '-D warnings' || '' }}
+      CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: ${{ (github.ref == 'refs/heads/main' || github.base_ref == 'main') && '-D warnings' || '' }}
+      CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: ${{ (github.ref == 'refs/heads/main' || github.base_ref == 'main') && '-D warnings' || '' }}
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU: ${{ (github.ref == 'refs/heads/main' || github.base_ref == 'main') && '-D warnings' || '' }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+          - os: windows-latest
+          - os: ubuntu-24.04-arm
+          - os: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ matrix.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build tests
+        run: cargo test --no-run --profile ci
+      # this order is faster according to rust-analyzer
+      - name: Build
+        run: cargo build --all-targets --quiet --profile ci --features annex-b,intl_bundled,experimental,embedded_lz4
+      - name: Install latest nextest
+        uses: taiki-e/install-action@nextest
+      - name: Test with nextest
+        run: cargo nextest run --profile ci --cargo-profile ci --features annex-b,intl_bundled,experimental,embedded_lz4
+      - name: Test docs
+        run: cargo test --doc --profile ci --features annex-b,intl_bundled,experimental
+
+  baseline-jit-memory:
+    name: Baseline JIT memory (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: macos-15-intel
+            arch: x86_64
+          - os: macos-14
+            arch: aarch64
+    env:
+      BOA_JIT_DIAGNOSTICS: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ matrix.os }}-${{ runner.arch }}-baseline-jit-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Record native environment
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          {
+            uname -a
+            rustc --version --verbose
+            git show --no-patch --format=fuller HEAD
+          } > artifacts/environment.txt
+          actual_host=$(rustc --version --verbose | awk '/^host:/ {print $2}')
+          test "${actual_host%%-*}" = "$EXPECTED_ARCH"
+          test "$(uname -m | sed 's/^arm64$/aarch64/')" = "$EXPECTED_ARCH"
+
+      - name: Test code memory, entry ABI, runtime calls and frame contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p boa_engine --features baseline-jit jit:: -- --nocapture \
+            2>&1 | tee artifacts/baseline-jit.log
+
+      - name: Upload native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-jit-${{ matrix.os }}-${{ runner.arch }}
+          path: artifacts/
+          if-no-files-found: error
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Set environment
+        run: |
+          target=$(rustc -vV | awk '/^host/ { print $2 }' | tr [:lower:] [:upper:] | tr '-' '_')
+          echo "CARGO_TARGET_${target}_RUSTFLAGS=$W_FLAGS" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # Get the rust_version from the Cargo.toml
+      - name: Get rust_version
+        id: rust_version
+        run: echo "rust_version=$(grep '^rust-version' Cargo.toml | cut -d' ' -f3 | tr -d '"')" >> $GITHUB_OUTPUT
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust_version.outputs.rust_version }}
+
+      - name: Check compilation
+        run: cargo check --all-features --all-targets
+
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Set environment
+        run: |
+          target=$(rustc -vV | awk '/^host/ { print $2 }' | tr [:lower:] [:upper:] | tr '-' '_')
+          echo "CARGO_TARGET_${target}_RUSTFLAGS=$W_FLAGS" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Format (rustfmt)
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Set environment
+        run: |
+          target=$(rustc -vV | awk '/^host/ { print $2 }' | tr [:lower:] [:upper:] | tr '-' '_')
+          echo "CARGO_TARGET_${target}_RUSTFLAGS=$W_FLAGS" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-workspaces
+        run: cargo install cargo-workspaces
+
+      - name: Clippy (All features)
+        run: cargo workspaces exec cargo clippy --all-features --all-targets
+      - name: Clippy (No features)
+        run: cargo workspaces exec cargo clippy --no-default-features --all-targets
+      - name: Clippy (Intl)
+        run: cargo clippy -p boa_engine --features intl
+      - name: Clippy (Annex-B)
+        run: cargo clippy -p boa_engine --features annex-b
+      - name: Clippy (Experimental)
+        run: cargo clippy -p boa_engine --features experimental
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUSTDOCFLAGS: ${{ (github.ref == 'refs/heads/main' || github.base_ref == 'main') && '-D warnings' || '' }}
+    steps:
+      - name: Set environment
+        run: |
+          target=$(rustc -vV | awk '/^host/ { print $2 }' | tr [:lower:] [:upper:] | tr '-' '_')
+          echo "CARGO_TARGET_${target}_RUSTFLAGS=$W_FLAGS" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Generate documentation
+        run: cargo doc -v --document-private-items --all-features
+
+  build-fuzz:
+    name: Fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Set environment
+        run: |
+          target=$(rustc -vV | awk '/^host/ { print $2 }' | tr [:lower:] [:upper:] | tr '-' '_')
+          echo "CARGO_TARGET_${target}_RUSTFLAGS=$W_FLAGS" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Build fuzz
+        run: cd tests/fuzz && cargo fuzz build -s none --dev
+
+  build-run-examples:
+    name: Build & run examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Set environment
+        run: |
+          target=$(rustc -vV | awk '/^host/ { print $2 }' | tr [:lower:] [:upper:] | tr '-' '_')
+          echo "CARGO_TARGET_${target}_RUSTFLAGS=$W_FLAGS" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-workspaces
+        run: cargo install cargo-workspaces
+
+      - name: Build (All features)
+        run: cargo workspaces exec cargo build --all-features --all-targets --profile ci
+      - name: Build (No features)
+        run: cargo workspaces exec cargo build --no-default-features --all-targets --profile ci
+
+      - name: Run examples
+        run: |
+          cd examples
+          cargo run -p boa_examples --bin 2>&1 \
+            | grep -E '^ ' \
+            | xargs -n1 sh -c 'cargo run -p boa_examples --profile ci --bin $0 || exit 255'

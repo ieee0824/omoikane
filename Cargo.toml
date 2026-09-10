@@ -25,8 +25,9 @@ ab_glyph = "0.2"
 base64 = "0.22"
 brotli = { version = "7", default-features = false, features = ["std"] }
 crc32fast = "1.5"
-# Pinned to a specific revision so every fix it carries is reproducible and
-# cannot silently change under us: the inline-cache guard (issues 057-059), the
+# Source is maintained in engine/boa; engine/boa-origin.json records the
+# imported revision and original file hashes. The inherited fixes include the
+# inline-cache guard (issues 057-059), the
 # primitive property fast path (#313), appending to a string in place when a
 # compound assignment owns it (#318, #319, #320), the collection threshold the
 # profiling in #315 settled on, suspendable native host calls (#354), and
@@ -61,9 +62,9 @@ crc32fast = "1.5"
 # (ieee0824/boa#86), ARM64 property/helper lowering (ieee0824/boa#87),
 # bounded JIT completion copies/property-binding scans (ieee0824/boa#88),
 # and ASAN-independent native parser stack measurement (ieee0824/boa#89).
-# The pinned commit contains all listed fork changes.
-boa_engine = { git = "https://github.com/ieee0824/boa", rev = "ee98fdacffb38093d9d220c2ac21a4ed6839ce37", features = ["annex-b"] }
-boa_gc = { git = "https://github.com/ieee0824/boa", rev = "ee98fdacffb38093d9d220c2ac21a4ed6839ce37" }
+# The imported source contains all listed fork changes.
+boa_engine = { path = "engine/boa/core/engine", features = ["annex-b"] }
+boa_gc = { path = "engine/boa/core/gc" }
 flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"

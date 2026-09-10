@@ -1,0 +1,138 @@
+name: Publish Release
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Publish crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Set environment
+        env:
+          W_FLAGS: ${{ (github.ref == 'refs/heads/main' || github.base_ref == 'main') && '-Dwarnings' || '' }}
+        # Setting `RUSTFLAGS` overrides any flags set on .cargo/config.toml, so we need to
+        # set the target flags instead which are cumulative.
+        # Track https://github.com/rust-lang/cargo/issues/5376
+        run: |
+          target=$(rustc -vV | awk '/^host/ { print $2 }' | tr [:lower:] [:upper:] | tr '-' '_')
+          echo "CARGO_TARGET_${target}_RUSTFLAGS=$W_FLAGS" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-workspaces
+        run: cargo install cargo-workspaces
+
+      - name: Release
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          PATCH: ${{ github.run_number }}
+        shell: bash
+        run: |
+          git config --global user.email "runner@gha.local"
+          git config --global user.name "Github Action"
+          cargo workspaces publish \
+            --from-git \
+            --yes \
+            --no-git-commit \
+            skip
+
+  npm_publish:
+    name: Publish NPM package (wasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: 'latest'
+
+      - name: Build boa_wasm
+        run: wasm-pack build --scope boa-dev ./ffi/wasm
+
+      - name: Set-up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Set-up npm config for publishing
+        run: npm config set -- '//registry.npmjs.org/:_authToken' "${{ secrets.NPM_TOKEN }}"
+
+      - name: Check if the npm version already exists
+        run: |
+          VERSION=$(jq -r '.version' ./ffi/wasm/pkg/package.json)
+
+          if npm view @boa-dev/boa_wasm@$VERSION version > dev/null 2>&1; then
+            echo "Version $VERSION already published. Skipping"
+            echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
+          fi
+
+      - name: Publish to npm
+        if: env.SKIP_PUBLISH != 'true'
+        run: npm publish ./ffi/wasm/pkg --access=public
+
+  release-binaries:
+    name: Publish binaries
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [linux, macos-arm64, win-msvc]
+        include:
+        - build: linux
+          os: ubuntu-latest
+          target: x86_64-unknown-linux-gnu
+          binary_extension: ""
+        - build: macos-arm64
+          os: macos-14
+          target: aarch64-apple-darwin
+          binary_extension: ""
+        - build: win-msvc
+          os: windows-latest
+          target: x86_64-pc-windows-msvc
+          binary_extension: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ matrix.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --target ${{ matrix.target }} --verbose --release --locked --bin boa
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: target/${{ matrix.target }}/release/boa${{ matrix.binary_extension }}
+          asset_name: boa-${{ matrix.target }}${{ matrix.binary_extension }}
+          tag: ${{ github.ref }}
