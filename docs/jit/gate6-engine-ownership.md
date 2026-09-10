@@ -71,6 +71,19 @@ PR #654の後続修正はmacOSのテスト用HTTP socketとBash互換性を調�
 0.1.5で再現する。初回取り込みでは原本を保持し、この依存変更を暗黙に混ぜない。
 原本との一致と既知不具合の解消は別に判定する。
 
+取り込みPR #656のhead `484e26e5573a3381fe9505cc2a5a6113cc97edd2` に対する
+[engine workspace CI](https://github.com/ieee0824/omoikane/actions/runs/34461070905)は、
+3環境とも成功した。実行対象は59バイナリで、x86_64は1572件、ARM64の2環境は
+各1576件の成功を個々のcase名と照合した。4件の差はARM64専用JITテストであり、
+ケース欠落ではない。別途doc testsは各環境128件成功・既存ignore 3件。
+unit testの既存ignore 1件とともに、未実行分を成功数へ加えていない。
+
+[全Test262比較](https://github.com/ieee0824/omoikane/actions/runs/34461070884)は
+Linuxの2環境で全50595ケースの結果が一致した。一方、macOS ARM64の
+`Atomics.waitAsync`で原本と取り込み後の成否が変わり、比較は失敗した。
+この時点の未解決課題は #657 で追跡する。workspaceや配布CIの成功だけでは
+この比較の成功を代替できず、原因・修正・再検証を完了するまで移行完了とは判定しない。
+
 - Test262のrevisionと未対応featureは `engine/boa/test262_config.toml` を維持する。
   rootブラウザは `annex-b` を有効にするが、任意のIntl/experimental featureを
   新たにproductionへ追加しない。Test262の既知の非対応とpanicは区別する。
@@ -110,6 +123,20 @@ rollbackはreview用branchで行う。rootの `boa_engine` と `boa_gc` を、�
 独立化後のengine修正を戻す場合は、embeddingへの影響も含めて対応commitをrevertし、
 実行方針を変えずに同じ検証を行う。
 
-これらは実施手順であり、rollbackや配布検証が済んだことの証明ではない。
+2026-09-10に、取り込みcommit `4bd2846d10d6d8b88ea99bc289da88920e385d1e` の
+別checkoutでrootのCargo manifest/lockを旧git pinへ戻し、9クレートがすべて
+`ee98fdacffb38093d9d220c2ac21a4ed6839ce37`、他を含む384パッケージのversionが
+変更されないことを検証した。Linux ARM64でブラウザ操作7件、`cargo build --locked`、
+`cargo check --locked --features gui` が成功した。これは旧pinへ戻す手順の実行確認で、
+mainへrollbackを適用した記録や、rollback版の3環境配布検証ではない。
+
+取り込み版の[配布CI](https://github.com/ieee0824/omoikane/actions/runs/34461071582)は
+3環境ともarchiveの生成・展開、展開したlibraryのFFI実行、JIT probe、
+ignoredを含む全suite、Acid3、WPT、Web API、native契約に成功した。
+3つのarchiveを取得し、全memberのhash・サイズ、来歴とlicenseが原本と一致することも
+照合した。実際のCI checkoutはPRのmerge revision
+`909399a86bbaff3d4c7f310af493c744d9734eae` で、全環境が同じrevisionとroot lockを使う。
+性能変更後には、その変更を含むrevisionでも同じ配布検証を行う。
+
 #552/#553には実行commit・lock・生ログ・画像・case一覧・配布物・判定をそろえ、
 CI成功と実際の要件を照合してから #515 を閉じる。
