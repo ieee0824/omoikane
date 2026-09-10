@@ -93,5 +93,6 @@ GCの既存50テスト、通常build、JIT無効/有効の計算結果確認テ�
 今回はfixtureを変えずその現象も個別に検査する。改善時は新しいbaselineが必要になる。
 
 統合したソースの全ブラウザsuite・操作画像・Acid3/WPT/Web API、GC/JIT stress、
-engine全Test262比較、3環境の実archiveは #553 の最終CIで確認する。
+engine全Test262比較、3環境の実archiveはPR #660の最終CIで成功した。
+[最終検証](gate6-final-verification.md)に実行ソース・ケース照合・配布hash・既知の制限を記録する。
 運用方式・原本・更新責任・rollbackは [ADR](gate6-engine-ownership.md) に従う。

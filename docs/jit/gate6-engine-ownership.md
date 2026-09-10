@@ -1,6 +1,6 @@
 # ADR: 既存Boa workspaceをOmoikaneで管理する
 
-- Status: Accepted（配置・検証の完了は #552/#553 で判定）
+- Status: Accepted / Implemented（PR #656 / #660、[最終検証](gate6-final-verification.md)）
 - Date: 2026-09-10
 - Scope: #515、#546〜#553
 - Decision: 既存forkを `engine/boa/` に取り込み、Omoikaneの変更単位で保守する
@@ -53,7 +53,8 @@ workspaceの `exclude` と各featureの範囲は元のmanifestを保持する。
 
 移行前のブラウザ基準はPR #654の `0d2a89bdecbcad15ead5e6614157e763a6483e84`。
 通常実行で2353ケースを実行し、全ケースのsuite名とcase名を保存した。移行後も同じ
-ソース・fixture・feature・期待値で実行し、名前と件数、結果を照合する。
+ソース・fixture・feature・期待値で実行し、名前と件数、結果を照合した。
+最終GC変更後は計算結果テスト1件を加えた2354件で、元の2353ケースを全保持して成功した。
 JIT有効時は既存Gate 4/native契約と同じfeature・seed・stress条件を使う。
 caseの消失、既存assertionの弱化、未実行を合格として扱う変更は認めない。
 
@@ -74,23 +75,23 @@ PR #654の後続修正はmacOSのテスト用HTTP socketとBash互換性を調�
 0.1.5で再現する。初回取り込みでは原本を保持し、この依存変更を暗黙に混ぜない。
 原本との一致と既知不具合の解消は別に判定する。
 
-取り込みPR #656のhead `484e26e5573a3381fe9505cc2a5a6113cc97edd2` に対する
-[engine workspace CI](https://github.com/ieee0824/omoikane/actions/runs/34461070905)は、
-3環境とも成功した。実行対象は59バイナリで、x86_64は1572件、ARM64の2環境は
-各1576件の成功を個々のcase名と照合した。4件の差はARM64専用JITテストであり、
-ケース欠落ではない。別途doc testsは各環境128件成功・既存ignore 3件。
-unit testの既存ignore 1件とともに、未実行分を成功数へ加えていない。
+最終採用したPR #656のheadは `a55b6ff8bcb18c1a6db18fb6fe27521cb9486e44`、
+mergeは `6a5f6411fdecc5cc42f44d05758d3f105a6a96af`。その後のGC性能変更PR #660は
+`46a08df8744f24bf693531a7bd4867cd7df65083` でマージした。
+[最終検証](gate6-final-verification.md)のengine workspaceはx86 1576件、ARM64各1580件と
+各128 doc testsが成功した。ARM64の4件の差は専用JITテストであり欠落ではない。
+既存unit ignore 1件・doc ignore 3件は成功数へ加えていない。
 
-[全Test262比較](https://github.com/ieee0824/omoikane/actions/runs/34461070884)は
-Linuxの2環境で全50595ケースの結果が一致した。一方、macOS ARM64の
-`Atomics.waitAsync`で原本と取り込み後の成否が変わり、比較は失敗した。
-この時点の未解決課題は #657 で追跡する。workspaceや配布CIの成功だけでは
-この比較の成功を代替できず、原因・修正・再検証を完了するまで移行完了とは判定しない。
+取り込み途中のhead `484e26e5573a3381fe9505cc2a5a6113cc97edd2` では、
+macOS ARM64の `Atomics.waitAsync` で原本と現行の成否が変わり比較が失敗した。
+この問題を #657 で診断・修正した。修正を含むPR #656の全CI、さらにPR #660の
+原本/現行×3環境の全50,595ケース比較が成功した。PR #660では全結果が原本と一致し、
+原本の既知の失敗を解消したという意味ではない。
 
 #657では、タイマーの期限を測る`SystemTime`とTest262の`Instant`が異なる速度で
 進むことを確認した。macOSの診断では前者の200msに対し後者が約199.90msで、
 16ファイルの反復320回中34回が200ms未満の終了として失敗した。
-`Clock::monotonic_now()`を追加し、標準時計と各executorの期限を`Instant`に揃える。
+`Clock::monotonic_now()`を追加し、標準時計と各executorの期限を`Instant`に揃えた。
 `Date.now()`とTemporalは従来の日時を使い、既存の制御用Clockはdefault methodで
 タイマーを進められる。来歴manifestは原本のまま保持し、この修正を別commitで追跡する。
 
@@ -99,8 +100,8 @@ Linux ARM64・macOS ARM64とも同じ320回がすべて成功し、時計の前�
 回帰テストも修正前の2件失敗から修正後の3件成功へ変わった。
 [CLIの回帰検証](https://github.com/ieee0824/omoikane/actions/runs/34466306688)も
 修正前の失敗と修正後の成功、CLI・smol/tokioサンプルのbuildを確認した。
-これは固定した対象ケースの修正確認で、変更後の全Test262・全ブラウザsuite・
-3環境配布の代わりにはしない。それらの結果は修正を含むPR revisionで再度照合する。
+これは固定した対象ケースの修正確認である。修正後の全Test262・全ブラウザsuite・
+3環境配布も成功し、[最終報告](gate6-final-verification.md)で実行ソースと照合した。
 
 - Test262のrevisionと未対応featureは `engine/boa/test262_config.toml` を維持する。
   rootブラウザは `annex-b` を有効にするが、任意のIntl/experimental featureを
@@ -125,7 +126,8 @@ Omoikane向け修正と互換性をレビューする。上流や旧forkのHEAD�
 ブラウザsuite、JIT on/offと配布gateを確認する。依存の更新では両方のlockfileをレビューし、
 crateの二重解決や旧git sourceの混入を確認する。
 性能変更はブラウザ動作の基準確定後に同じ11 workload・代表ページを反復測定し、
-結果と意味論を維持した改善を #553 へ記録する。
+結果と意味論を維持した改善を記録する。今回採用したGC変更の測定条件・改善・
+残る文字列2項目の遅延は[性能報告](gate6-gc-performance.md)を参照する。
 
 ## 配布・rollback
 
@@ -148,13 +150,12 @@ rollbackはreview用branchで行う。rootの `boa_engine` と `boa_gc` を、�
 `cargo check --locked --features gui` が成功した。これは旧pinへ戻す手順の実行確認で、
 mainへrollbackを適用した記録や、rollback版の3環境配布検証ではない。
 
-取り込み版の[配布CI](https://github.com/ieee0824/omoikane/actions/runs/34461071582)は
-3環境ともarchiveの生成・展開、展開したlibraryのFFI実行、JIT probe、
-ignoredを含む全suite、Acid3、WPT、Web API、native契約に成功した。
-3つのarchiveを取得し、全memberのhash・サイズ、来歴とlicenseが原本と一致することも
-照合した。実際のCI checkoutはPRのmerge revision
-`909399a86bbaff3d4c7f310af493c744d9734eae` で、全環境が同じrevisionとroot lockを使う。
-性能変更後には、その変更を含むrevisionでも同じ配布検証を行う。
+取り込み・時計修正・GC変更を含む[最終配布CI](https://github.com/ieee0824/omoikane/actions/runs/34472500372)は
+3環境ともarchive生成・展開、展開したlibraryのFFI、JIT probe、ignoredを含む全suite、
+Acid3、WPT、Web API、native契約に成功した。取得した実archiveの全memberのhash・サイズ、
+来歴・licenseも照合した。CI checkout `b3eee561af1e8849ba1db77ff05d94420d7be909` は
+PR #660のheadとmergeの両方と同じGit treeで、3環境が同じrevisionとroot lockを使う。
 
-#552/#553には実行commit・lock・生ログ・画像・case一覧・配布物・判定をそろえ、
-CI成功と実際の要件を照合してから #515 を閉じる。
+[最終検証](gate6-final-verification.md)に実行commit・ケース照合・画像・3 archiveのhash、
+残る #655/#658/#659/#661 とrollback手順の検証範囲をまとめた。
+独立化後の変更もこの保守・検証手順に従う。
