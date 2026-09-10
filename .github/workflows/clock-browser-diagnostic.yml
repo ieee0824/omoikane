@@ -38,6 +38,11 @@ jobs:
           root = Path.cwd()
           out = root / '.artifacts/clock-browser'
           out.mkdir(parents=True)
+          # The root workspace has pre-existing formatting differences. Record
+          # them before changing engine sources, then reject any added difference.
+          before_format = subprocess.run(['cargo', 'fmt', '--all', '--check'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+          (out / 'root-format-before.log').write_bytes(before_format.stdout)
+          (out / 'root-format-before.json').write_text(json.dumps({'exit_code': before_format.returncode}) + '\n')
           origin = json.loads((root / 'engine/boa-origin.json').read_text())
           files = ['core/engine/src/context/time.rs', 'core/engine/src/job.rs', 'cli/src/main.rs', 'examples/src/bin/smol_event_loop.rs', 'examples/src/bin/tokio_event_loop.rs']
           for name in files:
@@ -57,7 +62,17 @@ jobs:
       - name: Verify source resolution and formatting
         run: |
           python3 scripts/check-engine-source.py > .artifacts/clock-browser/source-check.json
-          cargo fmt --all --check
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, subprocess
+          out = Path('.artifacts/clock-browser')
+          before = json.loads((out / 'root-format-before.json').read_text())
+          after = subprocess.run(['cargo', 'fmt', '--all', '--check'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+          (out / 'root-format-after.log').write_bytes(after.stdout)
+          unchanged = after.returncode == before['exit_code'] and after.stdout == (out / 'root-format-before.log').read_bytes()
+          (out / 'root-format-comparison.json').write_text(json.dumps({'before_exit_code': before['exit_code'], 'after_exit_code': after.returncode, 'unchanged': unchanged}) + '\n')
+          assert unchanged, 'root formatting differs from the unmodified diagnostic checkout'
+          PY
           cargo fmt --manifest-path engine/boa/Cargo.toml --all --check
       - name: Run related browser and module cases
         shell: bash
