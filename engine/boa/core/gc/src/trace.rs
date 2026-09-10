@@ -14,7 +14,7 @@ use std::{
     sync::atomic,
 };
 
-use crate::{EphemeronPointer, GcErasedPointer};
+use crate::{EphemeronPointer, GcErasedPointer, PointerSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TraceMode {
@@ -53,12 +53,12 @@ pub struct Tracer {
     queue: VecDeque<StrongEntry>,
     ephemeron_queue: VecDeque<EphemeronEntry>,
     discovered_ephemerons: Vec<EphemeronPointer>,
-    discovered_ephemeron_set: HashSet<EphemeronPointer>,
+    discovered_ephemeron_set: PointerSet<EphemeronPointer>,
     // Promotion tracing may inspect old allocations reachable from a young
     // object in order to install their write barriers. Keep this local visited
     // set so those old nodes are scanned once without marking them as nursery
     // survivors.
-    scanned_old: HashSet<GcErasedPointer>,
+    scanned_old: PointerSet<GcErasedPointer>,
     // Whether this tracer is being used to install remembered-set barriers
     // while an allocation is promoted. Ordinary minor collections keep the
     // nursery bounded by skipping old allocations entirely.
@@ -76,8 +76,8 @@ impl Tracer {
             queue: VecDeque::default(),
             ephemeron_queue: VecDeque::default(),
             discovered_ephemerons: Vec::default(),
-            discovered_ephemeron_set: HashSet::default(),
-            scanned_old: HashSet::default(),
+            discovered_ephemeron_set: PointerSet::default(),
+            scanned_old: PointerSet::default(),
             scan_old: false,
             marked_young: Vec::default(),
             current_node: None,

@@ -29,7 +29,6 @@ use pointers::{NonTraceable, RawWeakMap};
 use std::time::{Duration, Instant};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
     mem,
     ptr::NonNull,
 };
@@ -47,6 +46,11 @@ type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
 type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
 type ErasedWeakMapBoxPointer = NonNull<dyn ErasedWeakMapBox>;
 type RootProviderPointer = NonNull<dyn Trace>;
+
+// Collector-owned allocation addresses do not need the general-purpose hash
+// used by std collections. Reuse the existing hashbrown dependency for these
+// internal sets; keep pointer equality, root counts, and tracing unchanged.
+type PointerSet<T> = hashbrown::HashSet<T>;
 
 thread_local!(static GC_DROPPING: Cell<bool> = const { Cell::new(false) });
 thread_local!(static GC_SUSPENDED: Cell<usize> = const { Cell::new(0) });
@@ -66,19 +70,19 @@ thread_local!(static ROOTED_ALLOCATIONS: Cell<usize> = const { Cell::new(0) });
 thread_local!(static ROOTED_EPHEMERONS: Cell<usize> = const { Cell::new(0) });
 // The header count makes repeated root clones cheap; these registries make the
 // mark phase enumerate roots without scanning every allocation in the heap.
-thread_local!(static ROOT_REGISTRY: RefCell<HashSet<GcErasedPointer>> = RefCell::new(HashSet::new()));
-thread_local!(static EPHEMERON_ROOT_REGISTRY: RefCell<HashSet<EphemeronPointer>> = RefCell::new(HashSet::new()));
+thread_local!(static ROOT_REGISTRY: RefCell<PointerSet<GcErasedPointer>> = RefCell::new(PointerSet::new()));
+thread_local!(static EPHEMERON_ROOT_REGISTRY: RefCell<PointerSet<EphemeronPointer>> = RefCell::new(PointerSet::new()));
 // Allocations can trigger collection before the newly allocated pointer reaches
 // its caller. These stacks keep that one in-flight allocation alive without
 // paying for a root-count update and hash-table insertion on every allocation.
 thread_local!(static TEMPORARY_STRONG_ROOTS: RefCell<Vec<GcErasedPointer>> = const { RefCell::new(Vec::new()) });
 thread_local!(static TEMPORARY_EPHEMERON_ROOTS: RefCell<Vec<EphemeronPointer>> = const { RefCell::new(Vec::new()) });
 // Young edges already discovered while promoting an allocation.
-thread_local!(static REMEMBERED_STRONGS: RefCell<HashSet<GcErasedPointer>> = RefCell::new(HashSet::new()));
-thread_local!(static REMEMBERED_EPHEMERONS: RefCell<HashSet<EphemeronPointer>> = RefCell::new(HashSet::new()));
+thread_local!(static REMEMBERED_STRONGS: RefCell<PointerSet<GcErasedPointer>> = RefCell::new(PointerSet::new()));
+thread_local!(static REMEMBERED_EPHEMERONS: RefCell<PointerSet<EphemeronPointer>> = RefCell::new(PointerSet::new()));
 // A mutable borrow of a cell in an old allocation is the write barrier. The hot
 // path only dirties the parent; minor collection scans each dirty parent once.
-thread_local!(static REMEMBERED_OLD_PARENTS: RefCell<HashSet<GcErasedPointer>> = RefCell::new(HashSet::new()));
+thread_local!(static REMEMBERED_OLD_PARENTS: RefCell<PointerSet<GcErasedPointer>> = RefCell::new(PointerSet::new()));
 #[cfg(feature = "gc-profile")]
 thread_local!(static GC_PROFILE: Cell<GcProfile> = const { Cell::new(GcProfile::new()) });
 thread_local!(static BOA_GC: RefCell<BoaGc> = {
@@ -257,7 +261,7 @@ fn remember_young_allocation(pointer: GcErasedPointer) {
 /// promoted strong allocation when their key is live.
 fn remember_ephemeron_allocation(pointer: EphemeronPointer) {
     let mut pending = vec![pointer];
-    let mut seen = HashSet::new();
+    let mut seen = PointerSet::new();
     while let Some(pointer) = pending.pop() {
         if !seen.insert(pointer) {
             continue;
@@ -883,7 +887,7 @@ impl Collector {
             })
             .collect();
 
-        let mut dead_ephemerons: HashSet<EphemeronPointer> = gc
+        let mut dead_ephemerons: PointerSet<EphemeronPointer> = gc
             .young_weaks
             .iter()
             .copied()
@@ -1125,7 +1129,7 @@ impl Collector {
         }
 
         let mut pending = Vec::new();
-        let mut pending_set = HashSet::new();
+        let mut pending_set = PointerSet::new();
         loop {
             // SAFETY: all queued pointers come from roots, live heap edges, or
             // the write barrier and remain valid during this pass.
