@@ -1,0 +1,107 @@
+name: Engine Test262 comparison
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['engine/**', 'Cargo.toml', 'Cargo.lock', 'scripts/engine-test262.py', 'scripts/tests/test_engine_test262.py', '.github/workflows/engine-test262.yml']
+  push:
+    branches: [main]
+    paths: ['engine/**', 'Cargo.toml', 'Cargo.lock', 'scripts/engine-test262.py', 'scripts/tests/test_engine_test262.py', '.github/workflows/engine-test262.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-test262-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run:
+    name: Test262 (${{ matrix.platform.target }}, ${{ matrix.variant }})
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [reference, current]
+        platform:
+          - {os: ubuntu-24.04, target: x86_64-unknown-linux-gnu}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu}
+          - {os: macos-14, target: aarch64-apple-darwin}
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: ${{ github.workspace }}/engine/boa/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The retained original subtree must remain available after engine changes.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine/boa -> target
+          key: engine-test262-v1-${{ matrix.platform.target }}-${{ matrix.variant }}
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: Read fixed Test262 revision
+        id: suite
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+          revision = tomllib.loads(pathlib.Path('engine/boa/test262_config.toml').read_text())['commit']
+          assert re.fullmatch(r'[0-9a-f]{40}', revision)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'revision={revision}\n')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          repository: tc39/test262
+          ref: ${{ steps.suite.outputs.revision }}
+          path: test262
+          persist-credentials: false
+      - name: Execute complete suite and retain case identities
+        shell: bash
+        run: |
+          python3 scripts/engine-test262.py run .artifacts/engine-test262 \
+            --target '${{ matrix.platform.target }}' --variant '${{ matrix.variant }}' --test262 test262
+      - name: Upload raw results and dependency inputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-test262-${{ matrix.platform.target }}-${{ matrix.variant }}
+          path: |
+            .artifacts/engine-test262/
+            !.artifacts/engine-test262/**/reference-source/**
+          if-no-files-found: error
+
+  compare:
+    name: Test262 compatibility comparison
+    needs: run
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: engine-test262-*
+          path: .artifacts/engine-test262/
+          merge-multiple: true
+      - name: Reject missing executions, lost cases and regressions
+        env:
+          RUN_RESULT: ${{ needs.run.result }}
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_engine_test262.py
+          python3 scripts/engine-test262.py compare .artifacts/engine-test262
+          test "$RUN_RESULT" = success
+      - name: Upload before and after comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-test262-comparison
+          path: .artifacts/engine-test262/comparison.json
+          if-no-files-found: error

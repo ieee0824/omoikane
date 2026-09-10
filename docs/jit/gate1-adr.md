@@ -58,16 +58,17 @@ JIT frameのsoundnessを証明するものではない。
 | Gate 3 / #512 | x86_64のarithとprop-monoだけをbaseline JIT化する | Gate 2のcontract/verifierとfallbackが安定 | 限定benchで効果なし、またはinterpreter fallbackとの差分が再現不能 |
 | Gate 4 / #513 | JIT frame、GC root、deopt、例外、interruptを統合する | Gate 3の限定fast pathと完全なfallback | GC/use-after-free、誤ったdeopt/例外、timeout不能、WPT/Acid3/全suite回帰 |
 | Gate 5 / #514 | aarch64と3配布targetへ同じ契約を移植する | Gate 4のsoundness成立 | target間の意味論差分、CI/release gate失敗 |
-| Gate 6 / #515 | 必要なら全面切替を評価する | full embedding parity、性能、release gateを全て満たす | 1つでも未達ならBoaをdefaultから外さない |
+| Gate 6 / #515 | 既存forkをOmoikane内で独立管理し、ブラウザ検証後に性能を改善する | 現行の動作基準、引き継ぐ実装・テストと方式を確認する | 互換性・性能・3環境配布のいずれかが未検証なら完了扱いにしない |
 
 2026-09-10のオーナー判断によりmacOS x86_64は配布対象から除外した。
 現在の対象はLinux x86_64、Linux ARM64、macOS ARM64で、詳細は
 [Gate 5のsupport matrix](gate5-release.md)と#545を参照する。
 
-Gate 6は「切替を行う権利」を得るgateであり、切替を予約するものではない。
-Boa依存の削除、default engine変更、production realmでのJIT有効化は、Gate 6の
-完了条件を別PRで満たし、Copilotレビュー・CI・compatibility gateを通過するまで
-禁止する。
+2026-09-10のオーナー確認により、Gate 6は既存forkを引き継いだ独立運用と性能改善を
+扱う。`engine/boa/` へ取り込む採用方式は
+[Gate 6の運用ADR](gate6-engine-ownership.md)を参照する。
+別engineへの全面再実装、Boa由来コードの除去、production JITの自動有効化は要求しない。
+まずブラウザ動作を検証・修正し、その後に同条件で性能を測定して改善する。
 
 ## Gate 2 Issueの読み替え
 

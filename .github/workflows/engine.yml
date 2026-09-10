@@ -1,0 +1,110 @@
+name: Engine workspace
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['engine/**', 'Cargo.toml', 'Cargo.lock', 'scripts/check-engine-source.py', 'scripts/tests/test_engine_source.py', '.github/workflows/engine.yml']
+  push:
+    branches: [main]
+    paths: ['engine/**', 'Cargo.toml', 'Cargo.lock', 'scripts/check-engine-source.py', 'scripts/tests/test_engine_source.py', '.github/workflows/engine.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-workspace-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: Engine source and dependency graph
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - name: Verify retained source and in-tree dependencies
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_engine_source.py
+          python3 scripts/check-engine-source.py --output .artifacts/engine/source.json
+      - name: Upload source verification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-source
+          path: .artifacts/engine/
+          if-no-files-found: error
+
+  workspace:
+    name: Engine workspace (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+    defaults:
+      run:
+        working-directory: engine/boa
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TERM_COLOR: never
+      ENGINE_FEATURES: annex-b,intl_bundled,experimental,embedded_lz4,boa_engine/baseline-jit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine/boa -> target
+          key: engine-workspace-v1-${{ matrix.target }}
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+      - name: Record source, host, features and dependency inputs
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          rustc --version --verbose > artifacts/toolchain.txt
+          actual=$(rustc --version --verbose | awk '/^host:/ {print $2}')
+          test "$actual" = "$EXPECTED_TARGET"
+          git rev-parse HEAD > artifacts/revision.txt
+          cp ../boa-origin.json artifacts/origin.json
+          cp Cargo.lock artifacts/Cargo.lock
+          printf '%s\n' "$ENGINE_FEATURES" > artifacts/features.txt
+      - name: Verify engine formatting
+        run: cargo fmt --all --check
+      - name: Build default workspace tests
+        run: |
+          set -euo pipefail
+          cargo test --locked --no-run --profile ci 2>&1 | tee artifacts/build-default.log
+      - name: Build all inherited workspace targets and feature contracts
+        run: |
+          set -euo pipefail
+          cargo build --locked --all-targets --profile ci --features "$ENGINE_FEATURES" 2>&1 | tee artifacts/build-features.log
+      - name: Record cases and execute workspace contracts
+        run: |
+          set -euo pipefail
+          cargo nextest list --locked --cargo-profile ci --features "$ENGINE_FEATURES" --message-format json > artifacts/cases.json
+          cargo nextest run --locked --profile ci --cargo-profile ci --features "$ENGINE_FEATURES" 2>&1 | tee artifacts/tests.log
+          cargo test --locked --doc --profile ci --features "$ENGINE_FEATURES" 2>&1 | tee artifacts/doctests.log
+      - name: Upload case inventory and complete execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-workspace-${{ matrix.target }}
+          path: engine/boa/artifacts/
+          if-no-files-found: error

@@ -28,12 +28,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core
       - name: Run all tests (including ignored)
-        run: cargo test -- --include-ignored
+        run: cargo test --locked -- --include-ignored
       - name: Run Gate 2 differential harness
-        run: cargo test --features jit-differential --test jit_differential
+        run: cargo test --locked --features jit-differential --test jit_differential
 
       # Native JIT contracts run in jit-native.yml on all three distribution targets.
-      - run: cargo build
+      - run: cargo build --locked
       # Re-run the JS benchmark with output shown: libtest swallows stdout for
       # passing tests, so the per-shape table and the drift classification would
       # otherwise never be visible. The build is already warm from the step
@@ -41,7 +41,7 @@ jobs:
       - name: Report JS execution benchmark
         env:
           OMOIKANE_JS_BENCH_REPORT: .artifacts/js-benchmark/report.json
-        run: cargo test --test js_benchmark -- --nocapture
+        run: cargo test --locked --test js_benchmark -- --nocapture
       - name: Upload JS benchmark report
         if: always()
         uses: actions/upload-artifact@v4
@@ -169,7 +169,7 @@ jobs:
           WPT_REQUIRED: "1"
           WPT_REPORT: .artifacts/wpt/report.json
           WPT_JUNIT: .artifacts/wpt/junit.xml
-        run: cargo test --test wpt_smoke -- --nocapture
+        run: cargo test --locked --test wpt_smoke -- --nocapture
       - name: Upload WPT reports
         if: always()
         uses: actions/upload-artifact@v4

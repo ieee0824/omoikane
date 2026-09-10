@@ -58,7 +58,7 @@ jobs:
           actual=$(rustc --version --verbose | awk '/^host:/ {print $2}')
           test "$actual" = "$EXPECTED_TARGET"
           git rev-parse HEAD > .artifacts/browser/revision.txt
-          cargo generate-lockfile
+          cargo metadata --locked --format-version 1 > .artifacts/browser/dependencies.json
           cp Cargo.lock .artifacts/browser/Cargo.lock
       - name: Verify page operations and Acid3
         shell: bash

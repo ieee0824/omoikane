@@ -1,0 +1,128 @@
+use super::{Gc, GcEdge};
+use crate::{Finalize, Trace, register_root, unregister_root};
+use std::{fmt, mem::ManuallyDrop, ops::Deref, ptr};
+
+/// An explicitly registered, heap-external owner of a garbage-collected value.
+///
+/// During migration this also retains a `Gc<T>`, so collection semantics remain
+/// unchanged until all heap edges use a distinct unrooted type.
+pub struct Rooted<T: Trace + ?Sized + 'static> {
+    inner: Gc<T>,
+}
+
+impl<T: Trace> Rooted<T> {
+    /// Allocates a value and registers its handle as an explicit root.
+    #[must_use]
+    pub fn new(value: T) -> Self {
+        Self::from_gc(Gc::new(value))
+    }
+}
+
+impl<T: Trace + ?Sized> Rooted<T> {
+    /// Promotes a legacy `Gc<T>` handle to an explicitly registered root.
+    #[must_use]
+    pub fn from_gc(inner: Gc<T>) -> Self {
+        register_root(inner.as_erased_pointer());
+        Self { inner }
+    }
+
+    #[must_use]
+    /// Borrows the compatibility `Gc<T>` handle used during migration.
+    pub fn as_gc(&self) -> &Gc<T> {
+        &self.inner
+    }
+
+    /// Returns whether this allocation contains a value of type `U`.
+    #[must_use]
+    pub fn is<U: Trace + 'static>(this: &Self) -> bool {
+        Gc::is::<U>(&this.inner)
+    }
+
+    /// Returns whether two roots point to the same allocation.
+    #[must_use]
+    pub fn ptr_eq<U: Trace + ?Sized>(this: &Self, other: &Rooted<U>) -> bool {
+        Gc::ptr_eq(&this.inner, &other.inner)
+    }
+
+    /// Reinterprets a root as another allocation type.
+    ///
+    /// # Safety
+    /// The caller must ensure the cast is valid.
+    #[must_use]
+    pub unsafe fn cast_unchecked<U: Trace + 'static>(this: Self) -> Rooted<U> {
+        // SAFETY: Forwarded from this function's contract.
+        unsafe { GcEdge::cast_unchecked::<U>(this.into_edge()) }.root()
+    }
+
+    /// Downcasts this root when its allocation contains `U`.
+    #[must_use]
+    pub fn downcast<U: Trace + 'static>(this: Self) -> Option<Rooted<U>> {
+        if !Self::is::<U>(&this) {
+            return None;
+        }
+        // SAFETY: The allocation type was checked above.
+        Some(unsafe { Self::cast_unchecked::<U>(this) })
+    }
+
+    /// Converts this external root into an unregistered heap edge.
+    #[must_use]
+    pub fn into_edge(self) -> GcEdge<T> {
+        let this = ManuallyDrop::new(self);
+        unregister_root(this.inner.as_erased_pointer());
+
+        // SAFETY: `this` will not run `Rooted::drop`, and `inner` is read exactly
+        // once into the returned edge.
+        let inner = unsafe { ptr::read(&raw const this.inner) };
+        GcEdge::from_gc(inner)
+    }
+
+    /// Consumes this root and returns its allocation pointer.
+    ///
+    /// This is primarily useful for an immediate pointer unsizing conversion
+    /// followed by [`Self::from_raw`]. The allocation is unregistered while the
+    /// raw pointer is outstanding.
+    #[must_use]
+    pub fn into_raw(this: Self) -> ptr::NonNull<crate::GcBox<T>> {
+        GcEdge::into_raw(this.into_edge())
+    }
+
+    /// Reconstructs an explicit root from a pointer produced by [`Self::into_raw`].
+    ///
+    /// # Safety
+    ///
+    /// `inner` must have been returned by [`Self::into_raw`] for a compatible
+    /// allocation and must not have been reconstructed already.
+    #[must_use]
+    pub unsafe fn from_raw(inner: ptr::NonNull<crate::GcBox<T>>) -> Self {
+        // SAFETY: Forwarded from this function's contract.
+        unsafe { GcEdge::from_raw(inner) }.root()
+    }
+}
+
+impl<T: Trace + ?Sized> Clone for Rooted<T> {
+    fn clone(&self) -> Self {
+        Self::from_gc(self.inner.clone())
+    }
+}
+
+impl<T: Trace + ?Sized> Drop for Rooted<T> {
+    fn drop(&mut self) {
+        unregister_root(self.inner.as_erased_pointer());
+    }
+}
+
+impl<T: Trace + ?Sized> Deref for Rooted<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T: Trace + ?Sized + fmt::Debug> fmt::Debug for Rooted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Rooted").field(&self.inner).finish()
+    }
+}
+
+impl<T: Trace + ?Sized> Finalize for Rooted<T> {}
