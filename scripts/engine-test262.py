@@ -18,6 +18,22 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin")
 
 
+# #655: these ten formerly CPU-dependent cases must pass on every supported host.
+# boa_tester records file stems without the .js extension.
+FLOAT16_CASES = (
+    'test/built-ins/DataView/prototype/setFloat16/set-values-return-undefined',
+    'test/built-ins/Math/f16round/value-conversion',
+    'test/built-ins/TypedArray/prototype/fill/fill-values-conversion-operations',
+    'test/built-ins/TypedArray/prototype/map/return-new-typedarray-conversion-operation',
+    'test/built-ins/TypedArray/prototype/set/array-arg-src-tonumber-value-conversions',
+    'test/built-ins/TypedArray/prototype/set/typedarray-arg-set-values-diff-buffer-other-type-conversions',
+    'test/built-ins/TypedArrayConstructors/ctors/object-arg/conversion-operation',
+    'test/built-ins/TypedArrayConstructors/internals/DefineOwnProperty/conversion-operation',
+    'test/built-ins/TypedArrayConstructors/internals/Set/conversion-operation',
+    'test/staging/sm/Math/f16round',
+)
+
+
 def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2) + "\n")
@@ -118,6 +134,7 @@ def compare(root):
     source = ROOT / "engine/boa"
     suite_revision = tomllib.loads((source / "test262_config.toml").read_text())["commit"]
     lock_sha256 = hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest()
+    current_cases = {}
     for target in TARGETS:
         try:
             before, after = (read(root / target / variant / "execution.json")
@@ -128,8 +145,11 @@ def compare(root):
             assert before["revision"] == revision, "stale source revision"
             assert before["origin_tree"] == origin["tree"], "incorrect original source"
             assert before["test262_revision"] == suite_revision, "incorrect suite revision"
-            assert before["lock_sha256"] == lock_sha256, "incorrect dependency lock"
-            for field in ("revision", "test262_revision", "origin_tree", "lock_sha256", "toolchain_sha256"):
+            # The retained source keeps its original lock. Dependency fixes in the
+            # current engine must not overwrite or silently re-resolve that baseline.
+            assert before["lock_sha256"] == origin["files"]["Cargo.lock"]["sha256"], "incorrect reference dependency lock"
+            assert after["lock_sha256"] == lock_sha256, "incorrect current dependency lock"
+            for field in ("revision", "test262_revision", "origin_tree", "toolchain_sha256"):
                 assert before[field] == after[field], field
             a, b = (read(root / target / variant / "cases.json") for variant in ("reference", "current"))
             assert len(a) == before["case_count"] and len(b) == after["case_count"]
@@ -146,15 +166,34 @@ def compare(root):
             panics = [name for name, case in b.items() if case["status"] == "P"]
             changes = [{"case": name, "before": a.get(name), "after": b.get(name)}
                        for name in sorted(a.keys() | b.keys()) if a.get(name) != b.get(name)]
-            passed = not (removed or regressed or added_failures or panics)
+            required_failures = [name for name in FLOAT16_CASES
+                                 if b.get(name, {}).get("status") != "O"]
+            required_cases = {name: {"before": a.get(name), "after": b.get(name)}
+                              for name in FLOAT16_CASES}
+            current_cases[target] = b
+            passed = not (removed or regressed or added_failures or panics or required_failures)
             report["targets"][target] = {"passed": passed, "before": before["stats"],
                                          "after": after["stats"], "removed": removed,
                                          "regressions": regressed, "added_failures": added_failures,
-                                         "panics": panics, "changes": changes}
+                                         "panics": panics, "changes": changes,
+                                         "reference_lock_sha256": before["lock_sha256"],
+                                         "current_lock_sha256": after["lock_sha256"],
+                                         "required_cases": required_cases,
+                                         "required_failures": required_failures}
         except (OSError, ValueError, KeyError, AssertionError) as error:
             passed = False
             report["targets"][target] = {"passed": False, "error": str(error)}
         report["passed"] &= passed
+    # Preserve complete cross-host differences as well as before/after changes.
+    # Only the explicitly required cases are a cross-host pass gate; other known
+    # Test262 limitations remain visible and are still checked for regressions.
+    report["cross_target_differences"] = []
+    if len(current_cases) == len(TARGETS):
+        names = set().union(*(cases.keys() for cases in current_cases.values()))
+        for name in sorted(names):
+            results = {target: current_cases[target].get(name) for target in TARGETS}
+            if any(result != results[TARGETS[0]] for result in results.values()):
+                report["cross_target_differences"].append({"case": name, "results": results})
     write(root / "comparison.json", report)
     print(json.dumps(report), flush=True)
     return report["passed"]
