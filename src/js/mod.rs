@@ -33,6 +33,7 @@ use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver, matches_selector,
     parse_scope_prelude, parse_selector_list,
 };
+use crate::css::{SelectorMatchCache, matches_selector_cached};
 use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disabled};
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::http::cors::{
@@ -13678,15 +13679,23 @@ fn query_first_matching_descendant(
     node: &NodeHandle,
     selectors: &[Selector],
 ) -> Option<NodeHandle> {
+    find_matching_descendant(node, selectors, &mut SelectorMatchCache::default())
+}
+
+fn find_matching_descendant(
+    node: &NodeHandle,
+    selectors: &[Selector],
+    cache: &mut SelectorMatchCache,
+) -> Option<NodeHandle> {
     for child in node.child_nodes() {
         if child.node_type() == NodeType::Element
             && selectors
                 .iter()
-                .any(|selector| matches_selector(&child, selector))
+                .any(|selector| matches_selector_cached(&child, selector, cache))
         {
             return Some(child);
         }
-        if let Some(found) = query_first_matching_descendant(&child, selectors) {
+        if let Some(found) = find_matching_descendant(&child, selectors, cache) {
             return Some(found);
         }
     }
@@ -13695,7 +13704,12 @@ fn query_first_matching_descendant(
 
 fn query_all_matching_descendants(node: &NodeHandle, selectors: &[Selector]) -> Vec<NodeHandle> {
     let mut results = Vec::new();
-    collect_matching_descendants(node, selectors, &mut results);
+    collect_matching_descendants(
+        node,
+        selectors,
+        &mut results,
+        &mut SelectorMatchCache::default(),
+    );
     results
 }
 
@@ -13703,16 +13717,17 @@ fn collect_matching_descendants(
     node: &NodeHandle,
     selectors: &[Selector],
     results: &mut Vec<NodeHandle>,
+    cache: &mut SelectorMatchCache,
 ) {
     for child in node.child_nodes() {
         if child.node_type() == NodeType::Element
             && selectors
                 .iter()
-                .any(|selector| matches_selector(&child, selector))
+                .any(|selector| matches_selector_cached(&child, selector, cache))
         {
             results.push(child.clone());
         }
-        collect_matching_descendants(&child, selectors, results);
+        collect_matching_descendants(&child, selectors, results, cache);
     }
 }
 
