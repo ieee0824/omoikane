@@ -125,3 +125,44 @@ fn layout_metrics_cache_invalidates_when_a_child_document_root_is_detached() {
     runtime.eval("childRoot.remove();").unwrap();
     assert_eq!(number(&mut runtime, "childRoot.clientWidth"), 0.0);
 }
+
+#[test]
+fn inline_form_controls_expose_painted_border_boxes_and_invalidate_when_hidden() {
+    for tag in ["input", "textarea", "select", "button"] {
+        let mut runtime = runtime(&format!(
+            "<html><body><div><{tag} id='editor' style='width:80px;height:20px;padding:3px;border:2px solid;box-sizing:content-box'>Text</{tag}></div></body></html>"
+        ));
+        runtime.set_viewport(320.0, 240.0);
+        runtime
+            .eval("globalThis.editor=document.getElementById('editor')")
+            .unwrap();
+        assert_eq!(
+            number(&mut runtime, "editor.getBoundingClientRect().width"),
+            90.0,
+            "{tag}"
+        );
+        assert_eq!(
+            number(&mut runtime, "editor.getBoundingClientRect().height"),
+            30.0,
+            "{tag}"
+        );
+        assert_eq!(number(&mut runtime, "editor.offsetWidth"), 90.0);
+        assert_eq!(number(&mut runtime, "editor.clientWidth"), 86.0);
+        assert_eq!(number(&mut runtime, "editor.getClientRects().length"), 1.0);
+        runtime.eval("globalThis.original=editor.getBoundingClientRect(); editor.parentElement.style.transform='translate(11px,13px)'").unwrap();
+        assert_eq!(
+            number(&mut runtime, "editor.getBoundingClientRect().x-original.x"),
+            11.0
+        );
+        assert_eq!(
+            number(&mut runtime, "editor.getBoundingClientRect().y-original.y"),
+            13.0
+        );
+        runtime.eval("editor.style.display='none'").unwrap();
+        assert_eq!(
+            number(&mut runtime, "editor.getBoundingClientRect().width"),
+            0.0
+        );
+        assert_eq!(number(&mut runtime, "editor.getClientRects().length"), 0.0);
+    }
+}

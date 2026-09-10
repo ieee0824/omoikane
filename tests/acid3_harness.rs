@@ -1,7 +1,7 @@
 //! Integration tests for the Acid3 harness.
 //!
-//! The fixture checks verify status, headers and DOM structure. With baseline
-//! JIT enabled, both drive modes must additionally score 100/100 for Gate 4.
+//! The fixture checks verify status, headers and DOM structure. Both the
+//! default interpreter and baseline JIT must score 100/100 in both drive modes.
 
 #[path = "acid3_common/harness.rs"]
 mod harness;
@@ -106,9 +106,9 @@ fn acid3_page_parses_to_dom_with_scoreboard() {
     );
 }
 
-/// Both drive modes must complete; native JIT gates additionally require 100/100.
+/// Both drive modes must score 100/100 without script or driving errors.
 #[test]
-fn runner_completes_without_panicking() {
+fn runner_scores_100_in_both_drive_modes() {
     let server = FixtureServer::start();
 
     let faithful = run_acid3(&server.base_url(), DriveMode::Faithful);
@@ -118,11 +118,6 @@ fn runner_completes_without_panicking() {
     let direct = run_acid3(&server.base_url(), DriveMode::DirectDrive);
     assert_eq!(direct.page_status, 200);
 
-    #[cfg(all(
-        feature = "baseline-jit",
-        any(target_arch = "x86_64", target_arch = "aarch64"),
-        any(target_os = "linux", target_os = "macos")
-    ))]
     {
         let row = |run: &harness::Acid3Run| {
             serde_json::json!({

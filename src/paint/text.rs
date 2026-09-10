@@ -373,12 +373,16 @@ pub(crate) fn paint_text_with_registry(
                     super::paint_generated_box(canvas, fragment_rect, style, clip, _viewport);
                 }
                 InlineFragmentContent::FormControl(style, value, editing) => {
-                    if let Some(background) = background_color(style) {
-                        canvas.fill_rect_clipped(fragment_rect, background, clip);
-                    }
                     let border = EdgeSizesForPaint::from_style(style);
-                    if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
-                        paint_rect_borders(canvas, fragment_rect, style, border, clip);
+                    // A block control's owning LayoutBox already painted its
+                    // background and border. Inline controls have no such box.
+                    if fragment.node.identity() != layout.node.identity() {
+                        if let Some(background) = background_color(style) {
+                            canvas.fill_rect_clipped(fragment_rect, background, clip);
+                        }
+                        if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
+                            paint_rect_borders(canvas, fragment_rect, style, border, clip);
+                        }
                     }
                     let content_rect = inline_fragment_content_rect(fragment_rect, style, border);
                     let color = fragment_text_color(&fragment.style).unwrap_or(fallback_color);

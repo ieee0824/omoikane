@@ -13,6 +13,7 @@ use serde_json::json;
 
 use crate::cdp::{CdpSession, JsonRpcError};
 use crate::frame::{BrowserFrame, FrameError, render_browser_frame};
+use crate::js::StorageManager;
 
 /// Stable identity for a tab in one PlatformBrowser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -137,6 +138,7 @@ struct BrowserTab {
 #[derive(Debug)]
 pub struct PlatformBrowser {
     tabs: BTreeMap<TabId, BrowserTab>,
+    storage_manager: StorageManager,
     active_tab: Option<TabId>,
     next_tab_id: u64,
     downloads: BTreeMap<DownloadId, DownloadInfo>,
@@ -149,6 +151,7 @@ impl PlatformBrowser {
     pub fn new() -> Self {
         Self {
             tabs: BTreeMap::new(),
+            storage_manager: StorageManager::new(),
             active_tab: None,
             next_tab_id: 1,
             downloads: BTreeMap::new(),
@@ -172,9 +175,10 @@ impl PlatformBrowser {
             .next_tab_id
             .checked_add(1)
             .ok_or(BrowserError::IdExhausted("tab"))?;
-        let mut session = CdpSession::new().map_err(|message| {
-            BrowserError::Network(format!("failed to create tab runtime: {message}"))
-        })?;
+        let mut session =
+            CdpSession::with_storage_manager(self.storage_manager.clone()).map_err(|message| {
+                BrowserError::Network(format!("failed to create tab runtime: {message}"))
+            })?;
         let url = url.filter(|url| !url.trim().is_empty());
         if let Some(url) = url {
             session

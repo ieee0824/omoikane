@@ -195,7 +195,7 @@ pub(crate) fn collect_stylesheet_with_imports(
 
 /// Resolve relative `url()` references against the stylesheet URL, rather than
 /// the document URL. CSS URLs are scoped to the stylesheet that contains them.
-fn resolve_stylesheet_asset_urls(
+pub(crate) fn resolve_stylesheet_asset_urls(
     css: String,
     stylesheet_url: Option<&crate::http::Url>,
 ) -> String {

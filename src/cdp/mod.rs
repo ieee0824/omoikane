@@ -665,6 +665,7 @@ pub(crate) struct SessionSettleTimings {
 #[derive(Debug)]
 pub struct CdpSession {
     runtime: JsRuntime,
+    _storage_lifetime: TabStorageLifetime,
     storage_manager: StorageManager,
     storage_session_id: u64,
     http_client: Client,
@@ -692,6 +693,20 @@ pub struct CdpSession {
     history_index: usize,
     document_generation: u64,
     accessibility_enabled: bool,
+}
+
+/// Declared after the runtime so workers and child realms finish dropping
+/// before the closed tab's session storage is released.
+#[derive(Debug)]
+struct TabStorageLifetime {
+    manager: StorageManager,
+    session_id: u64,
+}
+
+impl Drop for TabStorageLifetime {
+    fn drop(&mut self) {
+        self.manager.remove_session(self.session_id);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -731,8 +746,16 @@ pub(crate) enum PreparedPageNavigation {
 impl CdpSession {
     /// Creates a new session with an empty `about:blank` document.
     pub fn new() -> Result<Self, String> {
-        let storage_manager = StorageManager::new();
+        Self::with_storage_manager(StorageManager::new())
+    }
+
+    /// Creates a tab with its own session storage in a shared browser profile.
+    pub(crate) fn with_storage_manager(storage_manager: StorageManager) -> Result<Self, String> {
         let storage_session_id = storage_manager.create_session();
+        let storage_lifetime = TabStorageLifetime {
+            manager: storage_manager.clone(),
+            session_id: storage_session_id,
+        };
         let runtime = JsRuntime::with_document_url_and_storage(
             TreeBuilder::parse("<html><head></head><body></body></html>").document(),
             "about:blank",
@@ -742,6 +765,7 @@ impl CdpSession {
         .map_err(|error| error.to_string())?;
         let mut session = Self {
             runtime,
+            _storage_lifetime: storage_lifetime,
             storage_manager,
             storage_session_id,
             http_client: Client::new(),
@@ -832,14 +856,16 @@ impl CdpSession {
         self.runtime.document()
     }
 
-    /// Returns the active page's top-level Window scroll offset.
-    pub(crate) fn window_scroll_offset(&self) -> (f32, f32) {
-        self.runtime.window_scroll_offset()
-    }
-
     /// Returns the URL of the currently loaded document.
     pub fn current_url(&self) -> &str {
         &self.current_url
+    }
+
+    /// Renders the current document using its input/CSSOM layout.
+    pub(crate) fn paint_current_document(
+        &mut self,
+    ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
+        self.runtime.paint_current_document()
     }
 
     /// Updates the active page's layout and script-visible viewport dimensions.

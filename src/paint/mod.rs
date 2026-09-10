@@ -1118,6 +1118,7 @@ pub fn render_document_with_url(
 /// Session-owned Documents must not run their script elements again merely
 /// because the embedder asks for a screenshot. Their current DOM is the input
 /// snapshot; only styles, layout, and paint are evaluated here.
+#[cfg(test)]
 pub(crate) fn render_document_snapshot_with_url(
     document: &NodeHandle,
     viewport: Rect,

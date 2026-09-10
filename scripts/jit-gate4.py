@@ -98,6 +98,7 @@ def run_shard(shard, root):
     env.update({
         "CI": "1",
         "OMOIKANE_JIT_GATE_REPORT_DIR": str(folder),
+        "OMOIKANE_BROWSER_REPORT_DIR": str(folder / "browser"),
         "OMOIKANE_WEB_API_REPORT": str(folder / "web-api.json"),
         "OMOIKANE_JIT_STRESS_SEEDS": env.get("OMOIKANE_JIT_STRESS_SEEDS", "64"),
         "OMOIKANE_JIT_STRESS_MIN_SECONDS": env.get("OMOIKANE_JIT_STRESS_MIN_SECONDS", "600"),
