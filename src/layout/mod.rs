@@ -1126,8 +1126,8 @@ fn layout_document(
         ..BoxDimensions::default()
     };
 
-    let document_box = BoxDimensions {
-        content: dimensions.content,
+    let initial_containing_block = BoxDimensions {
+        content: viewport,
         ..BoxDimensions::default()
     };
     for (child, style, static_position) in positioned_children {
@@ -1135,7 +1135,7 @@ fn layout_document(
             &child,
             resolver,
             &style,
-            positioned_ancestor.unwrap_or(document_box),
+            positioned_ancestor.unwrap_or(initial_containing_block),
             static_position,
             viewport,
         ) {
@@ -1521,6 +1521,72 @@ fn layout_element(
         }
     }
 
+    // Blockification must retain a form control's value/selection fragment,
+    // even when the parent's inline formatting context never visits it.
+    if matches!(
+        node.tag_name().as_deref(),
+        Some("input" | "textarea" | "select" | "button" | "progress" | "meter")
+    ) {
+        let mut lines = layout_inline_nodes(
+            std::slice::from_ref(node),
+            resolver,
+            x - padding.left - border.left,
+            y - padding.top - border.top,
+            width + padding.left + padding.right + border.left + border.right,
+            inline::TextAlign::Left,
+            0.0,
+            direction_is_rtl(&style),
+        );
+        if let Some(fragment) = lines.first().and_then(|line| line.fragments.first()) {
+            let intrinsic_height =
+                (fragment.rect.height - padding.top - padding.bottom - border.top - border.bottom)
+                    .max(0.0);
+            let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
+                resolve_content_height(
+                    &style,
+                    containing_block.height,
+                    padding,
+                    border,
+                    y,
+                    y + intrinsic_height,
+                )
+            });
+            let dimensions = BoxDimensions {
+                content: Rect {
+                    x,
+                    y,
+                    width,
+                    height: content_height,
+                },
+                padding,
+                border,
+                margin,
+            };
+            let border_box = dimensions.border_box();
+            for line in &mut lines {
+                line.rect = border_box;
+                for fragment in &mut line.fragments {
+                    fragment.rect = border_box;
+                }
+            }
+            let mut layout = LayoutBox {
+                node: node.clone(),
+                dimensions,
+                visibility: visibility(&style),
+                overflow: overflow(&style),
+                z_index: z_index(&style),
+                transform: AffineTransform::identity(),
+                needs_scroll_translation: false,
+                paint_scroll: None,
+                lines,
+                children: Vec::new(),
+                marker: None,
+            };
+            apply_relative_offset(&mut layout, &style);
+            return Some(layout);
+        }
+    }
+
     if is_table_container_element(node, &style) {
         let is_shrink_to_fit = resolved_length(&style, "width", containing_block.width).is_none();
         if is_shrink_to_fit {
@@ -1595,9 +1661,15 @@ fn layout_element(
     };
     for (child, cs, static_position) in positioned_children {
         if let Some(positioned) = layout_positioned_child(
-            &child, resolver, &cs,
-            next_pos_ancestor.unwrap_or(dimensions),
-            static_position, viewport,
+            &child,
+            resolver,
+            &cs,
+            next_pos_ancestor.unwrap_or(BoxDimensions {
+                content: viewport,
+                ..BoxDimensions::default()
+            }),
+            static_position,
+            viewport,
         ) {
             children.push(positioned);
         }

@@ -99,6 +99,14 @@ impl StorageManager {
         state.next_session_id
     }
 
+    /// Releases all origin-specific session storage when a tab closes.
+    pub(crate) fn remove_session(&self, session_id: u64) {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        state
+            .session
+            .retain(|(session, _), _| *session != session_id);
+    }
+
     pub(crate) fn cache_open(&self, origin: &StorageOrigin, name: String) -> bool {
         let mut state = self.0.lock().expect("storage manager mutex poisoned");
         let storage = state.caches.entry(origin.clone()).or_default();
@@ -331,6 +339,32 @@ fn cache_request_replacement_key(request: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_a_tab_discards_its_sessions_but_preserves_profile_storage() {
+        let manager = StorageManager::new();
+        let first = manager.create_session();
+        let second = manager.create_session();
+        let origin = StorageOrigin::from_url("https://example.test/").unwrap();
+        let other_origin = StorageOrigin::from_url("https://other.test/").unwrap();
+        for origin in [&origin, &other_origin] {
+            manager.set(first, origin, false, "tab".into(), "first".into());
+        }
+        manager.set(second, &origin, false, "tab".into(), "second".into());
+        manager.set(first, &origin, true, "shared".into(), "retained".into());
+        manager.remove_session(first);
+        assert_eq!(manager.get(first, &origin, false, "tab"), None);
+        assert_eq!(manager.get(first, &other_origin, false, "tab"), None);
+        assert_eq!(
+            manager.get(second, &origin, false, "tab").as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            manager.get(second, &origin, true, "shared").as_deref(),
+            Some("retained")
+        );
+        assert_eq!(manager.0.lock().unwrap().session.len(), 1);
+    }
 
     #[test]
     fn reading_an_absent_area_does_not_allocate_it() {

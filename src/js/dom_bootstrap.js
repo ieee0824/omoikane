@@ -2017,6 +2017,13 @@
       return wrapNode(__omoikane_parent_node(this.__id));
     }
 
+    get parentElement() {
+      const parentId = __omoikane_parent_node(this.__id);
+      return parentId !== null && __omoikane_node_type(parentId) === 1
+        ? wrapNode(parentId)
+        : null;
+    }
+
     get assignedSlot() {
       return wrapNode(__omoikane_assigned_slot(this.__id));
     }

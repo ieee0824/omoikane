@@ -6,7 +6,7 @@ use crate::http::url::resolve_url;
 use crate::layout::Rect;
 use crate::paint::{
     Canvas, Color, Image, RenderTimings, clear_render_timings, record_render_timings,
-    render_document_snapshot_with_url, render_document_with_url,
+    render_document_with_url,
 };
 use std::time::Instant;
 
@@ -17,9 +17,8 @@ pub(crate) fn capture_session_screenshot_png(
     viewport: Rect,
 ) -> Result<Vec<u8>, String> {
     clear_render_timings();
-    let settle_timings = session
-        .settle_for_render()
-        .map_err(|error| error.message)?;
+    session.set_viewport(viewport.width as u32, viewport.height as u32);
+    let settle_timings = session.settle_for_render().map_err(|error| error.message)?;
     record_render_timings(&RenderTimings {
         timers: settle_timings.timers,
         animation_frames: settle_timings.animation_frames,
@@ -27,7 +26,6 @@ pub(crate) fn capture_session_screenshot_png(
     });
     let document = session.document();
     let base_url = session.current_url().parse::<crate::http::Url>().ok();
-    let scroll = session.window_scroll_offset();
 
     match render_frameset_screenshot_png(
         &document,
@@ -41,12 +39,7 @@ pub(crate) fn capture_session_screenshot_png(
                 resolve_frameset_render_document(&document, base_url.as_ref())
                     .unwrap_or((document.clone(), base_url.clone()));
             let canvas = if render_document.identity() == document.identity() {
-                render_document_snapshot_with_url(
-                    &render_document,
-                    viewport,
-                    render_base_url.as_ref(),
-                    scroll,
-                )
+                session.paint_current_document()
             } else {
                 render_document_with_url(&render_document, viewport, render_base_url.as_ref())
             }
@@ -434,7 +427,18 @@ mod tests {
             width: 32.0,
             height: 32.0,
         };
-        let _png = capture_session_screenshot_png(&mut session, viewport).unwrap();
+        let png = capture_session_screenshot_png(&mut session, viewport).unwrap();
+        let image = Image::decode_png(&png).unwrap();
+        assert_eq!((image.width(), image.height()), (32, 32));
+        let metrics = session
+            .dispatch(
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": "innerWidth + 'x' + innerHeight", "returnByValue": true,
+                }),
+            )
+            .unwrap();
+        assert_eq!(metrics["result"]["value"], "32x32");
         let runs = session
             .dispatch(
                 "Runtime.evaluate",

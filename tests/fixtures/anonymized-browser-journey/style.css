@@ -1,0 +1,10 @@
+html,body{margin:0;padding:0;background:rgb(245,247,250);font-family:sans-serif;color:rgb(25,40,60)}
+header{height:48px;padding:16px;background:rgb(23,54,88);color:white;font-size:24px}
+h1{position:absolute;left:20px;top:82px;font-size:24px;margin:0}
+label{position:absolute;left:20px;top:123px}
+input{position:absolute;left:20px;top:150px;width:240px;height:32px;box-sizing:border-box}
+button{height:36px;width:140px;background:rgb(220,230,242);border:1px solid rgb(70,90,120);color:rgb(20,35,55)}
+#apply{position:absolute;left:20px;top:202px}
+#status{position:absolute;left:20px;top:260px;width:300px;height:64px;margin:0;padding:12px;box-sizing:border-box;background:rgb(30,90,150);color:white}
+#submit{position:absolute;left:20px;top:350px}
+#description{position:absolute;left:20px;top:405px;font-size:14px}

@@ -4316,7 +4316,7 @@ fn absolutely_positions_child_relative_to_parent_content_box() {
     resolver.add_stylesheet(
             Origin::Author,
             parse_stylesheet(
-                "div { width: 200px; padding-left: 10px; padding-top: 5px; } \
+                "div { position: relative; width: 200px; padding-left: 10px; padding-top: 5px; } \
                  .flow { height: 20px; } \
                  .absolute { position: absolute; left: 30px; top: 12px; width: 50px; height: 15px; }",
             )
@@ -4344,6 +4344,61 @@ fn absolutely_positions_child_relative_to_parent_content_box() {
     assert_eq!(absolute_box.dimensions.content.x, 40.0);
     assert_eq!(absolute_box.dimensions.content.y, 17.0);
     assert_eq!(container_box.dimensions.content.height, 20.0);
+}
+
+#[test]
+fn blockified_text_controls_keep_live_values_in_their_border_boxes() {
+    for positioning in [
+        "display: block",
+        "position: absolute; left: 20px; top: 30px",
+        "float: left",
+    ] {
+        for tag in ["input", "textarea"] {
+            let document = crate::html::TreeBuilder::parse(&format!(
+                "<html><body><{tag} id='editor'></{tag}></body></html>"
+            ))
+            .document();
+            let control = document.query_selector("#editor").unwrap();
+            control.set_text_control_state("Typed value".into(), 3, 7, true);
+            let mut resolver = StyleResolver::new();
+            resolver.add_stylesheet(Origin::Author, parse_stylesheet(&format!(
+                "#editor {{ {positioning}; width:120px; height:30px; padding:3px; border:2px solid; box-sizing:border-box }}"
+            )).unwrap());
+            let layout = layout_tree(
+                &document,
+                &mut resolver,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 400.0,
+                    height: 300.0,
+                },
+            )
+            .unwrap();
+            let control_box = find_layout_box_by_tag(&layout, tag).unwrap();
+            let fragment = &control_box.lines[0].fragments[0];
+            assert_eq!(
+                fragment.rect,
+                control_box.dimensions.border_box(),
+                "{tag}: {positioning}"
+            );
+            assert_eq!((fragment.rect.width, fragment.rect.height), (120.0, 30.0));
+            match &fragment.content {
+                InlineFragmentContent::FormControl(_, value, Some(editing)) => {
+                    assert_eq!(value, "Typed value");
+                    assert_eq!(
+                        (
+                            editing.selection_start,
+                            editing.selection_end,
+                            editing.focused
+                        ),
+                        (3, 7, true)
+                    );
+                }
+                payload => panic!("missing live control payload: {payload:?}"),
+            }
+        }
+    }
 }
 
 #[test]
@@ -4439,6 +4494,48 @@ fn fixed_position_inset_inline_end_maps_to_left_in_rtl() {
     // In RTL the inline-end edge is the left edge: 10px from the viewport's left.
     assert_eq!(layout.children[0].dimensions.content.x, 10.0);
     assert_eq!(layout.children[0].dimensions.content.y, 20.0);
+}
+
+#[test]
+fn absolute_without_positioned_ancestor_uses_the_initial_viewport() {
+    let document = crate::html::TreeBuilder::parse(
+        "<html><body><header></header><main><section><aside></aside></section></main></body></html>",
+    ).document();
+    for (insets, expected) in [
+        ("left: 20px; top: 30px", (20.0, 30.0)),
+        ("right: 10%; bottom: 25%", (310.0, 220.0)),
+    ] {
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin: 0 }} header {{ height: 80px }} \
+             main {{ width: 200px; height: 100px; padding: 10px }} \
+             section {{ padding: 15px }} \
+             aside {{ position: absolute; width: 50px; height: 20px; {insets} }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 320.0,
+            },
+        )
+        .unwrap();
+        let positioned = find_layout_box_by_tag(&layout, "aside").unwrap();
+        assert_eq!(
+            (
+                positioned.dimensions.content.x,
+                positioned.dimensions.content.y
+            ),
+            expected
+        );
+    }
 }
 
 #[test]

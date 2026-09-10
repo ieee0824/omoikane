@@ -1,0 +1,80 @@
+name: Browser behavior
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-behavior-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    name: Browser (${{ matrix.platform.target }}, ${{ matrix.mode }})
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [interpreter, baseline-jit]
+        platform:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+    env:
+      CARGO_BUILD_JOBS: '2'
+      OMOIKANE_BROWSER_REPORT_DIR: .artifacts/browser/journeys
+      OMOIKANE_JIT_GATE_REPORT_DIR: .artifacts/browser/acid3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: browser-${{ matrix.platform.target }}-${{ matrix.mode }}
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: Install system fonts
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core
+      - name: Record build inputs
+        shell: bash
+        env:
+          EXPECTED_TARGET: ${{ matrix.platform.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/browser
+          rustc --version --verbose > .artifacts/browser/toolchain.txt
+          actual=$(rustc --version --verbose | awk '/^host:/ {print $2}')
+          test "$actual" = "$EXPECTED_TARGET"
+          git rev-parse HEAD > .artifacts/browser/revision.txt
+          cargo generate-lockfile
+          cp Cargo.lock .artifacts/browser/Cargo.lock
+      - name: Verify page operations and Acid3
+        shell: bash
+        env:
+          ENGINE_MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          features=()
+          if [ "$ENGINE_MODE" = baseline-jit ]; then
+            features=(--features baseline-jit)
+          fi
+          cargo test --locked "${features[@]}" --test browser_journeys --test acid3_harness -- --nocapture --test-threads=1 2>&1 | tee .artifacts/browser/tests.log
+      - name: Upload logs, reports and painted frames
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-${{ matrix.platform.target }}-${{ matrix.mode }}
+          path: .artifacts/browser/
+          if-no-files-found: error

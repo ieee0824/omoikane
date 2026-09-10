@@ -3,9 +3,7 @@
 use std::time::{Duration, Instant};
 
 use crate::cdp::{CdpSession, JsonRpcError};
-use crate::http::Url;
-use crate::layout::Rect;
-use crate::paint::{Color, PaintError, render_document_snapshot_with_url};
+use crate::paint::{Color, PaintError};
 
 /// Coordinates a platform window's redraw requests with browser rendering
 /// opportunities.
@@ -140,19 +138,9 @@ pub fn render_browser_frame(
         .drive_event_loop(elapsed_ms)
         .map_err(FrameError::EventLoop)?;
 
-    let base_url = session.current_url().parse::<Url>().ok();
-    let mut canvas = render_document_snapshot_with_url(
-        &session.document(),
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: width as f32,
-            height: height as f32,
-        },
-        base_url.as_ref(),
-        session.window_scroll_offset(),
-    )
-    .map_err(FrameError::Paint)?;
+    let mut canvas = session
+        .paint_current_document()
+        .map_err(FrameError::Paint)?;
     canvas.composite_over(Color::rgb(255, 255, 255));
 
     Ok(BrowserFrame {

@@ -81,3 +81,39 @@ machine-readable JSON reportが必要な場合は出力先を指定します。
 OMOIKANE_WEB_API_REPORT=target/web-api-surface.json \
   cargo test --test web_api_surface -- --nocapture
 ```
+
+## Browser operation journeys
+
+`browser_journeys` starts a local HTTP fixture server and drives the public
+`PlatformBrowser`/CDP APIs used by native frontends. It covers redirect and resource
+loading, keyboard/mouse input, fetch and animation-frame DOM updates, form POST and
+history, tab storage isolation, Worker cloning and child Realm/event-loop behavior.
+External stylesheet ordering, imports, media changes, CSP and resource reuse are
+checked against both CSSOM geometry and painted pixels.
+
+```bash
+OMOIKANE_BROWSER_REPORT_DIR=.artifacts/browser/journeys \
+  cargo test --test browser_journeys -- --nocapture --test-threads=1
+OMOIKANE_JIT_GATE_REPORT_DIR=.artifacts/browser/acid3 \
+  cargo test --test acid3_harness -- --nocapture --test-threads=1
+```
+
+Add `--features baseline-jit` before `--` to repeat these contracts with that
+feature enabled. Acid3 requires 100/100 and no script/drive errors in both drive
+modes, including the default interpreter build. `browser-behavior.yml` runs both
+configurations on Linux x86_64, Linux ARM64 and macOS ARM64.
+
+The operation report directory contains one JSON per successful journey and PNGs
+named `anonymized-browser-journey.<scenario>.actual.png`. Assertions use specified
+geometry, DOM values and stable interior pixels; system-dependent text rasterization
+is not compared to a whole-image golden. Typed input must visibly change the input's
+interior. Review actual images as well: this found missing input text after the
+original DOM assertions already passed. A failed assertion remains a failed test;
+absence of a successful JSON report is not success.
+
+These fixed journeys exercise selected browser behavior, not arbitrary website
+compatibility or native window creation. They accompany the full suite, WPT and Web
+API surface tests. Separate browser instances have separate in-memory storage;
+persistence across process restarts and cross-tab storage events are not asserted
+by these cases. See [the Gate 6 browser baseline](../docs/jit/gate6-browser-baseline.md)
+for the defects, source baseline and verification order.

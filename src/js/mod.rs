@@ -58,6 +58,7 @@ mod module_loading_tests;
 use module_fetch::{ModuleFetch, ModuleFetchPool};
 
 mod storage;
+mod stylesheet;
 mod event_loop;
 mod csp;
 pub use storage::StorageManager;
@@ -1038,7 +1039,7 @@ struct HostState {
     /// Per-document cached style resolvers, keyed by the identity of each
     /// document's root [`Document`] node (the top-level document and every
     /// `<iframe>` sub-browsing-context document). Each entry is rebuilt on
-    /// demand from that document's own inline `<style>` rules when it is marked
+    /// demand from that document's author stylesheets when it is marked
     /// dirty, so `getComputedStyle` on a node resolves against the cascade of
     /// the document that node actually lives in — the main document's rules
     /// never leak into a sub-document and vice versa (issue 016-15).
@@ -1493,17 +1494,19 @@ impl IframeSandboxPolicy {
 /// A cached [`StyleResolver`] for one document (the top-level document or an
 /// iframe sub-document), plus a dirty flag driving lazy rebuilds.
 ///
-/// The resolver is seeded from that document's own inline `<style>` rules only;
+/// The resolver is seeded from that document's own author stylesheets;
 /// it is rebuilt on the next computed-style query whenever [`dirty`] is set (or
 /// the resolver has never been built), so a DOM mutation in one document does
 /// not force every other document's resolver to rebuild.
 ///
 /// [`dirty`]: DocumentStyleEntry::dirty
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct DocumentStyleEntry {
-    /// Cached resolver seeded with this document's inline `<style>` rules, or
+    /// Cached resolver seeded with this document's author stylesheets, or
     /// `None` until first built.
     resolver: Option<StyleResolver>,
+    resources: stylesheet::StylesheetLoader,
+    web_fonts: Arc<crate::font::WebFontRegistry>,
     /// `true` when this document was mutated since `resolver` was built, so the
     /// next query must rebuild it (a forced synchronous style recompute).
     dirty: bool,
@@ -1572,6 +1575,8 @@ impl HostState {
             document.identity(),
             DocumentStyleEntry {
                 resolver: None,
+                resources: Default::default(),
+                web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
             },
@@ -1984,6 +1989,8 @@ impl HostState {
             document.identity(),
             DocumentStyleEntry {
                 resolver: None,
+                resources: Default::default(),
+                web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
             },
@@ -2527,13 +2534,8 @@ impl HostState {
         }
     }
 
-    /// Rebuilds `document`'s cached [`StyleResolver`] from its own inline
-    /// stylesheets when that document is dirty (or nothing has been built yet).
-    ///
-    /// Only inline `<style>` element content belonging to `document` is
-    /// collected; external stylesheets are intentionally not fetched here so
-    /// that computed-style resolution stays synchronous and free of network
-    /// side effects. `document` must be a root [`Document`] node.
+    /// Rebuilds a document's author cascade, retaining its loaded resources.
+    /// The same resolver feeds computed style, geometry, hit testing and paint.
     fn ensure_style_resolver(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
         let needs_rebuild = match self.document_styles.get(&document_id) {
@@ -2577,16 +2579,28 @@ impl HostState {
         let _ = resolver.set_transition_time_ms(transition_time_ms);
         resolver.set_viewport(viewport.width, viewport.height);
         let policy = self.csp_policy_for_document(document);
-        for (style_node, scope, implicit_scope_root, css) in collect_inline_stylesheets(document) {
-            if !policy.allows_inline(ResourceType::Style) {
-                self.record_csp_violation(
-                    document,
-                    ResourceType::Style,
-                    format!("style-element:{}", style_node.identity()),
-                );
-                continue;
+        let base = crate::paint::stylesheet::extract_document_base_url(
+            document,
+            self.base_url_for_document(document_id).as_ref(),
+        );
+        let mut resources = self
+            .document_styles
+            .get_mut(&document_id)
+            .map(|entry| std::mem::take(&mut entry.resources))
+            .unwrap_or_default();
+        let mut web_fonts = crate::font::WebFontRegistry::new();
+        for (style_node, scope, implicit_scope_root) in collect_stylesheet_nodes(document) {
+            let (css, blocked) = resources.load_node(&style_node, base.as_ref(), &policy);
+            for blocked_uri in blocked {
+                self.record_csp_violation(document, ResourceType::Style, blocked_uri);
             }
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+            for font in crate::paint::stylesheet::fetch_font_face_fonts(
+                std::slice::from_ref(&sheet),
+                base.as_ref(),
+            ) {
+                web_fonts.push_shared(&font.family, font.weight, font.style, font.font);
+            }
             if let Some((scope, order)) = scope {
                 resolver.add_scoped_stylesheet_in_order_with_implicit_scope_root(
                     Origin::Author,
@@ -2641,6 +2655,8 @@ impl HostState {
             document_id,
             DocumentStyleEntry {
                 resolver: Some(resolver),
+                resources,
+                web_fonts: Arc::new(web_fonts),
                 dirty: false,
                 needs_full_sample: true,
             },
@@ -2708,13 +2724,30 @@ impl HostState {
         }
         let viewport = self.viewport;
         let document_id = document.identity();
+        let base = crate::paint::stylesheet::extract_document_base_url(
+            &document,
+            self.base_url_for_document(document_id).as_ref(),
+        );
+        let animation_time = self.event_loop.rendering_time_ms() as u64;
         // Compute into a local so the `document_styles` borrow is released
         // before assigning `self.layout_root` (a different field).
         let layout = self
             .document_styles
             .get_mut(&document_id)
-            .and_then(|entry| entry.resolver.as_mut())
-            .and_then(|resolver| crate::layout::layout_tree(&document, resolver, viewport));
+            .and_then(|entry| {
+                let resolver = entry.resolver.as_mut()?;
+                crate::layout::with_layout_fonts(
+                    crate::paint::text::load_text_fonts(),
+                    Some(entry.web_fonts.clone()),
+                    || {
+                        crate::layout::with_image_base_url(base, || {
+                            crate::layout::with_image_animation_time(animation_time, || {
+                                crate::layout::layout_tree(&document, resolver, viewport)
+                            })
+                        })
+                    },
+                )
+            });
         // This is a generation of rebuild attempts, not only successful trees:
         // a failed rebuild must not leave an older adjusted tree reusable.
         self.layout_generation = self.layout_generation.saturating_add(1);
@@ -3796,6 +3829,57 @@ impl JsRuntime {
             layout: state.layout_generation,
             paint: state.paint_generation,
         }
+    }
+
+    /// Paints the current document with the layout used by CSSOM and input.
+    pub(crate) fn paint_current_document(
+        &mut self,
+    ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
+        self.eval("__omoikane_flush_stylesheets()")
+            .map_err(|_| crate::paint::PaintError::InvalidImageBuffer)?;
+        let mut state = self.host_state.borrow_mut();
+        let start = Instant::now();
+        state.ensure_adjusted_layout();
+        let layout_time = start.elapsed();
+        let document_id = state.document.identity();
+        let viewport = state.viewport;
+        let base = crate::paint::stylesheet::extract_document_base_url(
+            &state.document,
+            state.base_url_for_document(document_id).as_ref(),
+        );
+        let animation_time = state.event_loop.rendering_time_ms() as u64;
+        let state = &mut *state;
+        let layout = &state
+            .adjusted_layout_cache
+            .as_ref()
+            .ok_or(crate::paint::PaintError::InvalidImageBuffer)?
+            .root;
+        let entry = state
+            .document_styles
+            .get_mut(&document_id)
+            .ok_or(crate::paint::PaintError::InvalidImageBuffer)?;
+        let resolver = entry
+            .resolver
+            .as_mut()
+            .ok_or(crate::paint::PaintError::InvalidImageBuffer)?;
+        let start = Instant::now();
+        let canvas = crate::layout::with_image_base_url(base, || {
+            crate::layout::with_image_animation_time(animation_time, || {
+                crate::paint::paint_layout_with_web_fonts(
+                    layout,
+                    resolver,
+                    viewport,
+                    crate::paint::text::load_text_fonts(),
+                    Some(&entry.web_fonts),
+                )
+            })
+        });
+        crate::paint::record_render_timings(&crate::paint::RenderTimings {
+            layout: layout_time,
+            paint: start.elapsed(),
+            ..Default::default()
+        });
+        Ok(canvas)
     }
 
     /// Returns the topmost event-target element at viewport coordinates.
@@ -9226,46 +9310,28 @@ fn cache_storage_native(
 // Computed style + layout metrics (issues 016-8, 044-2)
 // ---------------------------------------------------------------------------
 
-/// Recursively collects the text content of every inline `<style>` element in
-/// the document tree, returning one CSS string per `<style>` element.
-///
-/// Only inline styles are gathered; linked stylesheets are not fetched here to
-/// keep computed-style resolution synchronous and side-effect free.
-fn collect_inline_stylesheets(
+/// Collects author stylesheet owners in tree order, preserving shadow scopes.
+fn collect_stylesheet_nodes(
     document: &NodeHandle,
-) -> Vec<(NodeHandle, Option<(NodeHandle, usize)>, Option<NodeHandle>, String)> {
+) -> Vec<(NodeHandle, Option<(NodeHandle, usize)>, Option<NodeHandle>)> {
     fn walk(
         node: &NodeHandle,
         scope: Option<&(NodeHandle, usize)>,
         next_scope_order: &mut usize,
-        out: &mut Vec<(
-            NodeHandle,
-            Option<(NodeHandle, usize)>,
-            Option<NodeHandle>,
-            String,
-        )>,
+        out: &mut Vec<(NodeHandle, Option<(NodeHandle, usize)>, Option<NodeHandle>)>,
     ) {
-        if node.node_type() == NodeType::Element
-            && node
-                .tag_name()
-                .as_deref()
-                .is_some_and(|tag| tag.eq_ignore_ascii_case("style"))
-        {
-            let css = collect_text_recursive(node);
-            if !css.trim().is_empty() {
-                let implicit_scope_root = node.parent_node().and_then(|parent| {
-                    if parent.node_type() == NodeType::Element {
-                        Some(parent)
-                    } else {
-                        // A style element directly in a shadow tree has no
-                        // element parent; CSS Scoping defines its implicit
-                        // scope root as the shadow host.
-                        scope
-                            .and_then(|(root, _)| root.shadow_host())
-                    }
-                });
-                out.push((node.clone(), scope.cloned(), implicit_scope_root, css));
-            }
+        if node.tag_name().as_deref() == Some("noscript") {
+            return;
+        }
+        if matches!(node.tag_name().as_deref(), Some("style" | "link")) {
+            let implicit_scope_root = node.parent_node().and_then(|parent| {
+                if parent.node_type() == NodeType::Element {
+                    Some(parent)
+                } else {
+                    scope.and_then(|(root, _)| root.shadow_host())
+                }
+            });
+            out.push((node.clone(), scope.cloned(), implicit_scope_root));
         }
         if let Some(root) = node.shadow_root() {
             *next_scope_order += 1;
@@ -9277,8 +9343,7 @@ fn collect_inline_stylesheets(
         }
     }
     let mut out = Vec::new();
-    let mut next_scope_order = 0;
-    walk(document, None, &mut next_scope_order, &mut out);
+    walk(document, None, &mut 0, &mut out);
     out
 }
 
@@ -9413,7 +9478,7 @@ fn find_layout_box_with_transform<'a>(
     if &root.node == node {
         return Some((root, transform));
     }
-    collect_matching_image_fragments(root, node, transform, (0.0, 0.0), fragments);
+    collect_matching_replaced_fragments(root, node, transform, (0.0, 0.0), fragments);
     for child in &root.children {
         if let Some(found) = find_layout_box_with_transform(child, node, transform, fragments) {
             return Some(found);
@@ -9429,7 +9494,7 @@ struct InlineFragmentGeometry {
     scroll: (f32, f32),
 }
 
-fn collect_matching_image_fragments(
+fn collect_matching_replaced_fragments(
     root: &LayoutBox,
     node: &NodeHandle,
     transform: AffineTransform,
@@ -9438,16 +9503,21 @@ fn collect_matching_image_fragments(
 ) {
     for line in &root.lines {
         for fragment in &line.fragments {
-            if &fragment.node == node
-                && let InlineFragmentContent::Image(_, style) = &fragment.content
-            {
-                output.push(InlineFragmentGeometry {
-                    rect: fragment.rect,
-                    style: style.clone(),
-                    transform,
-                    scroll,
-                });
+            if &fragment.node != node {
+                continue;
             }
+            let style = match &fragment.content {
+                InlineFragmentContent::Image(_, style)
+                | InlineFragmentContent::FormControl(style, _, _)
+                | InlineFragmentContent::IconFormControl(style, _, _, _) => style,
+                _ => continue,
+            };
+            output.push(InlineFragmentGeometry {
+                rect: fragment.rect,
+                style: style.clone(),
+                transform,
+                scroll,
+            });
         }
     }
 }
@@ -9706,7 +9776,7 @@ fn transform_rect(rect: Rect, transform: AffineTransform) -> Rect {
     }
 }
 
-fn compute_image_fragment_metrics(fragments: Vec<InlineFragmentGeometry>) -> LayoutMetrics {
+fn compute_replaced_fragment_metrics(fragments: Vec<InlineFragmentGeometry>) -> LayoutMetrics {
     let Some(first) = fragments.first() else {
         return LayoutMetrics::zero();
     };
@@ -9964,7 +10034,7 @@ fn layout_metrics_native(
                     ) {
                         metrics = compute_transformed_layout_metrics(layout, transform);
                     } else {
-                        metrics = compute_image_fragment_metrics(fragments);
+                        metrics = compute_replaced_fragment_metrics(fragments);
                     }
 
                     if is_main_document && let Some(painted_root) = state
@@ -9978,7 +10048,7 @@ fn layout_metrics_native(
                         ) {
                             compute_transformed_layout_metrics(layout, transform)
                         } else {
-                            compute_image_fragment_metrics(painted_fragments)
+                            compute_replaced_fragment_metrics(painted_fragments)
                         };
                         if painted.has_box {
                             metrics.x = painted.x;
@@ -11181,7 +11251,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         if is_style_attribute {
             state.borrow_mut().refresh_csp_inline_style_nodes(&node);
             state.borrow_mut().invalidate_style_cache_for_node(&node);
-        } else if node.tag_name().as_deref() == Some("style") {
+        } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
@@ -13883,7 +13953,7 @@ fn remove_attribute_native(
         if is_style_attribute {
             state.borrow_mut().refresh_csp_inline_style_nodes(&node);
             state.borrow_mut().invalidate_style_cache_for_node(&node);
-        } else if node.tag_name().as_deref() == Some("style") {
+        } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
@@ -14117,6 +14187,8 @@ fn create_document_native(
             id,
             DocumentStyleEntry {
                 resolver: None,
+                resources: Default::default(),
+                web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
             },
@@ -14151,6 +14223,8 @@ fn parse_xml_native(
             id,
             DocumentStyleEntry {
                 resolver: None,
+                resources: Default::default(),
+                web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
             },
@@ -31973,7 +32047,7 @@ b</textarea></form>"#);
         );
 
         // Write a <style> targeting #target. Outside script execution the
-        // fragment appends to <body>; collect_inline_stylesheets still picks it
+        // fragment appends to <body>; collect_stylesheet_nodes still picks it
         // up. This must mark the cached resolver dirty.
         runtime
             .eval("document.write('<style>#target { white-space: pre-wrap; }</style>')")

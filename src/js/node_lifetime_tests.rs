@@ -16,6 +16,41 @@ fn collect(runtime: &mut JsRuntime) {
 }
 
 #[test]
+fn parent_element_tracks_reparenting_without_crossing_document_or_shadow_roots() {
+    let mut runtime = runtime();
+    runtime
+        .eval(
+            r#"
+        var parent = document.createElement('section');
+        var child = document.createElement('span');
+        var text = document.createTextNode('text');
+        var comment = document.createComment('comment');
+        var fragment = document.createDocumentFragment();
+        var shadow = document.createElement('div').attachShadow({mode:'open'});
+        var checks = [document.parentElement === null,
+                      document.documentElement.parentElement === null,
+                      child.parentElement === null];
+        parent.appendChild(child); parent.appendChild(text); parent.appendChild(comment);
+        checks.push(child.parentElement === parent, text.parentElement === parent,
+                    comment.parentElement === parent);
+        fragment.appendChild(child);
+        checks.push(child.parentNode === fragment, child.parentElement === null);
+        shadow.appendChild(child);
+        checks.push(child.parentNode === shadow, child.parentElement === null);
+        document.body.appendChild(child);
+        checks.push(child.parentElement === document.body);
+        child.remove();
+        checks.push(child.parentElement === null);
+    "#,
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.eval("checks.every(Boolean)").unwrap().as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn retained_iframe_document_and_nodes_survive_navigation_and_removal() {
     let mut runtime = runtime();
     runtime
