@@ -4,7 +4,7 @@
 //! phases can share and mutate the same tree.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,13 +17,38 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// iframe-reload lifetime hazard in issue 049.)
 static NEXT_NODE_ID: AtomicUsize = AtomicUsize::new(1);
 
+#[cfg(test)]
+mod slot_cache_tests;
+
+#[cfg(test)]
 thread_local! {
+    static SLOT_ASSIGNMENT_WORK: std::cell::Cell<(usize, usize, usize)> = const {
+        std::cell::Cell::new((0, 0, 0))
+    };
+}
+
+thread_local! {
+    // Native DOM handles are confined to one thread. An epoch makes every
+    // structural/name mutation invalidate slot snapshots in constant time,
+    // including parser and embedding mutations that bypass the JS bindings.
+    static SLOT_ASSIGNMENT_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Number of elements on this thread that currently hold a non-zero scroll
     /// offset. Scrolling is rare, so paint and the layout-metrics bindings use
     /// this to skip their scroll passes entirely on documents that never
     /// scrolled. A released element does not decrement the count, which only
     /// costs an avoidable pass.
     static SCROLLED_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn invalidate_slot_assignments() {
+    SLOT_ASSIGNMENT_EPOCH.with(|epoch| {
+        epoch.set(
+            epoch
+                .get()
+                .checked_add(1)
+                .expect("DOM mutation epoch exhausted"),
+        );
+    });
 }
 
 /// Whether any element on this thread holds a non-zero scroll offset.
@@ -88,7 +113,7 @@ pub(crate) fn is_actually_disabled(node: &NodeHandle) -> bool {
 pub struct NodeHandle(Rc<RefCell<NodeInner>>);
 
 /// A non-owning handle used by caches that must not extend a DOM node's lifetime.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct WeakNodeHandle(Weak<RefCell<NodeInner>>);
 
 impl WeakNodeHandle {
@@ -174,6 +199,15 @@ pub struct Document;
 struct ShadowRoot {
     host: Weak<RefCell<NodeInner>>,
     mode: ShadowRootMode,
+    assignments: Option<(u64, Rc<SlotAssignments>)>,
+}
+
+/// A root owns its snapshot, but it must not keep removed slots or light
+/// children alive until the next lookup. Both directions use weak handles.
+#[derive(Debug, Default)]
+struct SlotAssignments {
+    by_slot: HashMap<usize, Vec<WeakNodeHandle>>,
+    by_node: HashMap<usize, WeakNodeHandle>,
 }
 
 /// A DOM element node.
@@ -528,6 +562,7 @@ impl NodeHandle {
         let root = Self::new(NodeData::ShadowRoot(ShadowRoot {
             host: Rc::downgrade(&self.0),
             mode,
+            assignments: None,
         }));
         element.shadow_root = Some(root.clone());
         Some(root)
@@ -572,18 +607,18 @@ impl NodeHandle {
 
     /// Returns the slot this light-tree child is assigned to.
     ///
-    /// Assignment is derived from the current trees rather than cached. This
-    /// keeps all native mutation paths (parser insertion, `innerHTML`, and DOM
-    /// methods) consistent without requiring a second invalidation graph.
+    /// All slots in a host share the current native-mutation snapshot, including
+    /// changes made by parser insertion, `innerHTML`, and embedding DOM methods.
     pub fn assigned_slot(&self) -> Option<NodeHandle> {
         if !self.is_slottable() {
             return None;
         }
         let host = self.parent_node()?;
         let root = host.shadow_root()?;
-        slot_assignments(&root)
-            .into_iter()
-            .find_map(|(slot, nodes)| nodes.iter().any(|node| node == self).then_some(slot))
+        slot_assignments(&root)?
+            .by_node
+            .get(&self.identity())?
+            .upgrade()
     }
 
     /// Returns the directly assigned slottables for an HTML `<slot>` element.
@@ -597,8 +632,12 @@ impl NodeHandle {
             return Vec::new();
         };
         let assigned = slot_assignments(&root)
-            .into_iter()
-            .find_map(|(slot, nodes)| (&slot == self).then_some(nodes))
+            .and_then(|assignments| {
+                assignments
+                    .by_slot
+                    .get(&self.identity())
+                    .map(|nodes| nodes.iter().filter_map(WeakNodeHandle::upgrade).collect())
+            })
             .unwrap_or_default();
         if !flatten {
             return assigned;
@@ -667,6 +706,7 @@ impl NodeHandle {
         detach_from_parent(&child);
         child.0.borrow_mut().parent = Some(Rc::downgrade(&self.0));
         self.0.borrow_mut().children.push(child);
+        invalidate_slot_assignments();
     }
 
     /// Inserts `new_child` before `reference_child`.
@@ -714,6 +754,7 @@ impl NodeHandle {
         };
         new_child.0.borrow_mut().parent = Some(Rc::downgrade(&self.0));
         self.0.borrow_mut().children.insert(index, new_child);
+        invalidate_slot_assignments();
         Ok(())
     }
 
@@ -742,6 +783,7 @@ impl NodeHandle {
 
         let removed = self.0.borrow_mut().children.remove(index);
         removed.0.borrow_mut().parent = None;
+        invalidate_slot_assignments();
         // Detaching destroys the subtree's boxes, and with them their scroll
         // offsets: re-inserting the node starts from the top of its content.
         // Reordering within one parent detaches first, so it resets too.
@@ -810,6 +852,9 @@ impl NodeHandle {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             let name = name.into();
             let name = if element.html { name.to_ascii_lowercase() } else { name };
+            if matches!(name.as_str(), "slot" | "name") {
+                invalidate_slot_assignments();
+            }
             if name == "checked" && !element.dirty_checkedness {
                 element.checked = true;
             }
@@ -844,6 +889,9 @@ impl NodeHandle {
     ) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             let qualified_name = qualified_name.into();
+            if matches!(qualified_name.as_str(), "slot" | "name") {
+                invalidate_slot_assignments();
+            }
             element.attributes.insert(qualified_name.clone(), value.into());
             element.attribute_names.insert(qualified_name, AttributeName {
                 namespace_uri,
@@ -882,6 +930,9 @@ impl NodeHandle {
     pub fn remove_attribute(&self, name: &str) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             let name = if element.html { name.to_ascii_lowercase() } else { name.to_string() };
+            if matches!(name.as_str(), "slot" | "name") {
+                invalidate_slot_assignments();
+            }
             element.attributes.remove(&name);
             element.attribute_names.remove(&name);
             if name == "checked" && !element.dirty_checkedness {
@@ -896,6 +947,9 @@ impl NodeHandle {
     /// Removes an exactly-qualified XML/namespaced attribute.
     pub fn remove_xml_attribute(&self, qualified_name: &str) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            if matches!(qualified_name, "slot" | "name") {
+                invalidate_slot_assignments();
+            }
             element.attributes.remove(qualified_name);
             element.attribute_names.remove(qualified_name);
         }
@@ -1147,6 +1201,11 @@ fn detach_from_parent(child: &NodeHandle) {
 
 fn collect_slots(node: &NodeHandle, slots: &mut Vec<NodeHandle>) {
     for child in node.child_nodes() {
+        #[cfg(test)]
+        SLOT_ASSIGNMENT_WORK.with(|work| {
+            let (builds, shadow, light) = work.get();
+            work.set((builds, shadow + 1, light));
+        });
         if child.is_html_slot() {
             slots.push(child.clone());
         }
@@ -1154,22 +1213,41 @@ fn collect_slots(node: &NodeHandle, slots: &mut Vec<NodeHandle>) {
     }
 }
 
-/// Computes every slot assignment for one shadow host in a single pass over
-/// the host's light children. This is the shared host-unit primitive used by
-/// DOM accessors and flat-tree layout, avoiding a fresh shadow-tree walk for
-/// each candidate slottable.
-fn slot_assignments(root: &NodeHandle) -> Vec<(NodeHandle, Vec<NodeHandle>)> {
+/// Shares one assignment calculation across a host's slots and light children.
+/// A mutation invalidates snapshots lazily, without walking ancestors or roots
+/// at mutation time. The name index preserves the first slot in tree order.
+fn slot_assignments(root: &NodeHandle) -> Option<Rc<SlotAssignments>> {
+    // A separately retained shadow root can outlive its host without another
+    // mutation. In that case even a matching epoch has no assigned children.
+    let host = root.shadow_host()?;
+    let epoch = SLOT_ASSIGNMENT_EPOCH.with(std::cell::Cell::get);
+    if let NodeData::ShadowRoot(data) = &root.0.borrow().data
+        && let Some((cached_epoch, assignments)) = &data.assignments
+        && *cached_epoch == epoch
+    {
+        return Some(assignments.clone());
+    }
+    #[cfg(test)]
+    SLOT_ASSIGNMENT_WORK.with(|work| {
+        let (builds, shadow, light) = work.get();
+        work.set((builds + 1, shadow, light));
+    });
     let mut slots = Vec::new();
     collect_slots(root, &mut slots);
-    let mut assignments: Vec<_> = slots
-        .iter()
-        .cloned()
-        .map(|slot| (slot, Vec::new()))
-        .collect();
-    let Some(host) = root.shadow_host() else {
-        return assignments;
-    };
+    let mut first_slot_by_name = HashMap::new();
+    let mut assignments = SlotAssignments::default();
+    for slot in &slots {
+        first_slot_by_name
+            .entry(slot.get_attribute("name").unwrap_or_default())
+            .or_insert(slot);
+        assignments.by_slot.insert(slot.identity(), Vec::new());
+    }
     for child in host.child_nodes() {
+        #[cfg(test)]
+        SLOT_ASSIGNMENT_WORK.with(|work| {
+            let (builds, shadow, light) = work.get();
+            work.set((builds, shadow, light + 1));
+        });
         if !child.is_slottable() {
             continue;
         }
@@ -1178,14 +1256,22 @@ fn slot_assignments(root: &NodeHandle) -> Vec<(NodeHandle, Vec<NodeHandle>)> {
         } else {
             String::new()
         };
-        if let Some(index) = slots
-            .iter()
-            .position(|slot| slot.get_attribute("name").unwrap_or_default() == requested_name)
-        {
-            assignments[index].1.push(child);
+        if let Some(slot) = first_slot_by_name.get(&requested_name) {
+            assignments
+                .by_slot
+                .get_mut(&slot.identity())
+                .unwrap()
+                .push(child.downgrade());
+            assignments
+                .by_node
+                .insert(child.identity(), slot.downgrade());
         }
     }
-    assignments
+    let assignments = Rc::new(assignments);
+    if let NodeData::ShadowRoot(data) = &mut root.0.borrow_mut().data {
+        data.assignments = Some((epoch, assignments.clone()));
+    }
+    Some(assignments)
 }
 
 fn flatten_slotables(nodes: Vec<NodeHandle>, output: &mut Vec<NodeHandle>) {
