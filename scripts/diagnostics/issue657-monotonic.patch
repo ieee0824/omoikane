@@ -2,12 +2,10 @@ diff --git a/engine/boa/core/engine/src/context/time.rs b/engine/boa/core/engine
 index b1eb0d5..61e9196 100644
 --- a/engine/boa/core/engine/src/context/time.rs
 +++ b/engine/boa/core/engine/src/context/time.rs
-@@ -1,14 +1,10 @@
- //! Clock related types and functions.
- 
+@@ -3 +3 @@
 -/// A monotonic instant in time, in the Boa engine.
 +/// An instant in a Boa clock's time domain.
- ///
+@@ -5,7 +5,3 @@
 -/// This type is guaranteed to be monotonic, i.e. if two instants
 -/// are compared, the later one will always be greater than the
 -/// earlier one. It is also always guaranteed to be greater than
@@ -18,16 +16,10 @@ index b1eb0d5..61e9196 100644
 +/// [`Clock::now`] supplies Unix timestamps for dates; [`Clock::monotonic_now`]
 +/// supplies nondecreasing timestamps for elapsed-time measurements. Compare or
 +/// subtract instants only when they come from the same clock and method.
- #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
- pub struct JsInstant {
-     /// The duration of time since the Unix epoch.
-@@ -133,8 +129,17 @@ impl std::ops::Sub for JsInstant {
- 
- /// Implement a clock that can be used to measure time.
- pub trait Clock {
+@@ -136 +132 @@ pub trait Clock {
 -    /// Returns the current time.
 +    /// Returns the current wall-clock time since the Unix epoch.
-     fn now(&self) -> JsInstant;
+@@ -137,0 +134,9 @@ pub trait Clock {
 +
 +    /// Returns a nondecreasing clock reading for timeout deadlines.
 +    ///
@@ -37,13 +29,7 @@ index b1eb0d5..61e9196 100644
 +    fn monotonic_now(&self) -> JsInstant {
 +        self.now()
 +    }
- }
- 
- /// A clock that uses the standard system clock.
-@@ -150,6 +155,16 @@ impl Clock for StdClock {
- 
-         JsInstant::new_unchecked(duration)
-     }
+@@ -152,0 +158,10 @@ impl Clock for StdClock {
 +
 +    fn monotonic_now(&self) -> JsInstant {
 +        // Keep a Unix-based origin without letting later wall-clock changes
@@ -54,44 +40,20 @@ index b1eb0d5..61e9196 100644
 +            ANCHOR.get_or_init(|| (crate::sys::time::Instant::now(), self.now().inner));
 +        JsInstant::new_unchecked(*epoch + instant.elapsed())
 +    }
- }
- 
- /// A clock that uses a fixed time, useful for testing. The internal time is in milliseconds.
 diff --git a/engine/boa/core/engine/src/job.rs b/engine/boa/core/engine/src/job.rs
 index 677013a..37cfa7d 100644
 --- a/engine/boa/core/engine/src/job.rs
 +++ b/engine/boa/core/engine/src/job.rs
-@@ -876,7 +876,7 @@ impl JobExecutor for SimpleJobExecutor {
-             Job::PromiseJob(p) => self.promise_jobs.borrow_mut().push_back(p),
-             Job::AsyncJob(a) => self.async_jobs.borrow_mut().push_back(a),
-             Job::TimeoutJob(t) => {
+@@ -879 +879 @@ impl JobExecutor for SimpleJobExecutor {
 -                let now = context.clock().now();
 +                let now = context.clock().monotonic_now();
-                 self.timeout_jobs.borrow_mut().insert(now + t.timeout(), t);
-             }
-             Job::GenericJob(g) => self.generic_jobs.borrow_mut().push_back(g),
-@@ -911,7 +911,7 @@ impl JobExecutor for SimpleJobExecutor {
- 
-                 // There are no timeout jobs to run IIF there are no jobs to execute right now.
-                 let no_timeout_jobs_to_run = {
+@@ -914 +914 @@ impl JobExecutor for SimpleJobExecutor {
 -                    let now = context.borrow().clock().now();
 +                    let now = context.borrow().clock().monotonic_now();
-                     !self.timeout_jobs.borrow().iter().any(|(t, _)| &now >= t)
-                 };
- 
-@@ -930,7 +930,7 @@ impl JobExecutor for SimpleJobExecutor {
-                 }
- 
-                 {
+@@ -933 +933 @@ impl JobExecutor for SimpleJobExecutor {
 -                    let now = context.borrow().clock().now();
 +                    let now = context.borrow().clock().monotonic_now();
-                     let mut timeouts_borrow = self.timeout_jobs.borrow_mut();
-                     let mut jobs_to_keep = timeouts_borrow.split_off(&now);
-                     jobs_to_keep.retain(|_, job| !job.is_cancelled());
-@@ -973,6 +973,101 @@ impl JobExecutor for SimpleJobExecutor {
- mod tests {
-     use super::*;
- 
+@@ -975,0 +976,95 @@ mod tests {
 +    mod clock_domains {
 +        use super::*;
 +        use crate::context::time::{Clock, FixedClock};
@@ -187,6 +149,3 @@ index 677013a..37cfa7d 100644
 +        }
 +    }
 +
-     #[test]
-     fn cancelled_async_promise_job_restores_its_callers_realm() {
-         let mut context = Context::default();

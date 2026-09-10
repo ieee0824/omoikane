@@ -18,8 +18,11 @@ def write(name, value):
 
 def verify_clock_fix(patch):
     """Prove the new regressions fail with the original scheduler clock."""
-    subprocess.run(['git', 'apply', '--check', str(patch)], cwd=ROOT, check=True)
-    subprocess.run(['git', 'apply', str(patch)], cwd=ROOT, check=True)
+    origin = json.loads((ROOT / 'engine/boa-origin.json').read_text())
+    for name in ['core/engine/src/context/time.rs', 'core/engine/src/job.rs']:
+        assert hashlib.sha256((ENGINE / name).read_bytes()).hexdigest() == origin['files'][name]['sha256']
+    subprocess.run(['git', 'apply', '--check', '--unidiff-zero', str(patch)], cwd=ROOT, check=True)
+    subprocess.run(['git', 'apply', '--unidiff-zero', str(patch)], cwd=ROOT, check=True)
     job = ENGINE / 'core/engine/src/job.rs'
     fixed = job.read_text()
     assert fixed.count('clock().monotonic_now()') == 3
