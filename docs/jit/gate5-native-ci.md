@@ -3,13 +3,15 @@
 Issue: #544. Requires the ARM64 foundation, arithmetic and properties in #541–#543.
 
 Previously release.yml cross-built Linux ARM64 and only ran cargo test on Linux
-x86_64. Native JIT targets now uses four actual hosts: ubuntu-24.04 (x86_64),
-ubuntu-24.04-arm, macos-15-intel and macos-14 (ARM64). The Rust host triple and
+x86_64. Native JIT targets now uses three actual hosts: ubuntu-24.04 (x86_64),
+ubuntu-24.04-arm and macos-14 (ARM64). The Rust host triple and
 machine architecture must match the distribution target. No QEMU is required.
 
 The reusable jit-native.yml runs for PRs, main, manual requests and release tags.
-Release publication depends on all four native checks as well as the existing
-packaging jobs. Package names and release publishing remain unchanged. The native
+Release publication depends on all three native checks as well as the existing
+packaging jobs. macOS x86_64 support and its release archive were removed by the
+project owner's 2026-09-10 decision in #545; see [the support matrix](gate5-release.md).
+The retained targets keep their package names and release publishing. The native
 matrix owns the existing code-memory, lowering, arithmetic/property, stack-map,
 runtime-call, GC-root and deopt/exception/timeout integration contracts that used
 to run only in the general Linux job. The full Gate 4 stress gate remains separate.

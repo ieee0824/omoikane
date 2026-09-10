@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build, exercise and aggregate the four native distribution targets for Gate 5."""
+"""Build, exercise and aggregate the supported distribution targets for Gate 5."""
 
 import argparse
 import ctypes
@@ -20,7 +20,6 @@ import traceback
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("libomoikane.so", "omoikane-linux-x86_64.tar.gz"),
     "aarch64-unknown-linux-gnu": ("libomoikane.so", "omoikane-linux-aarch64.tar.gz"),
-    "x86_64-apple-darwin": ("libomoikane.dylib", "omoikane-macos-x86_64.tar.gz"),
     "aarch64-apple-darwin": ("libomoikane.dylib", "omoikane-macos-aarch64.tar.gz"),
 }
 SUITE_COMMAND = ["cargo", "test", "--locked", "--features", "baseline-jit,jit-differential",

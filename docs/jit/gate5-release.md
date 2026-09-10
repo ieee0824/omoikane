@@ -5,11 +5,11 @@ Issue: [#545](https://github.com/ieee0824/omoikane/issues/545), parent
 
 The Gate 5 workflow builds actual distribution archives and executes their
 contents on the matching native host. Full-suite tests and package builds run
-in separate jobs, with one resolved Cargo.lock shared by all eight jobs.
+in separate jobs, with one resolved Cargo.lock shared by all six jobs.
 The same reusable workflow is a dependency of `release.yml`; publication cannot
 proceed if any target, package smoke, or compatibility check fails.
 
-Pull requests execute the gate through `release.yml` itself, so its four-target
+Pull requests execute the gate through `release.yml` itself, so its three-target
 build path is exercised before merge. The standalone native-JIT workflow also
 runs on PRs; the release workflow calls that matrix again only for tag pushes
 and manual preflights. Manual runs validate the complete release path without
@@ -20,16 +20,20 @@ The reusable gate also runs directly after pushes to main.
 | --- | --- | --- | --- |
 | x86_64-unknown-linux-gnu | ubuntu-24.04 | libomoikane.so | System V x86-64 |
 | aarch64-unknown-linux-gnu | ubuntu-24.04-arm | libomoikane.so | AAPCS64 |
-| x86_64-apple-darwin | macos-15-intel | libomoikane.dylib | System V x86-64 / macOS code-memory policy |
 | aarch64-apple-darwin | macos-14 | libomoikane.dylib | Apple arm64 / macOS code-memory policy |
 
 This table identifies the tested support matrix; the matching revision's
 `jit-gate5-report/gate.json` records its actual pass/fail decision. A green
 cross-build alone, a stale report or a skipped native workload is insufficient.
 
+macOS support is ARM64 only. On 2026-09-10 the project owner removed macOS
+x86_64 from the supported distribution targets in #545. It is excluded from
+release packaging and required native/full-suite CI. Historical Intel macOS
+measurements describe earlier experiments, not current support guarantees.
+
 ## Archive and compatibility checks
 
-Existing archive names, the C header and the default library are retained.
+The supported targets retain their archive names, C header and default library.
 The default library is built without optional features and copied to staging
 before building the separate `omoikane-jit-smoke` diagnostic executable with
 `baseline-jit`. A `build.json` manifest records revision, compiler, target,
@@ -112,8 +116,8 @@ python3 scripts/jit-gate5.py suite TARGET .artifacts/jit-gate5
 python3 scripts/jit-gate5.py package TARGET .artifacts/jit-gate5
 ```
 
-Local results for one target cannot satisfy the four-target aggregate. CI retains
-`jit-gate5-TARGET-suite`, `jit-gate5-TARGET-package`, the four verified archives,
+Local results for one target cannot satisfy the three-target aggregate. CI retains
+`jit-gate5-TARGET-suite`, `jit-gate5-TARGET-package`, the three verified archives,
 the shared identity/lockfile and `jit-gate5-report`. Complete logs are uploaded on
 failure as well; failed steps do not produce a passing target result.
 

@@ -26,7 +26,7 @@ jobs:
           python-version: '3.12'
       - name: Verify incomplete or mismatched evidence cannot pass
         run: python3 -m unittest discover -s scripts/tests -p test_jit_gate5.py
-      - name: Resolve one dependency set for all eight jobs
+      - name: Resolve one dependency set for all six jobs
         run: python3 scripts/jit-gate5.py prepare .artifacts/jit-gate5/inputs
       - uses: actions/upload-artifact@v4
         with:
@@ -43,7 +43,7 @@ jobs:
       fail-fast: false
       matrix:
         kind: [suite, package]
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin]
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, aarch64-apple-darwin]
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
@@ -51,9 +51,6 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             archive: omoikane-linux-aarch64.tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-15-intel
-            archive: omoikane-macos-x86_64.tar.gz
           - target: aarch64-apple-darwin
             os: macos-14
             archive: omoikane-macos-aarch64.tar.gz

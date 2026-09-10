@@ -32,7 +32,7 @@ jobs:
       - name: Run Gate 2 differential harness
         run: cargo test --features jit-differential --test jit_differential
 
-      # Native JIT contracts run in jit-native.yml on all four distribution targets.
+      # Native JIT contracts run in jit-native.yml on all three distribution targets.
       - run: cargo build
       # Re-run the JS benchmark with output shown: libtest swallows stdout for
       # passing tests, so the per-shape table and the drift classification would
