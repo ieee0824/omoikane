@@ -1134,7 +1134,10 @@ fn font_metrics_carry_css_web_font_selection() {
     );
     let metrics = font_metrics(&style);
 
-    assert_eq!(metrics.font_family, Some(crate::font::FontFamilyKey::new("twitterchirp")));
+    assert_eq!(
+        metrics.font_family,
+        Some(crate::font::FontFamilyKey::new("TwitterChirp, sans-serif"))
+    );
     assert_eq!(metrics.font_weight, crate::font::FontWeight(700));
     assert_eq!(metrics.font_style, crate::font::FontStyle::Italic);
 }

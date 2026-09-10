@@ -291,6 +291,13 @@ fn record(case: &str, details: Value) {
 
 #[test]
 fn http_page_input_fetch_and_dom_changes_reach_the_painted_frame() {
+    record_fonts(
+        "http_page_input_fetch_and_dom_changes_reach_the_painted_frame",
+        http_page_input_fetch_and_dom_changes_reach_the_painted_frame_impl,
+    );
+}
+
+fn http_page_input_fetch_and_dom_changes_reach_the_painted_frame_impl() {
     let server = FixtureServer::start();
     let mut browser = PlatformBrowser::with_tab(Some(&server.url("/start"))).unwrap();
     assert_eq!(
@@ -385,6 +392,13 @@ fn http_page_input_fetch_and_dom_changes_reach_the_painted_frame() {
 
 #[test]
 fn form_submission_and_back_navigation_preserve_saved_state() {
+    record_fonts(
+        "form_submission_and_back_navigation_preserve_saved_state",
+        form_submission_and_back_navigation_preserve_saved_state_impl,
+    );
+}
+
+fn form_submission_and_back_navigation_preserve_saved_state_impl() {
     let server = FixtureServer::start();
     let mut browser = PlatformBrowser::with_tab(Some(&server.url("/app/index.html"))).unwrap();
     browser.render_active(640, 480, 16).unwrap();
@@ -435,6 +449,13 @@ fn form_submission_and_back_navigation_preserve_saved_state() {
 
 #[test]
 fn tabs_share_local_storage_but_keep_session_storage_separate() {
+    record_fonts(
+        "tabs_share_local_storage_but_keep_session_storage_separate",
+        tabs_share_local_storage_but_keep_session_storage_separate_impl,
+    );
+}
+
+fn tabs_share_local_storage_but_keep_session_storage_separate_impl() {
     let server = FixtureServer::start();
     let mut browser = PlatformBrowser::with_tab(Some(&server.url("/storage"))).unwrap();
     let first = browser.active_tab().unwrap();
@@ -510,6 +531,13 @@ fn tabs_share_local_storage_but_keep_session_storage_separate() {
 
 #[test]
 fn worker_clone_and_child_realm_complete_through_the_page_event_loop() {
+    record_fonts(
+        "worker_clone_and_child_realm_complete_through_the_page_event_loop",
+        worker_clone_and_child_realm_complete_through_the_page_event_loop_impl,
+    );
+}
+
+fn worker_clone_and_child_realm_complete_through_the_page_event_loop_impl() {
     let server = FixtureServer::start();
     let mut browser = PlatformBrowser::with_tab(Some(&server.url("/app/index.html"))).unwrap();
     browser.render_active(640, 480, 16).unwrap();
@@ -579,6 +607,13 @@ fn worker_clone_and_child_realm_complete_through_the_page_event_loop() {
 
 #[test]
 fn linked_stylesheets_share_cascade_geometry_and_paint_across_updates() {
+    record_fonts(
+        "linked_stylesheets_share_cascade_geometry_and_paint_across_updates",
+        linked_stylesheets_share_cascade_geometry_and_paint_across_updates_impl,
+    );
+}
+
+fn linked_stylesheets_share_cascade_geometry_and_paint_across_updates_impl() {
     let server = FixtureServer::start();
     let mut browser = PlatformBrowser::with_tab(Some(&server.url("/style-contract"))).unwrap();
     browser.active_session_mut().unwrap().set_viewport(640, 480);
@@ -639,6 +674,13 @@ fn linked_stylesheets_share_cascade_geometry_and_paint_across_updates() {
 
 #[test]
 fn stylesheet_policy_is_shared_by_geometry_and_paint() {
+    record_fonts(
+        "stylesheet_policy_is_shared_by_geometry_and_paint",
+        stylesheet_policy_is_shared_by_geometry_and_paint_impl,
+    );
+}
+
+fn stylesheet_policy_is_shared_by_geometry_and_paint_impl() {
     let server = FixtureServer::start();
     let mut browser = PlatformBrowser::with_tab(Some(&server.url("/style-csp"))).unwrap();
     let frame = browser.render_active(640, 480, 16).unwrap();
@@ -658,6 +700,13 @@ fn stylesheet_policy_is_shared_by_geometry_and_paint() {
 
 #[test]
 fn normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates() {
+    record_fonts(
+        "normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates",
+        normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates_impl,
+    );
+}
+
+fn normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates_impl() {
     let server = FixtureServer::start();
     let mut browser = PlatformBrowser::with_tab(Some(&server.url("/inline-form"))).unwrap();
     let first = browser.render_active(320, 240, 16).unwrap();
@@ -699,4 +748,24 @@ fn normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates()
         "inline-form",
         json!({"input_border_box":[90,30],"focused_input":true,"submitted":"name=Lin"}),
     );
+}
+
+fn record_fonts(case: &str, run: impl FnOnce()) {
+    let Some(root) = std::env::var_os("OMOIKANE_BROWSER_REPORT_DIR") else {
+        return run();
+    };
+    let (_, selections) = omoikane::font::with_font_selection_diagnostics(run);
+    let dir = std::path::PathBuf::from(root).join("fonts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let report = json!({
+        "case": case,
+        "input_fixture": "tests/fixtures/anonymized-browser-journey/",
+        "case_source": "tests/browser_journeys.rs",
+        "selections": selections,
+    });
+    std::fs::write(
+        dir.join(format!("{case}.json")),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
 }

@@ -93,7 +93,7 @@ checked against both CSSOM geometry and painted pixels.
 
 ```bash
 OMOIKANE_BROWSER_REPORT_DIR=.artifacts/browser/journeys \
-  cargo test --test browser_journeys -- --nocapture --test-threads=1
+  cargo test --test browser_journeys --test system_font_selection -- --nocapture --test-threads=1
 OMOIKANE_JIT_GATE_REPORT_DIR=.artifacts/browser/acid3 \
   cargo test --test acid3_harness -- --nocapture --test-threads=1
 ```
@@ -110,6 +110,22 @@ is not compared to a whole-image golden. Typed input must visibly change the inp
 interior. Review actual images as well: this found missing input text after the
 original DOM assertions already passed. A failed assertion remains a failed test;
 absence of a successful JSON report is not success.
+
+The `fonts/` subdirectory records each journey's actual primary font selections
+in layout and paint: the requested CSS family list, weight and style, plus the
+selected system file, collection face index and OpenType metadata. The inventory
+report includes all discovered faces and hashes of the files selected for the
+three generic families in normal/bold and upright/italic styles. Input CSS is in
+the named fixture and test source at the revision recorded by the workflow.
+Font diagnostics are opt-in and scoped to the thread executing the journey.
+
+The workflow also runs `cargo test --lib font -- --include-ignored --nocapture`.
+The original fonts in [anonymized-font-selection](fixtures/anonymized-font-selection/README.md)
+verify metadata-based selection independently of filenames and directory order,
+TTC face indices through shaping and rasterization, and CJK/combining fallback.
+Their layout/paint test emits four `anonymized-font-selection.*.actual.png` files
+when `OMOIKANE_BROWSER_REPORT_DIR` is set. These controlled faces have distinct
+advances and outlines; their geometric assertions do not depend on installed fonts.
 
 These fixed journeys exercise selected browser behavior, not arbitrary website
 compatibility or native window creation. They accompany the full suite, WPT and Web
