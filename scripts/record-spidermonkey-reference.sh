@@ -19,6 +19,11 @@ esac
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 runner_url="file://${repo_root}/tests/js_benchmark/firefox-runner.html"
+fixture_sha256=$(python3 - "$repo_root/tests/js_benchmark/shapes.js" <<'PYHASH'
+import hashlib, pathlib, sys
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PYHASH
+)
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
@@ -38,6 +43,9 @@ record_mode() {
       if [[ "$mode" == interpreter ]]; then
         echo 'user_pref("javascript.options.baselinejit", false);'
         echo 'user_pref("javascript.options.ion", false);'
+      else
+        echo 'user_pref("javascript.options.baselinejit", true);'
+        echo 'user_pref("javascript.options.ion", true);'
       fi
     } >"$profile/user.js"
     output="$scratch/${mode}-${run}.log"
@@ -70,71 +78,9 @@ if [[ "$show_samples" == 1 ]]; then
   cat "$raw"
 fi
 
-awk -F'|' -v runs="$runs" '
-  function is_positive_number(value) {
-    return value ~ /^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/ && value + 0 > 0
-  }
-  BEGIN {
-    shape_list = "arith prop-mono prop-mega call closure-alloc object-alloc string-concat array primitive-string-property primitive-string-method proto-method"
-    shape_count = split(shape_list, shape_ids, " ")
-    for (shape_pos = 1; shape_pos <= shape_count; shape_pos++) {
-      expected[shape_ids[shape_pos]] = 1
-    }
-  }
-  NF != 6 {
-    print "malformed benchmark row: " $0 > "/dev/stderr"
-    invalid = 1
-    next
-  }
-  {
-    mode = $1
-    run = $2
-    shape = $3
-    if ((mode != "interpreter" && mode != "jit") || run < 1 || run > runs || !(shape in expected)) {
-      print "unexpected benchmark identity: " mode "|" run "|" shape > "/dev/stderr"
-      invalid = 1
-      next
-    }
-    if ($4 !~ /^[1-9][0-9]*$/ || !is_positive_number($5) || !is_positive_number($6)) {
-      print "invalid benchmark measurement: " $0 > "/dev/stderr"
-      invalid = 1
-      next
-    }
-    key = mode "|" run "|" shape
-    if (key in seen) {
-      print "duplicate benchmark shape: " key > "/dev/stderr"
-      invalid = 1
-    }
-    seen[key] = 1
-  }
-  END {
-    modes[1] = "interpreter"
-    modes[2] = "jit"
-    for (mode_index = 1; mode_index <= 2; mode_index++) {
-      for (run = 1; run <= runs; run++) {
-        for (shape_index = 1; shape_index <= shape_count; shape_index++) {
-          key = modes[mode_index] "|" run "|" shape_ids[shape_index]
-          if (!(key in seen)) {
-            print "missing benchmark shape: " key > "/dev/stderr"
-            invalid = 1
-          }
-        }
-      }
-    }
-    if (invalid) exit 1
-  }
-' "$raw"
-
-echo "reference_engine|$($firefox_bin --version 2>/dev/null | head -n 1)"
-echo "measurement_runs|$runs"
-echo "minimum_ns_per_op"
-awk -F'|' '
-  NF == 6 {
-    key = $1 "|" $3
-    value = $6 + 0
-    if (!(key in minimum) || value < minimum[key]) minimum[key] = value
-  }
-  END {
-    for (key in minimum) print key "|" minimum[key]
-  }
-' "$raw" | sort
+report_args=()
+if [[ -n "${OMOIKANE_SM_BENCH_REPORT:-}" ]]; then
+  report_args=(--report "$OMOIKANE_SM_BENCH_REPORT")
+fi
+python3 "$repo_root/scripts/benchmark-reference.py" "$raw" --runs "$runs" --expected-fixture-sha256 "$fixture_sha256" \
+  --firefox-version "$("$firefox_bin" --version 2>/dev/null | head -n 1)" "${report_args[@]}"

@@ -1,0 +1,122 @@
+{
+  "version": 7,
+  "profile": "dev",
+  "passes": 4,
+  "reference_engine": "SpiderMonkey (Firefox 153.0.1; minimum of 5 independent processes)",
+  "target_arch": "x86_64",
+  "target_os": "linux",
+  "environment": "Omoikane timing baseline inherited from v6 idle two-core container; Firefox 153.0.1 references recorded separately on x86_64 Linux",
+  "measurement_runs": 5,
+  "shapes": [
+    {
+      "id": "arith",
+      "description": "Bytecode dispatch and integer arithmetic with no property access or allocation",
+      "iterations": 2000000,
+      "baseline_ns_per_op": 140.7,
+      "reference": {
+        "spidermonkey_interpreter": 37.82,
+        "spidermonkey_jit": 3.54
+      }
+    },
+    {
+      "id": "prop-mono",
+      "description": "Monomorphic property read/write through one call site (inline cache hit path)",
+      "iterations": 1000000,
+      "baseline_ns_per_op": 242.9,
+      "reference": {
+        "spidermonkey_interpreter": 47.26,
+        "spidermonkey_jit": 1.82
+      }
+    },
+    {
+      "id": "prop-mega",
+      "description": "Megamorphic property read across eight shapes (inline cache miss path)",
+      "iterations": 500000,
+      "baseline_ns_per_op": 267.8,
+      "reference": {
+        "spidermonkey_interpreter": 39.52,
+        "spidermonkey_jit": 6.2
+      }
+    },
+    {
+      "id": "call",
+      "description": "Function call overhead",
+      "iterations": 1000000,
+      "baseline_ns_per_op": 298.5,
+      "reference": {
+        "spidermonkey_interpreter": 43.22,
+        "spidermonkey_jit": 3.56
+      }
+    },
+    {
+      "id": "closure-alloc",
+      "description": "One closure allocated per iteration (allocator and GC pressure)",
+      "iterations": 300000,
+      "baseline_ns_per_op": 804.9,
+      "reference": {
+        "spidermonkey_interpreter": 53.07,
+        "spidermonkey_jit": 3.27
+      }
+    },
+    {
+      "id": "object-alloc",
+      "description": "One object literal allocated per iteration (allocator and GC pressure)",
+      "iterations": 300000,
+      "baseline_ns_per_op": 627.2,
+      "reference": {
+        "spidermonkey_interpreter": 55.67,
+        "spidermonkey_jit": 4.27
+      }
+    },
+    {
+      "id": "string-concat",
+      "description": "String building by repeated appending, which now extends the string in place rather than reallocating and copying it (issues #318-#320)",
+      "iterations": 200000,
+      "baseline_ns_per_op": 159.7,
+      "reference": {
+        "spidermonkey_interpreter": 42.5,
+        "spidermonkey_jit": 6.7
+      }
+    },
+    {
+      "id": "array",
+      "description": "Array index and push",
+      "iterations": 500000,
+      "baseline_ns_per_op": 401.5,
+      "reference": {
+        "spidermonkey_interpreter": 66.4,
+        "spidermonkey_jit": 16.8
+      }
+    },
+    {
+      "id": "primitive-string-property",
+      "description": "Property read on a string primitive, with no call (wrapper allocation shows here first; its spidermonkey_jit figure is loop-overhead-bound, see shapes.js)",
+      "iterations": 500000,
+      "baseline_ns_per_op": 144.4,
+      "reference": {
+        "spidermonkey_interpreter": 27.96,
+        "spidermonkey_jit": 4.0
+      }
+    },
+    {
+      "id": "primitive-string-method",
+      "description": "Method call on a string primitive (the read above plus the call)",
+      "iterations": 500000,
+      "baseline_ns_per_op": 272.2,
+      "reference": {
+        "spidermonkey_interpreter": 39.2,
+        "spidermonkey_jit": 3.76
+      }
+    },
+    {
+      "id": "proto-method",
+      "description": "Method resolved one step up a prototype chain, with a plain object receiver built outside the timed body",
+      "iterations": 500000,
+      "baseline_ns_per_op": 336.4,
+      "reference": {
+        "spidermonkey_interpreter": 46.72,
+        "spidermonkey_jit": 3.36
+      }
+    }
+  ]
+}

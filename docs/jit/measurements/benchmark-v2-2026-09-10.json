@@ -1,0 +1,3207 @@
+{
+  "schema_version": 1,
+  "fixture": {
+    "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+    "version": 2
+  },
+  "inputs": {
+    "base_revision": "443fd1e21ef0ac03723077c35f0d510c0444b421",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: aarch64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 22.1.8\n",
+    "environment": "Linux aarch64 local container; dev profile; one build job; measurements without concurrent compilation",
+    "source_hashes": {
+      "Cargo.lock": "3c9dddeac03dadbde9af2509274da185dad0f84d50cb055cda91fe51c2ae4ff7",
+      "engine/boa/Cargo.lock": "128e77e97ea1af28b7beddf5e0801ef64a286f9fc2936cac85d65c8ca411b34a",
+      "tests/js_benchmark/shapes.js": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+      "tests/js_benchmark.rs": "b57339a937f16c1e9607b8f7545a2689e020715e606676640bbab7c95c156f9a",
+      "tests/engine_benchmark_results.rs": "984399bf865316527424d5a3bebb9239055c9cbfa625d1dc92fd08ff424386b0",
+      "tests/js_benchmark/firefox-runner.html": "affce252f1a1fc2bf81c931c0d7f10d9dfdbf5a91f770d282d789588359a5a11",
+      "scripts/record-spidermonkey-reference.sh": "cec20efa2707e97f9e9a389b36b605f8b69c5f87bb05d8b7a97ddc4c556a0179",
+      "scripts/benchmark-reference.py": "c3b27a8bb585ff0fc5969e6571db7a9ec59073cbdef1d7f6b9e6ae7b51cb7e57"
+    },
+    "binaries": {
+      "interpreter-engine_benchmark_results": "8f2fc625333ce35039f923c860840485b8bc583c54b684864dc0c5c6d598cb42",
+      "interpreter-js_benchmark": "37917f9fb23cef05a057b8bf005643e4c604c93caf2104237c7aa6271f742180",
+      "jit-engine_benchmark_results": "c98b982a7aeb93ed039db97e8b456ac72487faf9cfa11a7f8e5f8f9afb99285b",
+      "jit-js_benchmark": "e228e631fb598fe77595380be1670b428ad9d7a3c38b3f69d3ea52bb49f177e0"
+    },
+    "completed_at": "2026-09-10T23:10:21.740186+00:00",
+    "source_hashes_unchanged": true
+  },
+  "omoikane": {
+    "interpreter": {
+      "fixture": {
+        "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+        "version": 2
+      },
+      "profile": "dev",
+      "runs": [
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 0,
+            "compile_rejections": 0,
+            "compile_requests": 0,
+            "compiled_entries": 0,
+            "enabled": false,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 0,
+            "interrupt_deopts": 0,
+            "property_bailouts": 0,
+            "property_guard_hits": 0,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 0,
+            "shape_deopts": 0,
+            "successful_compilations": 0,
+            "total_compile_time_ns": 0,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 419.3738,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 209.69,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 612.6392,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 612.64,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 216.8491,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 433.7,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 549.863,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 549.86,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 329.9382,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1099.79,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 294.2412,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 980.8,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 57.2513,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 286.26,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 409.2464,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 818.49,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 133.8046,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 267.61,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 255.1674,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 510.33,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 325.5249,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 651.05,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        },
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 0,
+            "compile_rejections": 0,
+            "compile_requests": 0,
+            "compiled_entries": 0,
+            "enabled": false,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 0,
+            "interrupt_deopts": 0,
+            "property_bailouts": 0,
+            "property_guard_hits": 0,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 0,
+            "shape_deopts": 0,
+            "successful_compilations": 0,
+            "total_compile_time_ns": 0,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 419.6758,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 209.84,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 617.738,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 617.74,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 216.0461,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 432.09,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 551.4451,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 551.45,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 375.6928,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1252.31,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 307.0319,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1023.44,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 57.3329,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 286.66,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 411.7876,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 823.58,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 131.4184,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 262.84,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 256.9988,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 514.0,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 326.3934,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 652.79,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        },
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 0,
+            "compile_rejections": 0,
+            "compile_requests": 0,
+            "compiled_entries": 0,
+            "enabled": false,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 0,
+            "interrupt_deopts": 0,
+            "property_bailouts": 0,
+            "property_guard_hits": 0,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 0,
+            "shape_deopts": 0,
+            "successful_compilations": 0,
+            "total_compile_time_ns": 0,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 418.5106,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 209.26,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 603.2487,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 603.25,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 214.7737,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 429.55,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 548.2223,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 548.22,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 369.4178,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1231.39,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 311.1837,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1037.28,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 56.9114,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 284.56,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 415.6897,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 831.38,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 131.7974,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 263.59,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 256.4049,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 512.81,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 324.7358,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 649.47,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        },
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 0,
+            "compile_rejections": 0,
+            "compile_requests": 0,
+            "compiled_entries": 0,
+            "enabled": false,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 0,
+            "interrupt_deopts": 0,
+            "property_bailouts": 0,
+            "property_guard_hits": 0,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 0,
+            "shape_deopts": 0,
+            "successful_compilations": 0,
+            "total_compile_time_ns": 0,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 417.7042,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 208.85,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 609.582,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 609.58,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 215.4674,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 430.93,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 549.0179,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 549.02,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 382.3471,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1274.49,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 310.423,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1034.74,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 56.2527,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 281.26,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 413.4354,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 826.87,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 132.6417,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 265.28,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 256.9515,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 513.9,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 329.8855,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 659.77,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        },
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 0,
+            "compile_rejections": 0,
+            "compile_requests": 0,
+            "compiled_entries": 0,
+            "enabled": false,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 0,
+            "interrupt_deopts": 0,
+            "property_bailouts": 0,
+            "property_guard_hits": 0,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 0,
+            "shape_deopts": 0,
+            "successful_compilations": 0,
+            "total_compile_time_ns": 0,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 417.673,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 208.84,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 612.2468,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 612.25,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 214.2115,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 428.42,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 550.9648,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 550.96,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 371.2108,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1237.37,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 308.0367,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1026.79,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 57.3131,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 286.57,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 414.0029,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 828.01,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 133.0921,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 266.18,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 255.0611,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 510.12,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 326.2189,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 652.44,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        }
+      ],
+      "target_arch": "aarch64",
+      "target_os": "linux"
+    },
+    "jit": {
+      "fixture": {
+        "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+        "version": 2
+      },
+      "profile": "dev",
+      "runs": [
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 2928,
+            "compile_rejections": 17,
+            "compile_requests": 19,
+            "compiled_entries": 2936,
+            "enabled": true,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 2092,
+            "interrupt_deopts": 2928,
+            "property_bailouts": 976,
+            "property_guard_hits": 980,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 32809282,
+            "shape_deopts": 0,
+            "successful_compilations": 2,
+            "total_compile_time_ns": 41264080,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 13.2166,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 6.61,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 7.6461,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 7.65,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 276.0254,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 552.05,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 674.631,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 674.63,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 354.2928,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1180.98,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 347.8908,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1159.64,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 73.0892,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 365.45,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 540.077,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 1080.15,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 170.0691,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 340.14,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 331.3696,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 662.74,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 406.6593,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 813.32,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        },
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 2928,
+            "compile_rejections": 17,
+            "compile_requests": 19,
+            "compiled_entries": 2936,
+            "enabled": true,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 2092,
+            "interrupt_deopts": 2928,
+            "property_bailouts": 976,
+            "property_guard_hits": 980,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 32809282,
+            "shape_deopts": 0,
+            "successful_compilations": 2,
+            "total_compile_time_ns": 35306625,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 13.384,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 6.69,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 7.6438,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 7.64,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 277.7988,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 555.6,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 666.3122,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 666.31,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 389.2862,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1297.62,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 361.1156,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1203.72,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 73.8542,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 369.27,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 546.4917,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 1092.98,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 173.2963,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 346.59,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 334.5037,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 669.01,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 410.978,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 821.96,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        },
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 2928,
+            "compile_rejections": 17,
+            "compile_requests": 19,
+            "compiled_entries": 2936,
+            "enabled": true,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 2092,
+            "interrupt_deopts": 2928,
+            "property_bailouts": 976,
+            "property_guard_hits": 980,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 32809282,
+            "shape_deopts": 0,
+            "successful_compilations": 2,
+            "total_compile_time_ns": 36015889,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 13.307,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 6.65,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 7.7426,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 7.74,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 277.2579,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 554.52,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 669.4631,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 669.46,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 383.2958,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1277.65,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 356.3501,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1187.83,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 76.9909,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 384.95,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 551.3721,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 1102.74,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 172.7019,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 345.4,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 332.3254,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 664.65,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 408.9648,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 817.93,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        },
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 2928,
+            "compile_rejections": 17,
+            "compile_requests": 19,
+            "compiled_entries": 2936,
+            "enabled": true,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 2092,
+            "interrupt_deopts": 2928,
+            "property_bailouts": 976,
+            "property_guard_hits": 980,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 32809282,
+            "shape_deopts": 0,
+            "successful_compilations": 2,
+            "total_compile_time_ns": 38600612,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 13.6424,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 6.82,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 7.8676,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 7.87,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 277.7125,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 555.43,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 684.5943,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 684.59,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 413.0791,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1376.93,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 365.0001,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1216.67,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 74.2127,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 371.06,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 548.1603,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 1096.32,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 174.3371,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 348.67,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 340.7248,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 681.45,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 412.115,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 824.23,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        },
+        {
+          "fixture": {
+            "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+            "version": 2
+          },
+          "jit_diagnostics": {
+            "arithmetic_deopts": 0,
+            "bailouts": 2928,
+            "compile_rejections": 17,
+            "compile_requests": 19,
+            "compiled_entries": 2936,
+            "enabled": true,
+            "exception_handler_entries": 0,
+            "exception_unwinds": 0,
+            "generated_code_bytes": 2092,
+            "interrupt_deopts": 2928,
+            "property_bailouts": 976,
+            "property_guard_hits": 980,
+            "property_guard_misses": 0,
+            "runtime_helper_entries": 32809282,
+            "shape_deopts": 0,
+            "successful_compilations": 2,
+            "total_compile_time_ns": 35862286,
+            "type_deopts": 0
+          },
+          "measurements": [
+            {
+              "elapsed_ms": 13.1071,
+              "id": "arith",
+              "iterations": 2000000,
+              "ns_per_op": 6.55,
+              "result": 64.0
+            },
+            {
+              "elapsed_ms": 7.6152,
+              "id": "prop-mono",
+              "iterations": 1000000,
+              "ns_per_op": 7.62,
+              "result": 500003500000.0
+            },
+            {
+              "elapsed_ms": 273.5962,
+              "id": "prop-mega",
+              "iterations": 500000,
+              "ns_per_op": 547.19,
+              "result": 1750000.0
+            },
+            {
+              "elapsed_ms": 674.2556,
+              "id": "call",
+              "iterations": 1000000,
+              "ns_per_op": 674.26,
+              "result": 1000000.0
+            },
+            {
+              "elapsed_ms": 379.758,
+              "id": "closure-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1265.86,
+              "result": 715003.0
+            },
+            {
+              "elapsed_ms": 354.0425,
+              "id": "object-alloc",
+              "iterations": 300000,
+              "ns_per_op": 1180.14,
+              "result": 730003.0
+            },
+            {
+              "elapsed_ms": 74.1233,
+              "id": "string-concat",
+              "iterations": 200000,
+              "ns_per_op": 370.62,
+              "result": 2494.0
+            },
+            {
+              "elapsed_ms": 544.7724,
+              "id": "array",
+              "iterations": 500000,
+              "ns_per_op": 1089.54,
+              "result": 124999750000.0
+            },
+            {
+              "elapsed_ms": 170.5459,
+              "id": "primitive-string-property",
+              "iterations": 500000,
+              "ns_per_op": 341.09,
+              "result": 499997.0
+            },
+            {
+              "elapsed_ms": 334.3363,
+              "id": "primitive-string-method",
+              "iterations": 500000,
+              "ns_per_op": 668.67,
+              "result": 999856.0
+            },
+            {
+              "elapsed_ms": 407.7992,
+              "id": "proto-method",
+              "iterations": 500000,
+              "ns_per_op": 815.6,
+              "result": 750000.0
+            }
+          ],
+          "passes": 4
+        }
+      ],
+      "target_arch": "aarch64",
+      "target_os": "linux"
+    }
+  },
+  "spidermonkey": {
+    "primary": {
+      "fixture": {
+        "version": 2,
+        "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464"
+      },
+      "passes": 4,
+      "measurement_runs": 5,
+      "reference_engine": "Mozilla Firefox 155.0.1",
+      "target_arch": "aarch64",
+      "target_os": "linux",
+      "samples": [
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 39.84,
+          "ns_per_op": 19.92,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 36.62,
+          "ns_per_op": 36.62,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 14.08,
+          "ns_per_op": 28.16,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 32.8,
+          "ns_per_op": 32.8,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 14.36,
+          "ns_per_op": 47.87,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 11.08,
+          "ns_per_op": 36.93,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 5.04,
+          "ns_per_op": 25.2,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 22.84,
+          "ns_per_op": 45.68,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 10.36,
+          "ns_per_op": 20.72,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 15.34,
+          "ns_per_op": 30.68,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 18.96,
+          "ns_per_op": 37.92,
+          "result": 750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 65.62,
+          "ns_per_op": 32.81,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 38.16,
+          "ns_per_op": 38.16,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 13.44,
+          "ns_per_op": 26.88,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 29.88,
+          "ns_per_op": 29.88,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 12.38,
+          "ns_per_op": 41.27,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 12.18,
+          "ns_per_op": 40.6,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 5.06,
+          "ns_per_op": 25.3,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 23.54,
+          "ns_per_op": 47.08,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 10.5,
+          "ns_per_op": 21.0,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 15.42,
+          "ns_per_op": 30.84,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 20.92,
+          "ns_per_op": 41.84,
+          "result": 750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 41.48,
+          "ns_per_op": 20.74,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 34.72,
+          "ns_per_op": 34.72,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 16.62,
+          "ns_per_op": 33.24,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 33.26,
+          "ns_per_op": 33.26,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 11.46,
+          "ns_per_op": 38.2,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 21.9,
+          "ns_per_op": 73.0,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 5.08,
+          "ns_per_op": 25.4,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 20.94,
+          "ns_per_op": 41.88,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 11.04,
+          "ns_per_op": 22.08,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 13.28,
+          "ns_per_op": 26.56,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 16.12,
+          "ns_per_op": 32.24,
+          "result": 750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 53.18,
+          "ns_per_op": 26.59,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 37.44,
+          "ns_per_op": 37.44,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 14.8,
+          "ns_per_op": 29.6,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 33.24,
+          "ns_per_op": 33.24,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 12.58,
+          "ns_per_op": 41.93,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 13.76,
+          "ns_per_op": 45.87,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 5.14,
+          "ns_per_op": 25.7,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 22.94,
+          "ns_per_op": 45.88,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 8.98,
+          "ns_per_op": 17.96,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 15.66,
+          "ns_per_op": 31.32,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 18.9,
+          "ns_per_op": 37.8,
+          "result": 750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 51.44,
+          "ns_per_op": 25.72,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 65.42,
+          "ns_per_op": 65.42,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 20.1,
+          "ns_per_op": 40.2,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 37.7,
+          "ns_per_op": 37.7,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 14.72,
+          "ns_per_op": 49.07,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 11.92,
+          "ns_per_op": 39.73,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 5.2,
+          "ns_per_op": 26.0,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 28.0,
+          "ns_per_op": 56.0,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 10.46,
+          "ns_per_op": 20.92,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 15.3,
+          "ns_per_op": 30.6,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 18.5,
+          "ns_per_op": 37.0,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 7.64,
+          "ns_per_op": 3.82,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 1.66,
+          "ns_per_op": 1.66,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 2.46,
+          "ns_per_op": 4.92,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 7.04,
+          "ns_per_op": 7.04,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.54,
+          "ns_per_op": 5.13,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.26,
+          "ns_per_op": 4.2,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 0.94,
+          "ns_per_op": 4.7,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 3.08,
+          "ns_per_op": 6.16,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 1.84,
+          "ns_per_op": 3.68,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.82,
+          "ns_per_op": 3.64,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.84,
+          "ns_per_op": 3.68,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 8.24,
+          "ns_per_op": 4.12,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 0.9,
+          "ns_per_op": 0.9,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 1.76,
+          "ns_per_op": 3.52,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 4.86,
+          "ns_per_op": 4.86,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.12,
+          "ns_per_op": 3.73,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 2.14,
+          "ns_per_op": 7.13,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 0.58,
+          "ns_per_op": 2.9,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 9.62,
+          "ns_per_op": 19.24,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 1.84,
+          "ns_per_op": 3.68,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.94,
+          "ns_per_op": 3.88,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.84,
+          "ns_per_op": 3.68,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 8.86,
+          "ns_per_op": 4.43,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 0.92,
+          "ns_per_op": 0.92,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 3.46,
+          "ns_per_op": 6.92,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 9.16,
+          "ns_per_op": 9.16,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.22,
+          "ns_per_op": 4.07,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.26,
+          "ns_per_op": 4.2,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 1.28,
+          "ns_per_op": 6.4,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 5.68,
+          "ns_per_op": 11.36,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 4.58,
+          "ns_per_op": 9.16,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.92,
+          "ns_per_op": 3.84,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.86,
+          "ns_per_op": 3.72,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 26.1,
+          "ns_per_op": 13.05,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 0.94,
+          "ns_per_op": 0.94,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 4.66,
+          "ns_per_op": 9.32,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 7.98,
+          "ns_per_op": 7.98,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.26,
+          "ns_per_op": 4.2,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.28,
+          "ns_per_op": 4.27,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 0.64,
+          "ns_per_op": 3.2,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 3.28,
+          "ns_per_op": 6.56,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 1.86,
+          "ns_per_op": 3.72,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.84,
+          "ns_per_op": 3.68,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.86,
+          "ns_per_op": 3.72,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 26.08,
+          "ns_per_op": 13.04,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 1.14,
+          "ns_per_op": 1.14,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 2.72,
+          "ns_per_op": 5.44,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 7.44,
+          "ns_per_op": 7.44,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.12,
+          "ns_per_op": 3.73,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.18,
+          "ns_per_op": 3.93,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 0.6,
+          "ns_per_op": 3.0,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 2.72,
+          "ns_per_op": 5.44,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 2.7,
+          "ns_per_op": 5.4,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.88,
+          "ns_per_op": 3.76,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.84,
+          "ns_per_op": 3.68,
+          "result": 750000.0
+        }
+      ],
+      "minimum_ns_per_op": {
+        "interpreter": {
+          "arith": 19.92,
+          "prop-mono": 34.72,
+          "prop-mega": 26.88,
+          "call": 29.88,
+          "closure-alloc": 38.2,
+          "object-alloc": 36.93,
+          "string-concat": 25.2,
+          "array": 41.88,
+          "primitive-string-property": 17.96,
+          "primitive-string-method": 26.56,
+          "proto-method": 32.24
+        },
+        "jit": {
+          "arith": 3.82,
+          "prop-mono": 0.9,
+          "prop-mega": 3.52,
+          "call": 4.86,
+          "closure-alloc": 3.73,
+          "object-alloc": 3.93,
+          "string-concat": 2.9,
+          "array": 5.44,
+          "primitive-string-property": 3.68,
+          "primitive-string-method": 3.64,
+          "proto-method": 3.68
+        }
+      }
+    },
+    "confirmation": {
+      "fixture": {
+        "version": 2,
+        "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464"
+      },
+      "passes": 4,
+      "measurement_runs": 5,
+      "reference_engine": "Mozilla Firefox 155.0.1",
+      "target_arch": "aarch64",
+      "target_os": "linux",
+      "samples": [
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 47.12,
+          "ns_per_op": 23.56,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 36.32,
+          "ns_per_op": 36.32,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 13.52,
+          "ns_per_op": 27.04,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 34.22,
+          "ns_per_op": 34.22,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 11.22,
+          "ns_per_op": 37.4,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 10.96,
+          "ns_per_op": 36.53,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 5.12,
+          "ns_per_op": 25.6,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 19.88,
+          "ns_per_op": 39.76,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 9.0,
+          "ns_per_op": 18.0,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 13.0,
+          "ns_per_op": 26.0,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 1,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 19.0,
+          "ns_per_op": 38.0,
+          "result": 750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 56.08,
+          "ns_per_op": 28.04,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 36.98,
+          "ns_per_op": 36.98,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 14.36,
+          "ns_per_op": 28.72,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 44.78,
+          "ns_per_op": 44.78,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 11.14,
+          "ns_per_op": 37.13,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 11.32,
+          "ns_per_op": 37.73,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 4.98,
+          "ns_per_op": 24.9,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 20.9,
+          "ns_per_op": 41.8,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 9.36,
+          "ns_per_op": 18.72,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 12.46,
+          "ns_per_op": 24.92,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 2,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 19.86,
+          "ns_per_op": 39.72,
+          "result": 750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 41.04,
+          "ns_per_op": 20.52,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 38.82,
+          "ns_per_op": 38.82,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 15.62,
+          "ns_per_op": 31.24,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 32.64,
+          "ns_per_op": 32.64,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 10.88,
+          "ns_per_op": 36.27,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 14.06,
+          "ns_per_op": 46.87,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 5.26,
+          "ns_per_op": 26.3,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 21.84,
+          "ns_per_op": 43.68,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 11.22,
+          "ns_per_op": 22.44,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 13.0,
+          "ns_per_op": 26.0,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 3,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 21.12,
+          "ns_per_op": 42.24,
+          "result": 750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 53.74,
+          "ns_per_op": 26.87,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 41.34,
+          "ns_per_op": 41.34,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 13.98,
+          "ns_per_op": 27.96,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 31.94,
+          "ns_per_op": 31.94,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 12.64,
+          "ns_per_op": 42.13,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 12.28,
+          "ns_per_op": 40.93,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 8.04,
+          "ns_per_op": 40.2,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 24.82,
+          "ns_per_op": 49.64,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 9.38,
+          "ns_per_op": 18.76,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 13.06,
+          "ns_per_op": 26.12,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 4,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 19.46,
+          "ns_per_op": 38.92,
+          "result": 750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 53.68,
+          "ns_per_op": 26.84,
+          "result": 64.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 40.28,
+          "ns_per_op": 40.28,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 13.82,
+          "ns_per_op": 27.64,
+          "result": 1750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 30.86,
+          "ns_per_op": 30.86,
+          "result": 1000000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 11.88,
+          "ns_per_op": 39.6,
+          "result": 715003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 14.62,
+          "ns_per_op": 48.73,
+          "result": 730003.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 5.3,
+          "ns_per_op": 26.5,
+          "result": 2494.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 24.6,
+          "ns_per_op": 49.2,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 10.14,
+          "ns_per_op": 20.28,
+          "result": 499997.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 14.94,
+          "ns_per_op": 29.88,
+          "result": 999856.0
+        },
+        {
+          "mode": "interpreter",
+          "run": 5,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 18.46,
+          "ns_per_op": 36.92,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 8.68,
+          "ns_per_op": 4.34,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 0.92,
+          "ns_per_op": 0.92,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 2.32,
+          "ns_per_op": 4.64,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 7.92,
+          "ns_per_op": 7.92,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.12,
+          "ns_per_op": 3.73,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.56,
+          "ns_per_op": 5.2,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 0.86,
+          "ns_per_op": 4.3,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 7.68,
+          "ns_per_op": 15.36,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 3.74,
+          "ns_per_op": 7.48,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.96,
+          "ns_per_op": 3.92,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 1,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 5.14,
+          "ns_per_op": 10.28,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 15.06,
+          "ns_per_op": 7.53,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 0.94,
+          "ns_per_op": 0.94,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 4.02,
+          "ns_per_op": 8.04,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 5.38,
+          "ns_per_op": 5.38,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.14,
+          "ns_per_op": 3.8,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.2,
+          "ns_per_op": 4.0,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 0.62,
+          "ns_per_op": 3.1,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 3.0,
+          "ns_per_op": 6.0,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 1.88,
+          "ns_per_op": 3.76,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 2.12,
+          "ns_per_op": 4.24,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 2,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.92,
+          "ns_per_op": 3.84,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 10.02,
+          "ns_per_op": 5.01,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 0.94,
+          "ns_per_op": 0.94,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 5.62,
+          "ns_per_op": 11.24,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 13.06,
+          "ns_per_op": 13.06,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.36,
+          "ns_per_op": 4.53,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.2,
+          "ns_per_op": 4.0,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 0.68,
+          "ns_per_op": 3.4,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 2.88,
+          "ns_per_op": 5.76,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 1.84,
+          "ns_per_op": 3.68,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 2.74,
+          "ns_per_op": 5.48,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 3,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 2.34,
+          "ns_per_op": 4.68,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 16.42,
+          "ns_per_op": 8.21,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 0.92,
+          "ns_per_op": 0.92,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 1.8,
+          "ns_per_op": 3.6,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 4.9,
+          "ns_per_op": 4.9,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.36,
+          "ns_per_op": 4.53,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.78,
+          "ns_per_op": 5.93,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 0.62,
+          "ns_per_op": 3.1,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 2.68,
+          "ns_per_op": 5.36,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 2.08,
+          "ns_per_op": 4.16,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.88,
+          "ns_per_op": 3.76,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 4,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 1.92,
+          "ns_per_op": 3.84,
+          "result": 750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "arith",
+          "iterations": 2000000,
+          "elapsed_ms": 8.02,
+          "ns_per_op": 4.01,
+          "result": 64.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "prop-mono",
+          "iterations": 1000000,
+          "elapsed_ms": 0.9,
+          "ns_per_op": 0.9,
+          "result": 500003500000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "prop-mega",
+          "iterations": 500000,
+          "elapsed_ms": 1.94,
+          "ns_per_op": 3.88,
+          "result": 1750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "call",
+          "iterations": 1000000,
+          "elapsed_ms": 8.28,
+          "ns_per_op": 8.28,
+          "result": 1000000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "closure-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.12,
+          "ns_per_op": 3.73,
+          "result": 715003.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "object-alloc",
+          "iterations": 300000,
+          "elapsed_ms": 1.18,
+          "ns_per_op": 3.93,
+          "result": 730003.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "string-concat",
+          "iterations": 200000,
+          "elapsed_ms": 0.64,
+          "ns_per_op": 3.2,
+          "result": 2494.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "array",
+          "iterations": 500000,
+          "elapsed_ms": 2.7,
+          "ns_per_op": 5.4,
+          "result": 124999750000.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "primitive-string-property",
+          "iterations": 500000,
+          "elapsed_ms": 2.82,
+          "ns_per_op": 5.64,
+          "result": 499997.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "primitive-string-method",
+          "iterations": 500000,
+          "elapsed_ms": 2.84,
+          "ns_per_op": 5.68,
+          "result": 999856.0
+        },
+        {
+          "mode": "jit",
+          "run": 5,
+          "id": "proto-method",
+          "iterations": 500000,
+          "elapsed_ms": 2.1,
+          "ns_per_op": 4.2,
+          "result": 750000.0
+        }
+      ],
+      "minimum_ns_per_op": {
+        "interpreter": {
+          "arith": 20.52,
+          "prop-mono": 36.32,
+          "prop-mega": 27.04,
+          "call": 30.86,
+          "closure-alloc": 36.27,
+          "object-alloc": 36.53,
+          "string-concat": 24.9,
+          "array": 39.76,
+          "primitive-string-property": 18.0,
+          "primitive-string-method": 24.92,
+          "proto-method": 36.92
+        },
+        "jit": {
+          "arith": 4.01,
+          "prop-mono": 0.9,
+          "prop-mega": 3.6,
+          "call": 4.9,
+          "closure-alloc": 3.73,
+          "object-alloc": 3.93,
+          "string-concat": 3.1,
+          "array": 5.36,
+          "primitive-string-property": 3.68,
+          "primitive-string-method": 3.76,
+          "proto-method": 3.84
+        }
+      }
+    }
+  },
+  "confirmation_to_primary_ratios": {
+    "interpreter": {
+      "arith": 1.0301204819277108,
+      "prop-mono": 1.0460829493087558,
+      "prop-mega": 1.005952380952381,
+      "call": 1.0327978580990629,
+      "closure-alloc": 0.9494764397905759,
+      "object-alloc": 0.9891686975358788,
+      "string-concat": 0.988095238095238,
+      "array": 0.9493791786055396,
+      "primitive-string-property": 1.0022271714922049,
+      "primitive-string-method": 0.9382530120481929,
+      "proto-method": 1.1451612903225807
+    },
+    "jit": {
+      "arith": 1.049738219895288,
+      "prop-mono": 1.0,
+      "prop-mega": 1.0227272727272727,
+      "call": 1.008230452674897,
+      "closure-alloc": 1.0,
+      "object-alloc": 1.0,
+      "string-concat": 1.0689655172413794,
+      "array": 0.9852941176470588,
+      "primitive-string-property": 1.0,
+      "primitive-string-method": 1.0329670329670328,
+      "proto-method": 1.0434782608695652
+    }
+  },
+  "interpretation": "New baseline only. No old/new fixture performance comparison."
+}

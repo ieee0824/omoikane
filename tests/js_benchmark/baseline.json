@@ -1,122 +1,139 @@
 {
-  "version": 7,
+  "version": 8,
   "profile": "dev",
   "passes": 4,
-  "reference_engine": "SpiderMonkey (Firefox 153.0.1; minimum of 5 independent processes)",
-  "target_arch": "x86_64",
+  "reference_engine": "SpiderMonkey (Mozilla Firefox 155.0.1; minimum of 5 independent processes)",
+  "target_arch": "aarch64",
   "target_os": "linux",
-  "environment": "Omoikane timing baseline inherited from v6 idle two-core container; Firefox 153.0.1 references recorded separately on x86_64 Linux",
+  "environment": "Linux aarch64 local container; dev profile; one build job; measurements without concurrent compilation",
   "measurement_runs": 5,
   "shapes": [
     {
       "id": "arith",
       "description": "Bytecode dispatch and integer arithmetic with no property access or allocation",
       "iterations": 2000000,
-      "baseline_ns_per_op": 140.7,
+      "baseline_ns_per_op": 209.26,
       "reference": {
-        "spidermonkey_interpreter": 37.82,
-        "spidermonkey_jit": 3.54
-      }
+        "spidermonkey_interpreter": 19.92,
+        "spidermonkey_jit": 3.82
+      },
+      "expected_result": 64.0
     },
     {
       "id": "prop-mono",
       "description": "Monomorphic property read/write through one call site (inline cache hit path)",
       "iterations": 1000000,
-      "baseline_ns_per_op": 242.9,
+      "baseline_ns_per_op": 612.25,
       "reference": {
-        "spidermonkey_interpreter": 47.26,
-        "spidermonkey_jit": 1.82
-      }
+        "spidermonkey_interpreter": 34.72,
+        "spidermonkey_jit": 0.9
+      },
+      "expected_result": 500003500000.0
     },
     {
       "id": "prop-mega",
       "description": "Megamorphic property read across eight shapes (inline cache miss path)",
       "iterations": 500000,
-      "baseline_ns_per_op": 267.8,
+      "baseline_ns_per_op": 430.93,
       "reference": {
-        "spidermonkey_interpreter": 39.52,
-        "spidermonkey_jit": 6.2
-      }
+        "spidermonkey_interpreter": 26.88,
+        "spidermonkey_jit": 3.52
+      },
+      "expected_result": 1750000.0
     },
     {
       "id": "call",
       "description": "Function call overhead",
       "iterations": 1000000,
-      "baseline_ns_per_op": 298.5,
+      "baseline_ns_per_op": 549.86,
       "reference": {
-        "spidermonkey_interpreter": 43.22,
-        "spidermonkey_jit": 3.56
-      }
+        "spidermonkey_interpreter": 29.88,
+        "spidermonkey_jit": 4.86
+      },
+      "expected_result": 1000000.0
     },
     {
       "id": "closure-alloc",
       "description": "One closure allocated per iteration (allocator and GC pressure)",
       "iterations": 300000,
-      "baseline_ns_per_op": 804.9,
+      "baseline_ns_per_op": 1237.37,
       "reference": {
-        "spidermonkey_interpreter": 53.07,
-        "spidermonkey_jit": 3.27
-      }
+        "spidermonkey_interpreter": 38.2,
+        "spidermonkey_jit": 3.73
+      },
+      "expected_result": 715003.0
     },
     {
       "id": "object-alloc",
       "description": "One object literal allocated per iteration (allocator and GC pressure)",
       "iterations": 300000,
-      "baseline_ns_per_op": 627.2,
+      "baseline_ns_per_op": 1026.79,
       "reference": {
-        "spidermonkey_interpreter": 55.67,
-        "spidermonkey_jit": 4.27
-      }
+        "spidermonkey_interpreter": 36.93,
+        "spidermonkey_jit": 3.93
+      },
+      "expected_result": 730003.0
     },
     {
       "id": "string-concat",
       "description": "String building by repeated appending, which now extends the string in place rather than reallocating and copying it (issues #318-#320)",
       "iterations": 200000,
-      "baseline_ns_per_op": 159.7,
+      "baseline_ns_per_op": 286.26,
       "reference": {
-        "spidermonkey_interpreter": 42.5,
-        "spidermonkey_jit": 6.7
-      }
+        "spidermonkey_interpreter": 25.2,
+        "spidermonkey_jit": 2.9
+      },
+      "expected_result": 2494.0
     },
     {
       "id": "array",
-      "description": "Array index and push",
+      "description": "Array push/index, resetting after each complete 1024-element block",
       "iterations": 500000,
-      "baseline_ns_per_op": 401.5,
+      "baseline_ns_per_op": 826.87,
       "reference": {
-        "spidermonkey_interpreter": 66.4,
-        "spidermonkey_jit": 16.8
-      }
+        "spidermonkey_interpreter": 41.88,
+        "spidermonkey_jit": 5.44
+      },
+      "expected_result": 124999750000.0
     },
     {
       "id": "primitive-string-property",
       "description": "Property read on a string primitive, with no call (wrapper allocation shows here first; its spidermonkey_jit figure is loop-overhead-bound, see shapes.js)",
       "iterations": 500000,
-      "baseline_ns_per_op": 144.4,
+      "baseline_ns_per_op": 265.28,
       "reference": {
-        "spidermonkey_interpreter": 27.96,
-        "spidermonkey_jit": 4.0
-      }
+        "spidermonkey_interpreter": 17.96,
+        "spidermonkey_jit": 3.68
+      },
+      "expected_result": 499997.0
     },
     {
       "id": "primitive-string-method",
       "description": "Method call on a string primitive (the read above plus the call)",
       "iterations": 500000,
-      "baseline_ns_per_op": 272.2,
+      "baseline_ns_per_op": 512.81,
       "reference": {
-        "spidermonkey_interpreter": 39.2,
-        "spidermonkey_jit": 3.76
-      }
+        "spidermonkey_interpreter": 26.56,
+        "spidermonkey_jit": 3.64
+      },
+      "expected_result": 999856.0
     },
     {
       "id": "proto-method",
       "description": "Method resolved one step up a prototype chain, with a plain object receiver built outside the timed body",
       "iterations": 500000,
-      "baseline_ns_per_op": 336.4,
+      "baseline_ns_per_op": 652.44,
       "reference": {
-        "spidermonkey_interpreter": 46.72,
-        "spidermonkey_jit": 3.36
-      }
+        "spidermonkey_interpreter": 32.24,
+        "spidermonkey_jit": 3.68
+      },
+      "expected_result": 750000.0
     }
-  ]
+  ],
+  "fixture": {
+    "sha256": "177eb80ae73d1081eb620f747b4703e2a9f2731e0255bb60131b73b7dcac6464",
+    "version": 2
+  },
+  "jit_enabled": false,
+  "measurements": "docs/jit/measurements/benchmark-v2-2026-09-10.json"
 }
