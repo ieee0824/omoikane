@@ -489,7 +489,11 @@ fn test_load_system_font_helvetica() {
     #[cfg(target_os = "macos")]
     {
         let font = load_system_font("Helvetica");
-        assert!(font.is_ok(), "Should find Helvetica on macOS");
+        assert!(
+            font.is_ok(),
+            "Should find Helvetica on macOS: {:?}",
+            font.err()
+        );
     }
 }
 

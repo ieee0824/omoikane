@@ -28,6 +28,12 @@ It adds U+0301 and U+4E2D (`中`), with a zero-width combining mark and 900-unit
 base advances. It verifies CJK coverage and that `A` plus U+0301 stays in one
 fallback font run without depending on the host's installed fonts.
 
+`OmoikaneMacRoman.ttc` contains Regular, Bold and Italic faces of `Omoikane Café`
+at indices 0, 1 and 2. Its name table contains only Macintosh Roman records,
+including the non-ASCII `é`, to verify discovery without Unicode name records.
+The [Apple name-table specification](https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6name.html)
+defines the platform and encoding IDs; all outlines remain original CC0 fixtures.
+
 Regenerate with Python 3 and `fonttools==4.59.2` installed:
 
 ```sh

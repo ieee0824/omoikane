@@ -47,6 +47,33 @@ fn installed_faces_match_width_weight_and_style_from_metadata() {
 }
 
 #[test]
+fn system_family_selection_decodes_mac_roman_collection_names() {
+    let bytes = std::fs::read(fixture_dir().join("OmoikaneMacRoman.ttc")).unwrap();
+    let face = rustybuzz::ttf_parser::Face::parse(&bytes, 0).unwrap();
+    assert!(face.names().into_iter().all(|name| !name.is_unicode()));
+    let db = database();
+    for (index, weight, style, name, advance) in [
+        (0, 400, FontStyle::Normal, "Regular", 10.0),
+        (1, 700, FontStyle::Normal, "Bold", 14.0),
+        (2, 400, FontStyle::Italic, "Italic", 12.0),
+    ] {
+        let variant = FontVariantKey::new(FontWeight(weight), style);
+        let selected = db
+            .select("Omoikane Café", variant)
+            .expect("Mac Roman family");
+        assert_eq!(selected.face_index, index);
+        assert_eq!(
+            selected.full_name.as_deref(),
+            Some(format!("Omoikane Café {name}").as_str())
+        );
+        assert_eq!((selected.weight, selected.style), (weight, style));
+        let loaded = db.load("Omoikane Café", variant).unwrap();
+        assert_eq!(loaded.face_index(), index);
+        assert_eq!(loaded.rasterize('A', 20.0).unwrap().advance_x, advance);
+    }
+}
+
+#[test]
 fn collection_selection_keeps_its_face_through_shaping_and_rasterization() {
     let bytes = std::fs::read(fixture_dir().join("OmoikaneFixture.ttc")).unwrap();
     for (index, expected, standalone) in

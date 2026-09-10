@@ -63,3 +63,15 @@ collection.fonts = [fonts['Bold'], fonts['Regular'], fonts['Italic']]
 collection.save(root / 'OmoikaneFixture.ttc')
 font('Regular', 400, False, 900, family='Omoikane Fallback', fallback=True).save(
     root / 'OmoikaneFallback-Regular.ttf')
+
+# Legacy Macintosh fonts can contain only Mac Roman name records. Include a
+# non-ASCII family name so treating those bytes as UTF-8 cannot pass this case.
+mac_collection = TTCollection()
+mac_collection.fonts = []
+for style, weight, italic, advance, width in specs[:3]:
+    face = font(style, weight, italic, advance, width, family='Omoikane Café')
+    face['name'].names = [name for name in face['name'].names
+                          if name.platformID == 1 and name.platEncID == 0]
+    face['name'].setName(f'OmoikaneMacRoman-{style}', 6, 1, 0, 0)
+    mac_collection.fonts.append(face)
+mac_collection.save(root / 'OmoikaneMacRoman.ttc')

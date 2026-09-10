@@ -92,7 +92,7 @@ impl SystemFontDatabase {
                     name_id::FAMILY,
                 ] {
                     for name in face.names().into_iter().filter(|n| n.name_id == id) {
-                        if let Some(value) = name.to_string()
+                        if let Some(value) = decode_name(name)
                             && !value.trim().is_empty()
                             && !families.contains(&value)
                         {
@@ -107,7 +107,7 @@ impl SystemFontDatabase {
                     .names()
                     .into_iter()
                     .filter(|n| n.name_id == name_id::FULL_NAME)
-                    .find_map(|n| n.to_string());
+                    .find_map(decode_name);
                 faces.push(SystemFontFace {
                     path: path.clone(),
                     face_index: index,
@@ -219,6 +219,18 @@ impl SystemFontDatabase {
         }
         loaded.insert(index, Arc::clone(&font));
         Ok(font)
+    }
+}
+
+fn decode_name(name: ttf_parser::name::Name<'_>) -> Option<String> {
+    if name.platform_id == ttf_parser::PlatformId::Macintosh && name.encoding_id == 0 {
+        // ttf-parser decodes Unicode records only. Legacy Macintosh fonts can
+        // provide their family names exclusively in Mac Roman (encoding 0).
+        encoding_rs::MACINTOSH
+            .decode_without_bom_handling_and_without_replacement(name.name)
+            .map(|value| value.into_owned())
+    } else {
+        name.to_string()
     }
 }
 
