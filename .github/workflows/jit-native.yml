@@ -1,0 +1,70 @@
+name: Native JIT targets
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-jit-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native JIT (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-jit-v1-${{ matrix.target }}
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: Verify the native host and record the revision
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/jit-native
+          {
+            uname -a
+            rustc --version --verbose
+            git show --no-patch --format=fuller HEAD
+            echo "expected_target=$EXPECTED_TARGET"
+          } > .artifacts/jit-native/environment.txt
+          actual=$(rustc --version --verbose | awk '/^host:/ {print $2}')
+          test "$actual" = "$EXPECTED_TARGET"
+          test "$(uname -m | sed 's/^arm64$/aarch64/')" = "${EXPECTED_TARGET%%-*}"
+      - name: Run native JIT, GC, deopt, exception and timeout contracts
+        shell: bash
+        run: bash scripts/check-jit-native.sh
+      - name: Upload execution evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-native-${{ matrix.target }}
+          path: .artifacts/jit-native/
+          if-no-files-found: error
