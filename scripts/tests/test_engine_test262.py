@@ -41,6 +41,19 @@ class ComparisonTests(unittest.TestCase):
                 gate.write(folder / "cases.json", {
                     "test/passing": {"status": "O", "ecma_version": 6},
                     "test/known-failure": {"status": "F", "ecma_version": 6}})
+        origin = gate.read(self.root / "engine/boa-origin.json")
+        origin["files"] = {"Cargo.lock": {
+            "sha256": hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest()}}
+        gate.write(self.root / "engine/boa-origin.json", origin)
+        for target in gate.TARGETS:
+            for variant in ("reference", "current"):
+                folder = self.artifacts / target / variant
+                cases = gate.read(folder / "cases.json")
+                cases.update({name: {"status": "O", "ecma_version": 16} for name in gate.FLOAT16_CASES})
+                gate.write(folder / "cases.json", cases)
+                execution = gate.read(folder / "execution.json")
+                execution.update(case_count=len(cases), stats=dict(gate.Counter(x["status"] for x in cases.values())))
+                gate.write(folder / "execution.json", execution)
         self.folder = self.artifacts / gate.TARGETS[0] / "current"
 
     def compare(self):
@@ -95,6 +108,45 @@ class ComparisonTests(unittest.TestCase):
             with self.subTest(field=field):
                 gate.write(self.folder / "execution.json", dict(original, **{field: value}))
                 self.assertFalse(self.compare())
+
+    def test_expected_dependency_update_preserves_original_baseline(self):
+        source = self.root / "engine/boa/Cargo.lock"
+        source.write_text("updated dependencies\n")
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        for target in gate.TARGETS:
+            path = self.artifacts / target / "current/execution.json"
+            execution = gate.read(path)
+            execution["lock_sha256"] = digest
+            gate.write(path, execution)
+        self.assertTrue(self.compare())
+        # Overwriting the reference lock with the new lock must still fail.
+        path = self.artifacts / gate.TARGETS[0] / "reference/execution.json"
+        execution = gate.read(path)
+        execution["lock_sha256"] = digest
+        gate.write(path, execution)
+        self.assertFalse(self.compare())
+
+    def test_known_float16_failure_must_be_resolved_on_every_target(self):
+        for target in gate.TARGETS:
+            for status in ("F", "I", None):
+                with self.subTest(target=target, status=status):
+                    # Even an unchanged failure/skip/omission cannot pass #655.
+                    for variant in ("reference", "current"):
+                        self.folder = self.artifacts / target / variant
+                        self.change_case(gate.FLOAT16_CASES[0], status)
+                    self.assertFalse(self.compare())
+                    for variant in ("reference", "current"):
+                        self.folder = self.artifacts / target / variant
+                        self.change_case(gate.FLOAT16_CASES[0], "O")
+
+    def test_cross_target_differences_are_retained(self):
+        self.change_case("test/known-failure", "O")
+        self.assertTrue(self.compare())
+        report = gate.read(self.artifacts / "comparison.json")
+        self.assertEqual([item["case"] for item in report["cross_target_differences"]],
+                         ["test/known-failure"])
+        for result in report["targets"].values():
+            self.assertEqual(set(result["required_cases"]), set(gate.FLOAT16_CASES))
 
     def test_missing_target_does_not_pass(self):
         (self.folder / "execution.json").unlink()
