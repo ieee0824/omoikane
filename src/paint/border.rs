@@ -3,13 +3,11 @@
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::layout::{LayoutBox, Rect};
 
-use super::color::{parse_color, Color};
+use super::color::{Color, parse_color};
 use super::{
-    border_box_rect, border_color, border_radius_corners, Canvas,
-    fill_triangle_clipped, fill_triangle_clipped_inclusive,
-    has_border_radius, length_property, normalize_rect, padding_box_rect,
-    resolve_color_value,
-    BorderRegion,
+    BorderRegion, Canvas, border_box_rect, border_color, border_radius_corners,
+    fill_triangle_clipped, fill_triangle_clipped_inclusive, has_border_radius, length_property,
+    normalize_rect, padding_box_rect, resolve_color_value,
 };
 
 pub(crate) fn paint_borders(
@@ -17,12 +15,13 @@ pub(crate) fn paint_borders(
     layout: &LayoutBox,
     style: &ComputedStyle,
     clip: Option<Rect>,
+    offset: super::PaintOffset,
 ) {
     if !has_any_solid_border(style) {
         return;
     }
-    let border_box = border_box_rect(layout);
-    let padding_box = padding_box_rect(layout);
+    let border_box = offset.rect(border_box_rect(layout));
+    let padding_box = offset.rect(padding_box_rect(layout));
     let border = layout.dimensions.border;
 
     if has_border_radius(style) {
@@ -38,9 +37,8 @@ pub(crate) fn paint_borders(
         let solid_all_sides = ["top", "right", "bottom", "left"]
             .into_iter()
             .all(|side| has_solid_border_side(style, side));
-        let uniform_width = border.top == border.right
-            && border.top == border.bottom
-            && border.top == border.left;
+        let uniform_width =
+            border.top == border.right && border.top == border.bottom && border.top == border.left;
         let colors = ["top", "right", "bottom", "left"]
             .map(|side| border_color_side(style, side).unwrap_or(Color::rgb(0, 0, 0)));
         let uniform_color = colors.iter().all(|color| *color == colors[0]);
@@ -57,9 +55,15 @@ pub(crate) fn paint_borders(
             ] {
                 canvas.fill_rounded_rect_annulus(
                     border_box,
-                    tl, tr, br, bl,
+                    tl,
+                    tr,
+                    br,
+                    bl,
                     padding_box,
-                    inner_tl, inner_tr, inner_br, inner_bl,
+                    inner_tl,
+                    inner_tr,
+                    inner_br,
+                    inner_bl,
                     colors[0],
                     clip,
                     region,
@@ -75,9 +79,15 @@ pub(crate) fn paint_borders(
             let color = border_color_side(style, "left").unwrap_or(Color::rgb(0, 0, 0));
             canvas.fill_rounded_rect_annulus(
                 border_box,
-                tl, tr, br, bl,
+                tl,
+                tr,
+                br,
+                bl,
                 padding_box,
-                inner_tl, inner_tr, inner_br, inner_bl,
+                inner_tl,
+                inner_tr,
+                inner_br,
+                inner_bl,
                 color,
                 clip,
                 BorderRegion::Left,
@@ -89,9 +99,15 @@ pub(crate) fn paint_borders(
             let color = border_color_side(style, "right").unwrap_or(Color::rgb(0, 0, 0));
             canvas.fill_rounded_rect_annulus(
                 border_box,
-                tl, tr, br, bl,
+                tl,
+                tr,
+                br,
+                bl,
                 padding_box,
-                inner_tl, inner_tr, inner_br, inner_bl,
+                inner_tl,
+                inner_tr,
+                inner_br,
+                inner_bl,
                 color,
                 clip,
                 BorderRegion::Right,
@@ -103,9 +119,15 @@ pub(crate) fn paint_borders(
             let color = border_color_side(style, "top").unwrap_or(Color::rgb(0, 0, 0));
             canvas.fill_rounded_rect_annulus(
                 border_box,
-                tl, tr, br, bl,
+                tl,
+                tr,
+                br,
+                bl,
                 padding_box,
-                inner_tl, inner_tr, inner_br, inner_bl,
+                inner_tl,
+                inner_tr,
+                inner_br,
+                inner_bl,
                 color,
                 clip,
                 BorderRegion::Top,
@@ -117,9 +139,15 @@ pub(crate) fn paint_borders(
             let color = border_color_side(style, "bottom").unwrap_or(Color::rgb(0, 0, 0));
             canvas.fill_rounded_rect_annulus(
                 border_box,
-                tl, tr, br, bl,
+                tl,
+                tr,
+                br,
+                bl,
                 padding_box,
-                inner_tl, inner_tr, inner_br, inner_bl,
+                inner_tl,
+                inner_tr,
+                inner_br,
+                inner_bl,
                 color,
                 clip,
                 BorderRegion::Bottom,
@@ -655,7 +683,9 @@ pub(crate) fn paint_outer_box_shadow(
                 let x0 = box_local_n.x.floor().max(0.0) as i32;
                 let y0 = box_local_n.y.floor().max(0.0) as i32;
                 let x1 = (box_local_n.x + box_local_n.width).ceil().min(buf_w as f32) as i32;
-                let y1 = (box_local_n.y + box_local_n.height).ceil().min(buf_h as f32) as i32;
+                let y1 = (box_local_n.y + box_local_n.height)
+                    .ceil()
+                    .min(buf_h as f32) as i32;
                 for py in y0..y1 {
                     for px in x0..x1 {
                         let idx = (py as u32 * buf_w + px as u32) as usize * 4;
@@ -666,7 +696,14 @@ pub(crate) fn paint_outer_box_shadow(
             // color.a は合成時に適用し、一時バッファへの追加走査を避ける。
             let alpha_scale = color.a as f32 / 255.0;
             canvas.composite_canvas_clipped(
-                &shadow_buf, buf_x, buf_y, color.r, color.g, color.b, alpha_scale, clip,
+                &shadow_buf,
+                buf_x,
+                buf_y,
+                color.r,
+                color.g,
+                color.b,
+                alpha_scale,
+                clip,
             );
         } else {
             // blur なし・角丸なし: shadow_rect のうち border_box の外側のみを矩形バンドで描画する。
@@ -682,7 +719,12 @@ pub(crate) fn paint_outer_box_shadow(
             // top band: shadow の上端から border_box の上端まで
             if sy < by {
                 canvas.fill_rect_clipped(
-                    Rect { x: sx, y: sy, width: sw, height: by - sy },
+                    Rect {
+                        x: sx,
+                        y: sy,
+                        width: sw,
+                        height: by - sy,
+                    },
                     color,
                     clip,
                 );
@@ -692,7 +734,12 @@ pub(crate) fn paint_outer_box_shadow(
             let box_bottom = by + bh;
             if shadow_bottom > box_bottom {
                 canvas.fill_rect_clipped(
-                    Rect { x: sx, y: box_bottom, width: sw, height: shadow_bottom - box_bottom },
+                    Rect {
+                        x: sx,
+                        y: box_bottom,
+                        width: sw,
+                        height: shadow_bottom - box_bottom,
+                    },
                     color,
                     clip,
                 );
@@ -703,7 +750,12 @@ pub(crate) fn paint_outer_box_shadow(
             if band_bottom > band_top {
                 if sx < bx {
                     canvas.fill_rect_clipped(
-                        Rect { x: sx, y: band_top, width: bx - sx, height: band_bottom - band_top },
+                        Rect {
+                            x: sx,
+                            y: band_top,
+                            width: bx - sx,
+                            height: band_bottom - band_top,
+                        },
                         color,
                         clip,
                     );
@@ -771,7 +823,9 @@ pub(crate) fn paint_outer_box_shadow(
             let x0 = box_local_n.x.floor().max(0.0) as i32;
             let y0 = box_local_n.y.floor().max(0.0) as i32;
             let x1 = (box_local_n.x + box_local_n.width).ceil().min(buf_w as f32) as i32;
-            let y1 = (box_local_n.y + box_local_n.height).ceil().min(buf_h as f32) as i32;
+            let y1 = (box_local_n.y + box_local_n.height)
+                .ceil()
+                .min(buf_h as f32) as i32;
             for py in y0..y1 {
                 for px in x0..x1 {
                     let idx = (py as u32 * buf_w + px as u32) as usize * 4;
@@ -789,7 +843,14 @@ pub(crate) fn paint_outer_box_shadow(
 
         // メインキャンバスに合成（clip 適用）
         canvas.composite_canvas_clipped(
-            &shadow_buf, buf_x, buf_y, color.r, color.g, color.b, alpha_scale, clip,
+            &shadow_buf,
+            buf_x,
+            buf_y,
+            color.r,
+            color.g,
+            color.b,
+            alpha_scale,
+            clip,
         );
     }
 }

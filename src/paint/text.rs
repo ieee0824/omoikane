@@ -16,11 +16,8 @@ use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
-use super::color::{parse_color, Color};
-use super::{
-    background_color, length_property, paint_background_image,
-    Canvas, Image,
-};
+use super::color::{Color, parse_color};
+use super::{Canvas, Image, background_color, length_property, paint_background_image};
 
 const MAX_RENDER_GLYPH_CACHE_ENTRIES: usize = 16_384;
 
@@ -183,6 +180,7 @@ pub(crate) fn paint_text_with_registry(
     _viewport: Rect,
     fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
+    offset: super::PaintOffset,
 ) {
     // Fallback color from the containing block's style (used when fragment
     // style has no explicit color).
@@ -197,6 +195,7 @@ pub(crate) fn paint_text_with_registry(
 
     for line in &layout.lines {
         for fragment in &line.fragments {
+            let fragment_rect = offset.rect(fragment.rect);
             match &fragment.content {
                 InlineFragmentContent::Text(text) => {
                     let font_size = fragment.metrics.font_size.max(1.0);
@@ -204,8 +203,7 @@ pub(crate) fn paint_text_with_registry(
                     // Per-fragment style is used for text-transform and color so
                     // that nested inline elements (e.g. <span>) can have
                     // independent styling.
-                    let frag_color = fragment_text_color(&fragment.style)
-                        .unwrap_or(fallback_color);
+                    let frag_color = fragment_text_color(&fragment.style).unwrap_or(fallback_color);
                     let text_transform = fragment_text_transform(&fragment.style);
 
                     // For text-decoration, distinguish "property not present" from
@@ -214,7 +212,10 @@ pub(crate) fn paint_text_with_registry(
                     // to the containing block's decoration.
                     let has_frag_decoration = fragment.style.text_decoration_line.is_some();
                     let (decoration_line, decoration_color) = if has_frag_decoration {
-                        (fragment_decoration_line(&fragment.style), fragment_decoration_color(&fragment.style, frag_color))
+                        (
+                            fragment_decoration_line(&fragment.style),
+                            fragment_decoration_color(&fragment.style, frag_color),
+                        )
                     } else {
                         (block_decoration_line, block_decoration_color)
                     };
@@ -248,7 +249,7 @@ pub(crate) fn paint_text_with_registry(
                             || !can_shape_logical_text
                             || paint_shaped_horizontal_text(
                                 canvas,
-                                fragment.rect,
+                                fragment_rect,
                                 transformed_text,
                                 font_size,
                                 fragment.metrics.ascent,
@@ -257,11 +258,12 @@ pub(crate) fn paint_text_with_registry(
                                 frag_color,
                                 clip,
                                 fragment.metrics.letter_spacing,
-                            ).is_none()
+                            )
+                            .is_none()
                         {
                             paint_fragment_text(
                                 canvas,
-                                fragment.rect,
+                                fragment_rect,
                                 display_text,
                                 font_size,
                                 fragment.metrics.ascent,
@@ -278,7 +280,7 @@ pub(crate) fn paint_text_with_registry(
                                 fonts.iter().map(|font| font.as_ref()).collect();
                             paint_fragment_text(
                                 canvas,
-                                fragment.rect,
+                                fragment_rect,
                                 display_text,
                                 font_size,
                                 fragment.metrics.ascent,
@@ -293,20 +295,22 @@ pub(crate) fn paint_text_with_registry(
                                 fonts.iter().map(|font| font.as_ref()).collect();
                             if !can_shape_logical_text
                                 || paint_shaped_horizontal_text(
-                                canvas,
-                                fragment.rect,
-                                transformed_text,
-                                font_size,
-                                fragment.metrics.ascent,
-                                &font_refs,
-                                &fragment.style,
-                                frag_color,
-                                clip,
-                                fragment.metrics.letter_spacing,
-                            ).is_none() {
+                                    canvas,
+                                    fragment_rect,
+                                    transformed_text,
+                                    font_size,
+                                    fragment.metrics.ascent,
+                                    &font_refs,
+                                    &fragment.style,
+                                    frag_color,
+                                    clip,
+                                    fragment.metrics.letter_spacing,
+                                )
+                                .is_none()
+                            {
                                 paint_text_with_font(
                                     canvas,
-                                    fragment.rect,
+                                    fragment_rect,
                                     display_text,
                                     font_size,
                                     fragment.metrics.ascent,
@@ -321,7 +325,7 @@ pub(crate) fn paint_text_with_registry(
                         // Fallback: placeholder rectangles
                         paint_text_placeholder_with_mode(
                             canvas,
-                            fragment.rect,
+                            fragment_rect,
                             display_text,
                             font_size,
                             frag_color,
@@ -335,7 +339,7 @@ pub(crate) fn paint_text_with_registry(
                     if let Some((vertical_rl, _)) = vertical_mode {
                         paint_text_decoration_vertical(
                             canvas,
-                            fragment.rect,
+                            fragment_rect,
                             font_size,
                             decoration_line,
                             decoration_color,
@@ -345,7 +349,7 @@ pub(crate) fn paint_text_with_registry(
                     } else {
                         paint_text_decoration(
                             canvas,
-                            fragment.rect,
+                            fragment_rect,
                             fragment.metrics.ascent,
                             fragment.metrics.descent,
                             font_size,
@@ -358,7 +362,7 @@ pub(crate) fn paint_text_with_registry(
                 InlineFragmentContent::Image(image, style) => {
                     paint_inline_image_fragment(
                         canvas,
-                        fragment.rect,
+                        fragment_rect,
                         image,
                         style,
                         clip,
@@ -366,17 +370,17 @@ pub(crate) fn paint_text_with_registry(
                     );
                 }
                 InlineFragmentContent::GeneratedBox(style) => {
-                    super::paint_generated_box(canvas, fragment.rect, style, clip, _viewport);
+                    super::paint_generated_box(canvas, fragment_rect, style, clip, _viewport);
                 }
                 InlineFragmentContent::FormControl(style, value, editing) => {
                     if let Some(background) = background_color(style) {
-                        canvas.fill_rect_clipped(fragment.rect, background, clip);
+                        canvas.fill_rect_clipped(fragment_rect, background, clip);
                     }
                     let border = EdgeSizesForPaint::from_style(style);
                     if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
-                        paint_rect_borders(canvas, fragment.rect, style, border, clip);
+                        paint_rect_borders(canvas, fragment_rect, style, border, clip);
                     }
-                    let content_rect = inline_fragment_content_rect(fragment.rect, style, border);
+                    let content_rect = inline_fragment_content_rect(fragment_rect, style, border);
                     let color = fragment_text_color(&fragment.style).unwrap_or(fallback_color);
                     // Same font policy as the Text branch: the fragment's
                     // resolved web-font variant first, then the global fonts.
@@ -463,7 +467,12 @@ pub(crate) fn paint_text_with_registry(
                     }
                     if let Some(x) = caret_x {
                         canvas.fill_rect_clipped(
-                            Rect { x, y: text_rect.y, width: 1.0, height: text_rect.height },
+                            Rect {
+                                x,
+                                y: text_rect.y,
+                                width: 1.0,
+                                height: text_rect.height,
+                            },
                             color,
                             clip,
                         );
@@ -471,13 +480,13 @@ pub(crate) fn paint_text_with_registry(
                 }
                 InlineFragmentContent::IconFormControl(style, image, width, height) => {
                     if let Some(background) = background_color(style) {
-                        canvas.fill_rect_clipped(fragment.rect, background, clip);
+                        canvas.fill_rect_clipped(fragment_rect, background, clip);
                     }
                     let border = EdgeSizesForPaint::from_style(style);
                     if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
-                        paint_rect_borders(canvas, fragment.rect, style, border, clip);
+                        paint_rect_borders(canvas, fragment_rect, style, border, clip);
                     }
-                    let content_rect = inline_fragment_content_rect(fragment.rect, style, border);
+                    let content_rect = inline_fragment_content_rect(fragment_rect, style, border);
                     let image_rect = Rect {
                         x: content_rect.x + ((content_rect.width - width) / 2.0).max(0.0),
                         y: content_rect.y + ((content_rect.height - height) / 2.0).max(0.0),
@@ -659,14 +668,14 @@ pub(crate) fn paint_text_with_font(
         .count();
     for &ch in &chars {
         let zero_advance = is_zero_advance_character(ch);
-        let preferred_font = zero_advance.then(|| previous_char.map(|(_, index)| index)).flatten();
-        let (font_index, glyph, advance_x) = rasterize_with_fallback_preferred(
-            fonts,
-            ch,
-            font_size,
-            preferred_font,
-        );
-        let glyph = (!is_invisible_shaping_control(ch)).then_some(glyph).flatten();
+        let preferred_font = zero_advance
+            .then(|| previous_char.map(|(_, index)| index))
+            .flatten();
+        let (font_index, glyph, advance_x) =
+            rasterize_with_fallback_preferred(fonts, ch, font_size, preferred_font);
+        let glyph = (!is_invisible_shaping_control(ch))
+            .then_some(glyph)
+            .flatten();
         if !zero_advance
             && let Some((prev, prev_font_index)) = previous_char
             && prev_font_index == font_index
@@ -678,25 +687,24 @@ pub(crate) fn paint_text_with_font(
         }
 
         if let Some(glyph) = glyph
-            && glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
-                let glyph_x = horizontal_glyph_origin(
-                    cursor_x,
-                    cluster_origin_x,
-                    zero_advance,
-                    glyph.offset_x,
-                );
-                let glyph_y = baseline_y + glyph.offset_y;
+            && glyph.width > 0
+            && glyph.height > 0
+            && !glyph.bitmap.is_empty()
+        {
+            let glyph_x =
+                horizontal_glyph_origin(cursor_x, cluster_origin_x, zero_advance, glyph.offset_x);
+            let glyph_y = baseline_y + glyph.offset_y;
 
-                canvas.draw_glyph_mask(
-                    glyph_x,
-                    glyph_y,
-                    glyph.width,
-                    glyph.height,
-                    &glyph.bitmap,
-                    color,
-                    clip,
-                );
-            }
+            canvas.draw_glyph_mask(
+                glyph_x,
+                glyph_y,
+                glyph.width,
+                glyph.height,
+                &glyph.bitmap,
+                color,
+                clip,
+            );
+        }
 
         cursor_x += advance_x;
         // Apply letter-spacing between characters only (not after the last one)
@@ -737,14 +745,14 @@ pub(crate) fn paint_text_with_font_refs(
         .count();
     for &ch in &chars {
         let zero_advance = is_zero_advance_character(ch);
-        let preferred_font = zero_advance.then(|| previous_char.map(|(_, index)| index)).flatten();
-        let (font_index, glyph, advance_x) = rasterize_with_fallback_refs_preferred(
-            fonts,
-            ch,
-            font_size,
-            preferred_font,
-        );
-        let glyph = (!is_invisible_shaping_control(ch)).then_some(glyph).flatten();
+        let preferred_font = zero_advance
+            .then(|| previous_char.map(|(_, index)| index))
+            .flatten();
+        let (font_index, glyph, advance_x) =
+            rasterize_with_fallback_refs_preferred(fonts, ch, font_size, preferred_font);
+        let glyph = (!is_invisible_shaping_control(ch))
+            .then_some(glyph)
+            .flatten();
         if !zero_advance
             && let Some((prev, prev_font_index)) = previous_char
             && prev_font_index == font_index
@@ -756,25 +764,24 @@ pub(crate) fn paint_text_with_font_refs(
         }
 
         if let Some(glyph) = glyph
-            && glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
-                let glyph_x = horizontal_glyph_origin(
-                    cursor_x,
-                    cluster_origin_x,
-                    zero_advance,
-                    glyph.offset_x,
-                );
-                let glyph_y = baseline_y + glyph.offset_y;
+            && glyph.width > 0
+            && glyph.height > 0
+            && !glyph.bitmap.is_empty()
+        {
+            let glyph_x =
+                horizontal_glyph_origin(cursor_x, cluster_origin_x, zero_advance, glyph.offset_x);
+            let glyph_y = baseline_y + glyph.offset_y;
 
-                canvas.draw_glyph_mask(
-                    glyph_x,
-                    glyph_y,
-                    glyph.width,
-                    glyph.height,
-                    &glyph.bitmap,
-                    color,
-                    clip,
-                );
-            }
+            canvas.draw_glyph_mask(
+                glyph_x,
+                glyph_y,
+                glyph.width,
+                glyph.height,
+                &glyph.bitmap,
+                color,
+                clip,
+            );
+        }
 
         cursor_x += advance_x;
         if !zero_advance && remaining_non_zero > 1 {
@@ -860,7 +867,10 @@ fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
 
     let mut visual = String::with_capacity(text.len());
     for paragraph in &bidi.paragraphs {
-        visual.push_str(bidi.reorder_line(paragraph, paragraph.range.clone()).as_ref());
+        visual.push_str(
+            bidi.reorder_line(paragraph, paragraph.range.clone())
+                .as_ref(),
+        );
     }
     Cow::Owned(visual)
 }
@@ -1121,13 +1131,11 @@ fn paint_text_vertical_with_font_refs(
         let preferred_font = zero_advance
             .then(|| previous_cell.map(|(_, _, index)| index))
             .flatten();
-        let (font_index, glyph, advance_x) = rasterize_with_fallback_refs_preferred(
-            fonts,
-            ch,
-            font_size,
-            preferred_font,
-        );
-        let glyph = (!is_invisible_shaping_control(ch)).then_some(glyph).flatten();
+        let (font_index, glyph, advance_x) =
+            rasterize_with_fallback_refs_preferred(fonts, ch, font_size, preferred_font);
+        let glyph = (!is_invisible_shaping_control(ch))
+            .then_some(glyph)
+            .flatten();
         let advance = if zero_advance {
             0.0
         } else {
@@ -1625,6 +1633,7 @@ pub(crate) fn paint_list_marker(
     style: &ComputedStyle,
     clip: Option<Rect>,
     fonts: &[Arc<Font>],
+    offset: super::PaintOffset,
 ) {
     let Some(marker) = &layout.marker else {
         return;
@@ -1635,8 +1644,8 @@ pub(crate) fn paint_list_marker(
     let ascent = font_size * 0.8;
 
     let rect = Rect {
-        x: marker.x,
-        y: marker.y,
+        x: marker.x + offset.x,
+        y: marker.y + offset.y,
         width: font_size * (marker.text.chars().count() as f32) * 0.6,
         height: font_size,
     };
@@ -1654,7 +1663,7 @@ pub(crate) fn paint_list_marker(
             0.0,
         );
     } else {
-        paint_list_marker_placeholder(canvas, marker, font_size, color, clip);
+        paint_list_marker_placeholder_at(canvas, marker, font_size, color, clip, offset);
     }
 }
 
@@ -1674,6 +1683,7 @@ fn is_bullet_marker(text: &str) -> bool {
 /// - Bullet markers (disc/circle/square): rendered as a filled square.
 /// - Text markers (decimal/roman/alpha): delegated to `paint_text_placeholder`
 ///   so that the correct number of character-width rectangles is drawn.
+#[cfg(test)]
 pub(crate) fn paint_list_marker_placeholder(
     canvas: &mut Canvas,
     marker: &ListMarker,
@@ -1681,10 +1691,28 @@ pub(crate) fn paint_list_marker_placeholder(
     color: Color,
     clip: Option<Rect>,
 ) {
+    paint_list_marker_placeholder_at(
+        canvas,
+        marker,
+        font_size,
+        color,
+        clip,
+        super::PaintOffset::default(),
+    );
+}
+
+fn paint_list_marker_placeholder_at(
+    canvas: &mut Canvas,
+    marker: &ListMarker,
+    font_size: f32,
+    color: Color,
+    clip: Option<Rect>,
+    offset: super::PaintOffset,
+) {
     if is_bullet_marker(&marker.text) {
         let size = (font_size * 0.35).max(2.0);
-        let cx = marker.x + size * 0.5;
-        let cy = marker.y + font_size * 0.5;
+        let cx = (marker.x + offset.x) + size * 0.5;
+        let cy = (marker.y + offset.y) + font_size * 0.5;
 
         // Render disc/circle/square as a filled square for simplicity in placeholder mode.
         canvas.fill_rect_clipped(
@@ -1702,8 +1730,8 @@ pub(crate) fn paint_list_marker_placeholder(
         // per character. paint_text_placeholder sizes each char internally, so
         // rect.width is not used for rendering — we pass 0.0 to avoid confusion.
         let rect = Rect {
-            x: marker.x,
-            y: marker.y,
+            x: marker.x + offset.x,
+            y: marker.y + offset.y,
             width: 0.0,
             height: font_size,
         };

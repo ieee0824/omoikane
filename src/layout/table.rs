@@ -11,6 +11,14 @@ use super::{
     translate_layout_box_to_outer, translate_layout_contents, vertical_align, visibility, z_index,
 };
 
+#[cfg(test)]
+mod offset_tests;
+
+#[cfg(test)]
+thread_local! {
+    static COLUMN_OFFSET_ADDITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn layout_table_container(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -37,6 +45,7 @@ pub(super) fn layout_table_container(
         (width - total_spacing).max(0.0),
         shrink_to_fit,
     );
+    let column_offsets = column_x_offsets(&column_widths, spacing);
     let inner_width = (width - collapse_spacing).max(0.0);
 
     // === Pass 1: Layout all rows and collect rowspan info ===
@@ -63,6 +72,7 @@ pub(super) fn layout_table_container(
             column_count,
             &mut occupied_columns,
             &column_widths,
+            &column_offsets,
             spacing,
             viewport,
         )?;
@@ -336,12 +346,17 @@ pub(super) fn spanned_cell_width(column_widths: &[f32], start: usize, span: usiz
     content + gaps
 }
 
-pub(super) fn column_x_offset(column_widths: &[f32], column: usize, spacing: f32) -> f32 {
+fn column_x_offsets(column_widths: &[f32], spacing: f32) -> Vec<f32> {
+    let mut offsets = Vec::with_capacity(column_widths.len());
     let mut offset = 0.0;
-    for width in column_widths.iter().take(column.min(column_widths.len())) {
+    for width in column_widths {
+        offsets.push(offset);
+        // Keep the original left-to-right addition order, including spacing.
         offset += width + spacing;
+        #[cfg(test)]
+        COLUMN_OFFSET_ADDITIONS.with(|count| count.set(count.get() + 1));
     }
-    offset
+    offsets
 }
 
 fn layout_table_row_entry(
@@ -352,6 +367,7 @@ fn layout_table_row_entry(
     column_count: usize,
     occupied_columns: &mut [usize],
     column_widths: &[f32],
+    column_offsets: &[f32],
     spacing: f32,
     viewport: Rect,
 ) -> Option<(LayoutBox, f32, Vec<RowspanCellInfo>)> {
@@ -406,7 +422,7 @@ fn layout_table_row_entry(
 
     let mut children = Vec::new();
     for (column_start, _span, _rowspan, mut cell, cell_style) in measured {
-        let outer_x = x + column_x_offset(column_widths, column_start, spacing);
+        let outer_x = x + column_offsets[column_start];
         let original_total_height = cell.total_height();
         let extra_height = (row_height - original_total_height).max(0.0);
         if extra_height > 0.0 {
@@ -425,8 +441,8 @@ fn layout_table_row_entry(
         children.push(cell);
     }
 
-    let row_width: f32 = column_widths.iter().sum::<f32>()
-        + column_count.saturating_sub(1) as f32 * spacing;
+    let row_width: f32 =
+        column_widths.iter().sum::<f32>() + column_count.saturating_sub(1) as f32 * spacing;
     let row_box = LayoutBox {
         node: entry.row_node.clone(),
         dimensions: BoxDimensions {

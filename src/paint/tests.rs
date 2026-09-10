@@ -9117,6 +9117,7 @@ fn form_control_label_uses_web_font_variant() {
         viewport,
         std::slice::from_ref(&global_font),
         None,
+        PaintOffset::default(),
     );
     let mut with_registry = Canvas::new(60, 24);
     paint_text_with_registry(
@@ -9127,6 +9128,7 @@ fn form_control_label_uses_web_font_variant() {
         viewport,
         &[],
         Some(&registry),
+        PaintOffset::default(),
     );
 
     // Glyph pixels must be present (anything that is neither transparent nor
@@ -9201,6 +9203,7 @@ fn focused_text_control_paints_selection_and_caret() {
         viewport,
         &[],
         None,
+        PaintOffset::default(),
     );
     assert!(selected.pixels().chunks_exact(4).any(|pixel| pixel[2] > pixel[0]));
 
@@ -9213,6 +9216,7 @@ fn focused_text_control_paints_selection_and_caret() {
         viewport,
         &[],
         None,
+        PaintOffset::default(),
     );
     assert!(caret.pixels().chunks_exact(4).any(|pixel| pixel == [0, 0, 0, 255]));
 }

@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 
-use crate::dom::{Node, NodeHandle, NodeType, is_actually_disabled};
+use crate::dom::{Node, NodeHandle, NodeType, WeakNodeHandle, is_actually_disabled};
 
-use super::{AttributeOperator, Combinator, RelativeSelector, Selector, SelectorPart, SimpleSelector};
+use super::{
+    AttributeOperator, Combinator, RelativeSelector, Selector, SelectorPart, SimpleSelector,
+};
 
 /// Supported pseudo-elements for style matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -60,12 +62,38 @@ pub fn matches_selector_with_pseudo(
 pub(crate) struct SelectorMatchCache {
     structural_positions: HashMap<usize, StructuralPositions>,
     relational_matches: HashMap<(usize, usize), bool>,
+    #[cfg(test)]
+    pub(crate) structural_builds: usize,
+}
+
+impl SelectorMatchCache {
+    fn positions(&mut self, parent: &NodeHandle) -> &StructuralPositions {
+        #[cfg(test)]
+        if !self.structural_positions.contains_key(&parent.identity()) {
+            self.structural_builds += 1;
+        }
+        self.structural_positions
+            .entry(parent.identity())
+            .or_insert_with(|| build_structural_positions(parent))
+    }
 }
 
 #[derive(Debug, Default)]
 struct StructuralPositions {
     element: HashMap<usize, (usize, usize)>,
     of_type: HashMap<usize, (usize, usize)>,
+    elements: Vec<WeakNodeHandle>,
+    // Number of preceding elements for every child, including text/comments.
+    preceding_elements: HashMap<usize, usize>,
+}
+
+/// Match DOM query candidates with one cache for an unchanged tree/selector list.
+pub(crate) fn matches_selector_cached(
+    node: &NodeHandle,
+    selector: &Selector,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    matches_selector_with_pseudo_cached(node, selector, None, cache)
 }
 
 pub(crate) fn matches_selector_with_pseudo_cached(
@@ -305,21 +333,19 @@ fn matches_selector_part(
             }
             false
         }
-        Combinator::Child => node
-            .parent_node()
-            .is_some_and(|parent| {
-                matches_selector_part(
-                    &parent,
-                    selector,
-                    index - 1,
-                    None,
-                    cache,
-                    scope_root,
-                    allow_scope_ancestor_escape,
-                )
-            }),
-        Combinator::AdjacentSibling => previous_element_sibling(node)
-            .is_some_and(|sibling| {
+        Combinator::Child => node.parent_node().is_some_and(|parent| {
+            matches_selector_part(
+                &parent,
+                selector,
+                index - 1,
+                None,
+                cache,
+                scope_root,
+                allow_scope_ancestor_escape,
+            )
+        }),
+        Combinator::AdjacentSibling => {
+            previous_element_sibling(node, cache).is_some_and(|sibling| {
                 matches_selector_part(
                     &sibling,
                     selector,
@@ -329,27 +355,25 @@ fn matches_selector_part(
                     scope_root,
                     allow_scope_ancestor_escape,
                 )
-            }),
-        Combinator::GeneralSibling => {
-            let Some(parent) = node.parent_node() else {
-                return false;
-            };
-            let siblings = parent.child_nodes();
-            let Some(position) = siblings.iter().position(|candidate| candidate == node) else {
-                return false;
-            };
-            siblings[..position].iter().rev().any(|sibling| {
-                sibling.node_type() == NodeType::Element
-                    && matches_selector_part(
-                        sibling,
-                        selector,
-                        index - 1,
-                        None,
-                        cache,
-                        scope_root,
-                        allow_scope_ancestor_escape,
-                    )
             })
+        }
+        Combinator::GeneralSibling => {
+            let mut previous = previous_element_sibling(node, cache);
+            while let Some(sibling) = previous {
+                if matches_selector_part(
+                    &sibling,
+                    selector,
+                    index - 1,
+                    None,
+                    cache,
+                    scope_root,
+                    allow_scope_ancestor_escape,
+                ) {
+                    return true;
+                }
+                previous = previous_element_sibling(&sibling, cache);
+            }
+            false
         }
     }
 }
@@ -362,18 +386,16 @@ fn matches_compound(
     scope_root: Option<&NodeHandle>,
     allow_scope_ancestor_escape: bool,
 ) -> bool {
-    part.simples
-        .iter()
-        .all(|simple| {
-            matches_simple_selector(
-                node,
-                simple,
-                pseudo,
-                cache,
-                scope_root,
-                allow_scope_ancestor_escape,
-            )
-        })
+    part.simples.iter().all(|simple| {
+        matches_simple_selector(
+            node,
+            simple,
+            pseudo,
+            cache,
+            scope_root,
+            allow_scope_ancestor_escape,
+        )
+    })
 }
 
 fn matches_simple_selector(
@@ -414,9 +436,8 @@ fn matches_simple_selector(
             allow_scope_ancestor_escape,
         ),
         SimpleSelector::PseudoElement(name) => matches_pseudo_element(name, pseudo),
-        SimpleSelector::Is(selectors) | SimpleSelector::Where(selectors) => selectors
-            .iter()
-            .any(|selector| {
+        SimpleSelector::Is(selectors) | SimpleSelector::Where(selectors) => {
+            selectors.iter().any(|selector| {
                 matches_selector_with_scope_mode_cached(
                     node,
                     selector,
@@ -425,30 +446,27 @@ fn matches_simple_selector(
                     scope_root,
                     allow_scope_ancestor_escape,
                 )
-            }),
-        SimpleSelector::Not(selectors) => !selectors
-            .iter()
-            .any(|selector| {
-                matches_selector_with_scope_mode_cached(
-                    node,
-                    selector,
-                    pseudo,
-                    cache,
-                    scope_root,
-                    allow_scope_ancestor_escape,
-                )
-            }),
-        SimpleSelector::Has(selectors) => selectors
-            .iter()
-            .any(|selector| {
-                matches_relative_selector_cached(
-                    node,
-                    selector,
-                    cache,
-                    scope_root,
-                    allow_scope_ancestor_escape,
-                )
-            }),
+            })
+        }
+        SimpleSelector::Not(selectors) => !selectors.iter().any(|selector| {
+            matches_selector_with_scope_mode_cached(
+                node,
+                selector,
+                pseudo,
+                cache,
+                scope_root,
+                allow_scope_ancestor_escape,
+            )
+        }),
+        SimpleSelector::Has(selectors) => selectors.iter().any(|selector| {
+            matches_relative_selector_cached(
+                node,
+                selector,
+                cache,
+                scope_root,
+                allow_scope_ancestor_escape,
+            )
+        }),
     }
 }
 
@@ -459,7 +477,10 @@ fn matches_relative_selector_cached(
     scope_root: Option<&NodeHandle>,
     allow_scope_ancestor_escape: bool,
 ) -> bool {
-    let key = (anchor.identity(), relative as *const RelativeSelector as usize);
+    let key = (
+        anchor.identity(),
+        relative as *const RelativeSelector as usize,
+    );
     // A relative selector can contain :scope.  Its result depends on the
     // active scope root, so only reuse the document-wide cache for the
     // unscoped path where no such binding exists.
@@ -468,7 +489,7 @@ fn matches_relative_selector_cached(
             return *result;
         }
     }
-    let result = related_elements(anchor, relative.leading_combinator)
+    let result = related_elements(anchor, relative.leading_combinator, cache)
         .into_iter()
         .any(|candidate| {
             matches_relative_selector_part(
@@ -511,7 +532,7 @@ fn matches_relative_selector_part(
     let Some(combinator) = selector.parts[next_index].combinator else {
         return false;
     };
-    related_elements(node, combinator)
+    related_elements(node, combinator, cache)
         .into_iter()
         .any(|candidate| {
             matches_relative_selector_part(
@@ -525,7 +546,11 @@ fn matches_relative_selector_part(
         })
 }
 
-fn related_elements(node: &NodeHandle, combinator: Combinator) -> Vec<NodeHandle> {
+fn related_elements(
+    node: &NodeHandle,
+    combinator: Combinator,
+    cache: &mut SelectorMatchCache,
+) -> Vec<NodeHandle> {
     match combinator {
         Combinator::Descendant => {
             let mut descendants = Vec::new();
@@ -537,8 +562,8 @@ fn related_elements(node: &NodeHandle, combinator: Combinator) -> Vec<NodeHandle
             .into_iter()
             .filter(|child| child.node_type() == NodeType::Element)
             .collect(),
-        Combinator::AdjacentSibling => next_element_sibling(node).into_iter().collect(),
-        Combinator::GeneralSibling => following_element_siblings(node),
+        Combinator::AdjacentSibling => next_element_sibling(node, cache).into_iter().collect(),
+        Combinator::GeneralSibling => following_element_siblings(node, cache),
     }
 }
 
@@ -551,23 +576,33 @@ fn collect_element_descendants(node: &NodeHandle, output: &mut Vec<NodeHandle>) 
     }
 }
 
-fn following_element_siblings(node: &NodeHandle) -> Vec<NodeHandle> {
+fn following_element_siblings(
+    node: &NodeHandle,
+    cache: &mut SelectorMatchCache,
+) -> Vec<NodeHandle> {
     let Some(parent) = node.parent_node() else {
         return Vec::new();
     };
-    let siblings = parent.child_nodes();
-    let Some(index) = siblings.iter().position(|candidate| candidate == node) else {
+    let positions = cache.positions(&parent);
+    let Some(before) = positions.preceding_elements.get(&node.identity()) else {
         return Vec::new();
     };
-    siblings[index + 1..]
+    let next = before + usize::from(positions.element.contains_key(&node.identity()));
+    positions.elements[next..]
         .iter()
-        .filter(|candidate| candidate.node_type() == NodeType::Element)
-        .cloned()
+        .filter_map(WeakNodeHandle::upgrade)
         .collect()
 }
 
-fn next_element_sibling(node: &NodeHandle) -> Option<NodeHandle> {
-    following_element_siblings(node).into_iter().next()
+fn next_element_sibling(node: &NodeHandle, cache: &mut SelectorMatchCache) -> Option<NodeHandle> {
+    let parent = node.parent_node()?;
+    let positions = cache.positions(&parent);
+    let before = positions.preceding_elements.get(&node.identity())?;
+    let next = before + usize::from(positions.element.contains_key(&node.identity()));
+    positions
+        .elements
+        .get(next)
+        .and_then(WeakNodeHandle::upgrade)
 }
 
 fn matches_attribute_selector(
@@ -619,10 +654,9 @@ fn matches_pseudo_class(
         let function = function.to_ascii_lowercase();
         return match function.as_str() {
             "nth-child" => matches_nth_child(node, argument, cache),
-            "nth-last-child" => element_position(node, cache)
-                .is_some_and(|(index, total)| {
-                    parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
-                }),
+            "nth-last-child" => element_position(node, cache).is_some_and(|(index, total)| {
+                parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
+            }),
             "nth-of-type" => type_position(node, cache).is_some_and(|(index, _)| {
                 parse_an_plus_b(argument).is_some_and(|formula| formula.matches(index))
             }),
@@ -656,11 +690,14 @@ fn matches_pseudo_class(
         "enabled" => is_form_control(node) && !is_actually_disabled(node),
         "disabled" => is_actually_disabled(node),
         "checked" => node.checked(),
-        "empty" => node.child_nodes().into_iter().all(|child| match child.node_type() {
-            NodeType::Element => false,
-            NodeType::Text => child.data().is_some_and(|data| data.is_empty()),
-            _ => true,
-        }),
+        "empty" => node
+            .child_nodes()
+            .into_iter()
+            .all(|child| match child.node_type() {
+                NodeType::Element => false,
+                NodeType::Text => child.data().is_some_and(|data| data.is_empty()),
+                _ => true,
+            }),
         _ => false,
     }
 }
@@ -781,15 +818,17 @@ fn get_attribute(node: &NodeHandle, name: &str) -> Option<String> {
     node.get_attribute(name)
 }
 
-fn previous_element_sibling(node: &NodeHandle) -> Option<NodeHandle> {
+fn previous_element_sibling(
+    node: &NodeHandle,
+    cache: &mut SelectorMatchCache,
+) -> Option<NodeHandle> {
     let parent = node.parent_node()?;
-    let siblings = parent.child_nodes();
-    let index = siblings.iter().position(|candidate| candidate == node)?;
-    siblings[..index]
-        .iter()
-        .rev()
-        .find(|candidate| candidate.node_type() == NodeType::Element)
-        .cloned()
+    let positions = cache.positions(&parent);
+    let before = positions.preceding_elements.get(&node.identity())?;
+    positions
+        .elements
+        .get(before.checked_sub(1)?)
+        .and_then(WeakNodeHandle::upgrade)
 }
 
 fn element_index_in_parent(node: &NodeHandle, cache: &mut SelectorMatchCache) -> Option<usize> {
@@ -809,10 +848,7 @@ fn element_position(node: &NodeHandle, cache: &mut SelectorMatchCache) -> Option
     if parent.node_type() != NodeType::Element {
         return None;
     }
-    let positions = cache
-        .structural_positions
-        .entry(parent.identity())
-        .or_insert_with(|| build_structural_positions(&parent));
+    let positions = cache.positions(&parent);
     positions.element.get(&node.identity()).copied()
 }
 
@@ -821,34 +857,41 @@ fn type_position(node: &NodeHandle, cache: &mut SelectorMatchCache) -> Option<(u
     if parent.node_type() != NodeType::Element {
         return None;
     }
-    let positions = cache
-        .structural_positions
-        .entry(parent.identity())
-        .or_insert_with(|| build_structural_positions(&parent));
+    let positions = cache.positions(&parent);
     positions.of_type.get(&node.identity()).copied()
 }
 
 fn build_structural_positions(parent: &NodeHandle) -> StructuralPositions {
-    let elements: Vec<(usize, String)> = parent
-        .child_nodes()
-        .into_iter()
-        .filter_map(|child| child.tag_name().map(|tag| (child.identity(), tag.to_ascii_lowercase())))
-        .collect();
-    let total = elements.len();
+    let mut positions = StructuralPositions::default();
+    let mut tags = Vec::new();
+    for child in parent.child_nodes() {
+        positions
+            .preceding_elements
+            .insert(child.identity(), positions.elements.len());
+        if let Some(tag) = child.tag_name() {
+            tags.push((child.identity(), tag.to_ascii_lowercase()));
+            positions.elements.push(child.downgrade());
+        }
+    }
+    let total = positions.elements.len();
     let mut type_totals = HashMap::<String, usize>::new();
-    for (_, tag) in &elements {
+    for (_, tag) in &tags {
         *type_totals.entry(tag.clone()).or_default() += 1;
     }
     let mut type_indexes = HashMap::<String, usize>::new();
-    let mut positions = StructuralPositions::default();
-    for (offset, (identity, tag)) in elements.into_iter().enumerate() {
+    for (offset, (identity, tag)) in tags.into_iter().enumerate() {
         positions.element.insert(identity, (offset + 1, total));
         let index = type_indexes.entry(tag.clone()).or_default();
         *index += 1;
-        positions.of_type.insert(identity, (*index, type_totals[&tag]));
+        positions
+            .of_type
+            .insert(identity, (*index, type_totals[&tag]));
     }
     positions
 }
+
+#[cfg(test)]
+mod sibling_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1013,7 +1056,10 @@ mod tests {
         assert!(!matches_selector(&first, &selector(":only-child {}")));
         assert!(matches_selector(&first, &selector(":nth-child(-n+3) {}")));
         assert!(matches_selector(&third, &selector(":nth-last-child(1) {}")));
-        assert!(matches_selector(&second, &selector(":nth-last-child(even) {}")));
+        assert!(matches_selector(
+            &second,
+            &selector(":nth-last-child(even) {}")
+        ));
         parent.remove_child(&first).unwrap();
         assert!(matches_selector(&second, &selector(":first-child {}")));
     }
@@ -1046,14 +1092,22 @@ mod tests {
             paragraphs.push(paragraph);
         }
 
-        assert!(matches_selector(&paragraphs[0], &selector(":first-of-type {}")));
-        assert!(matches_selector(&paragraphs[7], &selector(":last-of-type {}")));
+        assert!(matches_selector(
+            &paragraphs[0],
+            &selector(":first-of-type {}")
+        ));
+        assert!(matches_selector(
+            &paragraphs[7],
+            &selector(":last-of-type {}")
+        ));
         assert_eq!(
             paragraphs
                 .iter()
                 .enumerate()
-                .filter_map(|(i, node)| matches_selector(node, &selector(":nth-of-type(3n-1) {}"))
-                    .then_some(i + 1))
+                .filter_map(
+                    |(i, node)| matches_selector(node, &selector(":nth-of-type(3n-1) {}"))
+                        .then_some(i + 1)
+                )
                 .collect::<Vec<_>>(),
             vec![2, 5, 8]
         );
@@ -1061,8 +1115,11 @@ mod tests {
             paragraphs
                 .iter()
                 .enumerate()
-                .filter_map(|(i, node)| matches_selector(node, &selector(":nth-last-of-type(-5n+3) {}"))
-                    .then_some(i + 1))
+                .filter_map(|(i, node)| matches_selector(
+                    node,
+                    &selector(":nth-last-of-type(-5n+3) {}")
+                )
+                .then_some(i + 1))
                 .collect::<Vec<_>>(),
             vec![6]
         );
@@ -1141,10 +1198,7 @@ mod tests {
             &selector(":disabled {}")
         ));
         assert!(matches_selector(&nested, &selector(":disabled {}")));
-        assert!(matches_selector(
-            &nested_input,
-            &selector(":disabled {}")
-        ));
+        assert!(matches_selector(&nested_input, &selector(":disabled {}")));
         assert!(nested_input.get_attribute("disabled").is_none());
     }
 
@@ -1260,8 +1314,14 @@ mod tests {
 
         // data-kind="intro hero" → contains "ro h"
         assert!(matches_selector(&lead, &selector("[data-kind*=intro] {}")));
-        assert!(matches_selector(&lead, &selector(r#"[data-kind*="ro h"] {}"#)));
-        assert!(!matches_selector(&lead, &selector("[data-kind*=missing] {}")));
+        assert!(matches_selector(
+            &lead,
+            &selector(r#"[data-kind*="ro h"] {}"#)
+        ));
+        assert!(!matches_selector(
+            &lead,
+            &selector("[data-kind*=missing] {}")
+        ));
     }
 
     #[test]
@@ -1310,9 +1370,18 @@ mod tests {
         let (_, _, _, main, lead, title, cta) = sample_tree();
 
         assert!(matches_selector(&main, &selector(":is(#app, .missing) {}")));
-        assert!(matches_selector(&lead, &selector(":where(.lead, #missing) {}")));
-        assert!(!matches_selector(&title, &selector(":is(.lead, .button) {}")));
-        assert!(matches_selector(&cta, &selector(":is(main > .button, p) {}")));
+        assert!(matches_selector(
+            &lead,
+            &selector(":where(.lead, #missing) {}")
+        ));
+        assert!(!matches_selector(
+            &title,
+            &selector(":is(.lead, .button) {}")
+        ));
+        assert!(matches_selector(
+            &cta,
+            &selector(":is(main > .button, p) {}")
+        ));
         assert!(!matches_selector(&main, &selector(":is() {}")));
     }
 
@@ -1352,8 +1421,14 @@ mod tests {
     fn matches_complex_and_nested_selector_lists() {
         let (_, _, _, main, lead, title, cta) = sample_tree();
 
-        assert!(!matches_selector(&lead, &selector(":not(main > p, .button) {}")));
-        assert!(matches_selector(&title, &selector(":not(main > p, .button) {}")));
+        assert!(!matches_selector(
+            &lead,
+            &selector(":not(main > p, .button) {}")
+        ));
+        assert!(matches_selector(
+            &title,
+            &selector(":not(main > p, .button) {}")
+        ));
         assert!(matches_selector(
             &cta,
             &selector(":not(:is(p, #missing)) {}")
@@ -1407,7 +1482,10 @@ mod tests {
             }
         );
 
-        assert_eq!(specificity(&selector(":where(#bar, .foo) {}")), Specificity::zero());
+        assert_eq!(
+            specificity(&selector(":where(#bar, .foo) {}")),
+            Specificity::zero()
+        );
 
         assert_eq!(
             specificity(&selector(":has(.foo, main > #target) {}")),

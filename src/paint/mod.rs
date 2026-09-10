@@ -176,12 +176,14 @@ pub(crate) use stylesheet::{
 pub(crate) use text::{
     TextDecorationLines, apply_text_transform, inline_fragment_content_rect,
     is_cjk_preferred_character, load_text_fonts, paint_inline_image_fragment, paint_list_marker,
-    paint_list_marker_placeholder, paint_text_decoration, paint_text_placeholder,
+    paint_text_decoration, paint_text_placeholder,
     paint_text_placeholder_with_mode, paint_text_with_font, paint_text_with_font_refs,
-    paint_text_with_registry,
-    rasterize_with_fallback, rasterize_with_fallback_refs, text_color, text_decoration_color,
-    text_decoration_line, with_render_glyph_cache,
+    paint_text_with_registry, rasterize_with_fallback, rasterize_with_fallback_refs, text_color,
+    text_decoration_color, text_decoration_line, with_render_glyph_cache,
 };
+
+#[cfg(test)]
+pub(crate) use text::paint_list_marker_placeholder;
 
 /// A decoded RGBA image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1389,6 +1391,7 @@ fn paint_box(
         true,
         text_fonts,
         web_fonts,
+        PaintOffset::default(),
     );
 }
 
@@ -1401,6 +1404,7 @@ fn paint_box_internal(
     include_phase_descendants: bool,
     text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
+    offset: PaintOffset,
 ) {
     if layout.visibility == Visibility::Hidden {
         return;
@@ -1415,6 +1419,7 @@ fn paint_box_internal(
             viewport,
             text_fonts,
             web_fonts,
+            offset,
         );
         return;
     }
@@ -1428,7 +1433,44 @@ fn paint_box_internal(
         include_phase_descendants,
         text_fonts,
         web_fonts,
+        offset,
     );
+}
+
+/// Translation from immutable layout coordinates into the current paint surface.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PaintOffset {
+    x: f32,
+    y: f32,
+}
+
+impl PaintOffset {
+    fn rect(self, mut rect: Rect) -> Rect {
+        rect.x += self.x;
+        rect.y += self.y;
+        rect
+    }
+
+    fn shifted(self, x: f32, y: f32) -> Self {
+        Self {
+            x: self.x + x,
+            y: self.y + y,
+        }
+    }
+
+    fn transform(self, transform: AffineTransform) -> AffineTransform {
+        if self.x == 0.0 && self.y == 0.0 {
+            return transform;
+        }
+        AffineTransform::translate(self.x, self.y)
+            .multiply(transform)
+            .multiply(AffineTransform::translate(-self.x, -self.y))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TRANSFORM_SURFACE_STATS: std::cell::Cell<(usize, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
 }
 
 const TRANSFORM_SURFACE_TILE_SIZE: u32 = 2048;
@@ -1442,8 +1484,23 @@ fn paint_transformed_box(
     viewport: Rect,
     text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
+    offset: PaintOffset,
 ) {
-    let Some(inverse) = layout.transform.inverse() else {
+    #[cfg(test)]
+    if transform_tiles_tests::use_reference() {
+        return transform_tiles_tests::paint_reference(
+            canvas,
+            layout,
+            resolver,
+            inherited_clip,
+            viewport,
+            text_fonts,
+            web_fonts,
+            offset,
+        );
+    }
+    let transform = offset.transform(layout.transform);
+    let Some(inverse) = transform.inverse() else {
         return;
     };
     let canvas_bounds = Rect {
@@ -1467,8 +1524,10 @@ fn paint_transformed_box(
         width: required_source.width + 2.0,
         height: required_source.height + 2.0,
     };
-    let Some(source_region) = intersect(subtree_paint_bounds(layout, resolver), required_source)
-    else {
+    let Some(source_region) = intersect(
+        offset.rect(subtree_paint_bounds(layout, resolver)),
+        required_source,
+    ) else {
         return;
     };
     let source_x0 = source_region.x.floor() as i32;
@@ -1486,8 +1545,13 @@ fn paint_transformed_box(
             let tile_y1 = (tile_y + tile_size).min(source_y1);
             let tile_width = (tile_x1 - tile_x).max(1) as u32;
             let tile_height = (tile_y1 - tile_y).max(1) as u32;
-            let mut translated_layout = layout.clone();
-            translate_layout_for_paint(&mut translated_layout, -(tile_x as f32), -(tile_y as f32));
+            let tile_offset = offset.shifted(-(tile_x as f32), -(tile_y as f32));
+            #[cfg(test)]
+            TRANSFORM_SURFACE_STATS.with(|stats| {
+                let (tiles, pixels, largest) = stats.get();
+                let area = u64::from(tile_width) * u64::from(tile_height);
+                stats.set((tiles + 1, pixels + area, largest.max(area)));
+            });
             let translated_viewport = Rect {
                 x: viewport.x - tile_x as f32,
                 y: viewport.y - tile_y as f32,
@@ -1500,17 +1564,17 @@ fn paint_transformed_box(
             // in destination space; local overflow/clip-path is painted here.
             paint_box_internal_untransformed(
                 &mut offscreen,
-                &translated_layout,
+                layout,
                 resolver,
                 None,
                 translated_viewport,
                 true,
                 text_fonts,
                 web_fonts,
+                tile_offset,
             );
-            let tile_transform = layout
-                .transform
-                .multiply(AffineTransform::translate(tile_x as f32, tile_y as f32));
+            let tile_transform =
+                transform.multiply(AffineTransform::translate(tile_x as f32, tile_y as f32));
             composite_affine(
                 canvas,
                 &offscreen,
@@ -1524,29 +1588,6 @@ fn paint_transformed_box(
                 },
             );
         }
-    }
-}
-
-fn translate_layout_for_paint(layout: &mut LayoutBox, dx: f32, dy: f32) {
-    layout.dimensions.content.x += dx;
-    layout.dimensions.content.y += dy;
-    for line in &mut layout.lines {
-        line.rect.x += dx;
-        line.rect.y += dy;
-        for fragment in &mut line.fragments {
-            fragment.rect.x += dx;
-            fragment.rect.y += dy;
-        }
-    }
-    if let Some(marker) = &mut layout.marker {
-        marker.x += dx;
-        marker.y += dy;
-    }
-    layout.transform = AffineTransform::translate(dx, dy)
-        .multiply(layout.transform)
-        .multiply(AffineTransform::translate(-dx, -dy));
-    for child in &mut layout.children {
-        translate_layout_for_paint(child, dx, dy);
     }
 }
 
@@ -1728,7 +1769,11 @@ fn hit_test_box(
                     if fragment.node.identity() == layout.node.identity() =>
                 {
                     let border = EdgeSizesForPaint::from_style(fragment_style);
-                    Some(inline_fragment_content_rect(fragment.rect, fragment_style, border))
+                    Some(inline_fragment_content_rect(
+                        fragment.rect,
+                        fragment_style,
+                        border,
+                    ))
                 }
                 _ => None,
             })
@@ -1736,12 +1781,11 @@ fn hit_test_box(
         if rect_contains_point(svg_box, local_point.0, local_point.1) {
             let local_x = local_point.0 - svg_box.x;
             let local_y = local_point.1 - svg_box.y;
-            let mut computed_pointer_events = |node: &NodeHandle| {
-                match resolver.computed_property(node, "pointer-events") {
+            let mut computed_pointer_events =
+                |node: &NodeHandle| match resolver.computed_property(node, "pointer-events") {
                     Some(ComputedValue::Keyword(value)) => Some(value),
                     _ => None,
-                }
-            };
+                };
             if let Some(target) = crate::svg::hit_test_svg(
                 &layout.node,
                 local_x,
@@ -1770,11 +1814,11 @@ fn hit_test_box(
                     if rect_contains_point(svg_box, local_point.0, local_point.1) {
                         let local_x = local_point.0 - svg_box.x;
                         let local_y = local_point.1 - svg_box.y;
-                        let mut computed_pointer_events = |node: &NodeHandle| {
-                            match resolver.computed_property(node, "pointer-events") {
-                                Some(ComputedValue::Keyword(value)) => Some(value),
-                                _ => None,
-                            }
+                        let mut computed_pointer_events = |node: &NodeHandle| match resolver
+                            .computed_property(node, "pointer-events")
+                        {
+                            Some(ComputedValue::Keyword(value)) => Some(value),
+                            _ => None,
                         };
                         if let Some(target) = crate::svg::hit_test_svg(
                             &fragment.node,
@@ -2071,14 +2115,15 @@ fn paint_box_internal_untransformed(
     include_phase_descendants: bool,
     text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
+    offset: PaintOffset,
 ) {
     if layout.visibility == Visibility::Hidden {
         return;
     }
 
     let style = resolver.computed_style(&layout.node);
-    let border_box = border_box_rect(layout);
-    let padding_box = padding_box_rect(layout);
+    let border_box = offset.rect(border_box_rect(layout));
+    let padding_box = offset.rect(padding_box_rect(layout));
     let clip_shape = clip_path_shape(&style, border_box);
     let inherited_clip = if let Some(inset_clip) = clip_path_inset_rect(&style, border_box) {
         let Some(inset_clip) = inset_clip else {
@@ -2123,7 +2168,7 @@ fn paint_box_internal_untransformed(
             width: canvas.width() as f32,
             height: canvas.height() as f32,
         };
-        let mut effect_bounds = subtree_paint_bounds(layout, resolver);
+        let mut effect_bounds = offset.rect(subtree_paint_bounds(layout, resolver));
         if let Some(shape) = &clip_shape {
             let Some(shaped_bounds) = intersect(effect_bounds, shape.bounds()) else {
                 return;
@@ -2157,10 +2202,9 @@ fn paint_box_internal_untransformed(
             pixels.set(pixels.get().saturating_add(buf_w as u64 * buf_h as u64));
         });
 
-        let mut offset_layout = layout.clone();
-        translate_layout_for_paint(&mut offset_layout, -(buf_x as f32), -(buf_y as f32));
-        let offset_border_box = border_box_rect(&offset_layout);
-        let offset_padding_box = padding_box_rect(&offset_layout);
+        let surface_offset = offset.shifted(-(buf_x as f32), -(buf_y as f32));
+        let offset_border_box = surface_offset.rect(border_box_rect(layout));
+        let offset_padding_box = surface_offset.rect(padding_box_rect(layout));
         let offset_inherited_clip = inherited_clip.map(|c| Rect {
             x: c.x - buf_x as f32,
             y: c.y - buf_y as f32,
@@ -2176,7 +2220,7 @@ fn paint_box_internal_untransformed(
         let mut offscreen = Canvas::new(buf_w, buf_h);
         paint_box_internal_to(
             &mut offscreen,
-            &offset_layout,
+            layout,
             resolver,
             offset_inherited_clip,
             offset_viewport,
@@ -2186,6 +2230,7 @@ fn paint_box_internal_untransformed(
             &style,
             offset_border_box,
             offset_padding_box,
+            surface_offset,
         );
         apply_filters(&mut offscreen, &filters);
         offscreen.multiply_alpha(opacity_value);
@@ -2240,6 +2285,7 @@ fn paint_box_internal_untransformed(
         &style,
         border_box,
         padding_box,
+        offset,
     );
 }
 
@@ -2749,6 +2795,7 @@ fn paint_replaced_image_box(
     layout: &LayoutBox,
     style: &ComputedStyle,
     clip: Option<Rect>,
+    offset: PaintOffset,
 ) {
     let is_positioned = matches!(
         style.get("position"),
@@ -2772,7 +2819,7 @@ fn paint_replaced_image_box(
         return;
     };
 
-    let content_box = layout.dimensions.content;
+    let content_box = offset.rect(layout.dimensions.content);
     let destination =
         image::object_fit_destination(content_box, image.width as f32, image.height as f32, style);
     // The content box bounds the painted result, so `cover` (and an oversized
@@ -2832,6 +2879,7 @@ fn paint_box_internal_to(
     style: &ComputedStyle,
     border_box: Rect,
     padding_box: Rect,
+    offset: PaintOffset,
 ) {
     let has_paint_containment = crate::layout::has_containment(style, "paint");
     let paint_containment_clip = has_paint_containment
@@ -2849,7 +2897,7 @@ fn paint_box_internal_to(
     let clip_values = background_list(style, "background-clip", "border-box");
     let color_clip = &clip_values[(image_count - 1) % clip_values.len()];
     let (background_clip_rect, background_radii) =
-        background_clip_geometry(layout, style, color_clip, border_box, padding_box);
+        background_clip_geometry(layout, style, color_clip, border_box, padding_box, offset);
     let background_clip = match inherited_clip {
         Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
         None => Some(background_clip_rect),
@@ -2880,19 +2928,20 @@ fn paint_box_internal_to(
         padding_box,
         inherited_clip,
         viewport,
+        offset,
     );
     if has_paint_containment {
         if paint_containment_clip.is_some() {
-            paint_replaced_image_box(canvas, layout, style, paint_containment_clip);
+            paint_replaced_image_box(canvas, layout, style, paint_containment_clip, offset);
         }
     } else if layout.overflow.clips_overflow() {
         let overflow_clip =
             overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport);
         if overflow_clip.is_some() {
-            paint_replaced_image_box(canvas, layout, style, overflow_clip);
+            paint_replaced_image_box(canvas, layout, style, overflow_clip, offset);
         }
     } else {
-        paint_replaced_image_box(canvas, layout, style, inherited_clip);
+        paint_replaced_image_box(canvas, layout, style, inherited_clip, offset);
     }
     if !has_paint_containment || paint_containment_clip.is_some() {
         paint_block_generated_pseudo_box(
@@ -2906,10 +2955,11 @@ fn paint_box_internal_to(
                 inherited_clip
             },
             viewport,
+            offset,
         );
     }
 
-    border::paint_borders(canvas, layout, style, inherited_clip);
+    border::paint_borders(canvas, layout, style, inherited_clip, offset);
 
     let clip = if has_paint_containment {
         let Some(combined) = paint_containment_clip else {
@@ -2978,34 +3028,36 @@ fn paint_box_internal_to(
 
     for child in negative_positioned_children {
         paint_box_internal(
-            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts,
+            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts, offset,
         );
     }
     for child in normal_block_children {
         paint_box_internal(
-            canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts,
+            canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts, offset,
         );
     }
     for child in float_children {
         paint_box_internal(
-            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts,
+            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts, offset,
         );
     }
-    text::paint_text_with_registry(canvas, layout, style, clip, viewport, text_fonts, web_fonts);
-    text::paint_list_marker(canvas, layout, style, clip, text_fonts);
+    text::paint_text_with_registry(
+        canvas, layout, style, clip, viewport, text_fonts, web_fonts, offset,
+    );
+    text::paint_list_marker(canvas, layout, style, clip, text_fonts, offset);
     for child in inline_children {
         paint_box_internal(
-            canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts,
+            canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts, offset,
         );
     }
     for child in auto_positioned_children {
         paint_box_internal(
-            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts,
+            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts, offset,
         );
     }
     for child in positive_positioned_children {
         paint_box_internal(
-            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts,
+            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts, offset,
         );
     }
 
@@ -3016,6 +3068,7 @@ fn paint_box_internal_to(
         PseudoElement::After,
         clip,
         viewport,
+        offset,
     );
 }
 
@@ -3134,6 +3187,7 @@ fn paint_block_generated_pseudo_box(
     pseudo: PseudoElement,
     clip: Option<Rect>,
     viewport: Rect,
+    offset: PaintOffset,
 ) {
     let Some(style) = resolver.computed_pseudo_style(&layout.node, pseudo) else {
         return;
@@ -3188,8 +3242,8 @@ fn paint_block_generated_pseudo_box(
     paint_generated_box(
         canvas,
         Rect {
-            x: layout.dimensions.content.x,
-            y,
+            x: layout.dimensions.content.x + offset.x,
+            y: y + offset.y,
             width: total_width,
             height: total_height,
         },
@@ -3232,13 +3286,14 @@ fn background_clip_geometry(
     clip: &str,
     border_box: Rect,
     padding_box: Rect,
+    offset: PaintOffset,
 ) -> (Rect, (f32, f32, f32, f32)) {
     let radii = border_radius_corners(style);
     let border = layout.dimensions.border;
     let padding = layout.dimensions.padding;
     let (rect, top, right, bottom, left) = if clip.eq_ignore_ascii_case("content-box") {
         (
-            layout.dimensions.content,
+            offset.rect(layout.dimensions.content),
             border.top + padding.top,
             border.right + padding.right,
             border.bottom + padding.bottom,
@@ -5224,6 +5279,7 @@ fn paint_background_images_for_box(
     padding_box: Rect,
     inherited_clip: Option<Rect>,
     viewport: Rect,
+    offset: PaintOffset,
 ) {
     let images = background_list(style, "background-image", "none");
     let origins = background_list(style, "background-origin", "padding-box");
@@ -5238,7 +5294,7 @@ fn paint_background_images_for_box(
             &origins[index % origins.len()],
             border_box,
             padding_box,
-            layout.dimensions.content,
+            offset.rect(layout.dimensions.content),
         );
         let (clip_rect, radii) = background_clip_geometry(
             layout,
@@ -5246,6 +5302,7 @@ fn paint_background_images_for_box(
             &clips[index % clips.len()],
             border_box,
             padding_box,
+            offset,
         );
         let clip = match inherited_clip {
             Some(inherited_clip) => intersect(clip_rect, inherited_clip),
@@ -5778,3 +5835,6 @@ impl Canvas {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transform_tiles_tests;
