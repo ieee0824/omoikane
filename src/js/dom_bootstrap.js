@@ -3991,8 +3991,10 @@
       return indexOfNode(child) < bOffset ? -1 : 1;
     }
     const aPath = [], bPath = [];
-    for (let n = aNode; n; n = n.parentNode) aPath.unshift(n);
-    for (let n = bNode; n; n = n.parentNode) bPath.unshift(n);
+    for (let n = aNode; n; n = n.parentNode) aPath.push(n);
+    for (let n = bNode; n; n = n.parentNode) bPath.push(n);
+    aPath.reverse();
+    bPath.reverse();
     let i = 0;
     while (i < aPath.length && aPath[i] === bPath[i]) i++;
     if (i === 0) return 0;
