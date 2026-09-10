@@ -61,6 +61,6 @@ cargo test --features baseline-jit --test jit_code_memory \
   --test jit_runtime_call --test jit_gc_roots
 ```
 
-These foundation tests run on ARM64 too. They do not assert that ARM64 JavaScript
-arithmetic or property bytecode already uses native lowering; those execution
-paths are introduced by #542 and #543.
+These foundation tests run on ARM64 too. JavaScript native-entry evidence comes
+from the [arithmetic](gate3-arithmetic.md) and [property](gate5-properties.md)
+execution contracts introduced by #542 and #543.

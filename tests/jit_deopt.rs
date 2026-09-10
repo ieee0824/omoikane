@@ -124,7 +124,10 @@ fn collection_before_deopt_does_not_leave_stale_registers() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn property_store_before_deopt_is_committed_exactly_once() {
     const SOURCE: &str = "function f(o,n,start){let s=start;for(let i=0;i<n;i++){o.x=o.x+1;s=s+o.x}return [o.x,s]}\
          let warm={x:0};f(warm,200,0);let target={x:0};f(target,100,9007199254740980).join(',')";
@@ -165,7 +168,10 @@ fn explicit_interrupt_matches_interpreter_failure() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn shape_guards_match_jit_off() {
     let source = "function f(o,n){let s=0;for(let i=0;i<n;i++){s+=o.x;o.x+=1}return s+o.x}\
              let a={x:1};f(a,200);let b={pad:0,x:7};f(b,100)";

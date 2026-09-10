@@ -10,7 +10,7 @@ initialization, return sequence, unsupported opcodes and unsupported platforms
 remain on the interpreter.
 
 The native frame contains checked scalar copies rather than raw `JsValue` bits.
-Every generated register write records a Number/Boolean type tag, so fallback
+Every generated scalar write records a Number/Boolean type tag, so fallback
 restores only operations that really completed and comparison results retain
 their ECMAScript type. Type mismatch, results outside the exact safe-integer range, NaN, negative zero
 (including multiplication), invalid remainder operands, and loop-limit
@@ -20,7 +20,7 @@ or hides a GC edge.
 ## ARM64 register and spill contract
 
 The ARM64 emitter is a leaf using x0 for the borrowed frame, x9/x10 for scalar
-values and Number/Boolean tags, x11/x12 for operands, and x13/x14 for temporaries
+values and side tags, x11/x12 for operands, and x13/x14 for temporaries
 and large-index addressing. It preserves x18, all callee-saved registers and the
 native stack. Every completed bytecode stores its result and type tag before an
 exit. The existing frame descriptors and deopt recipes recover the exact
@@ -30,7 +30,8 @@ Multiplication checks both halves of the signed 128-bit product before accepting
 an i64 result, then applies the same 53-bit guard as x86_64. Remainder uses signed
 division and multiply-subtract, preserving division-by-zero and negative-zero
 fallbacks. Other Number values keep the interpreter's semantics. Property
-lowering is handled by #543.
+lowering and rooted object-alias restoration are covered by
+[#543's property contract](gate5-properties.md).
 
 ## Verification
 

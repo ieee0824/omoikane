@@ -47,7 +47,10 @@ fn issue_305_function_reports_a_compiled_entry() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn issue_305_prop_mono_shape_uses_guarded_native_slots() {
     let iterations = 2_000_i64;
     let mut context = Context::default();
@@ -85,7 +88,10 @@ fn property_shape_and_descriptor_changes_match_interpreter_semantics() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn property_mutation_enters_native_code_then_bails_out_safely() {
     let mut context = Context::default();
     let result = context
@@ -174,4 +180,31 @@ fn arithmetic_boundaries_match_jit_disabled_after_a_native_warmup() {
         results.push(result.display().to_string());
     }
     assert_eq!(results[0], results[1]);
+}
+
+#[test]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+fn generated_boolean_property_store_keeps_its_type_after_deopt() {
+    const SOURCE: &str = "function f(o,n){for(var i=0;i<n;i++){var v=i;\
+        if(i>=500)v=i<900;o.x=v;}return typeof o.x+':'+o.x}f({x:0},2000)";
+    for enabled in [false, true] {
+        let mut context = Context::default();
+        context.set_baseline_jit_enabled(enabled);
+        let value = context.eval(Source::from_bytes(SOURCE)).unwrap();
+        assert_eq!(
+            value.as_string().unwrap().to_std_string_escaped(),
+            "boolean:false"
+        );
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        if enabled {
+            assert!(diagnostics.compiled_entries > 0, "{diagnostics:?}");
+            assert!(diagnostics.type_deopts > 0, "{diagnostics:?}");
+            assert!(diagnostics.property_bailouts > 0, "{diagnostics:?}");
+        } else {
+            assert_eq!(diagnostics.compiled_entries, 0);
+        }
+    }
 }

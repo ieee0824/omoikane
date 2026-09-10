@@ -44,7 +44,7 @@ fn nested_dom_exception_finally_rethrow_and_opaque_identity_match_interpreter() 
     );
     let diagnostics = on.baseline_jit_diagnostics();
     if cfg!(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         any(target_os = "linux", target_os = "macos")
     )) {
         assert!(diagnostics.runtime_helper_entries > before.runtime_helper_entries);
@@ -87,7 +87,7 @@ fn dom_api_error_and_host_error_match_with_jit_on_and_off() {
         off.eval(host_error).unwrap_err().to_string(),
     );
     if cfg!(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         any(target_os = "linux", target_os = "macos")
     )) {
         assert!(on.baseline_jit_diagnostics().exception_unwinds > before.exception_unwinds);
