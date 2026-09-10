@@ -1,0 +1,94 @@
+diff --git a/engine/boa/cli/src/main.rs b/engine/boa/cli/src/main.rs
+index a11a3ec..a1078f7 100644
+--- a/engine/boa/cli/src/main.rs
++++ b/engine/boa/cli/src/main.rs
+@@ -595 +595 @@ impl Executor {
+-        let now = context.clock().now();
++        let now = context.clock().monotonic_now();
+@@ -605 +605 @@ impl Executor {
+-        let now = context.clock().now();
++        let now = context.clock().monotonic_now();
+@@ -636 +636 @@ impl JobExecutor for Executor {
+-                let now = context.clock().now();
++                let now = context.clock().monotonic_now();
+@@ -697,0 +698,60 @@ impl JobExecutor for Executor {
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use boa_engine::{JsValue, context::time::Clock, job::NativeJob};
++    use std::cell::Cell;
++
++    struct AdjustableClocks {
++        wall: Cell<u64>,
++        monotonic: Cell<u64>,
++    }
++
++    impl Clock for AdjustableClocks {
++        fn now(&self) -> JsInstant {
++            JsInstant::new(self.wall.get(), 0)
++        }
++
++        fn monotonic_now(&self) -> JsInstant {
++            JsInstant::new(self.monotonic.get(), 0)
++        }
++    }
++
++    #[test]
++    fn cli_timeout_deadlines_ignore_wall_clock_adjustments() {
++        let clock = Rc::new(AdjustableClocks {
++            wall: Cell::new(1000),
++            monotonic: Cell::new(1000),
++        });
++        let executor = Rc::new(Executor::new(SharedExternalPrinterLogger::new()));
++        let mut context = Context::builder()
++            .clock(clock.clone())
++            .job_executor(executor.clone())
++            .build()
++            .unwrap();
++        let count = Rc::new(Cell::new(0));
++        let result = count.clone();
++        let job = NativeJob::new(move |_| {
++            result.set(result.get() + 1);
++            Ok(JsValue::undefined())
++        });
++        context.enqueue_job(TimeoutJob::new(job, 2000).into());
++
++        clock.wall.set(5000);
++        clock.monotonic.set(1001);
++        assert!(executor.is_empty(&mut context));
++        executor.drain_timeout_jobs(&mut context);
++        assert_eq!(count.get(), 0, "the timeout has not elapsed");
++
++        clock.wall.set(500);
++        clock.monotonic.set(1003);
++        assert!(!executor.is_empty(&mut context));
++        executor.drain_timeout_jobs(&mut context);
++        assert_eq!(
++            count.get(),
++            1,
++            "the timeout elapsed despite the wall adjustment"
++        );
++        assert!(executor.is_empty(&mut context));
++    }
++}
+diff --git a/engine/boa/examples/src/bin/smol_event_loop.rs b/engine/boa/examples/src/bin/smol_event_loop.rs
+index fee5aad..66d7cb6 100644
+--- a/engine/boa/examples/src/bin/smol_event_loop.rs
++++ b/engine/boa/examples/src/bin/smol_event_loop.rs
+@@ -56 +56 @@ impl Queue {
+-        let now = context.clock().now();
++        let now = context.clock().monotonic_now();
+@@ -91 +91 @@ impl JobExecutor for Queue {
+-                let now = context.clock().now();
++                let now = context.clock().monotonic_now();
+diff --git a/engine/boa/examples/src/bin/tokio_event_loop.rs b/engine/boa/examples/src/bin/tokio_event_loop.rs
+index e6740fe..f4b9543 100644
+--- a/engine/boa/examples/src/bin/tokio_event_loop.rs
++++ b/engine/boa/examples/src/bin/tokio_event_loop.rs
+@@ -56 +56 @@ impl Queue {
+-        let now = context.clock().now();
++        let now = context.clock().monotonic_now();
+@@ -92 +92 @@ impl JobExecutor for Queue {
+-                let now = context.clock().now();
++                let now = context.clock().monotonic_now();
