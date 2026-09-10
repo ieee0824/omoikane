@@ -8,20 +8,32 @@
 
 use boa_engine::jit::{JitCacheKey, JitCodeCache, JitError};
 
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 use boa_engine::jit::{CodePermission, JIT_ABI};
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 const FIXED_RETURN_STUB_LEN: usize = 11;
+
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+const FIXED_RETURN_STUB_LEN: usize = 16;
 
 fn key(code_id: u64, version: u32) -> JitCacheKey {
     JitCacheKey { code_id, version }
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn fixed_stub_uses_the_frozen_abi_and_rx_mapping() {
+    #[cfg(target_arch = "x86_64")]
     assert_eq!(JIT_ABI, "System V AMD64: extern C fn() -> u64");
+    #[cfg(target_arch = "aarch64")]
+    assert_eq!(JIT_ABI, "AAPCS64 / Apple arm64: extern C fn() -> u64");
     let mut cache = JitCodeCache::new();
     let handle = cache
         .compile_fixed_return(key(1, 1), 0x0123_4567_89AB_CDEF)
@@ -33,6 +45,12 @@ fn fixed_stub_uses_the_frozen_abi_and_rx_mapping() {
     );
     let (permission, mapped_len) = cache.diagnostics(handle).expect("live diagnostics");
     assert_eq!(permission, CodePermission::ReadExecute);
+    let dump = cache
+        .debug_code_dump(handle)
+        .expect("live code diagnostics");
+    assert!(dump.contains(JIT_ABI));
+    #[cfg(target_arch = "aarch64")]
+    assert!(dump.contains("ldr x0, 0x8"));
     assert!(
         mapped_len >= FIXED_RETURN_STUB_LEN,
         "published mapping has {mapped_len} bytes, expected at least {FIXED_RETURN_STUB_LEN}"
@@ -40,7 +58,10 @@ fn fixed_stub_uses_the_frozen_abi_and_rx_mapping() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn replacement_and_invalidation_cannot_reuse_stale_code() {
     let mut cache = JitCodeCache::new();
     let old = cache
@@ -63,7 +84,10 @@ fn replacement_and_invalidation_cannot_reuse_stale_code() {
 }
 
 #[test]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 fn executable_code_is_runtime_local() {
     let mut first_runtime = JitCodeCache::new();
     let mut second_runtime = JitCodeCache::new();
@@ -87,7 +111,10 @@ fn executable_code_is_runtime_local() {
 }
 
 #[test]
-#[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+)))]
 fn unsupported_target_fails_loudly_instead_of_running_zero_tests() {
     let mut cache = JitCodeCache::new();
     assert!(matches!(

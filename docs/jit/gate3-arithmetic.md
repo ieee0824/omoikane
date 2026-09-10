@@ -1,19 +1,37 @@
 # Gate 3-3: arithmetic native execution
 
-Issue #531 moves the arithmetic shape from the issue #305 benchmark through
-Boa's opt-in baseline JIT. After 32 loop backedges on supported x86-64 Unix
-hosts, the synchronous VM enters one generated code object for the remaining
-integer arithmetic, comparison, conditional branch, and backedge operations.
-The initialization, return sequence, async evaluator, unsupported opcodes, and
-unsupported platforms remain on the interpreter.
+Issues #531 and #542 move the arithmetic shape from the issue #305 benchmark
+through Boa's opt-in baseline JIT on Linux/macOS x86_64 and ARM64. After 32 hot
+loop backedges, the VM enters generated code for the remaining safe-integer
+arithmetic, comparisons, conditional branches, and backedge operations. Async
+entry requires enough instruction budget for a bounded native segment. Backedge
+polls return to the shared deadline, budget and iteration-limit checks. The
+initialization, return sequence, unsupported opcodes and unsupported platforms
+remain on the interpreter.
 
 The native frame contains checked scalar copies rather than raw `JsValue` bits.
-Every generated register write records a Number/Boolean type tag, so fallback
+Every generated scalar write records a Number/Boolean type tag, so fallback
 restores only operations that really completed and comparison results retain
-their ECMAScript type. Type mismatch, int32 overflow, NaN, negative zero
+their ECMAScript type. Type mismatch, results outside the exact safe-integer range, NaN, negative zero
 (including multiplication), invalid remainder operands, and loop-limit
 exhaustion resume Boa at the exact operation PC. The RX code mapping never owns
 or hides a GC edge.
+
+## ARM64 register and spill contract
+
+The ARM64 emitter is a leaf using x0 for the borrowed frame, x9/x10 for scalar
+values and side tags, x11/x12 for operands, and x13/x14 for temporaries
+and large-index addressing. It preserves x18, all callee-saved registers and the
+native stack. Every completed bytecode stores its result and type tag before an
+exit. The existing frame descriptors and deopt recipes recover the exact
+bytecode PC and completed writes.
+
+Multiplication checks both halves of the signed 128-bit product before accepting
+an i64 result, then applies the same 53-bit guard as x86_64. Remainder uses signed
+division and multiply-subtract, preserving division-by-zero and negative-zero
+fallbacks. Other Number values keep the interpreter's semantics. Property
+lowering and rooted object-alias restoration are covered by
+[#543's property contract](gate5-properties.md).
 
 ## Verification
 

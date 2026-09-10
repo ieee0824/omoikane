@@ -22,14 +22,17 @@ fn interpreter_allocation_and_exception_semantics_remain_unchanged() {
 #[cfg(feature = "baseline-jit")]
 mod enabled {
     use boa_engine::{
-        jit::{JitAllocationKind, JitRuntimeCall, RuntimeCallError},
         JsObject,
+        jit::{JitAllocationKind, JitRuntimeCall, RuntimeCallError},
     };
 
     use super::*;
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn generated_calls_allocate_return_and_preserve_live_values_across_gc() {
         let mut context = Context::default();
         let runtime = JitRuntimeCall::new(2, 1).expect("compile runtime-call boundary");
@@ -75,7 +78,10 @@ mod enabled {
     }
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn exception_and_allocation_failure_return_without_corrupting_interpreter() {
         let mut context = Context::default();
         let mut runtime = JitRuntimeCall::new(0, 1).unwrap();
@@ -93,7 +99,10 @@ mod enabled {
     }
 
     #[test]
-    #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(not(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    )))]
     fn unsupported_target_reports_an_error_instead_of_running_zero_tests() {
         assert!(matches!(
             JitRuntimeCall::new(0, 1),

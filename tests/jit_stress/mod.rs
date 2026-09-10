@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 const SUPPORTED: bool = cfg!(all(
-    target_arch = "x86_64",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ));
 

@@ -58,7 +58,7 @@ fn synchronous_and_asynchronous_jit_loops_share_the_sandbox_timeout() {
                 );
                 if enabled
                     && cfg!(all(
-                        target_arch = "x86_64",
+                        any(target_arch = "x86_64", target_arch = "aarch64"),
                         any(target_os = "linux", target_os = "macos")
                     ))
                 {
@@ -94,7 +94,7 @@ fn generated_execution_preserves_the_deterministic_iteration_limit() {
 #[test]
 fn report_arithmetic_and_property_deadline_poll_overhead() {
     if !cfg!(all(
-        target_arch = "x86_64",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
         any(target_os = "linux", target_os = "macos")
     )) {
         return;
