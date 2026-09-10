@@ -1,9 +1,10 @@
 name: Atomics timing diagnostic
+run-name: Atomics clock regression and timing (${{ github.sha }})
 
 on:
   push:
     branches: [ci/issue515-atomics-timing]
-    paths: ['.github/workflows/atomics-timing-diagnostic.yml', 'scripts/diagnose-atomics-timing.py']
+    paths: ['.github/workflows/atomics-timing-diagnostic.yml', 'scripts/diagnose-atomics-timing.py', 'scripts/diagnostics/issue657-monotonic.patch']
   workflow_dispatch:
 
 permissions:
