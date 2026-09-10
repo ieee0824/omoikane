@@ -876,7 +876,7 @@ impl JobExecutor for SimpleJobExecutor {
             Job::PromiseJob(p) => self.promise_jobs.borrow_mut().push_back(p),
             Job::AsyncJob(a) => self.async_jobs.borrow_mut().push_back(a),
             Job::TimeoutJob(t) => {
-                let now = context.clock().now();
+                let now = context.clock().monotonic_now();
                 self.timeout_jobs.borrow_mut().insert(now + t.timeout(), t);
             }
             Job::GenericJob(g) => self.generic_jobs.borrow_mut().push_back(g),
@@ -911,7 +911,7 @@ impl JobExecutor for SimpleJobExecutor {
 
                 // There are no timeout jobs to run IIF there are no jobs to execute right now.
                 let no_timeout_jobs_to_run = {
-                    let now = context.borrow().clock().now();
+                    let now = context.borrow().clock().monotonic_now();
                     !self.timeout_jobs.borrow().iter().any(|(t, _)| &now >= t)
                 };
 
@@ -930,7 +930,7 @@ impl JobExecutor for SimpleJobExecutor {
                 }
 
                 {
-                    let now = context.borrow().clock().now();
+                    let now = context.borrow().clock().monotonic_now();
                     let mut timeouts_borrow = self.timeout_jobs.borrow_mut();
                     let mut jobs_to_keep = timeouts_borrow.split_off(&now);
                     jobs_to_keep.retain(|_, job| !job.is_cancelled());
@@ -972,6 +972,101 @@ impl JobExecutor for SimpleJobExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod clock_domains {
+        use super::*;
+        use crate::context::time::{Clock, FixedClock};
+
+        #[derive(Debug)]
+        struct AdjustableClocks {
+            wall: Cell<u64>,
+            monotonic: Cell<u64>,
+        }
+
+        impl AdjustableClocks {
+            fn at(millis: u64) -> Self {
+                Self {
+                    wall: Cell::new(millis),
+                    monotonic: Cell::new(millis),
+                }
+            }
+
+            fn instant(millis: u64) -> JsInstant {
+                JsInstant::new(millis / 1000, ((millis % 1000) * 1_000_000) as u32)
+            }
+        }
+
+        impl Clock for AdjustableClocks {
+            fn now(&self) -> JsInstant {
+                Self::instant(self.wall.get())
+            }
+
+            fn monotonic_now(&self) -> JsInstant {
+                Self::instant(self.monotonic.get())
+            }
+        }
+
+        fn schedule_timeout(context: &mut Context) -> Rc<Cell<usize>> {
+            let count = Rc::new(Cell::new(0));
+            let result = count.clone();
+            let job = NativeJob::new(move |_| {
+                result.set(result.get() + 1);
+                Ok(JsValue::undefined())
+            });
+            context.enqueue_job(TimeoutJob::new(job, 200).into());
+            count
+        }
+
+        #[test]
+        fn forward_wall_adjustment_does_not_expire_a_timer_early() {
+            let clock = Rc::new(AdjustableClocks::at(1000));
+            let mut context = Context::builder().clock(clock.clone()).build().unwrap();
+            let count = schedule_timeout(&mut context);
+
+            clock.wall.set(5000);
+            clock.monotonic.set(1199);
+            context.run_jobs().unwrap();
+            assert_eq!(count.get(), 0, "only 199 milliseconds have elapsed");
+            assert_eq!(
+                context
+                    .eval(crate::Source::from_bytes("Date.now()"))
+                    .unwrap(),
+                JsValue::from(5000)
+            );
+
+            clock.monotonic.set(1201);
+            context.run_jobs().unwrap();
+            assert_eq!(count.get(), 1);
+        }
+
+        #[test]
+        fn backward_wall_adjustment_does_not_delay_a_due_timer() {
+            let clock = Rc::new(AdjustableClocks::at(1000));
+            let mut context = Context::builder().clock(clock.clone()).build().unwrap();
+            let count = schedule_timeout(&mut context);
+
+            clock.wall.set(500);
+            clock.monotonic.set(1201);
+            context.run_jobs().unwrap();
+            assert_eq!(count.get(), 1, "201 milliseconds have elapsed");
+            assert_eq!(
+                context
+                    .eval(crate::Source::from_bytes("Date.now()"))
+                    .unwrap(),
+                JsValue::from(500)
+            );
+        }
+
+        #[test]
+        fn existing_clocks_without_a_separate_monotonic_method_drive_timers() {
+            let clock = Rc::new(FixedClock::from_millis(1000));
+            let mut context = Context::builder().clock(clock.clone()).build().unwrap();
+            let count = schedule_timeout(&mut context);
+            clock.forward(201);
+            context.run_jobs().unwrap();
+            assert_eq!(count.get(), 1);
+        }
+    }
 
     #[test]
     fn cancelled_async_promise_job_restores_its_callers_realm() {

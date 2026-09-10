@@ -1,14 +1,10 @@
 //! Clock related types and functions.
 
-/// A monotonic instant in time, in the Boa engine.
+/// An instant in a Boa clock's time domain.
 ///
-/// This type is guaranteed to be monotonic, i.e. if two instants
-/// are compared, the later one will always be greater than the
-/// earlier one. It is also always guaranteed to be greater than
-/// or equal to the Unix epoch.
-///
-/// This should not be used to keep dates or times, but only to
-/// measure the current time in the engine.
+/// [`Clock::now`] supplies Unix timestamps for dates; [`Clock::monotonic_now`]
+/// supplies nondecreasing timestamps for elapsed-time measurements. Compare or
+/// subtract instants only when they come from the same clock and method.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct JsInstant {
     /// The duration of time since the Unix epoch.
@@ -133,8 +129,17 @@ impl std::ops::Sub for JsInstant {
 
 /// Implement a clock that can be used to measure time.
 pub trait Clock {
-    /// Returns the current time.
+    /// Returns the current wall-clock time since the Unix epoch.
     fn now(&self) -> JsInstant;
+
+    /// Returns a nondecreasing clock reading for timeout deadlines.
+    ///
+    /// This defaults to [`Self::now`] so existing controlled clocks keep driving
+    /// timers. Clocks whose wall time can be adjusted must override this method
+    /// to measure elapsed time independently of those adjustments.
+    fn monotonic_now(&self) -> JsInstant {
+        self.now()
+    }
 }
 
 /// A clock that uses the standard system clock.
@@ -149,6 +154,16 @@ impl Clock for StdClock {
             .expect("System clock is before Unix epoch");
 
         JsInstant::new_unchecked(duration)
+    }
+
+    fn monotonic_now(&self) -> JsInstant {
+        // Keep a Unix-based origin without letting later wall-clock changes
+        // shorten or extend timer deadlines. Date.now() still uses `now()`.
+        static ANCHOR: std::sync::OnceLock<(crate::sys::time::Instant, std::time::Duration)> =
+            std::sync::OnceLock::new();
+        let (instant, epoch) =
+            ANCHOR.get_or_init(|| (crate::sys::time::Instant::now(), self.now().inner));
+        JsInstant::new_unchecked(*epoch + instant.elapsed())
     }
 }
 

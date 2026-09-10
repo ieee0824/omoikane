@@ -592,7 +592,7 @@ impl Executor {
     }
 
     fn is_empty(&self, context: &mut Context) -> bool {
-        let now = context.clock().now();
+        let now = context.clock().monotonic_now();
 
         self.promise_jobs.borrow().is_empty()
             && self.async_jobs.borrow().is_empty()
@@ -602,7 +602,7 @@ impl Executor {
     }
 
     fn drain_timeout_jobs(&self, context: &mut Context) {
-        let now = context.clock().now();
+        let now = context.clock().monotonic_now();
 
         let mut timeouts_borrow = self.timeout_jobs.borrow_mut();
         let mut jobs_to_keep = timeouts_borrow.split_off(&now);
@@ -633,7 +633,7 @@ impl JobExecutor for Executor {
             Job::PromiseJob(job) => self.promise_jobs.borrow_mut().push_back(job),
             Job::AsyncJob(job) => self.async_jobs.borrow_mut().push_back(job),
             Job::TimeoutJob(job) => {
-                let now = context.clock().now();
+                let now = context.clock().monotonic_now();
                 self.timeout_jobs
                     .borrow_mut()
                     .insert(now + job.timeout(), job);
@@ -693,5 +693,65 @@ impl JobExecutor for Executor {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boa_engine::{JsValue, context::time::Clock, job::NativeJob};
+    use std::cell::Cell;
+
+    struct AdjustableClocks {
+        wall: Cell<u64>,
+        monotonic: Cell<u64>,
+    }
+
+    impl Clock for AdjustableClocks {
+        fn now(&self) -> JsInstant {
+            JsInstant::new(self.wall.get(), 0)
+        }
+
+        fn monotonic_now(&self) -> JsInstant {
+            JsInstant::new(self.monotonic.get(), 0)
+        }
+    }
+
+    #[test]
+    fn cli_timeout_deadlines_ignore_wall_clock_adjustments() {
+        let clock = Rc::new(AdjustableClocks {
+            wall: Cell::new(1000),
+            monotonic: Cell::new(1000),
+        });
+        let executor = Rc::new(Executor::new(SharedExternalPrinterLogger::new()));
+        let mut context = Context::builder()
+            .clock(clock.clone())
+            .job_executor(executor.clone())
+            .build()
+            .unwrap();
+        let count = Rc::new(Cell::new(0));
+        let result = count.clone();
+        let job = NativeJob::new(move |_| {
+            result.set(result.get() + 1);
+            Ok(JsValue::undefined())
+        });
+        context.enqueue_job(TimeoutJob::new(job, 2000).into());
+
+        clock.wall.set(5000);
+        clock.monotonic.set(1001);
+        assert!(executor.is_empty(&mut context));
+        executor.drain_timeout_jobs(&mut context);
+        assert_eq!(count.get(), 0, "the timeout has not elapsed");
+
+        clock.wall.set(500);
+        clock.monotonic.set(1003);
+        assert!(!executor.is_empty(&mut context));
+        executor.drain_timeout_jobs(&mut context);
+        assert_eq!(
+            count.get(),
+            1,
+            "the timeout elapsed despite the wall adjustment"
+        );
+        assert!(executor.is_empty(&mut context));
     }
 }

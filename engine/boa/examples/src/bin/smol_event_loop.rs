@@ -53,7 +53,7 @@ impl Queue {
     }
 
     fn drain_timeout_jobs(&self, context: &mut Context) {
-        let now = context.clock().now();
+        let now = context.clock().monotonic_now();
 
         let mut timeouts_borrow = self.timeout_jobs.borrow_mut();
         let mut jobs_to_keep = timeouts_borrow.split_off(&now);
@@ -88,7 +88,7 @@ impl JobExecutor for Queue {
             Job::PromiseJob(job) => self.promise_jobs.borrow_mut().push_back(job),
             Job::AsyncJob(job) => self.async_jobs.borrow_mut().push_back(job),
             Job::TimeoutJob(t) => {
-                let now = context.clock().now();
+                let now = context.clock().monotonic_now();
                 self.timeout_jobs.borrow_mut().insert(now + t.timeout(), t);
             }
             Job::GenericJob(g) => self.generic_jobs.borrow_mut().push_back(g),
