@@ -1203,3 +1203,87 @@ fn font_cache_register_web_font_with_variant() {
     let bold = cache.select_best_variant("MultiFont", FontWeight(700), FontStyle::Normal);
     assert!(bold.is_some());
 }
+
+#[test]
+fn system_family_selection_ignores_directory_order_and_style_in_filename() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/anonymized-font-selection");
+    for order in [
+        ["Bold", "Regular", "Italic"],
+        ["Italic", "Bold", "Regular"],
+        ["Regular", "Italic", "Bold"],
+    ] {
+        let dir = FontTestDirectory::new();
+        for (index, style) in order.into_iter().enumerate() {
+            std::fs::copy(
+                fixture.join(format!("OmoikaneFixture-{style}.ttf")),
+                dir.path().join(format!("OmoikaneFixture-{index}.ttf")),
+            )
+            .unwrap();
+        }
+        let database = SystemFontDatabase::from_directories(&[dir.path().to_path_buf()]);
+        let selected = database
+            .select("Omoikane Fixture", FontVariantKey::normal())
+            .unwrap();
+        let bytes = std::fs::read(&selected.path).unwrap();
+        let face = rustybuzz::ttf_parser::Face::parse(&bytes, selected.face_index).unwrap();
+        assert_eq!(
+            face.weight().to_number(),
+            400,
+            "normal requires the regular face"
+        );
+        assert!(!face.is_italic(), "normal must not use an italic face");
+    }
+}
+
+struct FontTestDirectory(std::path::PathBuf);
+impl FontTestDirectory {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("omoikane-font-{}-{n}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for FontTestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn system_collection_lookup_loads_the_selected_nonzero_face() {
+    let dir = FontTestDirectory::new();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/anonymized-font-selection/OmoikaneFixture.ttc");
+    std::fs::copy(fixture, dir.path().join("unrelated-name.ttc")).unwrap();
+    let database = SystemFontDatabase::from_directories(&[dir.path().to_path_buf()]);
+    assert_eq!(database.faces().len(), 3);
+    let selected = database
+        .select("Omoikane Fixture", FontVariantKey::normal())
+        .unwrap();
+    assert_eq!(selected.face_index, 1);
+    let font = selected.load().unwrap();
+    assert_eq!(font.system_face(), Some(selected));
+    assert_eq!(font.glyph_advance('A', 20.0), 10.0);
+    let shaped = font
+        .shape_text("AB", 20.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    assert_eq!(shaped.iter().map(|g| g.x_advance).sum::<f32>(), 20.0);
+}
+
+#[test]
+fn system_collection_rejects_face_counts_without_an_offset_table() {
+    let dir = FontTestDirectory::new();
+    let path = dir.path().join("truncated.ttc");
+    let mut bytes = b"ttcf\0\x01\0\0".to_vec();
+    bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    let database = SystemFontDatabase::from_directories(&[dir.path().to_path_buf()]);
+    assert!(database.faces().is_empty());
+    assert_eq!(database.unreadable_paths(), &[path.canonicalize().unwrap()]);
+}

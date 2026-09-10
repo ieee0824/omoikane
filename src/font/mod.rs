@@ -11,6 +11,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::{fmt, io};
 
+mod diagnostics;
+pub use diagnostics::{FontSelectionRecord, with_font_selection_diagnostics};
+mod system;
+#[cfg(test)]
+pub(crate) use system::with_test_database as with_test_font_database;
+pub(crate) use system::{SelectedFont, load_default_text_fonts_shared, select_text_font};
+pub use system::{SystemFontDatabase, SystemFontFace, find_system_font_face, system_font_database};
+
+#[cfg(test)]
+mod system_tests;
 #[cfg(test)]
 mod tests;
 
@@ -190,6 +200,9 @@ fn cluster_supported_by_font(
 /// Font representation wrapping `ab_glyph::FontVec`.
 pub struct Font {
     inner: FontVec,
+    face_index: u32,
+    pub(crate) cache_id: u64,
+    system_face: Option<SystemFontFace>,
 }
 
 /// Returns whether a code point is a shaping control or combining mark that
@@ -223,10 +236,36 @@ impl Font {
     /// WOFF fonts are decompressed (zlib) before parsing.
     /// WOFF2 fonts are decompressed (brotli) and reconstructed as sfnt before parsing.
     pub fn load_from_bytes(data: Vec<u8>) -> Result<Self, FontError> {
+        Self::load_from_bytes_at_index(data, 0)
+    }
+
+    /// Loads a specific face from a font or font collection.
+    ///
+    /// The index is shared by glyph metrics, OpenType shaping and rasterization.
+    pub fn load_from_bytes_at_index(data: Vec<u8>, face_index: u32) -> Result<Self, FontError> {
         let data = decode_font_data(data)?;
-        let font_vec = FontVec::try_from_vec_and_index(data, 0)
+        let font_vec = FontVec::try_from_vec_and_index(data, face_index)
             .map_err(|_| FontError::InvalidFont("Failed to parse font data".to_string()))?;
-        Ok(Font { inner: font_vec })
+        // Loaded system faces can leave the bounded cache during a paint. A
+        // monotonic identity prevents glyphs from aliasing a reused address.
+        static NEXT_FONT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let cache_id = NEXT_FONT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Font {
+            inner: font_vec,
+            face_index,
+            cache_id,
+            system_face: None,
+        })
+    }
+
+    /// Identifies the installed face used by this font, when loaded from the system.
+    pub fn system_face(&self) -> Option<&SystemFontFace> {
+        self.system_face.as_ref()
+    }
+
+    /// Returns the collection index used for both shaping and rasterization.
+    pub fn face_index(&self) -> u32 {
+        self.face_index
     }
 
     /// Rasterize a character at a given font size.
@@ -250,7 +289,7 @@ impl Font {
         size_px: f32,
         direction: ShapingDirection,
     ) -> Result<Vec<ShapedGlyph>, FontError> {
-        let face = Face::from_slice(self.inner.font_data(), 0)
+        let face = Face::from_slice(self.inner.font_data(), self.face_index)
             .ok_or_else(|| FontError::InvalidFont("Failed to build shaping face".to_string()))?;
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
@@ -1006,110 +1045,27 @@ fn generic_family_fonts(family: &str) -> Vec<&'static str> {
     }
 }
 
-/// Find a system font file matching the given family name.
+/// Finds the file containing the normal-width, normal-weight, upright face.
 ///
-/// Searches platform-specific font directories for TTF/OTF files whose
-/// filename contains the requested family name (case-insensitive).
-///
-/// For generic families (sans-serif, serif, monospace), tries common
-/// font names for each platform.
+/// A collection may contain the selected face at a nonzero index. Call
+/// [`find_system_font_face`] to retain that index, or [`load_system_font`] to
+/// load the selected face directly.
 pub fn find_system_font(family: &str) -> Option<PathBuf> {
-    // First try generic family mapping
-    let candidates = generic_family_fonts(family);
-    if !candidates.is_empty() {
-        for candidate in candidates {
-            if let Some(path) = search_font_dirs(candidate) {
-                return Some(path);
-            }
-        }
-    }
-
-    // Then try direct family name search
-    search_font_dirs(family)
+    find_system_font_face(family, FontVariantKey::normal()).map(|face| face.path)
 }
 
-/// Search system font directories for a font matching the given name.
-fn search_font_dirs(name: &str) -> Option<PathBuf> {
-    let name_lower = name.to_lowercase();
-
-    for dir in system_font_dirs() {
-        if !dir.exists() {
-            continue;
-        }
-
-        if let Some(path) = search_font_dir_recursive(&dir, &name_lower) {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
-/// Recursively search a directory for font files matching the name.
-fn search_font_dir_recursive(dir: &Path, name_lower: &str) -> Option<PathBuf> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return None,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-
-        if path.is_dir() {
-            // Recurse into subdirectories
-            if let Some(found) = search_font_dir_recursive(&path, name_lower) {
-                return Some(found);
-            }
-        } else if let Some(ext) = path.extension() {
-            // Check if it's a font file
-            let ext_lower = ext.to_string_lossy().to_lowercase();
-            if ext_lower == "ttf" || ext_lower == "otf" || ext_lower == "ttc" {
-                // Check if filename matches
-                if let Some(stem) = path.file_stem() {
-                    let stem_lower = stem.to_string_lossy().to_lowercase();
-                    // Match if stem contains the search name (handles "Arial-Bold.ttf" etc.)
-                    if stem_lower.contains(name_lower)
-                        || name_lower.contains(&stem_lower)
-                        || fuzzy_font_match(&stem_lower, name_lower)
-                    {
-                        return Some(path);
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Fuzzy matching for font names (handles common variations).
-fn fuzzy_font_match(filename: &str, query: &str) -> bool {
-    // Remove common suffixes and separators for comparison
-    let clean_filename = filename
-        .replace(['-', '_'], "")
-        .replace("regular", "")
-        .replace("bold", "")
-        .replace("italic", "")
-        .replace("oblique", "");
-
-    let clean_query = query.replace(['-', '_', ' '], "");
-
-    clean_filename.contains(&clean_query) || clean_query.contains(&clean_filename)
-}
-
-/// Load a system font by family name.
-///
-/// Searches system font directories and returns the first matching font.
-/// Supports generic families: sans-serif, serif, monospace.
+/// Loads the normal-weight, upright system face for a family or generic family.
 pub fn load_system_font(family: &str) -> Result<Font, FontError> {
-    let path = find_system_font(family)
-        .ok_or_else(|| FontError::Other(format!("System font '{}' not found", family)))?;
-
-    Font::load_from_file(&path)
+    load_system_font_variant(family, FontVariantKey::normal())
 }
 
-/// Load default text fonts shared by layout and paint.
-///
+/// Loads a system face matching the requested family, weight and style.
+pub fn load_system_font_variant(family: &str, variant: FontVariantKey) -> Result<Font, FontError> {
+    find_system_font_face(family, variant)
+        .ok_or_else(|| FontError::Other(format!("System font '{family}' not found")))?
+        .load()
+}
+
 /// Returns `true` if the character is in a CJK Unicode block and should
 /// preferentially use a CJK-capable font.
 pub fn is_cjk_preferred_character(ch: char) -> bool {
@@ -1123,12 +1079,29 @@ pub fn is_cjk_preferred_character(ch: char) -> bool {
     )
 }
 
+/// Loads default text fonts shared by layout and paint.
+///
 /// The first successfully loaded family becomes the primary font.
 /// Remaining fonts are fallback candidates (with CJK-preferred families included).
 pub fn load_default_text_fonts() -> Vec<Font> {
     let mut fonts = Vec::new();
     let mut loaded_families = HashSet::new();
-    let families = if cfg!(target_os = "macos") {
+    let families = default_text_font_families();
+
+    for family in families {
+        if !loaded_families.insert(family.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Ok(font) = load_system_font(family) {
+            fonts.push(font);
+        }
+    }
+
+    fonts
+}
+
+fn default_text_font_families() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
         &[
             "Hiragino Kaku Gothic ProN",
             "Hiragino Sans",
@@ -1148,18 +1121,7 @@ pub fn load_default_text_fonts() -> Vec<Font> {
             "IPA Gothic",
             "IPAGothic",
         ][..]
-    };
-
-    for family in families {
-        if !loaded_families.insert(family.to_ascii_lowercase()) {
-            continue;
-        }
-        if let Ok(font) = load_system_font(family) {
-            fonts.push(font);
-        }
     }
-
-    fonts
 }
 
 // ============================================================================
@@ -1200,8 +1162,7 @@ impl Default for FontWeight {
 }
 
 /// Parsed font-style value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
 pub enum FontStyle {
     #[default]
     Normal,
@@ -1231,7 +1192,7 @@ pub struct FontVariantKey {
     pub style: FontStyle,
 }
 
-/// Stable, case-insensitive identifier for a CSS font family.
+/// Stable, case-insensitive identifier for a CSS font family or ordered family list.
 ///
 /// Keys are interned in a process-wide table: names that fold to the same
 /// trimmed, Unicode-lowercased string share a key, and distinct names always
@@ -1240,16 +1201,35 @@ pub struct FontVariantKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontFamilyKey(u32);
 
-static FONT_FAMILY_KEY_INTERN: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+#[derive(Default)]
+struct FontFamilyIntern {
+    keys: HashMap<String, u32>,
+    families: Vec<Arc<[String]>>,
+}
+
+static FONT_FAMILY_KEY_INTERN: OnceLock<Mutex<FontFamilyIntern>> = OnceLock::new();
 
 impl FontFamilyKey {
     /// Interns `family` (trimmed and Unicode-lowercased) and returns its key.
     pub fn new(family: &str) -> Self {
         let folded = family.trim().to_lowercase();
-        let intern = FONT_FAMILY_KEY_INTERN.get_or_init(|| Mutex::new(HashMap::new()));
+        let intern = FONT_FAMILY_KEY_INTERN.get_or_init(|| Mutex::new(FontFamilyIntern::default()));
         let mut intern = intern.lock().unwrap_or_else(PoisonError::into_inner);
-        let next = intern.len() as u32;
-        Self(*intern.entry(folded).or_insert(next))
+        if let Some(key) = intern.keys.get(&folded) {
+            return Self(*key);
+        }
+        let next = intern.families.len() as u32;
+        intern
+            .families
+            .push(system::parse_family_list(&folded).into());
+        intern.keys.insert(folded, next);
+        Self(next)
+    }
+
+    fn families(self) -> Arc<[String]> {
+        let intern = FONT_FAMILY_KEY_INTERN.get().expect("interned family");
+        let intern = intern.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(&intern.families[self.0 as usize])
     }
 }
 
@@ -1306,8 +1286,8 @@ impl FontCache {
     /// Get or load a font by family name and variant.
     ///
     /// If the font is already cached for the exact variant, returns a clone of the Arc.
-    /// Otherwise, falls back to any cached variant for the same family, or loads from
-    /// the system.
+    /// Registered web families use their closest declared face. System families
+    /// resolve the requested style independently of previously cached styles.
     pub fn get_or_load_variant(
         &mut self,
         family: &str,
@@ -1318,19 +1298,20 @@ impl FontCache {
         if let Some(font) = self.fonts.get(&key) {
             return Ok(Arc::clone(font));
         }
-
-        // Try any cached variant of this family before hitting disk
-        if let Some(font) = self.select_best_variant(family, variant.weight, variant.style) {
+        if let Some(font) = self.select_best_variant(family, variant.weight, variant.style)
+            && font.system_face().is_none()
+        {
             return Ok(font);
         }
 
+        let font = system_font_database().load(family, variant)?;
         // Evict an arbitrary entry if at capacity
         if self.fonts.len() >= self.max_entries
-            && let Some(oldest_key) = self.fonts.keys().next().cloned() {
-                self.fonts.remove(&oldest_key);
-            }
+            && let Some(oldest_key) = self.fonts.keys().next().cloned()
+        {
+            self.fonts.remove(&oldest_key);
+        }
 
-        let font = Arc::new(load_system_font(family)?);
         self.fonts.insert(key, Arc::clone(&font));
         Ok(font)
     }
@@ -1356,23 +1337,26 @@ impl FontCache {
         data: Vec<u8>,
     ) -> Result<Arc<Font>, FontError> {
         let key = (family.to_lowercase(), FontVariantKey::new(weight, style));
-        // Evict an arbitrary entry if at capacity and this variant is not already cached
-        if !self.fonts.contains_key(&key) && self.fonts.len() >= self.max_entries
-            && let Some(oldest_key) = self.fonts.keys().next().cloned() {
-                self.fonts.remove(&oldest_key);
-            }
         let font = Arc::new(Font::load_from_bytes(data)?);
+        // A registered web family replaces its cached system faces. Retain no
+        // separate family markers that could outlive bounded cache entries.
+        self.fonts
+            .retain(|(name, _), cached| name != &key.0 || cached.system_face().is_none());
+        // Evict an arbitrary entry if at capacity and this variant is not already cached
+        if !self.fonts.contains_key(&key)
+            && self.fonts.len() >= self.max_entries
+            && let Some(oldest_key) = self.fonts.keys().next().cloned()
+        {
+            self.fonts.remove(&oldest_key);
+        }
         self.fonts.insert(key, Arc::clone(&font));
         Ok(font)
     }
 
     /// Select the best available variant for the given family, target weight, and style.
     ///
-    /// Implements a simplified version of CSS Fonts Module Level 3 §5.2:
-    /// 1. If an exact match exists, return it.
-    /// 2. Style matching: italic/oblique are interchangeable; normal is separate.
-    /// 3. Weight matching: for bold requests (≥600) prefer heavier variants first;
-    ///    for light requests (≤400) prefer lighter variants first.
+    /// Applies CSS style matching followed by the weight search order, including
+    /// the special 400–500 range. The same ranks are used for installed faces.
     ///
     /// Returns `None` when the family has no registered variants at all.
     pub fn select_best_variant(
@@ -1383,47 +1367,15 @@ impl FontCache {
     ) -> Option<Arc<Font>> {
         let family_lower = family.to_lowercase();
 
-        // Style-matching pass: prefer matching style, then compatible style
-        let style_score = |s: FontStyle| -> u8 {
-            match (target_style, s) {
-                (a, b) if a == b => 0,
-                // italic <-> oblique are close
-                (FontStyle::Italic, FontStyle::Oblique)
-                | (FontStyle::Oblique, FontStyle::Italic) => 1,
-                _ => 2,
-            }
-        };
-
-        // Weight-matching score: lower is better
-        let weight_score = |w: FontWeight| -> u16 {
-            let tw = target_weight.0;
-            let cw = w.0;
-            if cw >= tw {
-                // CSS: for weights ≥600, prefer upward first; for ≤400, prefer downward first
-                if tw >= 600 {
-                    cw - tw // prefer the smallest amount above target
-                } else {
-                    // downward preferred for thin/normal; upward is distant
-                    (cw - tw).saturating_add(500)
-                }
-            } else {
-                // cw < tw
-                if tw <= 400 {
-                    tw - cw // prefer closest below for thin weights
-                } else {
-                    (tw - cw).saturating_add(500)
-                }
-            }
-        };
-
         // Iterate directly without collecting — clone only the winning Arc.
         self.fonts
             .iter()
             .filter(|((fam, _), _)| fam == &family_lower)
             .min_by_key(|((_, vk), _)| {
-                let ss = style_score(vk.style) as u32 * 100_000;
-                let ws = weight_score(vk.weight) as u32;
-                ss + ws
+                (
+                    system::style_rank(target_style, vk.style),
+                    system::weight_rank(target_weight.0, vk.weight.0),
+                )
             })
             .map(|(_, font)| Arc::clone(font))
     }
@@ -1532,39 +1484,13 @@ impl WebFontRegistry {
             return Some(font.as_ref());
         }
 
-        // Scoring: style score dominates, weight score breaks ties
-        let style_score = |s: FontStyle| -> u8 {
-            match (target_style, s) {
-                (a, b) if a == b => 0,
-                (FontStyle::Italic, FontStyle::Oblique)
-                | (FontStyle::Oblique, FontStyle::Italic) => 1,
-                _ => 2,
-            }
-        };
-
-        let weight_score = |w: FontWeight| -> u16 {
-            let tw = target_weight.0;
-            let cw = w.0;
-            if cw >= tw {
-                if tw >= 600 {
-                    cw - tw
-                } else {
-                    (cw - tw).saturating_add(500)
-                }
-            } else {
-                // cw < tw
-                if tw <= 400 {
-                    tw - cw
-                } else {
-                    (tw - cw).saturating_add(500)
-                }
-            }
-        };
-
         variants
             .iter()
             .min_by_key(|(k, _)| {
-                (style_score(k.style) as u32) * 100_000 + weight_score(k.weight) as u32
+                (
+                    system::style_rank(target_style, k.style),
+                    system::weight_rank(target_weight.0, k.weight.0),
+                )
             })
             .map(|(_, font)| font.as_ref())
     }

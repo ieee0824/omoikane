@@ -9249,10 +9249,13 @@ fn render_timings_accumulate_multiple_documents_and_reset_when_taken() {
 
 #[test]
 fn render_glyph_cache_hits_and_separates_font_identity_and_size() {
-    let first_fonts = super::load_text_fonts();
-    let second_fonts = super::load_text_fonts();
-    assert!(!first_fonts.is_empty());
-    assert!(!second_fonts.is_empty());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf");
+    // Default system loads now share faces. Load two independent instances to
+    // keep checking the cache's font-identity boundary, with fixed input bytes.
+    let first_fonts = [Arc::new(Font::load_from_file(&path).unwrap())];
+    let second_fonts = [Arc::new(Font::load_from_file(&path).unwrap())];
+    assert!(!Arc::ptr_eq(&first_fonts[0], &second_fonts[0]));
 
     super::with_render_glyph_cache(|| {
         let _ = super::rasterize_with_fallback(&first_fonts[..1], 'A', 16.0);

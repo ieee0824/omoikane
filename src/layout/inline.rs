@@ -9,7 +9,8 @@ use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
     Font, FontFamilyKey, FontStyle, FontWeight, ShapingDirection, grapheme_spacing_boundaries,
-    is_zero_advance_character, load_default_text_fonts, shape_text_with_fallback,
+    is_zero_advance_character, load_default_text_fonts_shared, select_text_font,
+    shape_text_with_fallback,
 };
 use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
@@ -1566,8 +1567,13 @@ fn computed_font_family_key(value: &ComputedValue) -> Option<FontFamilyKey> {
         ComputedValue::Keyword(value) | ComputedValue::String(value) => value,
         _ => return None,
     };
-    let first = value.split(',').next()?.trim().trim_matches(['"', '\'']);
-    (!first.is_empty()).then(|| FontFamilyKey::new(first))
+    let family = value.trim();
+    let family = if family.contains(',') {
+        family
+    } else {
+        family.trim_matches(['"', '\''])
+    };
+    (!family.is_empty()).then(|| FontFamilyKey::new(family))
 }
 
 fn letter_spacing(style: &ComputedStyle) -> f32 {
@@ -2392,13 +2398,14 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
         }
 
         if let Some(ref context) = *fonts_ref {
-            let primary = metrics.font_family.and_then(|family| {
-                context.web_fonts.as_ref()?.select_best_by_key(
-                    family,
-                    metrics.font_weight,
-                    metrics.font_style,
-                )
-            });
+            let selected = select_text_font(
+                "layout",
+                metrics.font_family,
+                crate::font::FontVariantKey::new(metrics.font_weight, metrics.font_style),
+                context.web_fonts.as_deref(),
+                &context.system_fonts,
+            );
+            let primary = selected.as_ref().map(AsRef::as_ref);
             if primary.is_some() || !context.system_fonts.is_empty() {
                 let base = measure_text_width_with_fallback(
                     text,
@@ -2422,7 +2429,7 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
 }
 
 fn load_layout_fonts() -> Vec<Arc<Font>> {
-    load_default_text_fonts().into_iter().map(Arc::new).collect()
+    load_default_text_fonts_shared()
 }
 
 fn measure_text_width_with_fallback(

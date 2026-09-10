@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{
-    Font, FontError, FontStyle, FontWeight, GlyphRaster, ShapingDirection, WebFontRegistry,
-    grapheme_spacing_cluster_starts, is_zero_advance_character, load_default_text_fonts,
-    shape_text_with_fallback,
+    Font, FontError, FontFamilyKey, FontStyle, FontVariantKey, FontWeight, GlyphRaster,
+    ShapingDirection, WebFontRegistry, grapheme_spacing_cluster_starts, is_zero_advance_character,
+    load_default_text_fonts_shared, select_text_font, shape_text_with_fallback,
 };
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
@@ -23,7 +23,7 @@ const MAX_RENDER_GLYPH_CACHE_ENTRIES: usize = 16_384;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct RenderGlyphCacheKey {
-    font_identity: usize,
+    font_identity: u64,
     glyph: RenderGlyphIdentity,
     size_bits: u32,
 }
@@ -61,7 +61,7 @@ impl Drop for RenderGlyphCacheGuard {
 }
 
 /// Shares rasterized glyphs between text fragments in one paint operation.
-/// Clearing both boundaries ensures pointer identities never outlive fonts.
+/// Monotonic font identities remain distinct when the system cache evicts a face.
 pub(crate) fn with_render_glyph_cache<T>(paint: impl FnOnce() -> T) -> T {
     let owns_cache = RENDER_GLYPH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
@@ -87,7 +87,7 @@ pub(crate) fn with_render_glyph_cache<T>(paint: impl FnOnce() -> T) -> T {
 
 fn rasterize_cached(font: &Font, ch: char, size_px: f32) -> Result<Arc<GlyphRaster>, FontError> {
     let key = RenderGlyphCacheKey {
-        font_identity: std::ptr::from_ref(font) as usize,
+        font_identity: font.cache_id,
         glyph: RenderGlyphIdentity::Character(ch),
         size_bits: size_px.to_bits(),
     };
@@ -130,7 +130,7 @@ fn rasterize_glyph_cached(
     size_px: f32,
 ) -> Result<Arc<GlyphRaster>, FontError> {
     let key = RenderGlyphCacheKey {
-        font_identity: std::ptr::from_ref(font) as usize,
+        font_identity: font.cache_id,
         glyph: RenderGlyphIdentity::GlyphId(glyph_id),
         size_bits: size_px.to_bits(),
     };
@@ -236,14 +236,12 @@ pub(crate) fn paint_text_with_registry(
                     let can_shape_logical_text = fragment.style.resolved_bidi_level.is_some()
                         || matches!(&visual_text, Cow::Borrowed(_));
 
-                    // Try to resolve the best web font variant for this fragment.
-                    // If the fragment has a registered web-font family, use it as the
-                    // primary font and fall back to the global system font list.
-                    let web_font_for_fragment =
-                        select_fragment_web_font(web_fonts, &fragment.style);
-                    if let Some(web_font) = web_font_for_fragment {
-                        // Build a temporary font list: web variant first, then fallbacks
-                        let mut variant_fonts: Vec<&Font> = vec![web_font];
+                    // Resolve the same installed or web face used by layout,
+                    // retaining the existing cluster-level fallback fonts.
+                    let selected = select_fragment_font(web_fonts, fragment, fonts);
+                    if let Some(primary_font) = selected.as_ref().map(AsRef::as_ref) {
+                        // Requested installed or web face first, then fallbacks.
+                        let mut variant_fonts: Vec<&Font> = vec![primary_font];
                         variant_fonts.extend(fonts.iter().map(|font| font.as_ref()));
                         if vertical_mode.is_some()
                             || !can_shape_logical_text
@@ -387,10 +385,11 @@ pub(crate) fn paint_text_with_registry(
                     let content_rect = inline_fragment_content_rect(fragment_rect, style, border);
                     let color = fragment_text_color(&fragment.style).unwrap_or(fallback_color);
                     // Same font policy as the Text branch: the fragment's
-                    // resolved web-font variant first, then the global fonts.
+                    // resolved installed or web face first, then the global fonts.
                     let mut fragment_fonts: Vec<&Font> = Vec::new();
-                    if let Some(web_font) = select_fragment_web_font(web_fonts, &fragment.style) {
-                        fragment_fonts.push(web_font);
+                    let selected = select_fragment_font(web_fonts, fragment, fonts);
+                    if let Some(font) = selected.as_ref().map(AsRef::as_ref) {
+                        fragment_fonts.push(font);
                     }
                     fragment_fonts.extend(fonts.iter().map(|font| font.as_ref()));
                     let x_offset = if is_text_align_center(style) {
@@ -1233,7 +1232,7 @@ pub(crate) fn load_text_fonts() -> Vec<Arc<Font>> {
     if let Some(fonts) = TEST_TEXT_FONTS.with(|slot| slot.borrow().clone()) {
         return fonts;
     }
-    load_default_text_fonts().into_iter().map(Arc::new).collect()
+    load_default_text_fonts_shared()
 }
 
 #[cfg(test)]
@@ -1818,20 +1817,35 @@ fn is_text_align_center(style: &ComputedStyle) -> bool {
     )
 }
 
-/// Resolves the best registered web-font variant for a fragment's
-/// `font-family` / `font-weight` / `font-style`, if any.
-///
-/// Shared by the `Text` and `FormControl` paint branches so both apply the
-/// same web-font selection policy.
-fn select_fragment_web_font<'a>(
+/// Shares layout's family list and numeric CSS weight, while preserving support
+/// for callers that explicitly construct a fragment with style-only font data.
+fn select_fragment_font<'a>(
     web_fonts: Option<&'a WebFontRegistry>,
-    style: &FragmentStyle,
-) -> Option<&'a Font> {
-    let registry = web_fonts?;
-    let family = style.font_family.as_deref()?;
-    let weight = FontWeight::parse(style.font_weight.as_deref().unwrap_or("normal"));
-    let font_style = FontStyle::parse(style.font_style.as_deref().unwrap_or("normal"));
-    registry.select_best(family, weight, font_style)
+    fragment: &crate::layout::InlineFragment,
+    fonts: &[Arc<Font>],
+) -> Option<crate::font::SelectedFont<'a>> {
+    let style = &fragment.style;
+    let family = fragment
+        .metrics
+        .font_family
+        .or_else(|| style.font_family.as_deref().map(FontFamilyKey::new));
+    let weight = style
+        .font_weight
+        .as_deref()
+        .map(FontWeight::parse)
+        .unwrap_or(fragment.metrics.font_weight);
+    let font_style = style
+        .font_style
+        .as_deref()
+        .map(FontStyle::parse)
+        .unwrap_or(fragment.metrics.font_style);
+    select_text_font(
+        "paint",
+        family,
+        FontVariantKey::new(weight, font_style),
+        web_fonts,
+        fonts,
+    )
 }
 
 /// Measures the painted advance width of `text`, mirroring the advance model of
