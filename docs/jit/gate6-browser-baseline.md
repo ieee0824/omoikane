@@ -39,7 +39,7 @@ URL変更は新しいresourceを読み込み、文書の再読み込みでは新
 Linux x86_64、Linux ARM64、macOS ARM64のCIで実行し、ログ・JSON・PNG・Cargo.lock・
 対象revision・toolchainをartifactへ保存する。macOS x86_64は対象外。
 
-2026-09-10の本修正のローカル検証（Linux x86_64、production default）では、
+2026-09-10の本修正のローカル検証（Linux ARM64、production default）では、
 全suiteが2353 passed / 0 failed / 0 ignored、操作7ケース成功、Acid3両方式100/100、
 WPTは69ケース中66 pass・3 improvement・regression 0、Web APIは95/97 supported・
 error 0・regression 0だった。`cargo build --locked` と
