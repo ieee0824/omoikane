@@ -1,0 +1,78 @@
+name: Browser suite with clock fix
+
+on:
+  push:
+    branches: [ci/issue515-atomics-timing]
+    paths: ['.github/workflows/clock-browser-diagnostic.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      CARGO_BUILD_JOBS: '2'
+      WPT_ROOT: .cache/wpt
+      WPT_REQUIRED: '1'
+      OMOIKANE_BROWSER_REPORT_DIR: .artifacts/clock-browser/pages
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: workspace-v1
+          cache-workspace-crates: true
+      - name: Apply the reviewed source patches and record exact input hashes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, subprocess
+          root = Path.cwd()
+          out = root / '.artifacts/clock-browser'
+          out.mkdir(parents=True)
+          origin = json.loads((root / 'engine/boa-origin.json').read_text())
+          files = ['core/engine/src/context/time.rs', 'core/engine/src/job.rs', 'cli/src/main.rs', 'examples/src/bin/smol_event_loop.rs', 'examples/src/bin/tokio_event_loop.rs']
+          for name in files:
+              assert hashlib.sha256((root / 'engine/boa' / name).read_bytes()).hexdigest() == origin['files'][name]['sha256']
+          for patch in ['issue657-monotonic.patch', 'issue657-cli.patch']:
+              subprocess.run(['git', 'apply', '--unidiff-zero', str(root / 'scripts/diagnostics' / patch)], check=True)
+          identity = {'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'rustc': subprocess.check_output(['rustc', '-Vv'], text=True), 'lock_sha256': hashlib.sha256((root / 'Cargo.lock').read_bytes()).hexdigest(), 'source_sha256': {name: hashlib.sha256((root / 'engine/boa' / name).read_bytes()).hexdigest() for name in files}}
+          (out / 'identity.json').write_text(json.dumps(identity, indent=2) + '\n')
+          (out / 'source.patch').write_bytes(subprocess.check_output(['git', 'diff']))
+          PY
+      - name: Install the usual CI fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core
+      - name: Fetch the fixed WPT subset
+        run: bash scripts/fetch-wpt.sh
+      - name: Verify source resolution and formatting
+        run: |
+          python3 scripts/check-engine-source.py > .artifacts/clock-browser/source-check.json
+          cargo fmt --all --check
+          cargo fmt --manifest-path engine/boa/Cargo.toml --all --check
+      - name: Run related browser and module cases
+        shell: bash
+        run: cargo test --locked --test browser_journeys --test module_identity -- --nocapture 2>&1 | tee .artifacts/clock-browser/related.log
+      - name: Run all browser tests including ignored cases
+        shell: bash
+        run: cargo test --locked -- --include-ignored --nocapture 2>&1 | tee .artifacts/clock-browser/full-suite.log
+      - name: Build the default library and check the GUI
+        shell: bash
+        run: |
+          cargo build --locked 2>&1 | tee .artifacts/clock-browser/build.log
+          cargo check --locked --features gui 2>&1 | tee .artifacts/clock-browser/gui.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clock-browser-verification
+          path: .artifacts/clock-browser/
+          if-no-files-found: error
