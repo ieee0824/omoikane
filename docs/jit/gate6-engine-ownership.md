@@ -24,6 +24,9 @@ treeは `ef1116ba957e98da406752da8838094b99295098`。
 
 ## 実装・検証の対応
 
+構文・built-in・host連携・ブラウザ操作の具体的なケースと期待値は
+[機能と検証の対応表](gate6-validation-map.md)を参照する。
+
 | 領域 | 引き継ぐソース | 主な検証 |
 | --- | --- | --- |
 | 構文・AST・文字列 | `engine/boa/core/{parser,ast,interner,string}` | 同workspaceのunit/doc tests、`boa_parser` の `parser_stack`、固定Test262 |
@@ -83,6 +86,21 @@ Linuxの2環境で全50595ケースの結果が一致した。一方、macOS ARM
 `Atomics.waitAsync`で原本と取り込み後の成否が変わり、比較は失敗した。
 この時点の未解決課題は #657 で追跡する。workspaceや配布CIの成功だけでは
 この比較の成功を代替できず、原因・修正・再検証を完了するまで移行完了とは判定しない。
+
+#657では、タイマーの期限を測る`SystemTime`とTest262の`Instant`が異なる速度で
+進むことを確認した。macOSの診断では前者の200msに対し後者が約199.90msで、
+16ファイルの反復320回中34回が200ms未満の終了として失敗した。
+`Clock::monotonic_now()`を追加し、標準時計と各executorの期限を`Instant`に揃える。
+`Date.now()`とTemporalは従来の日時を使い、既存の制御用Clockはdefault methodで
+タイマーを進められる。来歴manifestは原本のまま保持し、この修正を別commitで追跡する。
+
+[修正候補の診断](https://github.com/ieee0824/omoikane/actions/runs/34465810545)では
+Linux ARM64・macOS ARM64とも同じ320回がすべて成功し、時計の前進・後退を扱う
+回帰テストも修正前の2件失敗から修正後の3件成功へ変わった。
+[CLIの回帰検証](https://github.com/ieee0824/omoikane/actions/runs/34466306688)も
+修正前の失敗と修正後の成功、CLI・smol/tokioサンプルのbuildを確認した。
+これは固定した対象ケースの修正確認で、変更後の全Test262・全ブラウザsuite・
+3環境配布の代わりにはしない。それらの結果は修正を含むPR revisionで再度照合する。
 
 - Test262のrevisionと未対応featureは `engine/boa/test262_config.toml` を維持する。
   rootブラウザは `annex-b` を有効にするが、任意のIntl/experimental featureを
