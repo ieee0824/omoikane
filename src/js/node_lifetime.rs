@@ -78,6 +78,8 @@ pub(super) struct NodeLifetimes {
     active: HashMap<GroupKey, Group>,
     nodes: HashMap<usize, WeakNodeHandle>,
     owners: HashMap<usize, usize>,
+    #[cfg(test)]
+    pub(super) enrollment_visits: usize,
 }
 
 impl Finalize for NodeLifetimes {}
@@ -218,10 +220,23 @@ impl HostState {
 
     /// Enroll parser-created nodes without creating JavaScript wrappers.
     pub(super) fn enroll_registered_tree(&mut self, node: &NodeHandle, owner: Option<usize>) {
-        let owner = document_root_for_node(node)
-            .map(|document| document.identity())
+        let connected_owner = document_root_for_node(node).map(|document| document.identity());
+        self.enroll_tree_with_owner(node, connected_owner, owner);
+    }
+
+    fn enroll_tree_with_owner(
+        &mut self,
+        node: &NodeHandle,
+        connected_owner: Option<usize>,
+        inherited_owner: Option<usize>,
+    ) {
+        #[cfg(test)]
+        {
+            self.node_lifetimes.enrollment_visits += 1;
+        }
+        let owner = connected_owner
             .or_else(|| self.node_lifetimes.owners.get(&node.identity()).copied())
-            .or(owner);
+            .or(inherited_owner);
         if let Some(owner) = owner
             && let Some(document) = self
                 .node_lifetimes
@@ -232,13 +247,38 @@ impl HostState {
             self.enroll_node(node, owner, &document);
         }
         if let Some(content) = node.template_content() {
-            self.enroll_registered_tree(&content, owner);
+            // Template contents have no parent edge to their template and may
+            // belong to a separate inert document. Preserve that boundary.
+            self.enroll_tree_with_owner(&content, None, owner);
         }
         if let Some(root) = node.shadow_root() {
-            self.enroll_registered_tree(&root, owner);
+            self.enroll_tree_with_owner(&root, connected_owner, owner);
         }
         for child in node.child_nodes() {
-            self.enroll_registered_tree(&child, owner);
+            self.enroll_tree_with_owner(&child, connected_owner, owner);
+        }
+    }
+
+    /// Reuse registered query results, while discovering native insertions and
+    /// updating ownership after native moves between connected documents.
+    pub(super) fn register_query_results(&mut self, scope: &NodeHandle, results: &[NodeHandle]) {
+        let connected_owner = document_root_for_node(scope)
+            .map(|document| document.identity())
+            .filter(|id| {
+                self.node_lifetimes
+                    .documents
+                    .get(id)
+                    .is_some_and(|document| document.strong_count() != 0)
+            });
+        for node in results {
+            let id = node.identity();
+            let owner_changed = connected_owner
+                .is_some_and(|owner| self.node_lifetimes.owners.get(&id) != Some(&owner));
+            if owner_changed || self.get_node(id).is_none() {
+                // A preorder query registers a newly discovered subtree once;
+                // later matches in the same subtree reuse that registration.
+                self.register_tree(node);
+            }
         }
     }
 

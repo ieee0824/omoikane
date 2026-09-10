@@ -49,6 +49,8 @@ mod document_write;
 mod node_lifetime;
 #[cfg(test)]
 mod node_lifetime_tests;
+#[cfg(test)]
+mod query_tests;
 mod module_fetch;
 #[cfg(test)]
 mod module_loading_tests;
@@ -2887,6 +2889,8 @@ fn document_root_for_node(node: &NodeHandle) -> Option<NodeHandle> {
     }
     let mut current = node.clone();
     loop {
+        #[cfg(test)]
+        query_tests::record_root_step();
         if let Some(parent) = current.parent_node() {
             current = parent;
         } else if let Some(host) = current.shadow_host() {
@@ -13410,19 +13414,15 @@ fn child_node_ids_native(
         .unwrap_or_default()
         .to_number(context)? as usize;
     with_host_state(|state| {
-        let children = {
+        let (node, children) = {
             let s = state.borrow();
             let node = s.get_node(id).ok_or_else(|| {
                 JsError::from(JsNativeError::error().with_message("node not found"))
             })?;
-            node.child_nodes()
+            let children = node.child_nodes();
+            (node, children)
         };
-        {
-            let mut s = state.borrow_mut();
-            for child in &children {
-                s.register_tree(child);
-            }
-        }
+        state.borrow_mut().register_query_results(&node, &children);
         let ids: Vec<JsValue> = children
             .iter()
             .map(|c| JsValue::from(c.identity() as f64))
@@ -13620,19 +13620,15 @@ fn query_selector_all_native(
         .to_std_string_escaped();
     let selectors = parse_dom_selector_list(&selector)?;
     with_host_state(|state| {
-        let results = {
+        let (parent, results) = {
             let s = state.borrow();
             let parent = s.get_node(parent_id).ok_or_else(|| {
                 JsError::from(JsNativeError::error().with_message("node not found"))
             })?;
-            query_all_matching_descendants(&parent, &selectors)
+            let results = query_all_matching_descendants(&parent, &selectors);
+            (parent, results)
         };
-        {
-            let mut s = state.borrow_mut();
-            for node in &results {
-                s.register_tree(node);
-            }
-        }
+        state.borrow_mut().register_query_results(&parent, &results);
         let ids: Vec<JsValue> = results
             .iter()
             .map(|n| JsValue::from(n.identity() as f64))
@@ -13699,6 +13695,15 @@ fn query_first_matching_descendant(
 
 fn query_all_matching_descendants(node: &NodeHandle, selectors: &[Selector]) -> Vec<NodeHandle> {
     let mut results = Vec::new();
+    collect_matching_descendants(node, selectors, &mut results);
+    results
+}
+
+fn collect_matching_descendants(
+    node: &NodeHandle,
+    selectors: &[Selector],
+    results: &mut Vec<NodeHandle>,
+) {
     for child in node.child_nodes() {
         if child.node_type() == NodeType::Element
             && selectors
@@ -13707,9 +13712,8 @@ fn query_all_matching_descendants(node: &NodeHandle, selectors: &[Selector]) -> 
         {
             results.push(child.clone());
         }
-        results.extend(query_all_matching_descendants(&child, selectors));
+        collect_matching_descendants(&child, selectors, results);
     }
-    results
 }
 
 fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
