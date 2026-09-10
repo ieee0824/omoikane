@@ -1,0 +1,276 @@
+{
+  "revision": "b3eee561af1e8849ba1db77ff05d94420d7be909",
+  "results": {
+    "x86_64-unknown-linux-gnu": {
+      "reviewed_source_cases_executed": {
+        "concurrent_iframe_imports_keep_separate_realms_and_csp": "js::module_loading_tests::concurrent_iframe_imports_keep_separate_realms_and_csp",
+        "tabs_share_local_storage_but_keep_session_storage_separate": "tabs_share_local_storage_but_keep_session_storage_separate",
+        "failed_imports_settle_without_blocking_other_imports": "js::module_loading_tests::failed_imports_settle_without_blocking_other_imports",
+        "dedicated_worker_messages_preserve_supported_clone_builtins": "js::tests::dedicated_worker_messages_preserve_supported_clone_builtins",
+        "async_eval_suspends_and_resumes_a_native_host_call": "js::tests::async_eval_suspends_and_resumes_a_native_host_call",
+        "dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed": "js::tests::dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed",
+        "public_boa_bytecode_pipeline_compiles_and_runs_arithmetic": "public_boa_bytecode_pipeline_compiles_and_runs_arithmetic",
+        "structured_clone_snapshots_cycles_builtins_and_rejects_unsupported_values": "js::tests::structured_clone_snapshots_cycles_builtins_and_rejects_unsupported_values",
+        "separate_module_scripts_and_later_imports_share_document_module_identity": "separate_module_scripts_and_later_imports_share_document_module_identity",
+        "normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates": "normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates",
+        "filter_roots_result_during_callback_allocations": "boa_engine builtins::array::tests::filter_roots_result_during_callback_allocations",
+        "resolving_promise_survives_collection_in_then_getter": "boa_engine builtins::promise::tests::resolving_promise_survives_collection_in_then_getter",
+        "service_worker_registration_scopes_lifecycle_and_controller_selection": "js::tests::service_worker_registration_scopes_lifecycle_and_controller_selection",
+        "http_page_input_fetch_and_dom_changes_reach_the_painted_frame": "http_page_input_fetch_and_dom_changes_reach_the_painted_frame",
+        "filter_species_callback_can_collect": "boa_engine builtins::array::tests::filter_species_callback_can_collect",
+        "imports_overlap_share_identity_and_cookies_and_keep_dynamic_imports_lazy": "js::module_loading_tests::imports_overlap_share_identity_and_cookies_and_keep_dynamic_imports_lazy",
+        "async_evaluation_honors_wall_clock_timeout_and_recovers_runtime": "js::tests::async_evaluation_honors_wall_clock_timeout_and_recovers_runtime",
+        "shared_worker_is_shared_across_same_origin_runtimes": "js::tests::shared_worker_is_shared_across_same_origin_runtimes",
+        "form_submission_and_back_navigation_preserve_saved_state": "form_submission_and_back_navigation_preserve_saved_state",
+        "dropping_runtime_clears_worker_cycle_before_collection": "js::tests::dropping_runtime_clears_worker_cycle_before_collection",
+        "dropping_async_eval_cancels_its_suspended_host_call": "js::tests::dropping_async_eval_cancels_its_suspended_host_call",
+        "user_thrown_timeout_message_is_not_classified_as_wall_clock_timeout": "js::tests::user_thrown_timeout_message_is_not_classified_as_wall_clock_timeout",
+        "every_timer_task_gets_a_microtask_checkpoint": "js::tests::every_timer_task_gets_a_microtask_checkpoint",
+        "queue_microtask_shares_the_microtask_queue_with_promise_reactions": "js::tests::queue_microtask_shares_the_microtask_queue_with_promise_reactions",
+        "suspended_animation_frame_does_not_leak_active_host_state_between_polls": "js::tests::suspended_animation_frame_does_not_leak_active_host_state_between_polls",
+        "cancelling_owned_task_drops_a_suspended_timer_callback": "js::tests::cancelling_owned_task_drops_a_suspended_timer_callback",
+        "active_host_state_is_restored_after_panic": "js::tests::active_host_state_is_restored_after_panic",
+        "custom_element_reactions_preserve_upgrade_and_reentrant_connection_state": "js::tests::custom_element_reactions_preserve_upgrade_and_reentrant_connection_state",
+        "set_timeout_function_callback_preserves_closure": "js::tests::set_timeout_function_callback_preserves_closure",
+        "async_animation_frame_prioritizes_callback_error_over_checkpoint_error": "js::tests::async_animation_frame_prioritizes_callback_error_over_checkpoint_error",
+        "alert_blocks_script_until_exactly_once_resolution": "js::tests::alert_blocks_script_until_exactly_once_resolution",
+        "dedicated_worker_runtime_task_errors_are_observable_without_stopping_page": "js::tests::dedicated_worker_runtime_task_errors_are_observable_without_stopping_page"
+      },
+      "module_cycles_and_thenables": {
+        "reference": {
+          "test/language/module-code/instn-named-iee-cycle": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-star-props-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-iee-err-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/built-ins/Promise/resolve/resolve-thenable": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/resolve-poisoned-then": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/S25.Promise_resolve_foreign_thenable_2": {
+            "status": "O",
+            "ecma_version": 8
+          }
+        },
+        "current": {
+          "test/language/module-code/instn-named-iee-cycle": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-star-props-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-iee-err-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/built-ins/Promise/resolve/resolve-thenable": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/resolve-poisoned-then": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/S25.Promise_resolve_foreign_thenable_2": {
+            "status": "O",
+            "ecma_version": 8
+          }
+        }
+      }
+    },
+    "aarch64-unknown-linux-gnu": {
+      "reviewed_source_cases_executed": {
+        "concurrent_iframe_imports_keep_separate_realms_and_csp": "js::module_loading_tests::concurrent_iframe_imports_keep_separate_realms_and_csp",
+        "tabs_share_local_storage_but_keep_session_storage_separate": "tabs_share_local_storage_but_keep_session_storage_separate",
+        "failed_imports_settle_without_blocking_other_imports": "js::module_loading_tests::failed_imports_settle_without_blocking_other_imports",
+        "dedicated_worker_messages_preserve_supported_clone_builtins": "js::tests::dedicated_worker_messages_preserve_supported_clone_builtins",
+        "async_eval_suspends_and_resumes_a_native_host_call": "js::tests::async_eval_suspends_and_resumes_a_native_host_call",
+        "dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed": "js::tests::dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed",
+        "public_boa_bytecode_pipeline_compiles_and_runs_arithmetic": "public_boa_bytecode_pipeline_compiles_and_runs_arithmetic",
+        "structured_clone_snapshots_cycles_builtins_and_rejects_unsupported_values": "js::tests::structured_clone_snapshots_cycles_builtins_and_rejects_unsupported_values",
+        "separate_module_scripts_and_later_imports_share_document_module_identity": "separate_module_scripts_and_later_imports_share_document_module_identity",
+        "normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates": "normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates",
+        "filter_roots_result_during_callback_allocations": "boa_engine builtins::array::tests::filter_roots_result_during_callback_allocations",
+        "resolving_promise_survives_collection_in_then_getter": "boa_engine builtins::promise::tests::resolving_promise_survives_collection_in_then_getter",
+        "service_worker_registration_scopes_lifecycle_and_controller_selection": "js::tests::service_worker_registration_scopes_lifecycle_and_controller_selection",
+        "http_page_input_fetch_and_dom_changes_reach_the_painted_frame": "http_page_input_fetch_and_dom_changes_reach_the_painted_frame",
+        "filter_species_callback_can_collect": "boa_engine builtins::array::tests::filter_species_callback_can_collect",
+        "imports_overlap_share_identity_and_cookies_and_keep_dynamic_imports_lazy": "js::module_loading_tests::imports_overlap_share_identity_and_cookies_and_keep_dynamic_imports_lazy",
+        "async_evaluation_honors_wall_clock_timeout_and_recovers_runtime": "js::tests::async_evaluation_honors_wall_clock_timeout_and_recovers_runtime",
+        "shared_worker_is_shared_across_same_origin_runtimes": "js::tests::shared_worker_is_shared_across_same_origin_runtimes",
+        "form_submission_and_back_navigation_preserve_saved_state": "form_submission_and_back_navigation_preserve_saved_state",
+        "dropping_runtime_clears_worker_cycle_before_collection": "js::tests::dropping_runtime_clears_worker_cycle_before_collection",
+        "dropping_async_eval_cancels_its_suspended_host_call": "js::tests::dropping_async_eval_cancels_its_suspended_host_call",
+        "user_thrown_timeout_message_is_not_classified_as_wall_clock_timeout": "js::tests::user_thrown_timeout_message_is_not_classified_as_wall_clock_timeout",
+        "every_timer_task_gets_a_microtask_checkpoint": "js::tests::every_timer_task_gets_a_microtask_checkpoint",
+        "queue_microtask_shares_the_microtask_queue_with_promise_reactions": "js::tests::queue_microtask_shares_the_microtask_queue_with_promise_reactions",
+        "suspended_animation_frame_does_not_leak_active_host_state_between_polls": "js::tests::suspended_animation_frame_does_not_leak_active_host_state_between_polls",
+        "cancelling_owned_task_drops_a_suspended_timer_callback": "js::tests::cancelling_owned_task_drops_a_suspended_timer_callback",
+        "active_host_state_is_restored_after_panic": "js::tests::active_host_state_is_restored_after_panic",
+        "custom_element_reactions_preserve_upgrade_and_reentrant_connection_state": "js::tests::custom_element_reactions_preserve_upgrade_and_reentrant_connection_state",
+        "set_timeout_function_callback_preserves_closure": "js::tests::set_timeout_function_callback_preserves_closure",
+        "async_animation_frame_prioritizes_callback_error_over_checkpoint_error": "js::tests::async_animation_frame_prioritizes_callback_error_over_checkpoint_error",
+        "alert_blocks_script_until_exactly_once_resolution": "js::tests::alert_blocks_script_until_exactly_once_resolution",
+        "dedicated_worker_runtime_task_errors_are_observable_without_stopping_page": "js::tests::dedicated_worker_runtime_task_errors_are_observable_without_stopping_page"
+      },
+      "module_cycles_and_thenables": {
+        "reference": {
+          "test/language/module-code/instn-named-iee-cycle": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-star-props-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-iee-err-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/built-ins/Promise/resolve/resolve-thenable": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/resolve-poisoned-then": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/S25.Promise_resolve_foreign_thenable_2": {
+            "status": "O",
+            "ecma_version": 8
+          }
+        },
+        "current": {
+          "test/language/module-code/instn-named-iee-cycle": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-star-props-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-iee-err-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/built-ins/Promise/resolve/resolve-thenable": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/resolve-poisoned-then": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/S25.Promise_resolve_foreign_thenable_2": {
+            "status": "O",
+            "ecma_version": 8
+          }
+        }
+      }
+    },
+    "aarch64-apple-darwin": {
+      "reviewed_source_cases_executed": {
+        "concurrent_iframe_imports_keep_separate_realms_and_csp": "js::module_loading_tests::concurrent_iframe_imports_keep_separate_realms_and_csp",
+        "tabs_share_local_storage_but_keep_session_storage_separate": "tabs_share_local_storage_but_keep_session_storage_separate",
+        "failed_imports_settle_without_blocking_other_imports": "js::module_loading_tests::failed_imports_settle_without_blocking_other_imports",
+        "dedicated_worker_messages_preserve_supported_clone_builtins": "js::tests::dedicated_worker_messages_preserve_supported_clone_builtins",
+        "async_eval_suspends_and_resumes_a_native_host_call": "js::tests::async_eval_suspends_and_resumes_a_native_host_call",
+        "dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed": "js::tests::dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed",
+        "public_boa_bytecode_pipeline_compiles_and_runs_arithmetic": "public_boa_bytecode_pipeline_compiles_and_runs_arithmetic",
+        "structured_clone_snapshots_cycles_builtins_and_rejects_unsupported_values": "js::tests::structured_clone_snapshots_cycles_builtins_and_rejects_unsupported_values",
+        "separate_module_scripts_and_later_imports_share_document_module_identity": "separate_module_scripts_and_later_imports_share_document_module_identity",
+        "normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates": "normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates",
+        "filter_roots_result_during_callback_allocations": "boa_engine builtins::array::tests::filter_roots_result_during_callback_allocations",
+        "resolving_promise_survives_collection_in_then_getter": "boa_engine builtins::promise::tests::resolving_promise_survives_collection_in_then_getter",
+        "service_worker_registration_scopes_lifecycle_and_controller_selection": "js::tests::service_worker_registration_scopes_lifecycle_and_controller_selection",
+        "http_page_input_fetch_and_dom_changes_reach_the_painted_frame": "http_page_input_fetch_and_dom_changes_reach_the_painted_frame",
+        "filter_species_callback_can_collect": "boa_engine builtins::array::tests::filter_species_callback_can_collect",
+        "imports_overlap_share_identity_and_cookies_and_keep_dynamic_imports_lazy": "js::module_loading_tests::imports_overlap_share_identity_and_cookies_and_keep_dynamic_imports_lazy",
+        "async_evaluation_honors_wall_clock_timeout_and_recovers_runtime": "js::tests::async_evaluation_honors_wall_clock_timeout_and_recovers_runtime",
+        "shared_worker_is_shared_across_same_origin_runtimes": "js::tests::shared_worker_is_shared_across_same_origin_runtimes",
+        "form_submission_and_back_navigation_preserve_saved_state": "form_submission_and_back_navigation_preserve_saved_state",
+        "dropping_runtime_clears_worker_cycle_before_collection": "js::tests::dropping_runtime_clears_worker_cycle_before_collection",
+        "dropping_async_eval_cancels_its_suspended_host_call": "js::tests::dropping_async_eval_cancels_its_suspended_host_call",
+        "user_thrown_timeout_message_is_not_classified_as_wall_clock_timeout": "js::tests::user_thrown_timeout_message_is_not_classified_as_wall_clock_timeout",
+        "every_timer_task_gets_a_microtask_checkpoint": "js::tests::every_timer_task_gets_a_microtask_checkpoint",
+        "queue_microtask_shares_the_microtask_queue_with_promise_reactions": "js::tests::queue_microtask_shares_the_microtask_queue_with_promise_reactions",
+        "suspended_animation_frame_does_not_leak_active_host_state_between_polls": "js::tests::suspended_animation_frame_does_not_leak_active_host_state_between_polls",
+        "cancelling_owned_task_drops_a_suspended_timer_callback": "js::tests::cancelling_owned_task_drops_a_suspended_timer_callback",
+        "active_host_state_is_restored_after_panic": "js::tests::active_host_state_is_restored_after_panic",
+        "custom_element_reactions_preserve_upgrade_and_reentrant_connection_state": "js::tests::custom_element_reactions_preserve_upgrade_and_reentrant_connection_state",
+        "set_timeout_function_callback_preserves_closure": "js::tests::set_timeout_function_callback_preserves_closure",
+        "async_animation_frame_prioritizes_callback_error_over_checkpoint_error": "js::tests::async_animation_frame_prioritizes_callback_error_over_checkpoint_error",
+        "alert_blocks_script_until_exactly_once_resolution": "js::tests::alert_blocks_script_until_exactly_once_resolution",
+        "dedicated_worker_runtime_task_errors_are_observable_without_stopping_page": "js::tests::dedicated_worker_runtime_task_errors_are_observable_without_stopping_page"
+      },
+      "module_cycles_and_thenables": {
+        "reference": {
+          "test/language/module-code/instn-named-iee-cycle": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-star-props-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-iee-err-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/built-ins/Promise/resolve/resolve-thenable": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/resolve-poisoned-then": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/S25.Promise_resolve_foreign_thenable_2": {
+            "status": "O",
+            "ecma_version": 8
+          }
+        },
+        "current": {
+          "test/language/module-code/instn-named-iee-cycle": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-star-props-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/language/module-code/instn-iee-err-circular": {
+            "status": "O",
+            "ecma_version": 6
+          },
+          "test/built-ins/Promise/resolve/resolve-thenable": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/resolve-poisoned-then": {
+            "status": "O",
+            "ecma_version": 8
+          },
+          "test/built-ins/Promise/resolve/S25.Promise_resolve_foreign_thenable_2": {
+            "status": "O",
+            "ecma_version": 8
+          }
+        }
+      }
+    }
+  },
+  "passed": true
+}

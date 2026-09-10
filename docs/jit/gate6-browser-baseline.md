@@ -44,7 +44,8 @@ Linux x86_64、Linux ARM64、macOS ARM64のCIで実行し、ログ・JSON・PNG�
 WPTは69ケース中66 pass・3 improvement・regression 0、Web APIは95/97 supported・
 error 0・regression 0だった。`cargo build --locked` と
 `cargo check --locked --features gui` も成功し、入力・送信・履歴の実画像を目視確認した。
-3環境のCIと移行後の再検証は、対応PRの実行結果で別途確認する。
+取り込み・時計修正・GC変更後の3環境×JIT無効/有効でも同じ操作7件が成功した。
+[最終検証](gate6-final-verification.md)で全suite・画像・互換性・3実archiveを照合した。
 
 最終判定には全suite（ignored含む）、cargo build、gui feature check、WPT regression 0、
 Web API surface regression 0、native JIT契約、3環境配布の検証を合わせる。
@@ -52,7 +53,19 @@ Web API surface regression 0、native JIT契約、3環境配布の検証を合�
 
 ## 独立化と性能改善への引き継ぎ
 
-#546/#551で依存・実装・テストの棚卸しを残し、方式決定後に #552 で独立管理を実装する。
+#546/#551で依存・実装・テストを棚卸しし、PR #656で `engine/boa/` の独立管理を実装した。
 既存parser・VM・built-ins・GC・JIT・bootstrapを継承する。性能比較は同じページ・入力・
 viewport・実行モード・ビルド条件で測り、操作結果と画像の正しさを確認してから採用する。
 独立化と性能改善の完了証拠は、このブラウザ修正の検証とは別に #553 へ記録する。
+
+## 最終画像の確認と制限
+
+PR #660の3環境×2 modeの42操作JSONと36PNGは、取り込み最終版PR #656と一致した。
+異なる13画像を目視確認し、表示文字・形状・色・入力/送信/履歴の結果を確認した。
+ただしLinux x86の文字が太い斜体、Linux ARM64が細い斜体、macOSが通常の文字になる
+差は変更前から存在した。fixtureは全体へのbold/italicを指定していない。
+
+[Issue #661](https://github.com/ieee0824/omoikane/issues/661)へ、familyだけを受け取る
+system font検索、順序を固定しない最初の一致、style名を除去する照合の問題を記録した。
+各runnerの実際のfont file/faceを記録していないため、選ばれたファイル名は断定しない。
+画像の非退行とweight/styleの正確なface選択の成立は別に判断する。

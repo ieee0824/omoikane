@@ -37,6 +37,9 @@
 | #548 native callのsuspend/resume/drop | [JS tests](../../src/js/mod.rs)の`async_eval_suspends_and_resumes_a_native_host_call`と`dropping_async_eval_cancels_its_suspended_host_call`。停止中は後続処理を実行せず、41をresumeすると42、drop後のresumeは失敗しruntime再利用は2を返す |
 | #548 hostのthrow・Promise・dialog・crypto | [JS tests](../../src/js/mod.rs)、[JIT exception](../../tests/jit_exception/mod.rs)、[CDP tests](../../src/cdp/mod.rs)。DOM例外とfinallyの順序・opaqueなthrow値のidentity・host error、dialog応答と暗号APIの値を検査 |
 | #548 timeoutの分類・復帰 | [JS tests](../../src/js/mod.rs)の`async_evaluation_honors_wall_clock_timeout_and_recovers_runtime`と`user_thrown_timeout_message_is_not_classified_as_wall_clock_timeout`。無限実行を中断し、同じ文字列のユーザー例外と区別してruntimeを再利用 |
+| #548 host activation・再入 | [JS tests](../../src/js/mod.rs)の`suspended_animation_frame_does_not_leak_active_host_state_between_polls`、`active_host_state_is_restored_after_panic`、`custom_element_reactions_preserve_upgrade_and_reentrant_connection_state`。poll間のhost/module state解放、panic後のouter state復元、JS callback→DOM再入時の接続順序を検査 |
+| #548 host保持値と取消し | 同ファイルの`set_timeout_function_callback_preserves_closure`と`alert_blocks_script_until_exactly_once_resolution`。forced GC後のclosureの値42、dialog中GCを越えた継続、二重/古い応答の拒否を検査 |
+| #548 非同期例外とdrop | 同ファイルの`cancelling_owned_task_drops_a_suspended_timer_callback`と`async_animation_frame_prioritizes_callback_error_over_checkpoint_error`。取消し後の継続不在、callback例外をcheckpoint例外より優先して返すことを検査 |
 | #548 GC/JIT内部契約 | [jit_gc_roots](../../tests/jit_gc_roots.rs)、[jit_runtime_call](../../tests/jit_runtime_call.rs)、[jit_interrupt](../../tests/jit_interrupt/mod.rs)、[jit_exception](../../tests/jit_exception/mod.rs)。native entryの実行カウンタ、minor/major後の生存・weak解放、例外順序、JIT off/onの中断結果を検査 |
 
 ## ブラウザ操作・Realm・Worker・過去の回帰
@@ -48,6 +51,7 @@
 | #549 全体互換性 | [Web API](../../tests/web_api_surface.rs)、[WPT smoke](../../tests/wpt_smoke.rs)、[Acid3](../../tests/acid3_harness.rs)、DOM/CDPを含む全suite。両Acid3駆動方式100/100とWPT/Web API regression 0が必要 |
 | #550 child Realm・WindowProxy | [module_loading_tests](../../src/js/module_loading_tests.rs)の`concurrent_iframe_imports_keep_separate_realms_and_csp`、[JS tests](../../src/js/mod.rs)のWindowProxy・iframe回帰。各childでmodule実行1回、別token、親のglobal非変更とorigin境界を検査 |
 | #550 Dedicated/Shared/Service Worker・messaging | [JS tests](../../src/js/mod.rs)の`dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed`、`shared_worker_is_shared_across_same_origin_runtimes`、`service_worker_registration_scopes_lifecycle_and_controller_selection`等。FIFO・clone後の値、共有接続、登録scope/lifecycleを検査 |
+| #550 task errorの観測 | [JS tests](../../src/js/mod.rs)の`dedicated_worker_runtime_task_errors_are_observable_without_stopping_page`。timerのエラーが1件観測でき、親ページの計算6×7が42を返すことを検査 |
 | #550 event loop・cancellation・drop | [event_loop](../../src/js/event_loop.rs)、[JS tests](../../src/js/mod.rs)の`every_timer_task_gets_a_microtask_checkpoint`、`dropping_runtime_clears_worker_cycle_before_collection`。task/microtask/rAF順序、破棄対象のcallback取消し、GC後のruntime再生成を検査 |
 | #550 タブ保存領域 | [browser_journeys](../../tests/browser_journeys.rs)の`tabs_share_local_storage_but_keep_session_storage_separate`。同originのlocalStorage共有、sessionStorage分離、タブ再開・別origin・別browserの分離を実際のタブ経路で検査 |
 | #551 #057/#058/#059 | [boa_inline_cache](../../tests/boa_inline_cache.rs)と[固定fixture](../../tests/fixtures/js/ic_prototype_reindex.js)。mutation sentinel到達後に同じwarm call siteが115を返すこと、own/prototype/accessorとshape分岐の分離を検査 |
@@ -72,3 +76,10 @@ featureとコマンドを使い、無効featureでの0件実行を成功証拠�
 各変更後に全suite・ブラウザ操作・JIT契約・3環境の実archive検証を行い、
 追加ケースは理由を記録する。原本のfloat16差分は#655、時計修正は#657、
 既存array benchmarkのNaNは#658として追跡し、既知の失敗を黙ってskipしない。
+
+最終実装PR #660では、元のdefault 2,353ケースに計算結果テスト1件を加えた2,354件が
+すべて成功した。3環境配布suiteは各2,392件成功し、元の2,391件を全保持した。
+上記アサーションをソースで確認した32ケースと循環module/thenable各3件の
+[実行結果対応](measurements/gate6-final-case-execution-2026-09-10.json)を保存した。
+CIソース、個別PASSの照合、画像、配布物、#655/#658/#659/#661の残課題は
+[最終検証](gate6-final-verification.md)を参照する。#657の時計修正は全CI確認済み。
