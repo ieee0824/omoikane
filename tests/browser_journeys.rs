@@ -46,6 +46,8 @@ impl FixtureServer {
                     }
                     Err(error) => panic!("fixture accept: {error}"),
                 };
+                // BSD sockets can inherit the listener's nonblocking flag.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
