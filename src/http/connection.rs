@@ -795,7 +795,7 @@ mod tests {
         Arc::get_mut(&mut server_config).unwrap().alpn_protocols =
             vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-        std::thread::spawn(move || {
+        let server = std::thread::spawn(move || {
             // First connection negotiates h2 and returns an unsupported frame type,
             // which the client currently treats as InvalidHeader.
             let (tcp_stream, _) = listener.accept().unwrap();
@@ -811,6 +811,20 @@ mod tests {
                 | frame_header[2] as usize;
             let mut settings_payload = vec![0u8; settings_len];
             tls_stream.read_exact(&mut settings_payload).unwrap();
+            assert_eq!(frame_header[3], 0x4, "the first frame is SETTINGS");
+            assert_eq!(tls_stream.conn.alpn_protocol(), Some(b"h2".as_slice()));
+
+            // Consume the complete GET before sending the invalid response.
+            // Closing with request bytes still in flight can replace the
+            // intended decode error with a TCP reset (observed on macOS).
+            tls_stream.read_exact(&mut frame_header).unwrap();
+            assert_eq!(frame_header[3], 0x1, "the request frame is HEADERS");
+            assert_eq!(frame_header[4] & 0x5, 0x5, "the GET ends this stream");
+            let headers_len = ((frame_header[0] as usize) << 16)
+                | ((frame_header[1] as usize) << 8)
+                | frame_header[2] as usize;
+            let mut headers_payload = vec![0u8; headers_len];
+            tls_stream.read_exact(&mut headers_payload).unwrap();
 
             let invalid_frame = [
                 0u8, 0u8, 0u8,  // payload len
@@ -820,18 +834,34 @@ mod tests {
             ];
             tls_stream.write_all(&invalid_frame).unwrap();
             tls_stream.flush().unwrap();
-            drop(tls_stream);
 
             // Second connection negotiates HTTP/1.1 and returns a valid response.
             let (tcp_stream, _) = listener.accept().unwrap();
+            // The reconnect proves the client consumed the invalid frame;
+            // keep its first connection alive until that has happened.
+            drop(tls_stream);
             let conn = rustls::ServerConnection::new(server_config).unwrap();
             let mut tls_stream = StreamOwned::new(conn, tcp_stream);
 
-            let mut request_bytes = vec![0u8; 4096];
-            let _ = tls_stream.read(&mut request_bytes).unwrap();
+            let mut reader = BufReader::new(&mut tls_stream);
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                request.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            assert!(request.starts_with("GET / HTTP/1.1\r\n"));
+            assert_eq!(
+                tls_stream.conn.alpn_protocol(),
+                Some(b"http/1.1".as_slice())
+            );
 
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nfallback";
             tls_stream.write_all(response.as_bytes()).unwrap();
+            tls_stream.conn.send_close_notify();
             tls_stream.flush().unwrap();
         });
 
@@ -867,6 +897,7 @@ mod tests {
 
         assert_eq!(response.status_code(), 200);
         assert_eq!(response.body(), b"fallback");
+        server.join().unwrap();
     }
 
     /// Helper: connect to a TLS server with the insecure verifier (no trusted roots required).
