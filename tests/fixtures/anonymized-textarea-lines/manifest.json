@@ -1,0 +1,10 @@
+[
+  {"name":"initial-lf","path":"initial-lf.html","width":800,"height":600,"fixture_sha256":"aab66cd367a830af62973a5a0bdc733dbcceb8f84699a957be616bbd02aea795"},
+  {"name":"js-crlf","path":"js-crlf.html","width":800,"height":600,"fixture_sha256":"44284c841ecae30c6e982685d7b85d8526fa6d8c90e72df143a018fe303e4ced"},
+  {"name":"wrap","path":"wrap.html","width":800,"height":600,"fixture_sha256":"1e0305159141db17af1871ad6eb09347f12827d8b23651551e378c2a51331047"},
+  {"name":"line-height-padding","path":"line-height-padding.html","width":800,"height":600,"fixture_sha256":"e47fa5bf9ad90245b0e922b6b2dcd171d1114a45d41784d5a5147028e651b10f"},
+  {"name":"clip","path":"clip.html","width":800,"height":600,"fixture_sha256":"632c10dae3e0a2a07f8adc0eefc54c98542636f318ddf26ecd30c8b75fc65a83"},
+  {"name":"input-control","path":"input-control.html","width":800,"height":600,"fixture_sha256":"8b36f2b4c00952ff871a0e1ba96a83b0284a1f805860d1e3d6cba15157f738a9"},
+  {"name":"caret-second-line","path":"caret-second-line.html","width":800,"height":600,"fixture_sha256":"1249ef35b5e463c8e3b04cd8a4108754c28c03dd5117569725d20f779b369820"},
+  {"name":"selection-second-line","path":"selection-second-line.html","width":800,"height":600,"fixture_sha256":"023f190d4896722b2851753eaf1d53fbd20ca583fe3b24ea4a878a40ab2cd9d4"}
+]

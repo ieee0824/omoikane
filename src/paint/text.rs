@@ -17,6 +17,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
 use super::color::{Color, parse_color};
+use super::form_control::paint_textarea_value;
 use super::{Canvas, Image, background_color, length_property, paint_background_image};
 
 const MAX_RENDER_GLYPH_CACHE_ENTRIES: usize = 16_384;
@@ -393,6 +394,35 @@ pub(crate) fn paint_text_with_registry(
                         fragment_fonts.push(font);
                     }
                     fragment_fonts.extend(fonts.iter().map(|font| font.as_ref()));
+                    if fragment.node.tag_name().as_deref() == Some("textarea") {
+                        let soft_wrap = !fragment
+                            .node
+                            .attributes()
+                            .and_then(|attributes| attributes.get("wrap").cloned())
+                            .is_some_and(|wrap| wrap.eq_ignore_ascii_case("off"));
+                        paint_textarea_value(
+                            canvas,
+                            content_rect,
+                            Rect {
+                                x: fragment_rect.x + border.left,
+                                y: fragment_rect.y + border.top,
+                                width: (fragment_rect.width - border.total_horizontal()).max(0.0),
+                                height: (fragment_rect.height - border.total_vertical()).max(0.0),
+                            },
+                            value,
+                            *editing,
+                            style,
+                            &fragment.style,
+                            fragment.metrics.font_size,
+                            fragment.metrics.ascent,
+                            &fragment_fonts,
+                            color,
+                            clip,
+                            fragment.metrics.letter_spacing,
+                            soft_wrap,
+                        );
+                        continue;
+                    }
                     let x_offset = if is_text_align_center(style) {
                         let text_width = measure_form_control_text_width(
                             value,
@@ -1896,7 +1926,7 @@ pub(crate) fn measure_form_control_text_width(
     width
 }
 
-fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
+pub(crate) fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
     if offset == 0 {
         return "";
     }

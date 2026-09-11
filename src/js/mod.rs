@@ -31254,6 +31254,34 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn textarea_normalizes_newlines_and_enter_inserts_one_lf() {
+        let mut runtime =
+            runtime_from_html(r#"<html><body><textarea id="area"></textarea></body></html>"#);
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(() => {
+                    const area = document.getElementById("area");
+                    area.value = "a\r\nb\rc";
+                    const normalized = area.value === "a\nb\nc" &&
+                      area.selectionStart === 5 && area.selectionEnd === 5;
+                    const events = [];
+                    for (const type of ["beforeinput", "input"]) {
+                      area.addEventListener(type, event => events.push(
+                        [type, event.inputType, event.data === null ? "null" : event.data].join(":")));
+                    }
+                    area.focus();
+                    area.setSelectionRange(1, 4);
+                    __omoikane_dispatch_keyboard_input("keydown", { key: "Enter" });
+                    return [normalized, area.value, area.selectionStart, area.selectionEnd,
+                      events.join("|")].join(";");
+                })()"#,
+            ),
+            "true;a\nc;2;2;beforeinput:insertLineBreak:null|input:insertLineBreak:null"
+        );
+    }
+
+    #[test]
     fn text_control_editing_respects_cancelation_readonly_and_maxlength() {
         let mut runtime = runtime_from_html(
             r#"<html><body><input id="field" value="ab" maxlength="3"><input id="readonly" value="locked" readonly></body></html>"#,

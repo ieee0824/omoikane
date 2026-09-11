@@ -7531,6 +7531,19 @@
     const end = control.selectionEnd;
     const key = String(init.key || "");
 
+    if (key === "Enter" && control instanceof HTMLTextAreaElement) {
+      if (control.maxLength < 0 || value.length - (end - start) < control.maxLength) {
+        dispatchTextControlInput(
+          control,
+          "insertLineBreak",
+          null,
+          value.slice(0, start) + "\n" + value.slice(end),
+          start + 1,
+        );
+      }
+      return;
+    }
+
     if (key === "Enter" && control instanceof HTMLInputElement) {
       const form = control.__owningForm();
       if (form) {
@@ -7689,15 +7702,18 @@
     select() { selectTextControl(this); }
   }
 
+  function normalizeTextAreaValue(value) {
+    return String(value).replace(/\r\n?/g, "\n");
+  }
+
   class HTMLTextAreaElement extends HTMLElement {
     get value() {
       if (this.__value !== undefined) return this.__value;
-      const initial = this.textContent || "";
-      return initial.startsWith("\r\n") ? initial.slice(2) :
-        (initial.startsWith("\n") || initial.startsWith("\r") ? initial.slice(1) : initial);
+      const initial = normalizeTextAreaValue(this.textContent || "");
+      return initial.startsWith("\n") ? initial.slice(1) : initial;
     }
     set value(value) {
-      this.__value = value == null ? "" : String(value);
+      this.__value = normalizeTextAreaValue(value == null ? "" : value);
       setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
     get defaultValue() { return this.textContent || ""; }

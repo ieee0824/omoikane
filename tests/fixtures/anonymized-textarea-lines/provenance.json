@@ -1,0 +1,161 @@
+{
+  "before": {
+    "cases": [
+      {
+        "name": "initial-lf",
+        "path": "initial-lf.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "aab66cd367a830af62973a5a0bdc733dbcceb8f84699a957be616bbd02aea795"
+      },
+      {
+        "name": "js-crlf",
+        "path": "js-crlf.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "44284c841ecae30c6e982685d7b85d8526fa6d8c90e72df143a018fe303e4ced"
+      },
+      {
+        "name": "wrap",
+        "path": "wrap.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "1e0305159141db17af1871ad6eb09347f12827d8b23651551e378c2a51331047"
+      },
+      {
+        "name": "line-height-padding",
+        "path": "line-height-padding.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "e47fa5bf9ad90245b0e922b6b2dcd171d1114a45d41784d5a5147028e651b10f"
+      },
+      {
+        "name": "clip",
+        "path": "clip.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "632c10dae3e0a2a07f8adc0eefc54c98542636f318ddf26ecd30c8b75fc65a83"
+      },
+      {
+        "name": "input-control",
+        "path": "input-control.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "8b36f2b4c00952ff871a0e1ba96a83b0284a1f805860d1e3d6cba15157f738a9"
+      },
+      {
+        "name": "caret-second-line",
+        "path": "caret-second-line.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "1249ef35b5e463c8e3b04cd8a4108754c28c03dd5117569725d20f779b369820"
+      },
+      {
+        "name": "selection-second-line",
+        "path": "selection-second-line.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "023f190d4896722b2851753eaf1d53fbd20ca583fe3b24ea4a878a40ab2cd9d4"
+      }
+    ],
+    "capture_script_sha256": "a4c8c9cdfccee62ef40c336f7b4e3e8f8f8e8528e780d03cb3124afdc928d3ec",
+    "library": "/target/issues669-671/final.so",
+    "library_sha256": "f8f52c6e2e11df2a6187fdb944a3734285a1edb37fc14bc9f51fb984e427efd6"
+  },
+  "after": {
+    "cases": [
+      {
+        "name": "initial-lf",
+        "path": "initial-lf.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "aab66cd367a830af62973a5a0bdc733dbcceb8f84699a957be616bbd02aea795"
+      },
+      {
+        "name": "js-crlf",
+        "path": "js-crlf.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "44284c841ecae30c6e982685d7b85d8526fa6d8c90e72df143a018fe303e4ced"
+      },
+      {
+        "name": "wrap",
+        "path": "wrap.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "1e0305159141db17af1871ad6eb09347f12827d8b23651551e378c2a51331047"
+      },
+      {
+        "name": "line-height-padding",
+        "path": "line-height-padding.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "e47fa5bf9ad90245b0e922b6b2dcd171d1114a45d41784d5a5147028e651b10f"
+      },
+      {
+        "name": "clip",
+        "path": "clip.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "632c10dae3e0a2a07f8adc0eefc54c98542636f318ddf26ecd30c8b75fc65a83"
+      },
+      {
+        "name": "input-control",
+        "path": "input-control.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "8b36f2b4c00952ff871a0e1ba96a83b0284a1f805860d1e3d6cba15157f738a9"
+      },
+      {
+        "name": "caret-second-line",
+        "path": "caret-second-line.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "1249ef35b5e463c8e3b04cd8a4108754c28c03dd5117569725d20f779b369820"
+      },
+      {
+        "name": "selection-second-line",
+        "path": "selection-second-line.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "023f190d4896722b2851753eaf1d53fbd20ca583fe3b24ea4a878a40ab2cd9d4"
+      }
+    ],
+    "capture_script_sha256": "a4c8c9cdfccee62ef40c336f7b4e3e8f8f8e8528e780d03cb3124afdc928d3ec",
+    "library": "/workspace/.artifacts/issues673-675/final-captures/after.so",
+    "library_sha256": "919ba42d95f007349f522a1b7aece29e29124b71127bd7135fb71fae8d318bd9"
+  },
+  "firefox": {
+    "sessionId": "03fd6a8b-f22a-4c06-9fe3-e65c16b194fd",
+    "capabilities": {
+      "acceptInsecureCerts": false,
+      "browserName": "firefox",
+      "browserVersion": "155.0.1",
+      "moz:accessibilityChecks": false,
+      "moz:buildID": "20260903215306",
+      "moz:geckodriverVersion": "0.37.1",
+      "moz:headless": true,
+      "moz:platformVersion": "6.8.0-100-generic",
+      "moz:processID": 857755,
+      "moz:profile": "/tmp/rust_mozprofilebH5G4v",
+      "moz:shutdownTimeout": 60000,
+      "moz:webdriverClick": true,
+      "moz:windowless": false,
+      "pageLoadStrategy": "normal",
+      "platformName": "linux",
+      "proxy": {},
+      "setWindowRect": true,
+      "strictFileInteractability": false,
+      "timeouts": {
+        "implicit": 0,
+        "pageLoad": 300000,
+        "script": 30000
+      },
+      "unhandledPromptBehavior": "dismiss and notify",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0"
+    }
+  },
+  "original_capture_root": "/workspace/.artifacts/issues673-675/final-captures/textarea-lines",
+  "before_revision": "c6ab6e8409a0d215ed8e19a6892761bd968e6910",
+  "note": "After library includes this change; raw PNGs retained separately. Checked-in PNGs are lossless copies, not baseline updates."
+}
