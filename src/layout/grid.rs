@@ -250,20 +250,31 @@ pub(super) fn layout_grid_container(
             row_gap,
         )
         .ok()?;
-        let layout = super::layout_node_with_subgrid(
+        let fixed_height = explicit_rows
+            .get(placement.row..placement.row + placement.row_span)
+            .is_some_and(|tracks| {
+                tracks
+                    .iter()
+                    .all(|track| fixed_track(*track, row_basis).is_some())
+            });
+        let stretch_height = fixed_height
+            .then(|| stretched_item_height(&style, &child_style, height))
+            .flatten();
+        let layout = super::layout_element(
             child,
             resolver,
             containing,
             viewport,
             None,
             inherited,
+            stretch_height,
         );
         if let Some(layout) = layout {
             let occupied = content_row_heights[placement.row..placement.row + placement.row_span].iter().sum::<f32>()
                 + row_gap * placement.row_span.saturating_sub(1) as f32;
             let deficit = (layout.total_height() - occupied).max(0.0);
             content_row_heights[placement.row + placement.row_span - 1] += deficit;
-            laid_out.push((index, layout));
+            laid_out.push((index, layout, stretch_height));
         }
     }
 
@@ -308,25 +319,22 @@ pub(super) fn layout_grid_container(
         content_height,
         alignment(&style, "align-content", Alignment::Start),
     );
-    // Row tracks can depend on content. Re-layout subgrid items once the
-    // parent's final track geometry is known so their nested lines use the
-    // exact spanned rows rather than the provisional fixed-track pass.
-    for (index, layout) in &mut laid_out {
+    // Content-sized tracks become definite after track sizing. Reflow stretched
+    // items when that changes their used height, and subgrids when their exact
+    // inherited tracks become available. Fixed rows already stretch on pass one.
+    for (index, layout, previous_height) in &mut laid_out {
         let placement = placements[*index];
         let child = &items[*index];
         let child_style = resolver.computed_style(child);
-        let inherited = match inherited_tracks_for_item(
+        let inherited = inherited_tracks_for_item(
             &child_style,
             placement,
             &column_widths,
             aligned_column_gap,
             Some(&row_heights),
             aligned_row_gap,
-        ) {
-            Ok(Some(inherited)) => inherited,
-            Ok(None) => continue,
-            Err(()) => return None,
-        };
+        )
+        .ok()?;
         let cell_width = track_area(
             &column_widths,
             placement.column,
@@ -350,13 +358,22 @@ pub(super) fn layout_grid_container(
             cell_width
         };
         let containing = Rect { x: 0.0, y: 0.0, width: item_width, height: cell_height };
-        if let Some(relayout) = super::layout_node_with_subgrid(
+        let stretch_height = stretched_item_height(&style, &child_style, cell_height);
+        if inherited.is_none()
+            && (stretch_height.is_none()
+                || stretch_height.map(|height| height.value)
+                    == previous_height.map(|height| height.value))
+        {
+            continue;
+        }
+        if let Some(relayout) = super::layout_element(
             child,
             resolver,
             containing,
             viewport,
             None,
-            Some(inherited),
+            inherited,
+            stretch_height,
         ) {
             *layout = relayout;
         }
@@ -364,7 +381,7 @@ pub(super) fn layout_grid_container(
     let column_offsets = offsets(&column_widths, aligned_column_gap, x + column_start);
     let row_offsets = offsets(&row_heights, aligned_row_gap, y + row_start);
     let mut children = Vec::new();
-    for (index, mut child) in laid_out {
+    for (index, mut child, _) in laid_out {
         let placement = placements[index];
         let child_style = resolver.computed_style(&items[index]);
         let cell_width = track_area(&column_widths, placement.column, placement.column_span, aligned_column_gap);
@@ -390,6 +407,32 @@ pub(super) fn layout_grid_container(
     }
     sort_children_by_z_index(&mut children);
     Some(LayoutBox { node: node.clone(), dimensions, visibility: visibility(&style), overflow: overflow(&style), z_index: z_index(&style), transform: AffineTransform::identity(), needs_scroll_translation: false, paint_scroll: None, lines: Vec::new(), children, marker: None })
+}
+
+fn stretched_item_height(
+    container_style: &ComputedStyle,
+    style: &ComputedStyle,
+    area_height: f32,
+) -> Option<super::UsedHeight> {
+    let align = self_alignment(style, "align-self")
+        .unwrap_or_else(|| alignment(container_style, "align-items", Alignment::Stretch));
+    let auto_height = style.get("height").is_none()
+        || matches!(style.get("height"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto"));
+    let auto_margin = ["margin-top", "margin-bottom"].iter().any(|property| {
+        matches!(style.get(property), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto"))
+    });
+    if align != Alignment::Stretch || !auto_height || auto_margin {
+        return None;
+    }
+    let margin = edge_sizes(style, "margin");
+    let padding = edge_sizes(style, "padding");
+    let border = edge_sizes(style, "border");
+    let height =
+        (area_height - margin.vertical() - padding.vertical() - border.vertical()).max(0.0);
+    Some(super::UsedHeight {
+        value: super::clamp_content_height(style, height, area_height, padding, border),
+        definite: true,
+    })
 }
 
 fn alignment(style: &ComputedStyle, property: &str, default: Alignment) -> Alignment {

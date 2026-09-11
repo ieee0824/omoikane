@@ -3362,3 +3362,6 @@ mod tests;
 
 #[cfg(test)]
 mod flex_reflow_tests;
+
+#[cfg(test)]
+mod grid_stretch_tests;
