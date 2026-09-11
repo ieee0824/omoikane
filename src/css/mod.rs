@@ -87,6 +87,10 @@ pub(crate) use transform::{
 };
 pub use tokenizer::tokenize;
 
+mod font_shorthand;
+#[cfg(test)]
+mod url_tests;
+
 /// A token emitted by the CSS tokenizer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CssToken {
@@ -94,6 +98,9 @@ pub enum CssToken {
     AtKeyword(String),
     Hash(String),
     String(String),
+    /// An unquoted `url(...)` argument, preserved as source text rather than
+    /// split into numbers or punctuation. CSS escapes remain in this value.
+    Url(String),
     Number(f32),
     Percentage(f32),
     Dimension(f32, String),

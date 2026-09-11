@@ -36,6 +36,8 @@ impl WriteServer {
                     }
                     Err(error) => panic!("{error}"),
                 };
+                // Accepted sockets can inherit nonblocking mode on BSD.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();

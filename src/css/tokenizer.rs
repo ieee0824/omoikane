@@ -54,6 +54,17 @@ pub fn tokenize(input: &str) -> Result<Vec<CssToken>, CssParseError> {
             }
             c if is_ident_start(c) || c == '-' || c == '\\' => {
                 let ident = consume_ident(&chars, &mut index);
+                if ident.eq_ignore_ascii_case("url") && chars.get(index) == Some(&'(') {
+                    let mut start = index + 1;
+                    while chars.get(start).is_some_and(|c| c.is_ascii_whitespace()) {
+                        start += 1;
+                    }
+                    if !matches!(chars.get(start), Some('"' | '\'')) {
+                        index = start;
+                        tokens.push(CssToken::Url(consume_unquoted_url(&chars, &mut index)?));
+                        continue;
+                    }
+                }
                 tokens.push(CssToken::Ident(ident));
             }
             ':' => {
@@ -104,6 +115,49 @@ pub fn tokenize(input: &str) -> Result<Vec<CssToken>, CssParseError> {
 
 pub(super) fn is_ident_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_' || ch == '-'
+}
+
+// Preserve URL payload bytes: numeric tokenization would turn `/0012` into
+// `/12` and corrupt digit runs in base64 fonts/images. Quoted URLs continue
+// through the existing string path. Retain escapes for the value serializer.
+fn consume_unquoted_url(chars: &[char], index: &mut usize) -> Result<String, CssParseError> {
+    let start = *index;
+    while let Some(&ch) = chars.get(*index) {
+        match ch {
+            ')' => {
+                let value = chars[start..*index].iter().collect();
+                *index += 1;
+                return Ok(value);
+            }
+            c if c.is_ascii_whitespace() => {
+                let end = *index;
+                while chars.get(*index).is_some_and(|c| c.is_ascii_whitespace()) {
+                    *index += 1;
+                }
+                if chars.get(*index).is_some_and(|&c| c != ')') {
+                    return Err(CssParseError::InvalidDeclaration);
+                }
+                *index += usize::from(*index < chars.len());
+                return Ok(chars[start..end].iter().collect());
+            }
+            '"' | '\'' | '(' | '\0'..='\x08' | '\x0b' | '\x0e'..='\x1f' | '\x7f' => {
+                return Err(CssParseError::InvalidDeclaration);
+            }
+            '\\' => {
+                if chars
+                    .get(*index + 1)
+                    .is_none_or(|c| matches!(c, '\n' | '\r' | '\x0c'))
+                {
+                    return Err(CssParseError::InvalidDeclaration);
+                }
+                // Advancing over a CSS escape also consumes its optional
+                // whitespace terminator; the original spelling is retained.
+                consume_css_escape(chars, index);
+            }
+            _ => *index += 1,
+        }
+    }
+    Ok(chars[start..*index].iter().collect())
 }
 
 pub(super) fn is_ident_char(ch: char) -> bool {
@@ -217,6 +271,11 @@ pub(super) fn render_tokens(tokens: &[CssToken]) -> String {
     for token in tokens {
         match token {
             CssToken::Ident(value) => rendered.push_str(value),
+            CssToken::Url(value) => {
+                rendered.push_str("url(");
+                rendered.push_str(value);
+                rendered.push(')');
+            }
             CssToken::AtKeyword(value) => {
                 rendered.push('@');
                 rendered.push_str(value);

@@ -20,6 +20,8 @@ pub(crate) use system::{SelectedFont, load_default_text_fonts_shared, select_tex
 pub use system::{SystemFontDatabase, SystemFontFace, find_system_font_face, system_font_database};
 
 #[cfg(test)]
+mod arabic_tests;
+#[cfg(test)]
 mod system_tests;
 #[cfg(test)]
 mod tests;
@@ -1109,6 +1111,10 @@ fn default_text_font_families() -> &'static [&'static str] {
             "Yu Gothic",
             "Noto Sans CJK JP",
             "Noto Sans JP",
+            "Geeza Pro",
+            "DejaVu Sans",
+            "Noto Sans Arabic",
+            "Noto Naskh Arabic",
         ][..]
     } else {
         &[
@@ -1120,6 +1126,12 @@ fn default_text_font_families() -> &'static [&'static str] {
             "MS Gothic",
             "IPA Gothic",
             "IPAGothic",
+            // The primary Latin and CJK families may contain no Arabic
+            // glyphs. Make installed Arabic-capable faces available to the
+            // same grapheme fallback used by layout and paint.
+            "DejaVu Sans",
+            "Noto Sans Arabic",
+            "Noto Naskh Arabic",
         ][..]
     }
 }

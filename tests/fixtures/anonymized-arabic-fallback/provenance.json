@@ -1,0 +1,105 @@
+{
+  "before": {
+    "cases": [
+      {
+        "name": "anonymized-text",
+        "path": "anonymized-text.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "b87de36edcf105bdcec9141b57ade5155cda86c68664bb9de05f09badeebcd6a"
+      },
+      {
+        "name": "anonymized-arabic-system",
+        "path": "anonymized-arabic-system.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "bf74e3f82f7c3c1baf12821a5332885e6bf587fcaa1e1638668b103067c62222"
+      },
+      {
+        "name": "anonymized-arabic-fixed",
+        "path": "anonymized-arabic-fixed.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "1dee27d049445d0843a8218a329ad209e8fd2f96fe06e6db27ef361c8d2d3e5f"
+      },
+      {
+        "name": "anonymized-arabic-primary",
+        "path": "anonymized-arabic-primary.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "a7a8e6dbb598c3d9c5897f73c884cf747342379d0a4c20ee8879adc4cae57e16"
+      }
+    ],
+    "capture_script_sha256": "a4c8c9cdfccee62ef40c336f7b4e3e8f8f8e8528e780d03cb3124afdc928d3ec",
+    "library": "/target/issues669-671/final.so",
+    "library_sha256": "f8f52c6e2e11df2a6187fdb944a3734285a1edb37fc14bc9f51fb984e427efd6"
+  },
+  "after": {
+    "cases": [
+      {
+        "name": "anonymized-text",
+        "path": "anonymized-text.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "b87de36edcf105bdcec9141b57ade5155cda86c68664bb9de05f09badeebcd6a"
+      },
+      {
+        "name": "anonymized-arabic-system",
+        "path": "anonymized-arabic-system.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "bf74e3f82f7c3c1baf12821a5332885e6bf587fcaa1e1638668b103067c62222"
+      },
+      {
+        "name": "anonymized-arabic-fixed",
+        "path": "anonymized-arabic-fixed.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "1dee27d049445d0843a8218a329ad209e8fd2f96fe06e6db27ef361c8d2d3e5f"
+      },
+      {
+        "name": "anonymized-arabic-primary",
+        "path": "anonymized-arabic-primary.html",
+        "width": 800,
+        "height": 600,
+        "fixture_sha256": "a7a8e6dbb598c3d9c5897f73c884cf747342379d0a4c20ee8879adc4cae57e16"
+      }
+    ],
+    "capture_script_sha256": "a4c8c9cdfccee62ef40c336f7b4e3e8f8f8e8528e780d03cb3124afdc928d3ec",
+    "library": "/workspace/.artifacts/issues673-675/final-captures/after.so",
+    "library_sha256": "919ba42d95f007349f522a1b7aece29e29124b71127bd7135fb71fae8d318bd9"
+  },
+  "firefox": {
+    "sessionId": "d7749467-2d27-4d5f-a58f-1c61c7a4a08d",
+    "capabilities": {
+      "acceptInsecureCerts": false,
+      "browserName": "firefox",
+      "browserVersion": "155.0.1",
+      "moz:accessibilityChecks": false,
+      "moz:buildID": "20260903215306",
+      "moz:geckodriverVersion": "0.37.1",
+      "moz:headless": true,
+      "moz:platformVersion": "6.8.0-100-generic",
+      "moz:processID": 858115,
+      "moz:profile": "/tmp/rust_mozprofileGUXMTB",
+      "moz:shutdownTimeout": 60000,
+      "moz:webdriverClick": true,
+      "moz:windowless": false,
+      "pageLoadStrategy": "normal",
+      "platformName": "linux",
+      "proxy": {},
+      "setWindowRect": true,
+      "strictFileInteractability": false,
+      "timeouts": {
+        "implicit": 0,
+        "pageLoad": 300000,
+        "script": 30000
+      },
+      "unhandledPromptBehavior": "dismiss and notify",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0"
+    }
+  },
+  "original_capture_root": "/workspace/.artifacts/issues673-675/final-captures/arabic-fallback",
+  "before_revision": "c6ab6e8409a0d215ed8e19a6892761bd968e6910",
+  "note": "After library includes this change; raw PNGs retained separately. Checked-in PNGs are lossless copies, not baseline updates."
+}

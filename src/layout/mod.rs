@@ -492,6 +492,8 @@ pub struct InlineFragment {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InlineFragmentContent {
     Text(String),
+    /// The border area of a non-replaced inline element on one line.
+    InlineBox(ComputedStyle),
     Image(Image, ComputedStyle),
     GeneratedBox(ComputedStyle),
     FormControl(ComputedStyle, String, Option<TextControlPaintState>),
@@ -2719,6 +2721,15 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                         InlineSegmentContent::Text(text) => {
                             measure_text_width(&text, segment.metrics)
                         }
+                        InlineSegmentContent::InlineEdge(style, start) => {
+                            let padding = edge_sizes(&style, "padding");
+                            let border = edge_sizes(&style, "border");
+                            if start {
+                                padding.left + border.left
+                            } else {
+                                padding.right + border.right
+                            }
+                        }
                         InlineSegmentContent::Image(_, style, rendered_width, _) => {
                             let padding = edge_sizes(&style, "padding");
                             let border = edge_sizes(&style, "border");
@@ -3224,3 +3235,6 @@ mod flex_text_tests;
 
 #[cfg(test)]
 mod margin_collapse_tests;
+
+#[cfg(test)]
+mod inline_box_tests;

@@ -1,0 +1,93 @@
+[
+  {
+    "name": "anonymized-font-file",
+    "path": "anonymized-font-file.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "8e6f129057b1d91b93327f33d37d97a54b335df8857dcff18a3246b99b72c1b1"
+  },
+  {
+    "name": "anonymized-inline-basic",
+    "path": "anonymized-inline-basic.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "67ab4adb8e1d6afa5efc49bd4c9f789badc356d416ac7f2940255e52b0b7021e"
+  },
+  {
+    "name": "anonymized-inline-multiline",
+    "path": "anonymized-inline-multiline.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "20d1d1008b69aabd3f01ef5c2a6d820bb4d574f193cbaeac8ad35c50930a710a"
+  },
+  {
+    "name": "anonymized-inline-nested",
+    "path": "anonymized-inline-nested.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "c0bb0a394443c8b842581d993bc95ca3f6c7e18049a8cadadcdfaa62e36a54f8"
+  },
+  {
+    "name": "anonymized-inline-empty",
+    "path": "anonymized-inline-empty.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "cbf00892756b059baaf9ac45be088fb108a4b3405769a20da358e285a77fcb3e"
+  },
+  {
+    "name": "anonymized-inline-empty-only",
+    "path": "anonymized-inline-empty-only.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "f79e6f128ce3209d520b9cb425c1cf96629cf4ee53c73e1aa4d56a659a2e603e"
+  },
+  {
+    "name": "anonymized-inline-empty-nested",
+    "path": "anonymized-inline-empty-nested.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "dd4860adbb13c30aba6614062a0595df38c1cf2bf8f395ba4cc045eb9cb03d63"
+  },
+  {
+    "name": "anonymized-inline-lineheight",
+    "path": "anonymized-inline-lineheight.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "a93729488082fd7cc792dd26893a30c77b2213b14f2ffb8240687659ac60c30f"
+  },
+  {
+    "name": "anonymized-inline-padding",
+    "path": "anonymized-inline-padding.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "d47f4abb8a7a78f04f9e871530707ddfcbf83f07f5abef2b5eed69e269ed6b09"
+  },
+  {
+    "name": "anonymized-inline-empty-margin",
+    "path": "anonymized-inline-empty-margin.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "576183de110621a898442fa035648506315df7b3c30a63db83d1167418bee6f1"
+  },
+  {
+    "name": "anonymized-inline-pre",
+    "path": "anonymized-inline-pre.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "c40f79fbd4b6a4464b39760665f1133bab736ef5b3fd8e6102d527879d2159a5"
+  },
+  {
+    "name": "anonymized-inline-pre-empty-lines",
+    "path": "anonymized-inline-pre-empty-lines.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "16b9ca25c66387afa3963679dff3e907e3a2cc0bb40ba31ab7ac3b6ffb8dbbd8"
+  },
+  {
+    "name": "anonymized-inline-pre-trailing-newline",
+    "path": "anonymized-inline-pre-trailing-newline.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "be717ff06485c101adb2b9deb6fdbaa703f587789ce4e8b4d3e4cba0fb0dc209"
+  }
+]

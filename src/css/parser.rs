@@ -809,6 +809,9 @@ impl Parser {
         }
 
         let (value_tokens, important) = split_important(&value_tokens);
+        if name == "font" {
+            return super::font_shorthand::expand(&value_tokens, important);
+        }
         // Preserve comma-separated mask layer lists. The paint path uses the
         // per-layer values for compositing, positioning, sizing, and repeat
         // behavior instead of silently dropping every layer after the first.
@@ -1196,6 +1199,7 @@ fn parse_single_value(token: &CssToken) -> Result<Value, CssParseError> {
         }
         CssToken::Hash(value) => Ok(Value::Color(format!("#{value}"))),
         CssToken::String(value) => Ok(Value::String(value.clone())),
+        CssToken::Url(value) => Ok(Value::Keyword(format!("url({value})"))),
         CssToken::Number(value) => Ok(Value::Number(*value)),
         CssToken::Percentage(value) => Ok(Value::Percentage(*value)),
         CssToken::Dimension(value, unit) => Ok(Value::Length(*value, unit.clone())),

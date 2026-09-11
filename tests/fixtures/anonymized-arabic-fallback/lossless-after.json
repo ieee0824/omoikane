@@ -1,0 +1,194 @@
+[
+  {
+    "file": "anonymized-arabic-fixed.firefox-reference.actual-repeat.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 1920813,
+    "review_bytes": 3022,
+    "original_sha256": "5019e5d4ca63ead8a7546140631df6de2140d0176dcbad901234a11609988570",
+    "review_sha256": "5d2da706273782df6f9622e4a622afc8316a8d05a6217740f6f93af270fa1d75",
+    "rgba_sha256": "0ff9d8929ae2f9b34679f49eb43d86351f4ca65792d6f03cf80a888a6ba6bf8e"
+  },
+  {
+    "file": "anonymized-arabic-fixed.firefox-reference.actual.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 1920813,
+    "review_bytes": 3022,
+    "original_sha256": "5019e5d4ca63ead8a7546140631df6de2140d0176dcbad901234a11609988570",
+    "review_sha256": "5d2da706273782df6f9622e4a622afc8316a8d05a6217740f6f93af270fa1d75",
+    "rgba_sha256": "0ff9d8929ae2f9b34679f49eb43d86351f4ca65792d6f03cf80a888a6ba6bf8e"
+  },
+  {
+    "file": "anonymized-arabic-fixed.firefox-reference.expected-repeat.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 8047,
+    "review_bytes": 3372,
+    "original_sha256": "528f224f3b9d2a35d602a83f55b562ec75978338266efdf8c59ab15ddb55398d",
+    "review_sha256": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a",
+    "rgba_sha256": "d03bafbf8ab608b7efdc00c3797beb7672016da76c46a8d8d21a8da305cefdcf"
+  },
+  {
+    "file": "anonymized-arabic-fixed.firefox-reference.expected.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 8047,
+    "review_bytes": 3372,
+    "original_sha256": "528f224f3b9d2a35d602a83f55b562ec75978338266efdf8c59ab15ddb55398d",
+    "review_sha256": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a",
+    "rgba_sha256": "d03bafbf8ab608b7efdc00c3797beb7672016da76c46a8d8d21a8da305cefdcf"
+  },
+  {
+    "file": "anonymized-arabic-primary.firefox-reference.actual-repeat.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 1920813,
+    "review_bytes": 2964,
+    "original_sha256": "9b17348f5cc02e02a4ab1460174d98907158a60c9000768db132e7fdea966727",
+    "review_sha256": "2a3ae67d641028f1a424fa576b2628e9a40b339f1f0cc44e2a89d8cef8bce9f1",
+    "rgba_sha256": "51c7dd8c9392b6599a7e45e2c55a91c9b56d6b5ff2afe17353744e604a2ac1b3"
+  },
+  {
+    "file": "anonymized-arabic-primary.firefox-reference.actual.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 1920813,
+    "review_bytes": 2964,
+    "original_sha256": "9b17348f5cc02e02a4ab1460174d98907158a60c9000768db132e7fdea966727",
+    "review_sha256": "2a3ae67d641028f1a424fa576b2628e9a40b339f1f0cc44e2a89d8cef8bce9f1",
+    "rgba_sha256": "51c7dd8c9392b6599a7e45e2c55a91c9b56d6b5ff2afe17353744e604a2ac1b3"
+  },
+  {
+    "file": "anonymized-arabic-primary.firefox-reference.expected-repeat.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 8050,
+    "review_bytes": 3194,
+    "original_sha256": "5e00f482609070e82e42b7e5e355a53163bd383548dc06b90ab65df8bdb92a2c",
+    "review_sha256": "1de3163644b0b34e615f68477f89dc856a31452224622fba131a2a3e6f42c16d",
+    "rgba_sha256": "ee7adb53ae286235e572c95c938b9b54e3cabbe358ed96440ecc82ea253561bd"
+  },
+  {
+    "file": "anonymized-arabic-primary.firefox-reference.expected.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 8050,
+    "review_bytes": 3194,
+    "original_sha256": "5e00f482609070e82e42b7e5e355a53163bd383548dc06b90ab65df8bdb92a2c",
+    "review_sha256": "1de3163644b0b34e615f68477f89dc856a31452224622fba131a2a3e6f42c16d",
+    "rgba_sha256": "ee7adb53ae286235e572c95c938b9b54e3cabbe358ed96440ecc82ea253561bd"
+  },
+  {
+    "file": "anonymized-arabic-system.firefox-reference.actual-repeat.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 1920813,
+    "review_bytes": 3022,
+    "original_sha256": "5019e5d4ca63ead8a7546140631df6de2140d0176dcbad901234a11609988570",
+    "review_sha256": "5d2da706273782df6f9622e4a622afc8316a8d05a6217740f6f93af270fa1d75",
+    "rgba_sha256": "0ff9d8929ae2f9b34679f49eb43d86351f4ca65792d6f03cf80a888a6ba6bf8e"
+  },
+  {
+    "file": "anonymized-arabic-system.firefox-reference.actual.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 1920813,
+    "review_bytes": 3022,
+    "original_sha256": "5019e5d4ca63ead8a7546140631df6de2140d0176dcbad901234a11609988570",
+    "review_sha256": "5d2da706273782df6f9622e4a622afc8316a8d05a6217740f6f93af270fa1d75",
+    "rgba_sha256": "0ff9d8929ae2f9b34679f49eb43d86351f4ca65792d6f03cf80a888a6ba6bf8e"
+  },
+  {
+    "file": "anonymized-arabic-system.firefox-reference.expected-repeat.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 8047,
+    "review_bytes": 3372,
+    "original_sha256": "528f224f3b9d2a35d602a83f55b562ec75978338266efdf8c59ab15ddb55398d",
+    "review_sha256": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a",
+    "rgba_sha256": "d03bafbf8ab608b7efdc00c3797beb7672016da76c46a8d8d21a8da305cefdcf"
+  },
+  {
+    "file": "anonymized-arabic-system.firefox-reference.expected.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 8047,
+    "review_bytes": 3372,
+    "original_sha256": "528f224f3b9d2a35d602a83f55b562ec75978338266efdf8c59ab15ddb55398d",
+    "review_sha256": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a",
+    "rgba_sha256": "d03bafbf8ab608b7efdc00c3797beb7672016da76c46a8d8d21a8da305cefdcf"
+  },
+  {
+    "file": "anonymized-text.firefox-reference.actual-repeat.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 1920813,
+    "review_bytes": 25197,
+    "original_sha256": "9a0397708c4e444b74898733e9dce1d7672472cb23a5649a884cfb08bd59ebde",
+    "review_sha256": "e15f3bb5928808441115b3789953ff8e5a3b1283ba9bd5d39fefa7a951fe8dc4",
+    "rgba_sha256": "e908368f0b049ae08cebaf2dd776432d97201b093285fbd85102681714f5711c"
+  },
+  {
+    "file": "anonymized-text.firefox-reference.actual.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 1920813,
+    "review_bytes": 25197,
+    "original_sha256": "9a0397708c4e444b74898733e9dce1d7672472cb23a5649a884cfb08bd59ebde",
+    "review_sha256": "e15f3bb5928808441115b3789953ff8e5a3b1283ba9bd5d39fefa7a951fe8dc4",
+    "rgba_sha256": "e908368f0b049ae08cebaf2dd776432d97201b093285fbd85102681714f5711c"
+  },
+  {
+    "file": "anonymized-text.firefox-reference.expected-repeat.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 33165,
+    "review_bytes": 31708,
+    "original_sha256": "5a37e27bd4e8c8cf8f779ce17532617e89a01c261c6322a2e7a66258f3c8c0b1",
+    "review_sha256": "84a3df61353d9d2536c6d9582effb242c6a45dc0c916dffb64b782438a9ba349",
+    "rgba_sha256": "472990806217624bb7d9360c39455a898d59981ea26df673e3db58a5bfb95632"
+  },
+  {
+    "file": "anonymized-text.firefox-reference.expected.png",
+    "dimensions": [
+      800,
+      600
+    ],
+    "original_bytes": 33165,
+    "review_bytes": 31708,
+    "original_sha256": "5a37e27bd4e8c8cf8f779ce17532617e89a01c261c6322a2e7a66258f3c8c0b1",
+    "review_sha256": "84a3df61353d9d2536c6d9582effb242c6a45dc0c916dffb64b782438a9ba349",
+    "rgba_sha256": "472990806217624bb7d9360c39455a898d59981ea26df673e3db58a5bfb95632"
+  }
+]

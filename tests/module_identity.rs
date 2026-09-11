@@ -33,6 +33,8 @@ impl ModuleServer {
                     }
                     Err(error) => panic!("accept: {error}"),
                 };
+                // Accepted sockets can inherit nonblocking mode on BSD.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();

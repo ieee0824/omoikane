@@ -2,6 +2,7 @@
 
 pub(crate) mod border;
 pub(crate) mod color;
+pub(crate) mod form_control;
 pub(crate) mod image;
 pub(crate) mod stylesheet;
 pub(crate) mod text;
@@ -5834,6 +5835,8 @@ impl Canvas {
     }
 }
 
+#[cfg(test)]
+mod font_data_url_tests;
 #[cfg(test)]
 mod font_selection_tests;
 #[cfg(test)]

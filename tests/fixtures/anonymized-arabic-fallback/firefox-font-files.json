@@ -1,0 +1,34 @@
+[
+  {
+    "path": "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "realpath": "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "index": "0",
+    "family": "Liberation Sans",
+    "full_name": "Liberation Sans",
+    "sha256": "f8ace1f892b2bd9dc1792ba7f097fa7588f84fed48321480e04de5390828221f"
+  },
+  {
+    "path": "/usr/share/fonts/truetype/fonts-japanese-mincho.ttf",
+    "realpath": "/usr/share/fonts/opentype/ipafont-mincho/ipam.ttf",
+    "index": "0",
+    "family": "IPAMincho,IPA\u660e\u671d",
+    "full_name": "IPAMincho,IPA\u660e\u671d",
+    "sha256": "ab923870b9ea047179c14fa78eede8d3957b6bfed26577253b5f08f75c102a34"
+  },
+  {
+    "path": "/usr/share/fonts/opentype/ipafont-mincho/ipam.ttf",
+    "realpath": "/usr/share/fonts/opentype/ipafont-mincho/ipam.ttf",
+    "index": "0",
+    "family": "IPAMincho,IPA\u660e\u671d",
+    "full_name": "IPAMincho,IPA\u660e\u671d",
+    "sha256": "ab923870b9ea047179c14fa78eede8d3957b6bfed26577253b5f08f75c102a34"
+  },
+  {
+    "path": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "realpath": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "index": "0",
+    "family": "DejaVu Sans",
+    "full_name": "DejaVu Sans",
+    "sha256": "abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322"
+  }
+]

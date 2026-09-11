@@ -1,0 +1,5 @@
+default	Some(SystemFontFace { path: "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", face_index: 0, families: ["Liberation Sans"], full_name: Some("Liberation Sans"), weight: 400, style: Normal, width: 5 })	café Ω □□□□□□□ □□□	[0, 0, 0, 0, 0, 0, 0]
+default	Some(SystemFontFace { path: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", face_index: 0, families: ["Noto Sans CJK JP"], full_name: Some("Noto Sans CJK JP"), weight: 400, style: Normal, width: 5 })	café Ω □□□□□□□ 日本語	[0, 0, 0, 0, 0, 0, 0]
+default	Some(SystemFontFace { path: "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf", face_index: 0, families: ["IPAGothic", "IPAゴシック"], full_name: Some("IPAGothic"), weight: 400, style: Normal, width: 5 })	café Ω □□□□□□□ 日本語	[0, 0, 0, 0, 0, 0, 0]
+/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf	None	café Ω العربية □□□	[5262, 5358, 5259, 5288, 5318, 5337, 1365]
+/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf	None	□□□□ □ العربية □□□	[1271, 1492, 102, 979, 12, 667, 46]

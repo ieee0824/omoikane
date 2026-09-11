@@ -1019,21 +1019,6 @@ pub(crate) fn fetch_font_face_fonts(
 
             let url_str = &ff_rule.src_url;
 
-            // Resolve relative and absolute font URLs. Cross-origin web fonts
-            // are common, but only public HTTPS destinations are permitted so
-            // an author stylesheet cannot use font loading to probe a private
-            // network address.
-            let resolved = match base_url {
-                Some(base) => match resolve_url(base, url_str) {
-                    Ok(url)
-                        if same_origin(&url, base)
-                            || is_public_cross_origin_stylesheet_url(&url) => url,
-                    Err(_) => continue,
-                    _ => continue,
-                },
-                None => continue,
-            };
-
             // Parse variant descriptors
             let weight = crate::font::FontWeight::parse(
                 ff_rule.font_weight.as_deref().unwrap_or("normal"),
@@ -1053,11 +1038,33 @@ pub(crate) fn fetch_font_face_fonts(
                 continue;
             }
 
-            // Fetch font data
-            let cross_origin = base_url.is_some_and(|base| !same_origin(&resolved, base));
-            let data = match fetch_font_bytes(&resolved.to_string(), &mut client, cross_origin) {
-                Some(d) => d,
-                None => continue,
+            // Embedded fonts do not need a network URL or a document base.
+            // Use the shared data-URL decoder and the same decoded size limit.
+            let data = if url_str
+                .get(..5)
+                .is_some_and(|s| s.eq_ignore_ascii_case("data:"))
+            {
+                match crate::http::parse_data_uri(url_str) {
+                    Some(uri) if uri.data.len() <= MAX_FONT_BYTES => uri.data,
+                    _ => continue,
+                }
+            } else {
+                // Keep the existing destination policy for network fonts.
+                let Some(base) = base_url else { continue };
+                let resolved = match resolve_url(base, url_str) {
+                    Ok(url)
+                        if same_origin(&url, base)
+                            || is_public_cross_origin_stylesheet_url(&url) =>
+                    {
+                        url
+                    }
+                    _ => continue,
+                };
+                let cross_origin = !same_origin(&resolved, base);
+                match fetch_font_bytes(&resolved.to_string(), &mut client, cross_origin) {
+                    Some(data) => data,
+                    None => continue,
+                }
             };
 
             // Load font — insert into seen_variants only on success to allow
