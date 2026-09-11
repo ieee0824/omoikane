@@ -230,7 +230,10 @@ pub(super) fn layout_children(
             width,
             &mut lines,
         );
-        if lines.len() != previous_lines {
+        if lines[previous_lines..]
+            .iter()
+            .any(|line| line.rect.height > 0.0)
+        {
             top_open = false;
             all_through = false;
             pending = Strut::default();
@@ -358,7 +361,10 @@ pub(super) fn layout_children(
         width,
         &mut lines,
     );
-    if lines.len() != previous_lines {
+    if lines[previous_lines..]
+        .iter()
+        .any(|line| line.rect.height > 0.0)
+    {
         all_through = false;
         pending_active = false;
     }
@@ -369,7 +375,7 @@ pub(super) fn layout_children(
     info.through = !independent
         && all_through
         && !had_clearance
-        && lines.is_empty()
+        && lines.iter().all(|line| line.rect.height == 0.0)
         && padding.vertical() == 0.0
         && border.vertical() == 0.0
         && used_height.is_none_or(|height| height.value == 0.0)

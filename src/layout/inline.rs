@@ -24,6 +24,8 @@ use super::{
     LAYOUT_FONTS,
 };
 
+mod boxes;
+
 // ── Text align ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +83,7 @@ pub(super) fn layout_inline_nodes(
     }
     coalesce_adjacent_text_segments(&mut segments);
 
-    layout_inline_segments(
+    let mut lines = layout_inline_segments(
         &segments,
         start_x,
         start_y,
@@ -89,7 +91,9 @@ pub(super) fn layout_inline_nodes(
         align,
         strut_line_height,
         direction_rtl,
-    )
+    );
+    boxes::finish(&mut lines, nodes, resolver, strut_line_height);
+    lines
 }
 
 /// Lays out an inline formatting context whose inline axis is vertical.
@@ -123,7 +127,7 @@ pub(super) fn layout_vertical_inline_nodes(
     // Horizontal layout's x axis is the vertical inline axis in this local
     // coordinate system.  A local origin of zero makes the transpose below
     // independent of the containing block's absolute position.
-    let horizontal_lines = layout_inline_segments(
+    let mut horizontal_lines = layout_inline_segments(
         &segments,
         0.0,
         0.0,
@@ -133,6 +137,7 @@ pub(super) fn layout_vertical_inline_nodes(
         false,
     );
 
+    boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
     horizontal_lines
         .into_iter()
         .map(|line| {
@@ -271,6 +276,7 @@ pub(super) struct InlineSegment {
 #[derive(Debug, Clone)]
 pub(super) enum InlineSegmentContent {
     Text(String),
+    InlineEdge(ComputedStyle, bool),
     Image(Image, ComputedStyle, f32, f32),
     GeneratedBox(ComputedStyle),
     FormControl(ComputedStyle, String, Option<TextControlPaintState>, f32, f32),
@@ -392,6 +398,11 @@ fn collect_element_inline_segments(
             return;
         }
 
+    let inline_box = super::is_inline_child(node, resolver);
+    if inline_box {
+        boxes::edge(node, &style, true, out);
+    }
+
     for child in node.layout_child_nodes() {
         match child.node_type() {
             NodeType::Text => {
@@ -406,6 +417,9 @@ fn collect_element_inline_segments(
         }
     }
     out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+    if inline_box {
+        boxes::edge(node, &style, false, out);
+    }
 }
 
 fn collect_input_segment(
@@ -1759,6 +1773,21 @@ fn layout_inline_segments(
         for piece in split_segment(segment) {
             match piece {
                 InlinePiece::Newline => {
+                    // An explicit line break occupies a line even when no
+                    // glyph precedes it. Retain its owner for empty pre lines.
+                    current_fragments.push(InlineFragment {
+                        node: segment.node.clone(),
+                        content: InlineFragmentContent::Text(String::new()),
+                        rect: Rect {
+                            x: cursor.x,
+                            y: cursor.y,
+                            width: 0.0,
+                            height: segment.line_height,
+                        },
+                        metrics: segment.metrics,
+                        vertical_align: segment.vertical_align,
+                        style: segment.style.clone(),
+                    });
                     cursor.wrap_line(
                         &mut lines,
                         &mut current_fragments,
@@ -1783,12 +1812,19 @@ fn layout_inline_segments(
                     is_first_piece_in_segment = false;
 
                     if can_wrap
+                        && !matches!(content, InlineFragmentContent::InlineBox(_))
                         && cursor.x > start_x
                         && exceeds_available_inline_width(
                             cursor.x + width - start_x,
                             available_width,
                         )
                     {
+                        // Collapsible whitespace at the end of a line is
+                        // discarded. Do not let it create an otherwise empty
+                        // continuation line before an inline closing edge.
+                        if collapsible_whitespace {
+                            continue;
+                        }
                         cursor.wrap_line(
                             &mut lines,
                             &mut current_fragments,
@@ -1796,9 +1832,6 @@ fn layout_inline_segments(
                             available_width,
                             align,
                         );
-                        if collapsible_whitespace {
-                            continue;
-                        }
                     }
 
                     if needs_character_break(
@@ -1847,13 +1880,21 @@ fn layout_inline_segments(
     }
 
     if !current_fragments.is_empty() {
+        let final_height = if current_fragments.iter().all(|fragment| {
+            matches!(fragment.content, InlineFragmentContent::InlineBox(_))
+                && fragment.rect.width == 0.0
+        }) {
+            0.0
+        } else {
+            cursor.line_height.max(0.0)
+        };
         push_line(
             &mut lines,
             &mut current_fragments,
             start_x,
             cursor.y,
             cursor.x - start_x,
-            cursor.line_height.max(0.0),
+            final_height,
             available_width,
             align,
             direction_rtl,
@@ -1882,6 +1923,19 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
                 segment.word_break,
                 segment.white_space_mode,
             )
+        }
+        InlineSegmentContent::InlineEdge(style, start) => {
+            let padding = edge_sizes(style, "padding");
+            let border = edge_sizes(style, "border");
+            vec![InlinePiece::Fragment {
+                content: InlineFragmentContent::InlineBox(style.clone()),
+                width: if *start {
+                    padding.left + border.left
+                } else {
+                    padding.right + border.right
+                },
+                height: 0.0,
+            }]
         }
         InlineSegmentContent::Image(image, style, rendered_width, rendered_height) => {
             let padding = edge_sizes(style, "padding");

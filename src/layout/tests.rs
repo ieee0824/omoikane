@@ -266,10 +266,15 @@ fn bidi_line_reorders_adjacent_rtl_fragments_without_changing_dom_order() {
     let texts: Vec<&str> = line.fragments.iter().filter_map(InlineFragment::text).collect();
     assert_eq!(texts, vec!["A", " ", "אב", "גד", " ", "Z"]);
 
-    let leading = &line.fragments[0];
-    let first_rtl = &line.fragments[2];
-    let second_rtl = &line.fragments[3];
-    let trailing = &line.fragments[5];
+    let text_fragments: Vec<_> = line
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.text().is_some())
+        .collect();
+    let leading = text_fragments[0];
+    let first_rtl = text_fragments[2];
+    let second_rtl = text_fragments[3];
+    let trailing = text_fragments[5];
     assert!(leading.rect.x < second_rtl.rect.x);
     assert!(second_rtl.rect.x < first_rtl.rect.x);
     assert!(first_rtl.rect.x < trailing.rect.x);
@@ -320,8 +325,13 @@ fn vertical_bidi_line_uses_the_same_cross_fragment_run_order() {
         .find(|fragment| fragment.node == second_text)
         .unwrap();
     assert!(second_fragment.rect.y < first_fragment.rect.y);
-    assert_eq!(line.fragments[0].node, first_text);
-    assert_eq!(line.fragments[1].node, second_text);
+    let text_nodes: Vec<_> = line
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.text().is_some())
+        .map(|fragment| fragment.node.clone())
+        .collect();
+    assert_eq!(text_nodes, [first_text, second_text]);
 }
 
 #[test]
@@ -357,11 +367,28 @@ fn adjacent_bidi_isolates_do_not_merge_into_one_reversed_run() {
     )
     .unwrap();
     let line = &layout.children[0].lines[0];
-    assert_eq!(line.fragments[0].text(), Some("אב"));
-    assert_eq!(line.fragments[1].text(), Some("גד"));
-    assert!(line.fragments[0].rect.x < line.fragments[1].rect.x);
-    assert_eq!(line.fragments[0].style.resolved_bidi_level.map(|level| level % 2), Some(1));
-    assert_eq!(line.fragments[1].style.resolved_bidi_level.map(|level| level % 2), Some(1));
+    let text_fragments: Vec<_> = line
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.text().is_some())
+        .collect();
+    assert_eq!(text_fragments[0].text(), Some("אב"));
+    assert_eq!(text_fragments[1].text(), Some("גד"));
+    assert!(text_fragments[0].rect.x < text_fragments[1].rect.x);
+    assert_eq!(
+        text_fragments[0]
+            .style
+            .resolved_bidi_level
+            .map(|level| level % 2),
+        Some(1)
+    );
+    assert_eq!(
+        text_fragments[1]
+            .style
+            .resolved_bidi_level
+            .map(|level| level % 2),
+        Some(1)
+    );
 }
 
 #[test]
@@ -1059,7 +1086,16 @@ fn inline_elements_contribute_text_fragments() {
 
     let paragraph_box = &layout.children[0];
     assert_eq!(paragraph_box.lines.len(), 1);
-    assert_eq!(paragraph_box.lines[0].fragments[0].text(), Some("inline"));
+    // The line now also retains the span's box for background paint and CSSOM.
+    // Its text content must still be exactly one unchanged fragment.
+    assert_eq!(
+        paragraph_box.lines[0]
+            .fragments
+            .iter()
+            .filter_map(InlineFragment::text)
+            .collect::<Vec<_>>(),
+        ["inline"]
+    );
 }
 
 #[test]
@@ -1214,10 +1250,20 @@ fn vertical_align_top_and_bottom_adjust_fragment_positions() {
 
     let line = &layout.children[0].lines[0];
     assert_eq!(line.rect.height, 30.0);
-    assert_eq!(line.fragments[0].rect.y, line.rect.y);
+    let top_fragment = line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    let bottom_fragment = line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("B"))
+        .unwrap();
+    assert_eq!(top_fragment.rect.y, line.rect.y);
     assert_eq!(
-        line.fragments[1].rect.y,
-        line.rect.y + line.rect.height - line.fragments[1].rect.height
+        bottom_fragment.rect.y,
+        line.rect.y + line.rect.height - bottom_fragment.rect.height
     );
 }
 
@@ -1257,7 +1303,11 @@ fn vertical_align_length_raises_fragment_above_baseline() {
     .unwrap();
 
     let line = &layout.children[0].lines[0];
-    let base_fragment = &line.fragments[0];
+    let base_fragment = line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("base"))
+        .unwrap();
     let raised_fragment = line
         .fragments
         .iter()
@@ -4612,7 +4662,12 @@ fn absolute_percentage_insets_resolve_against_positioned_ancestor() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        },
     )
     .unwrap();
 

@@ -1,0 +1,4866 @@
+[
+  {
+    "case": {
+      "name": "anonymized-font-file",
+      "path": "anonymized-font-file.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "8e6f129057b1d91b93327f33d37d97a54b335df8857dcff18a3246b99b72c1b1"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-font-file.before.png",
+        "sha256": "1940a609a252b54bb67be89e5b5d36e1e81ff3872563cc713924120e87445807"
+      },
+      "after": {
+        "path": "anonymized-font-file.after.png",
+        "sha256": "a0460596c5adeb5707e6837baa8b645cfa7fb96799b52d9791ad580d92b0948e"
+      },
+      "firefox": {
+        "path": "anonymized-font-file.firefox.png",
+        "sha256": "3fe30b0b9aee9e75060f4850e82972b8cbb68396feb85cd857af6e65da5f3d99"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "wrap",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 84,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              84
+            ]
+          ],
+          "text": "The quick brown fox jumps over the lazy dog. This paragraph checks wrapping.",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inline",
+          "x": 24,
+          "y": 108,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              108,
+              330,
+              28
+            ]
+          ],
+          "text": "Normal highlighted inline text",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "SPAN",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "highlighted inline",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "wrap",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 84,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              84
+            ]
+          ],
+          "text": "The quick brown fox jumps over the lazy dog. This paragraph checks wrapping.",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inline",
+          "x": 24,
+          "y": 108,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              108,
+              330,
+              28
+            ]
+          ],
+          "text": "Normal highlighted inline text",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "SPAN",
+          "x": 94.01,
+          "y": 110,
+          "width": 149.004,
+          "height": 24,
+          "clientRects": [
+            [
+              94.01,
+              110,
+              149.004,
+              24
+            ]
+          ],
+          "text": "highlighted inline",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "wrap",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 84,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              84
+            ]
+          ],
+          "text": "The quick brown fox jumps over the lazy dog. This paragraph checks wrapping.",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inline",
+          "x": 24,
+          "y": 108,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              108,
+              330,
+              28
+            ]
+          ],
+          "text": "Normal highlighted inline text",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "SPAN",
+          "x": 94.01666259765625,
+          "y": 110,
+          "width": 148.9666748046875,
+          "height": 24,
+          "clientRects": [
+            [
+              94.01666259765625,
+              110,
+              148.9666748046875,
+              24
+            ]
+          ],
+          "text": "highlighted inline",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-font-file",
+      "path": "anonymized-font-file.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "8e6f129057b1d91b93327f33d37d97a54b335df8857dcff18a3246b99b72c1b1",
+      "changed_pixels": 10637,
+      "changed_percent": 2.2160416666666665,
+      "strong_difference_pixels": 9783,
+      "mean_absolute_channel_error": 2.0462680555555557,
+      "max_channel_error": 232,
+      "diff_bbox": [
+        24,
+        30,
+        338,
+        134
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 148.9666748046875,
+      "differences": [
+        {
+          "key": "SPAN",
+          "firefox_geometry": {
+            "x": 94.01666259765625,
+            "y": 110,
+            "width": 148.9666748046875,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -94.01666259765625,
+            "y": -110,
+            "width": -148.9666748046875,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              94.01666259765625,
+              110,
+              148.9666748046875,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "3fe30b0b9aee9e75060f4850e82972b8cbb68396feb85cd857af6e65da5f3d99",
+        "omoikane": "1940a609a252b54bb67be89e5b5d36e1e81ff3872563cc713924120e87445807"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-font-file",
+      "path": "anonymized-font-file.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "8e6f129057b1d91b93327f33d37d97a54b335df8857dcff18a3246b99b72c1b1",
+      "changed_pixels": 8439,
+      "changed_percent": 1.758125,
+      "strong_difference_pixels": 7533,
+      "mean_absolute_channel_error": 1.7826763888888888,
+      "max_channel_error": 232,
+      "diff_bbox": [
+        24,
+        30,
+        338,
+        134
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.03732519531249068,
+      "differences": [
+        {
+          "key": "SPAN",
+          "firefox_geometry": {
+            "x": 94.01666259765625,
+            "y": 110,
+            "width": 148.9666748046875,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 94.01,
+            "y": 110,
+            "width": 149.004,
+            "height": 24
+          },
+          "geometry_delta": {
+            "x": -0.006662597656244884,
+            "width": 0.03732519531249068
+          },
+          "firefox_client_rects": [
+            [
+              94.01666259765625,
+              110,
+              148.9666748046875,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              94.01,
+              110,
+              149.004,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              -0.006662597656244884,
+              0,
+              0.03732519531249068,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "3fe30b0b9aee9e75060f4850e82972b8cbb68396feb85cd857af6e65da5f3d99",
+        "omoikane": "a0460596c5adeb5707e6837baa8b645cfa7fb96799b52d9791ad580d92b0948e"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-basic",
+      "path": "anonymized-inline-basic.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "67ab4adb8e1d6afa5efc49bd4c9f789badc356d416ac7f2940255e52b0b7021e"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-basic.before.png",
+        "sha256": "7ef7d83e4fb34a68dc65eff10cb17b09c8bd29771e3c2f610208a1a8c0cd059b"
+      },
+      "after": {
+        "path": "anonymized-inline-basic.after.png",
+        "sha256": "0c08d87b5bac90c97ff99016d10201879b6133242e100899de02b506ec645140"
+      },
+      "firefox": {
+        "path": "anonymized-inline-basic.firefox.png",
+        "sha256": "e828b1ee3f9b7c8cd4db2395dc108f7e6a23d0cee7e72500996fab16bbbf272c"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC DE",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "BC D",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC DE",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 37.34,
+          "y": 26,
+          "width": 47.783,
+          "height": 24,
+          "clientRects": [
+            [
+              37.34,
+              26,
+              47.783,
+              24
+            ]
+          ],
+          "text": "BC D",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC DE",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 37.33332824707031,
+          "y": 26,
+          "width": 47.78334045410156,
+          "height": 24,
+          "clientRects": [
+            [
+              37.33332824707031,
+              26,
+              47.78334045410156,
+              24
+            ]
+          ],
+          "text": "BC D",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-basic",
+      "path": "anonymized-inline-basic.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "67ab4adb8e1d6afa5efc49bd4c9f789badc356d416ac7f2940255e52b0b7021e",
+      "changed_pixels": 1426,
+      "changed_percent": 0.2970833333333333,
+      "strong_difference_pixels": 1400,
+      "mean_absolute_channel_error": 0.2770486111111111,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        26,
+        97,
+        49
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 47.78334045410156,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 47.78334045410156,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -37.33332824707031,
+            "y": -26,
+            "width": -47.78334045410156,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              47.78334045410156,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "e828b1ee3f9b7c8cd4db2395dc108f7e6a23d0cee7e72500996fab16bbbf272c",
+        "omoikane": "7ef7d83e4fb34a68dc65eff10cb17b09c8bd29771e3c2f610208a1a8c0cd059b"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-basic",
+      "path": "anonymized-inline-basic.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "67ab4adb8e1d6afa5efc49bd4c9f789badc356d416ac7f2940255e52b0b7021e",
+      "changed_pixels": 767,
+      "changed_percent": 0.15979166666666667,
+      "strong_difference_pixels": 699,
+      "mean_absolute_channel_error": 0.1940090277777778,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        26,
+        97,
+        49
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.006671752929690911,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 47.78334045410156,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 37.34,
+            "y": 26,
+            "width": 47.783,
+            "height": 24
+          },
+          "geometry_delta": {
+            "x": 0.006671752929690911,
+            "width": -0.00034045410156124944
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              47.78334045410156,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              37.34,
+              26,
+              47.783,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.006671752929690911,
+              0,
+              -0.00034045410156124944,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "e828b1ee3f9b7c8cd4db2395dc108f7e6a23d0cee7e72500996fab16bbbf272c",
+        "omoikane": "0c08d87b5bac90c97ff99016d10201879b6133242e100899de02b506ec645140"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-multiline",
+      "path": "anonymized-inline-multiline.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "20d1d1008b69aabd3f01ef5c2a6d820bb4d574f193cbaeac8ad35c50930a710a"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-multiline.before.png",
+        "sha256": "a065aba84a01c5dbcf971a48077720281dbe8c078430d6fce4bd96b4a8c9e99e"
+      },
+      "after": {
+        "path": "anonymized-inline-multiline.after.png",
+        "sha256": "2c66fa303234eac2b3e002e51219151290800dbc2f15aeb623b502fcb5039bc7"
+      },
+      "firefox": {
+        "path": "anonymized-inline-multiline.firefox.png",
+        "sha256": "e8cb4871371c156e531469781c25ffca0e4ce14c7291bfcf24483bfd45ad0305"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 130,
+          "height": 112,
+          "clientRects": [
+            [
+              24,
+              24,
+              130,
+              112
+            ]
+          ],
+          "text": "Before one two three four five six seven After",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "one two three four five six seven",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 130,
+          "height": 112,
+          "clientRects": [
+            [
+              24,
+              24,
+              130,
+              112
+            ]
+          ],
+          "text": "Before one two three four five six seven After",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 26,
+          "width": 122.285,
+          "height": 80,
+          "clientRects": [
+            [
+              88.482,
+              26,
+              33.369,
+              24
+            ],
+            [
+              24,
+              54,
+              122.285,
+              24
+            ],
+            [
+              24,
+              82,
+              120.049,
+              24
+            ]
+          ],
+          "text": "one two three four five six seven",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 130,
+          "height": 112,
+          "clientRects": [
+            [
+              24,
+              24,
+              130,
+              112
+            ]
+          ],
+          "text": "Before one two three four five six seven After",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 26,
+          "width": 122.23333740234375,
+          "height": 80,
+          "clientRects": [
+            [
+              88.44999694824219,
+              26,
+              33.350006103515625,
+              24
+            ],
+            [
+              24,
+              54,
+              122.23333740234375,
+              24
+            ],
+            [
+              24,
+              82,
+              120.01666259765625,
+              24
+            ]
+          ],
+          "text": "one two three four five six seven",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-multiline",
+      "path": "anonymized-inline-multiline.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "20d1d1008b69aabd3f01ef5c2a6d820bb4d574f193cbaeac8ad35c50930a710a",
+      "changed_pixels": 7641,
+      "changed_percent": 1.591875,
+      "strong_difference_pixels": 7486,
+      "mean_absolute_channel_error": 1.2625965277777778,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        26,
+        145,
+        131
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 122.23333740234375,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 122.23333740234375,
+            "height": 80
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -24,
+            "y": -26,
+            "width": -122.23333740234375,
+            "height": -80
+          },
+          "firefox_client_rects": [
+            [
+              88.44999694824219,
+              26,
+              33.350006103515625,
+              24
+            ],
+            [
+              24,
+              54,
+              122.23333740234375,
+              24
+            ],
+            [
+              24,
+              82,
+              120.01666259765625,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "e8cb4871371c156e531469781c25ffca0e4ce14c7291bfcf24483bfd45ad0305",
+        "omoikane": "a065aba84a01c5dbcf971a48077720281dbe8c078430d6fce4bd96b4a8c9e99e"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-multiline",
+      "path": "anonymized-inline-multiline.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "20d1d1008b69aabd3f01ef5c2a6d820bb4d574f193cbaeac8ad35c50930a710a",
+      "changed_pixels": 3489,
+      "changed_percent": 0.726875,
+      "strong_difference_pixels": 3168,
+      "mean_absolute_channel_error": 0.7716243055555555,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        30,
+        146,
+        131
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.05166259765624659,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 122.23333740234375,
+            "height": 80
+          },
+          "omoikane_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 122.285,
+            "height": 80
+          },
+          "geometry_delta": {
+            "width": 0.05166259765624659
+          },
+          "firefox_client_rects": [
+            [
+              88.44999694824219,
+              26,
+              33.350006103515625,
+              24
+            ],
+            [
+              24,
+              54,
+              122.23333740234375,
+              24
+            ],
+            [
+              24,
+              82,
+              120.01666259765625,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              88.482,
+              26,
+              33.369,
+              24
+            ],
+            [
+              24,
+              54,
+              122.285,
+              24
+            ],
+            [
+              24,
+              82,
+              120.049,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.03200305175781182,
+              0,
+              0.018993896484374773,
+              0
+            ],
+            [
+              0,
+              0,
+              0.05166259765624659,
+              0
+            ],
+            [
+              0,
+              0,
+              0.032337402343756594,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "e8cb4871371c156e531469781c25ffca0e4ce14c7291bfcf24483bfd45ad0305",
+        "omoikane": "2c66fa303234eac2b3e002e51219151290800dbc2f15aeb623b502fcb5039bc7"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-nested",
+      "path": "anonymized-inline-nested.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "c0bb0a394443c8b842581d993bc95ca3f6c7e18049a8cadadcdfaa62e36a54f8"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-nested.before.png",
+        "sha256": "42e5347c1d88fb6d96f93a92848e906852b5861716f920b2b7aca157e8744b07"
+      },
+      "after": {
+        "path": "anonymized-inline-nested.after.png",
+        "sha256": "0bcc2d5be3ebed89a3e5cf9d76204c38e08ac436110bbe678ede30baf8cfbc21"
+      },
+      "firefox": {
+        "path": "anonymized-inline-nested.firefox.png",
+        "sha256": "0cb25e8aa8298a2394cfeaf8d091c3d2e2ea51a2657c6d60772d8084182a06db"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC DE F GHI",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "outer",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "BC DE F GH",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inner",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "DE F",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC DE F GHI",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "outer",
+          "x": 37.34,
+          "y": 26,
+          "width": 100.786,
+          "height": 24,
+          "clientRects": [
+            [
+              37.34,
+              26,
+              100.786,
+              24
+            ]
+          ],
+          "text": "BC DE F GH",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inner",
+          "x": 70.68,
+          "y": 32,
+          "width": 31.89,
+          "height": 16,
+          "clientRects": [
+            [
+              70.68,
+              32,
+              31.89,
+              16
+            ]
+          ],
+          "text": "DE F",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC DE F GHI",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "outer",
+          "x": 37.33332824707031,
+          "y": 26,
+          "width": 100.76667785644531,
+          "height": 24,
+          "clientRects": [
+            [
+              37.33332824707031,
+              26,
+              100.76667785644531,
+              24
+            ]
+          ],
+          "text": "BC DE F GH",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inner",
+          "x": 70.66667175292969,
+          "y": 32,
+          "width": 31.883331298828125,
+          "height": 16,
+          "clientRects": [
+            [
+              70.66667175292969,
+              32,
+              31.883331298828125,
+              16
+            ]
+          ],
+          "text": "DE F",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-nested",
+      "path": "anonymized-inline-nested.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "c0bb0a394443c8b842581d993bc95ca3f6c7e18049a8cadadcdfaa62e36a54f8",
+      "changed_pixels": 2601,
+      "changed_percent": 0.541875,
+      "strong_difference_pixels": 2569,
+      "mean_absolute_channel_error": 0.49454791666666664,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        26,
+        142,
+        49
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 100.76667785644531,
+      "differences": [
+        {
+          "key": "outer",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 100.76667785644531,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -37.33332824707031,
+            "y": -26,
+            "width": -100.76667785644531,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              100.76667785644531,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        },
+        {
+          "key": "inner",
+          "firefox_geometry": {
+            "x": 70.66667175292969,
+            "y": 32,
+            "width": 31.883331298828125,
+            "height": 16
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -70.66667175292969,
+            "y": -32,
+            "width": -31.883331298828125,
+            "height": -16
+          },
+          "firefox_client_rects": [
+            [
+              70.66667175292969,
+              32,
+              31.883331298828125,
+              16
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "0cb25e8aa8298a2394cfeaf8d091c3d2e2ea51a2657c6d60772d8084182a06db",
+        "omoikane": "42e5347c1d88fb6d96f93a92848e906852b5861716f920b2b7aca157e8744b07"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-nested",
+      "path": "anonymized-inline-nested.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "c0bb0a394443c8b842581d993bc95ca3f6c7e18049a8cadadcdfaa62e36a54f8",
+      "changed_pixels": 1076,
+      "changed_percent": 0.22416666666666665,
+      "strong_difference_pixels": 989,
+      "mean_absolute_channel_error": 0.22433194444444443,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        26,
+        142,
+        49
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.019322143554688864,
+      "differences": [
+        {
+          "key": "outer",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 100.76667785644531,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 37.34,
+            "y": 26,
+            "width": 100.786,
+            "height": 24
+          },
+          "geometry_delta": {
+            "x": 0.006671752929690911,
+            "width": 0.019322143554688864
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              100.76667785644531,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              37.34,
+              26,
+              100.786,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.006671752929690911,
+              0,
+              0.019322143554688864,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        },
+        {
+          "key": "inner",
+          "firefox_geometry": {
+            "x": 70.66667175292969,
+            "y": 32,
+            "width": 31.883331298828125,
+            "height": 16
+          },
+          "omoikane_geometry": {
+            "x": 70.68,
+            "y": 32,
+            "width": 31.89,
+            "height": 16
+          },
+          "geometry_delta": {
+            "x": 0.013328247070319321,
+            "width": 0.0066687011718755684
+          },
+          "firefox_client_rects": [
+            [
+              70.66667175292969,
+              32,
+              31.883331298828125,
+              16
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              70.68,
+              32,
+              31.89,
+              16
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.013328247070319321,
+              0,
+              0.0066687011718755684,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "0cb25e8aa8298a2394cfeaf8d091c3d2e2ea51a2657c6d60772d8084182a06db",
+        "omoikane": "0bcc2d5be3ebed89a3e5cf9d76204c38e08ac436110bbe678ede30baf8cfbc21"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-empty",
+      "path": "anonymized-inline-empty.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "cbf00892756b059baaf9ac45be088fb108a4b3405769a20da358e285a77fcb3e"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-empty.before.png",
+        "sha256": "ba458c8c6210278a3f57e2c4d3131582e4348eba261140241bfd4ec5099e452f"
+      },
+      "after": {
+        "path": "anonymized-inline-empty.after.png",
+        "sha256": "a96273e7a255c623a187861c741692cd75c7d446ea9d2090898b72b87b2cb6ac"
+      },
+      "firefox": {
+        "path": "anonymized-inline-empty.firefox.png",
+        "sha256": "2d2b71066eee488855a5107e69a43efd2540fa67f654caff5961c708cc6e7aae"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "first",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "middle",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "last",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "hidden",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "C",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "first",
+          "x": 24,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "middle",
+          "x": 37.34,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              37.34,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "last",
+          "x": 50.68,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              50.68,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "hidden",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "C",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "first",
+          "x": 24,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "middle",
+          "x": 37.33332824707031,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              37.33332824707031,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "last",
+          "x": 50.66667175292969,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              50.66667175292969,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "hidden",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "C",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-empty",
+      "path": "anonymized-inline-empty.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "cbf00892756b059baaf9ac45be088fb108a4b3405769a20da358e285a77fcb3e",
+      "changed_pixels": 297,
+      "changed_percent": 0.061875000000000006,
+      "strong_difference_pixels": 279,
+      "mean_absolute_channel_error": 0.08520208333333333,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        31,
+        49,
+        46
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 50.66667175292969,
+      "differences": [
+        {
+          "key": "first",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -24,
+            "y": -26,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              24,
+              26,
+              0,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        },
+        {
+          "key": "middle",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -37.33332824707031,
+            "y": -26,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              0,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        },
+        {
+          "key": "last",
+          "firefox_geometry": {
+            "x": 50.66667175292969,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -50.66667175292969,
+            "y": -26,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              50.66667175292969,
+              26,
+              0,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "2d2b71066eee488855a5107e69a43efd2540fa67f654caff5961c708cc6e7aae",
+        "omoikane": "ba458c8c6210278a3f57e2c4d3131582e4348eba261140241bfd4ec5099e452f"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-empty",
+      "path": "anonymized-inline-empty.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "cbf00892756b059baaf9ac45be088fb108a4b3405769a20da358e285a77fcb3e",
+      "changed_pixels": 297,
+      "changed_percent": 0.061875000000000006,
+      "strong_difference_pixels": 280,
+      "mean_absolute_channel_error": 0.08525,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        31,
+        49,
+        46
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.013328247070312216,
+      "differences": [
+        {
+          "key": "middle",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 37.34,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "geometry_delta": {
+            "x": 0.006671752929690911
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              0,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              37.34,
+              26,
+              0,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.006671752929690911,
+              0,
+              0,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        },
+        {
+          "key": "last",
+          "firefox_geometry": {
+            "x": 50.66667175292969,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 50.68,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "geometry_delta": {
+            "x": 0.013328247070312216
+          },
+          "firefox_client_rects": [
+            [
+              50.66667175292969,
+              26,
+              0,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              50.68,
+              26,
+              0,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.013328247070312216,
+              0,
+              0,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "2d2b71066eee488855a5107e69a43efd2540fa67f654caff5961c708cc6e7aae",
+        "omoikane": "a96273e7a255c623a187861c741692cd75c7d446ea9d2090898b72b87b2cb6ac"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-empty-only",
+      "path": "anonymized-inline-empty-only.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "f79e6f128ce3209d520b9cb425c1cf96629cf4ee53c73e1aa4d56a659a2e603e"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-empty-only.before.png",
+        "sha256": "9014ccf1ae409230463c2bbff9a4708ac9219dcc4680f8b73eb7e0dfe0de8531"
+      },
+      "after": {
+        "path": "anonymized-inline-empty-only.after.png",
+        "sha256": "b1c03a8576b8e17023c472bc2ccc6cb81bd0a31bbc83a11cb3eedfa0dca4ff31"
+      },
+      "firefox": {
+        "path": "anonymized-inline-empty-only.firefox.png",
+        "sha256": "d75386e218c8aa07484fa0c9d3c796dc9a3432f1dc8b5766586929cd28d6bae0"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 0,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              0
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "after",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "After",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 0,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              0
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 24,
+          "width": 0,
+          "height": 0,
+          "clientRects": [
+            [
+              24,
+              24,
+              0,
+              0
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "after",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "After",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 0,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              0
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 24,
+          "width": 0,
+          "height": 0,
+          "clientRects": [
+            [
+              24,
+              24,
+              0,
+              0
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "after",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "After",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-empty-only",
+      "path": "anonymized-inline-empty-only.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "f79e6f128ce3209d520b9cb425c1cf96629cf4ee53c73e1aa4d56a659a2e603e",
+      "changed_pixels": 423,
+      "changed_percent": 0.088125,
+      "strong_difference_pixels": 394,
+      "mean_absolute_channel_error": 0.10960833333333334,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        30,
+        65,
+        47
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 24,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 24,
+            "width": 0,
+            "height": 0
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -24,
+            "y": -24
+          },
+          "firefox_client_rects": [
+            [
+              24,
+              24,
+              0,
+              0
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "d75386e218c8aa07484fa0c9d3c796dc9a3432f1dc8b5766586929cd28d6bae0",
+        "omoikane": "9014ccf1ae409230463c2bbff9a4708ac9219dcc4680f8b73eb7e0dfe0de8531"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-empty-only",
+      "path": "anonymized-inline-empty-only.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "f79e6f128ce3209d520b9cb425c1cf96629cf4ee53c73e1aa4d56a659a2e603e",
+      "changed_pixels": 423,
+      "changed_percent": 0.088125,
+      "strong_difference_pixels": 394,
+      "mean_absolute_channel_error": 0.10952291666666666,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        30,
+        65,
+        47
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "d75386e218c8aa07484fa0c9d3c796dc9a3432f1dc8b5766586929cd28d6bae0",
+        "omoikane": "b1c03a8576b8e17023c472bc2ccc6cb81bd0a31bbc83a11cb3eedfa0dca4ff31"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-empty-nested",
+      "path": "anonymized-inline-empty-nested.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "dd4860adbb13c30aba6614062a0595df38c1cf2bf8f395ba4cc045eb9cb03d63"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-empty-nested.before.png",
+        "sha256": "ba458c8c6210278a3f57e2c4d3131582e4348eba261140241bfd4ec5099e452f"
+      },
+      "after": {
+        "path": "anonymized-inline-empty-nested.after.png",
+        "sha256": "a96273e7a255c623a187861c741692cd75c7d446ea9d2090898b72b87b2cb6ac"
+      },
+      "firefox": {
+        "path": "anonymized-inline-empty-nested.firefox.png",
+        "sha256": "2d2b71066eee488855a5107e69a43efd2540fa67f654caff5961c708cc6e7aae"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "AB",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "outer",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inner",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "AB",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "outer",
+          "x": 37.34,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              37.34,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inner",
+          "x": 37.34,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              37.34,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "AB",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "outer",
+          "x": 37.33332824707031,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              37.33332824707031,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inner",
+          "x": 37.33332824707031,
+          "y": 26,
+          "width": 0,
+          "height": 24,
+          "clientRects": [
+            [
+              37.33332824707031,
+              26,
+              0,
+              24
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-empty-nested",
+      "path": "anonymized-inline-empty-nested.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "dd4860adbb13c30aba6614062a0595df38c1cf2bf8f395ba4cc045eb9cb03d63",
+      "changed_pixels": 297,
+      "changed_percent": 0.061875000000000006,
+      "strong_difference_pixels": 279,
+      "mean_absolute_channel_error": 0.08520208333333333,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        31,
+        49,
+        46
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 37.33332824707031,
+      "differences": [
+        {
+          "key": "outer",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -37.33332824707031,
+            "y": -26,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              0,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        },
+        {
+          "key": "inner",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -37.33332824707031,
+            "y": -26,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              0,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "2d2b71066eee488855a5107e69a43efd2540fa67f654caff5961c708cc6e7aae",
+        "omoikane": "ba458c8c6210278a3f57e2c4d3131582e4348eba261140241bfd4ec5099e452f"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-empty-nested",
+      "path": "anonymized-inline-empty-nested.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "dd4860adbb13c30aba6614062a0595df38c1cf2bf8f395ba4cc045eb9cb03d63",
+      "changed_pixels": 297,
+      "changed_percent": 0.061875000000000006,
+      "strong_difference_pixels": 280,
+      "mean_absolute_channel_error": 0.08525,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        31,
+        49,
+        46
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.006671752929690911,
+      "differences": [
+        {
+          "key": "outer",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 37.34,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "geometry_delta": {
+            "x": 0.006671752929690911
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              0,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              37.34,
+              26,
+              0,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.006671752929690911,
+              0,
+              0,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        },
+        {
+          "key": "inner",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 37.34,
+            "y": 26,
+            "width": 0,
+            "height": 24
+          },
+          "geometry_delta": {
+            "x": 0.006671752929690911
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              26,
+              0,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              37.34,
+              26,
+              0,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.006671752929690911,
+              0,
+              0,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "2d2b71066eee488855a5107e69a43efd2540fa67f654caff5961c708cc6e7aae",
+        "omoikane": "a96273e7a255c623a187861c741692cd75c7d446ea9d2090898b72b87b2cb6ac"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-lineheight",
+      "path": "anonymized-inline-lineheight.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "a93729488082fd7cc792dd26893a30c77b2213b14f2ffb8240687659ac60c30f"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-lineheight.before.png",
+        "sha256": "95708cae04635fd407446d5194368d103451ee7587ac60d17b87b1f80158d2a0"
+      },
+      "after": {
+        "path": "anonymized-inline-lineheight.after.png",
+        "sha256": "4daf3f06e1782ddf41f539792abf73a6cff02cd2f04e7b82130cd53204c483e4"
+      },
+      "firefox": {
+        "path": "anonymized-inline-lineheight.firefox.png",
+        "sha256": "0e029cc6d9ee1edcc2b4b3b66a650d0e0ffbc3a4d0ba5b38dece221b4f59530a"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 48,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              48
+            ]
+          ],
+          "text": "ABC DE",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "BC D",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 48,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              48
+            ]
+          ],
+          "text": "ABC DE",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 37.34,
+          "y": 36,
+          "width": 47.783,
+          "height": 24,
+          "clientRects": [
+            [
+              37.34,
+              36,
+              47.783,
+              24
+            ]
+          ],
+          "text": "BC D",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 48,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              48
+            ]
+          ],
+          "text": "ABC DE",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 37.33332824707031,
+          "y": 36,
+          "width": 47.78334045410156,
+          "height": 24,
+          "clientRects": [
+            [
+              37.33332824707031,
+              36,
+              47.78334045410156,
+              24
+            ]
+          ],
+          "text": "BC D",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-lineheight",
+      "path": "anonymized-inline-lineheight.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "a93729488082fd7cc792dd26893a30c77b2213b14f2ffb8240687659ac60c30f",
+      "changed_pixels": 1568,
+      "changed_percent": 0.32666666666666666,
+      "strong_difference_pixels": 1534,
+      "mean_absolute_channel_error": 0.3395416666666667,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        36,
+        97,
+        63
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 47.78334045410156,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 36,
+            "width": 47.78334045410156,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -37.33332824707031,
+            "y": -36,
+            "width": -47.78334045410156,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              36,
+              47.78334045410156,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "0e029cc6d9ee1edcc2b4b3b66a650d0e0ffbc3a4d0ba5b38dece221b4f59530a",
+        "omoikane": "95708cae04635fd407446d5194368d103451ee7587ac60d17b87b1f80158d2a0"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-lineheight",
+      "path": "anonymized-inline-lineheight.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "a93729488082fd7cc792dd26893a30c77b2213b14f2ffb8240687659ac60c30f",
+      "changed_pixels": 890,
+      "changed_percent": 0.18541666666666667,
+      "strong_difference_pixels": 824,
+      "mean_absolute_channel_error": 0.2508694444444444,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        36,
+        97,
+        63
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.006671752929690911,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 36,
+            "width": 47.78334045410156,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 37.34,
+            "y": 36,
+            "width": 47.783,
+            "height": 24
+          },
+          "geometry_delta": {
+            "x": 0.006671752929690911,
+            "width": -0.00034045410156124944
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              36,
+              47.78334045410156,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              37.34,
+              36,
+              47.783,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.006671752929690911,
+              0,
+              -0.00034045410156124944,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "0e029cc6d9ee1edcc2b4b3b66a650d0e0ffbc3a4d0ba5b38dece221b4f59530a",
+        "omoikane": "4daf3f06e1782ddf41f539792abf73a6cff02cd2f04e7b82130cd53204c483e4"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-padding",
+      "path": "anonymized-inline-padding.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "d47f4abb8a7a78f04f9e871530707ddfcbf83f07f5abef2b5eed69e269ed6b09"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-padding.before.png",
+        "sha256": "7ef7d83e4fb34a68dc65eff10cb17b09c8bd29771e3c2f610208a1a8c0cd059b"
+      },
+      "after": {
+        "path": "anonymized-inline-padding.after.png",
+        "sha256": "dad284389156dbdd5889f0a2fa724c4c34de81095c185850132b02f49dde59de"
+      },
+      "firefox": {
+        "path": "anonymized-inline-padding.firefox.png",
+        "sha256": "79cf7c54d3d7ccbea82ff06300e9ef0227c2ca4ca9c88c7101435fd5ed7f92fe"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC DE",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "BC D",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC DE",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 37.34,
+          "y": 21,
+          "width": 61.783,
+          "height": 34,
+          "clientRects": [
+            [
+              37.34,
+              21,
+              61.783,
+              34
+            ]
+          ],
+          "text": "BC D",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "ABC DE",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 37.33332824707031,
+          "y": 21,
+          "width": 61.78334045410156,
+          "height": 34,
+          "clientRects": [
+            [
+              37.33332824707031,
+              21,
+              61.78334045410156,
+              34
+            ]
+          ],
+          "text": "BC D",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-padding",
+      "path": "anonymized-inline-padding.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "d47f4abb8a7a78f04f9e871530707ddfcbf83f07f5abef2b5eed69e269ed6b09",
+      "changed_pixels": 2329,
+      "changed_percent": 0.48520833333333335,
+      "strong_difference_pixels": 2312,
+      "mean_absolute_channel_error": 0.5053069444444445,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        21,
+        111,
+        54
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 61.78334045410156,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 21,
+            "width": 61.78334045410156,
+            "height": 34
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -37.33332824707031,
+            "y": -21,
+            "width": -61.78334045410156,
+            "height": -34
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              21,
+              61.78334045410156,
+              34
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "79cf7c54d3d7ccbea82ff06300e9ef0227c2ca4ca9c88c7101435fd5ed7f92fe",
+        "omoikane": "7ef7d83e4fb34a68dc65eff10cb17b09c8bd29771e3c2f610208a1a8c0cd059b"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-padding",
+      "path": "anonymized-inline-padding.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "d47f4abb8a7a78f04f9e871530707ddfcbf83f07f5abef2b5eed69e269ed6b09",
+      "changed_pixels": 807,
+      "changed_percent": 0.168125,
+      "strong_difference_pixels": 739,
+      "mean_absolute_channel_error": 0.21724375,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        21,
+        111,
+        54
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.006671752929690911,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 37.33332824707031,
+            "y": 21,
+            "width": 61.78334045410156,
+            "height": 34
+          },
+          "omoikane_geometry": {
+            "x": 37.34,
+            "y": 21,
+            "width": 61.783,
+            "height": 34
+          },
+          "geometry_delta": {
+            "x": 0.006671752929690911,
+            "width": -0.00034045410156124944
+          },
+          "firefox_client_rects": [
+            [
+              37.33332824707031,
+              21,
+              61.78334045410156,
+              34
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              37.34,
+              21,
+              61.783,
+              34
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0.006671752929690911,
+              0,
+              -0.00034045410156124944,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "79cf7c54d3d7ccbea82ff06300e9ef0227c2ca4ca9c88c7101435fd5ed7f92fe",
+        "omoikane": "dad284389156dbdd5889f0a2fa724c4c34de81095c185850132b02f49dde59de"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-empty-margin",
+      "path": "anonymized-inline-empty-margin.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "576183de110621a898442fa035648506315df7b3c30a63db83d1167418bee6f1"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-empty-margin.before.png",
+        "sha256": "3c2b70caf519200d07cbc2fd6a92fbff1a1466bd92470ffc228e2218551c53f0"
+      },
+      "after": {
+        "path": "anonymized-inline-empty-margin.after.png",
+        "sha256": "3c2b70caf519200d07cbc2fd6a92fbff1a1466bd92470ffc228e2218551c53f0"
+      },
+      "firefox": {
+        "path": "anonymized-inline-empty-margin.firefox.png",
+        "sha256": "3c2b70caf519200d07cbc2fd6a92fbff1a1466bd92470ffc228e2218551c53f0"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "outer",
+          "x": 24,
+          "y": 54,
+          "width": 752,
+          "height": 10,
+          "clientRects": [
+            [
+              24,
+              54,
+              752,
+              10
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "first",
+          "x": 24,
+          "y": 54,
+          "width": 752,
+          "height": 10,
+          "clientRects": [
+            [
+              24,
+              54,
+              752,
+              10
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "outer",
+          "x": 24,
+          "y": 54,
+          "width": 752,
+          "height": 10,
+          "clientRects": [
+            [
+              24,
+              54,
+              752,
+              10
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 54,
+          "width": 0,
+          "height": 0,
+          "clientRects": [
+            [
+              24,
+              54,
+              0,
+              0
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "first",
+          "x": 24,
+          "y": 54,
+          "width": 752,
+          "height": 10,
+          "clientRects": [
+            [
+              24,
+              54,
+              752,
+              10
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "outer",
+          "x": 24,
+          "y": 54,
+          "width": 752,
+          "height": 10,
+          "clientRects": [
+            [
+              24,
+              54,
+              752,
+              10
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 54,
+          "width": 0,
+          "height": 0,
+          "clientRects": [
+            [
+              24,
+              54,
+              0,
+              0
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "first",
+          "x": 24,
+          "y": 54,
+          "width": 752,
+          "height": 10,
+          "clientRects": [
+            [
+              24,
+              54,
+              752,
+              10
+            ]
+          ],
+          "text": "",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-empty-margin",
+      "path": "anonymized-inline-empty-margin.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "576183de110621a898442fa035648506315df7b3c30a63db83d1167418bee6f1",
+      "changed_pixels": 0,
+      "changed_percent": 0.0,
+      "strong_difference_pixels": 0,
+      "mean_absolute_channel_error": 0.0,
+      "max_channel_error": 0,
+      "diff_bbox": null,
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 54,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 54,
+            "width": 0,
+            "height": 0
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -24,
+            "y": -54
+          },
+          "firefox_client_rects": [
+            [
+              24,
+              54,
+              0,
+              0
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "3c2b70caf519200d07cbc2fd6a92fbff1a1466bd92470ffc228e2218551c53f0",
+        "omoikane": "3c2b70caf519200d07cbc2fd6a92fbff1a1466bd92470ffc228e2218551c53f0"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-empty-margin",
+      "path": "anonymized-inline-empty-margin.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "576183de110621a898442fa035648506315df7b3c30a63db83d1167418bee6f1",
+      "changed_pixels": 0,
+      "changed_percent": 0.0,
+      "strong_difference_pixels": 0,
+      "mean_absolute_channel_error": 0.0,
+      "max_channel_error": 0,
+      "diff_bbox": null,
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "3c2b70caf519200d07cbc2fd6a92fbff1a1466bd92470ffc228e2218551c53f0",
+        "omoikane": "3c2b70caf519200d07cbc2fd6a92fbff1a1466bd92470ffc228e2218551c53f0"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-pre",
+      "path": "anonymized-inline-pre.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "c40f79fbd4b6a4464b39760665f1133bab736ef5b3fd8e6102d527879d2159a5"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-pre.before.png",
+        "sha256": "0eee69194ac5b20153e5d507d2fc2399d54315e57bccc55871659ad46c45bf05"
+      },
+      "after": {
+        "path": "anonymized-inline-pre.after.png",
+        "sha256": "38f113ffb198ea211907d03687244757e43da6295c0d3f0e18a0981fb72a61c9"
+      },
+      "firefox": {
+        "path": "anonymized-inline-pre.firefox.png",
+        "sha256": "dee4c3778fffe5b425a09590326d26dfa956546f717cc83abf012648132a81cf"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 56,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              56
+            ]
+          ],
+          "text": "A  \nBC  ",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "A  \nBC  ",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 56,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              56
+            ]
+          ],
+          "text": "A  \nBC  ",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 26,
+          "width": 38.896,
+          "height": 52,
+          "clientRects": [
+            [
+              24,
+              26,
+              23.35,
+              24
+            ],
+            [
+              24,
+              54,
+              38.896,
+              24
+            ]
+          ],
+          "text": "A  \nBC  ",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 56,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              56
+            ]
+          ],
+          "text": "A  \nBC  ",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 26,
+          "width": 38.883331298828125,
+          "height": 52,
+          "clientRects": [
+            [
+              24,
+              26,
+              24.433334350585938,
+              24
+            ],
+            [
+              24,
+              54,
+              38.883331298828125,
+              24
+            ]
+          ],
+          "text": "A  \nBC  ",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-pre",
+      "path": "anonymized-inline-pre.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "c40f79fbd4b6a4464b39760665f1133bab736ef5b3fd8e6102d527879d2159a5",
+      "changed_pixels": 1508,
+      "changed_percent": 0.31416666666666665,
+      "strong_difference_pixels": 1494,
+      "mean_absolute_channel_error": 0.2231972222222222,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        26,
+        62,
+        77
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 52,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 38.883331298828125,
+            "height": 52
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -24,
+            "y": -26,
+            "width": -38.883331298828125,
+            "height": -52
+          },
+          "firefox_client_rects": [
+            [
+              24,
+              26,
+              24.433334350585938,
+              24
+            ],
+            [
+              24,
+              54,
+              38.883331298828125,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "dee4c3778fffe5b425a09590326d26dfa956546f717cc83abf012648132a81cf",
+        "omoikane": "0eee69194ac5b20153e5d507d2fc2399d54315e57bccc55871659ad46c45bf05"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-pre",
+      "path": "anonymized-inline-pre.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "c40f79fbd4b6a4464b39760665f1133bab736ef5b3fd8e6102d527879d2159a5",
+      "changed_pixels": 436,
+      "changed_percent": 0.09083333333333334,
+      "strong_difference_pixels": 394,
+      "mean_absolute_channel_error": 0.10432430555555555,
+      "max_channel_error": 254,
+      "diff_bbox": [
+        24,
+        31,
+        50,
+        75
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.012668701171875796,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 38.883331298828125,
+            "height": 52
+          },
+          "omoikane_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 38.896,
+            "height": 52
+          },
+          "geometry_delta": {
+            "width": 0.012668701171875796
+          },
+          "firefox_client_rects": [
+            [
+              24,
+              26,
+              24.433334350585938,
+              24
+            ],
+            [
+              24,
+              54,
+              38.883331298828125,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              24,
+              26,
+              23.35,
+              24
+            ],
+            [
+              24,
+              54,
+              38.896,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0,
+              0,
+              -1.083334350585936,
+              0
+            ],
+            [
+              0,
+              0,
+              0.012668701171875796,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "dee4c3778fffe5b425a09590326d26dfa956546f717cc83abf012648132a81cf",
+        "omoikane": "38f113ffb198ea211907d03687244757e43da6295c0d3f0e18a0981fb72a61c9"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-pre-empty-lines",
+      "path": "anonymized-inline-pre-empty-lines.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "16b9ca25c66387afa3963679dff3e907e3a2cc0bb40ba31ab7ac3b6ffb8dbbd8"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-pre-empty-lines.before.png",
+        "sha256": "86f5fc47b86c13c8a871eb437f7bb5a98e115a4e136278a93b5831ba197cec9a"
+      },
+      "after": {
+        "path": "anonymized-inline-pre-empty-lines.after.png",
+        "sha256": "e1b0f6f8f651ffa1d4a6677e0a80fe2ac832161617e59b65067c5aadcf2f89a6"
+      },
+      "firefox": {
+        "path": "anonymized-inline-pre-empty-lines.firefox.png",
+        "sha256": "f114f758d141c7483552a0881a36caf5fb2f6d71948d0eaa1bd88a91eed1fbc2"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 140,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              140
+            ]
+          ],
+          "text": "\n\nA\n\nB",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "\n\nA\n\nB",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 140,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              140
+            ]
+          ],
+          "text": "\n\nA\n\nB",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 82,
+          "width": 13.34,
+          "height": 80,
+          "clientRects": [
+            [
+              24,
+              26,
+              0,
+              24
+            ],
+            [
+              24,
+              54,
+              0,
+              24
+            ],
+            [
+              24,
+              82,
+              13.34,
+              24
+            ],
+            [
+              24,
+              110,
+              0,
+              24
+            ],
+            [
+              24,
+              138,
+              13.34,
+              24
+            ]
+          ],
+          "text": "\n\nA\n\nB",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 140,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              140
+            ]
+          ],
+          "text": "\n\nA\n\nB",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 82,
+          "width": 13.333328247070312,
+          "height": 80,
+          "clientRects": [
+            [
+              24,
+              26,
+              0,
+              24
+            ],
+            [
+              24,
+              54,
+              0,
+              24
+            ],
+            [
+              24,
+              82,
+              13.333328247070312,
+              24
+            ],
+            [
+              24,
+              110,
+              0,
+              24
+            ],
+            [
+              24,
+              138,
+              13.333328247070312,
+              24
+            ]
+          ],
+          "text": "\n\nA\n\nB",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-pre-empty-lines",
+      "path": "anonymized-inline-pre-empty-lines.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "16b9ca25c66387afa3963679dff3e907e3a2cc0bb40ba31ab7ac3b6ffb8dbbd8",
+      "changed_pixels": 621,
+      "changed_percent": 0.129375,
+      "strong_difference_pixels": 609,
+      "mean_absolute_channel_error": 0.11299583333333334,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        82,
+        37,
+        161
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 82,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 82,
+            "width": 13.333328247070312,
+            "height": 80
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -24,
+            "y": -82,
+            "width": -13.333328247070312,
+            "height": -80
+          },
+          "firefox_client_rects": [
+            [
+              24,
+              26,
+              0,
+              24
+            ],
+            [
+              24,
+              54,
+              0,
+              24
+            ],
+            [
+              24,
+              82,
+              13.333328247070312,
+              24
+            ],
+            [
+              24,
+              110,
+              0,
+              24
+            ],
+            [
+              24,
+              138,
+              13.333328247070312,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "f114f758d141c7483552a0881a36caf5fb2f6d71948d0eaa1bd88a91eed1fbc2",
+        "omoikane": "86f5fc47b86c13c8a871eb437f7bb5a98e115a4e136278a93b5831ba197cec9a"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-pre-empty-lines",
+      "path": "anonymized-inline-pre-empty-lines.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "16b9ca25c66387afa3963679dff3e907e3a2cc0bb40ba31ab7ac3b6ffb8dbbd8",
+      "changed_pixels": 341,
+      "changed_percent": 0.07104166666666667,
+      "strong_difference_pixels": 312,
+      "mean_absolute_channel_error": 0.07394791666666667,
+      "max_channel_error": 254,
+      "diff_bbox": [
+        24,
+        82,
+        37,
+        161
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.006671752929687358,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 82,
+            "width": 13.333328247070312,
+            "height": 80
+          },
+          "omoikane_geometry": {
+            "x": 24,
+            "y": 82,
+            "width": 13.34,
+            "height": 80
+          },
+          "geometry_delta": {
+            "width": 0.006671752929687358
+          },
+          "firefox_client_rects": [
+            [
+              24,
+              26,
+              0,
+              24
+            ],
+            [
+              24,
+              54,
+              0,
+              24
+            ],
+            [
+              24,
+              82,
+              13.333328247070312,
+              24
+            ],
+            [
+              24,
+              110,
+              0,
+              24
+            ],
+            [
+              24,
+              138,
+              13.333328247070312,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              24,
+              26,
+              0,
+              24
+            ],
+            [
+              24,
+              54,
+              0,
+              24
+            ],
+            [
+              24,
+              82,
+              13.34,
+              24
+            ],
+            [
+              24,
+              110,
+              0,
+              24
+            ],
+            [
+              24,
+              138,
+              13.34,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0.006671752929687358,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0.006671752929687358,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "f114f758d141c7483552a0881a36caf5fb2f6d71948d0eaa1bd88a91eed1fbc2",
+        "omoikane": "e1b0f6f8f651ffa1d4a6677e0a80fe2ac832161617e59b65067c5aadcf2f89a6"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-inline-pre-trailing-newline",
+      "path": "anonymized-inline-pre-trailing-newline.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "be717ff06485c101adb2b9deb6fdbaa703f587789ce4e8b4d3e4cba0fb0dc209"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-inline-pre-trailing-newline.before.png",
+        "sha256": "472102899fee606cff95c7635537be989a798380e0eb8bd3010ef6fd678459a4"
+      },
+      "after": {
+        "path": "anonymized-inline-pre-trailing-newline.after.png",
+        "sha256": "59307f11d038cf814a4883ef374a9d3a89975c24dda15db14c167dc9d3254553"
+      },
+      "firefox": {
+        "path": "anonymized-inline-pre-trailing-newline.firefox.png",
+        "sha256": "c3394768e398b754a6988ba459bc2cad8a4e6885feb2b1e627491c6dd9022268"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "A\n",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "clientRects": [],
+          "text": "A\n",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "A\n",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 26,
+          "width": 13.34,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              26,
+              13.34,
+              24
+            ]
+          ],
+          "text": "A\n",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "p",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 28,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              28
+            ]
+          ],
+          "text": "A\n",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "s",
+          "x": 24,
+          "y": 26,
+          "width": 13.333328247070312,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              26,
+              13.333328247070312,
+              24
+            ]
+          ],
+          "text": "A\n",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-inline-pre-trailing-newline",
+      "path": "anonymized-inline-pre-trailing-newline.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "be717ff06485c101adb2b9deb6fdbaa703f587789ce4e8b4d3e4cba0fb0dc209",
+      "changed_pixels": 311,
+      "changed_percent": 0.06479166666666666,
+      "strong_difference_pixels": 309,
+      "mean_absolute_channel_error": 0.05525763888888889,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        26,
+        37,
+        49
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 26,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 13.333328247070312,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 0,
+            "y": 0,
+            "width": 0,
+            "height": 0
+          },
+          "geometry_delta": {
+            "x": -24,
+            "y": -26,
+            "width": -13.333328247070312,
+            "height": -24
+          },
+          "firefox_client_rects": [
+            [
+              24,
+              26,
+              13.333328247070312,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [],
+          "client_rect_deltas": [],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "c3394768e398b754a6988ba459bc2cad8a4e6885feb2b1e627491c6dd9022268",
+        "omoikane": "472102899fee606cff95c7635537be989a798380e0eb8bd3010ef6fd678459a4"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-inline-pre-trailing-newline",
+      "path": "anonymized-inline-pre-trailing-newline.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "be717ff06485c101adb2b9deb6fdbaa703f587789ce4e8b4d3e4cba0fb0dc209",
+      "changed_pixels": 153,
+      "changed_percent": 0.031875,
+      "strong_difference_pixels": 143,
+      "mean_absolute_channel_error": 0.03481597222222222,
+      "max_channel_error": 254,
+      "diff_bbox": [
+        24,
+        26,
+        37,
+        49
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.006671752929687358,
+      "differences": [
+        {
+          "key": "s",
+          "firefox_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 13.333328247070312,
+            "height": 24
+          },
+          "omoikane_geometry": {
+            "x": 24,
+            "y": 26,
+            "width": 13.34,
+            "height": 24
+          },
+          "geometry_delta": {
+            "width": 0.006671752929687358
+          },
+          "firefox_client_rects": [
+            [
+              24,
+              26,
+              13.333328247070312,
+              24
+            ]
+          ],
+          "omoikane_client_rects": [
+            [
+              24,
+              26,
+              13.34,
+              24
+            ]
+          ],
+          "client_rect_deltas": [
+            [
+              0,
+              0,
+              0.006671752929687358,
+              0
+            ]
+          ],
+          "firefox_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          },
+          "omoikane_state": {
+            "value": null,
+            "selectionStart": null,
+            "selectionEnd": null
+          }
+        }
+      ],
+      "image_sha256": {
+        "firefox": "c3394768e398b754a6988ba459bc2cad8a4e6885feb2b1e627491c6dd9022268",
+        "omoikane": "59307f11d038cf814a4883ef374a9d3a89975c24dda15db14c167dc9d3254553"
+      }
+    }
+  }
+]

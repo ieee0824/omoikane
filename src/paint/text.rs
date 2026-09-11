@@ -367,7 +367,8 @@ pub(crate) fn paint_text_with_registry(
                         _viewport,
                     );
                 }
-                InlineFragmentContent::GeneratedBox(style) => {
+                InlineFragmentContent::InlineBox(style)
+                | InlineFragmentContent::GeneratedBox(style) => {
                     super::paint_generated_box(canvas, fragment_rect, style, clip, _viewport);
                 }
                 InlineFragmentContent::FormControl(style, value, editing) => {

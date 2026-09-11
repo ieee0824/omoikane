@@ -9489,6 +9489,7 @@ fn find_layout_box_with_transform<'a>(
 
 struct InlineFragmentGeometry {
     rect: Rect,
+    non_replaced: bool,
     style: ComputedStyle,
     transform: AffineTransform,
     scroll: (f32, f32),
@@ -9507,13 +9508,15 @@ fn collect_matching_replaced_fragments(
                 continue;
             }
             let style = match &fragment.content {
-                InlineFragmentContent::Image(_, style)
+                InlineFragmentContent::InlineBox(style)
+                | InlineFragmentContent::Image(_, style)
                 | InlineFragmentContent::FormControl(style, _, _)
                 | InlineFragmentContent::IconFormControl(style, _, _, _) => style,
                 _ => continue,
             };
             output.push(InlineFragmentGeometry {
                 rect: fragment.rect,
+                non_replaced: matches!(fragment.content, InlineFragmentContent::InlineBox(_)),
                 style: style.clone(),
                 transform,
                 scroll,
@@ -9776,11 +9779,39 @@ fn transform_rect(rect: Rect, transform: AffineTransform) -> Rect {
     }
 }
 
+fn inline_rect_union(rects: impl Iterator<Item = Rect>) -> Rect {
+    let mut first = None;
+    let mut bounds: Option<Rect> = None;
+    for rect in rects {
+        first.get_or_insert(rect);
+        if rect.width == 0.0 || rect.height == 0.0 {
+            continue;
+        }
+        if let Some(r) = &mut bounds {
+            let right = (r.x + r.width).max(rect.x + rect.width);
+            let bottom = (r.y + r.height).max(rect.y + rect.height);
+            r.x = r.x.min(rect.x);
+            r.y = r.y.min(rect.y);
+            r.width = right - r.x;
+            r.height = bottom - r.y;
+        } else {
+            bounds = Some(rect);
+        }
+    }
+    bounds.or(first).unwrap_or_default()
+}
+
 fn compute_replaced_fragment_metrics(fragments: Vec<InlineFragmentGeometry>) -> LayoutMetrics {
     let Some(first) = fragments.first() else {
         return LayoutMetrics::zero();
     };
     let layout_rect = first.rect;
+    let non_replaced = first.non_replaced;
+    let offset_rect = if non_replaced {
+        inline_rect_union(fragments.iter().map(|f| f.rect))
+    } else {
+        layout_rect
+    };
     let padding = edge_sizes(&first.style, "padding");
     let border = edge_sizes(&first.style, "border");
     let client_width = (first.rect.width - border.left - border.right).max(0.0);
@@ -9794,35 +9825,26 @@ fn compute_replaced_fragment_metrics(fragments: Vec<InlineFragmentGeometry>) -> 
         rect.y -= fragment.scroll.1;
         client_rects.push(rect);
     }
-    let min_x = client_rects.iter().map(|rect| rect.x).fold(f32::INFINITY, f32::min);
-    let min_y = client_rects.iter().map(|rect| rect.y).fold(f32::INFINITY, f32::min);
-    let max_x = client_rects
-        .iter()
-        .map(|rect| rect.x + rect.width)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let max_y = client_rects
-        .iter()
-        .map(|rect| rect.y + rect.height)
-        .fold(f32::NEG_INFINITY, f32::max);
+    let union = inline_rect_union(client_rects.iter().copied());
     LayoutMetrics {
-        x: min_x,
-        y: min_y,
-        width: max_x - min_x,
-        height: max_y - min_y,
-        content_x: min_x + border.left + padding.left,
-        content_y: min_y + border.top + padding.top,
+        x: union.x,
+        y: union.y,
+        width: union.width,
+        height: union.height,
+        content_x: union.x + border.left + padding.left,
+        content_y: union.y + border.top + padding.top,
         content_width,
         content_height,
-        offset_width: layout_rect.width,
-        offset_height: layout_rect.height,
+        offset_width: offset_rect.width,
+        offset_height: offset_rect.height,
         offset_top: layout_rect.y,
         offset_left: layout_rect.x,
-        client_width,
-        client_height,
-        client_top: border.top,
-        client_left: border.left,
-        scroll_width: client_width,
-        scroll_height: client_height,
+        client_width: if non_replaced { 0.0 } else { client_width },
+        client_height: if non_replaced { 0.0 } else { client_height },
+        client_top: if non_replaced { 0.0 } else { border.top },
+        client_left: if non_replaced { 0.0 } else { border.left },
+        scroll_width: if non_replaced { 0.0 } else { client_width },
+        scroll_height: if non_replaced { 0.0 } else { client_height },
         client_rects,
         has_box: true,
     }
@@ -41144,3 +41166,6 @@ b</textarea></form>"#);
         assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "SecurityError");
     }
 }
+
+#[cfg(test)]
+mod inline_geometry_tests;
