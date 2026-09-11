@@ -1,0 +1,30 @@
+[
+  {
+    "name": "anonymized-text",
+    "path": "anonymized-text.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "b87de36edcf105bdcec9141b57ade5155cda86c68664bb9de05f09badeebcd6a"
+  },
+  {
+    "name": "anonymized-arabic-system",
+    "path": "anonymized-arabic-system.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "bf74e3f82f7c3c1baf12821a5332885e6bf587fcaa1e1638668b103067c62222"
+  },
+  {
+    "name": "anonymized-arabic-fixed",
+    "path": "anonymized-arabic-fixed.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "1dee27d049445d0843a8218a329ad209e8fd2f96fe06e6db27ef361c8d2d3e5f"
+  },
+  {
+    "name": "anonymized-arabic-primary",
+    "path": "anonymized-arabic-primary.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "a7a8e6dbb598c3d9c5897f73c884cf747342379d0a4c20ee8879adc4cae57e16"
+  }
+]

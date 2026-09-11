@@ -1,0 +1,634 @@
+[
+  {
+    "case": "anonymized-text",
+    "elements": [
+      {
+        "id": "",
+        "faces": [
+          {
+            "name": "Liberation Sans",
+            "family": "Liberation Sans",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 114,
+                "start": 0,
+                "text": "The quick brown fox jumps over the lazy dog. This paragraph checks word wrapping and line height at a fixed width."
+              },
+              {
+                "end": 7,
+                "start": 0,
+                "text": "Normal "
+              },
+              {
+                "end": 18,
+                "start": 0,
+                "text": "highlighted inline"
+              },
+              {
+                "end": 5,
+                "start": 0,
+                "text": " text"
+              },
+              {
+                "end": 29,
+                "start": 0,
+                "text": "After an explicit line break."
+              },
+              {
+                "end": 13,
+                "start": 0,
+                "text": "café naïve Ω "
+              },
+              {
+                "end": 21,
+                "start": 20,
+                "text": " "
+              }
+            ],
+            "names": [
+              "Liberation Sans",
+              "Regular",
+              "Ascender - Liberation Sans",
+              "Liberation Sans",
+              "Version 1.07.4",
+              "LiberationSans"
+            ],
+            "source": ""
+          },
+          {
+            "name": "Liberation Sans Bold",
+            "family": "Liberation Sans",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 20,
+                "start": 0,
+                "text": "Bold text 0123456789"
+              }
+            ],
+            "names": [
+              "Liberation Sans",
+              "Bold",
+              "Ascender - Liberation Sans Bold",
+              "Liberation Sans Bold",
+              "Version 1.07.4",
+              "LiberationSans-Bold"
+            ],
+            "source": ""
+          },
+          {
+            "name": "DejaVu Sans",
+            "family": "DejaVu Sans",
+            "fromFontGroup": false,
+            "fromLanguagePrefs": true,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 20,
+                "start": 13,
+                "text": "العربية"
+              }
+            ],
+            "names": [
+              "DejaVu Sans",
+              "Book",
+              "DejaVu Sans",
+              "DejaVu Sans",
+              "Version 2.37",
+              "DejaVuSans"
+            ],
+            "source": ""
+          },
+          {
+            "name": "IPAMincho",
+            "family": "IPAMincho",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 24,
+                "start": 21,
+                "text": "日本語"
+              }
+            ],
+            "names": [
+              "IPAMincho",
+              "Regular",
+              "IPAMincho Version 003.03",
+              "IPAMincho",
+              "Version 003.03",
+              "IPAMincho"
+            ],
+            "source": ""
+          }
+        ]
+      },
+      {
+        "id": "wrap",
+        "faces": [
+          {
+            "name": "Liberation Sans",
+            "family": "Liberation Sans",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 114,
+                "start": 0,
+                "text": "The quick brown fox jumps over the lazy dog. This paragraph checks word wrapping and line height at a fixed width."
+              }
+            ],
+            "names": [
+              "Liberation Sans",
+              "Regular",
+              "Ascender - Liberation Sans",
+              "Liberation Sans",
+              "Version 1.07.4",
+              "LiberationSans"
+            ],
+            "source": ""
+          }
+        ]
+      },
+      {
+        "id": "bold",
+        "faces": [
+          {
+            "name": "Liberation Sans Bold",
+            "family": "Liberation Sans",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 20,
+                "start": 0,
+                "text": "Bold text 0123456789"
+              }
+            ],
+            "names": [
+              "Liberation Sans",
+              "Bold",
+              "Ascender - Liberation Sans Bold",
+              "Liberation Sans Bold",
+              "Version 1.07.4",
+              "LiberationSans-Bold"
+            ],
+            "source": ""
+          }
+        ]
+      },
+      {
+        "id": "inline",
+        "faces": [
+          {
+            "name": "Liberation Sans",
+            "family": "Liberation Sans",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 7,
+                "start": 0,
+                "text": "Normal "
+              },
+              {
+                "end": 18,
+                "start": 0,
+                "text": "highlighted inline"
+              },
+              {
+                "end": 5,
+                "start": 0,
+                "text": " text"
+              },
+              {
+                "end": 29,
+                "start": 0,
+                "text": "After an explicit line break."
+              }
+            ],
+            "names": [
+              "Liberation Sans",
+              "Regular",
+              "Ascender - Liberation Sans",
+              "Liberation Sans",
+              "Version 1.07.4",
+              "LiberationSans"
+            ],
+            "source": ""
+          }
+        ]
+      },
+      {
+        "id": "unicode",
+        "faces": [
+          {
+            "name": "Liberation Sans",
+            "family": "Liberation Sans",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 13,
+                "start": 0,
+                "text": "café naïve Ω "
+              },
+              {
+                "end": 21,
+                "start": 20,
+                "text": " "
+              }
+            ],
+            "names": [
+              "Liberation Sans",
+              "Regular",
+              "Ascender - Liberation Sans",
+              "Liberation Sans",
+              "Version 1.07.4",
+              "LiberationSans"
+            ],
+            "source": ""
+          },
+          {
+            "name": "DejaVu Sans",
+            "family": "DejaVu Sans",
+            "fromFontGroup": false,
+            "fromLanguagePrefs": true,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 20,
+                "start": 13,
+                "text": "العربية"
+              }
+            ],
+            "names": [
+              "DejaVu Sans",
+              "Book",
+              "DejaVu Sans",
+              "DejaVu Sans",
+              "Version 2.37",
+              "DejaVuSans"
+            ],
+            "source": ""
+          },
+          {
+            "name": "IPAMincho",
+            "family": "IPAMincho",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 24,
+                "start": 21,
+                "text": "日本語"
+              }
+            ],
+            "names": [
+              "IPAMincho",
+              "Regular",
+              "IPAMincho Version 003.03",
+              "IPAMincho",
+              "Version 003.03",
+              "IPAMincho"
+            ],
+            "source": ""
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "case": "anonymized-arabic-system",
+    "elements": [
+      {
+        "id": "arabic",
+        "faces": [
+          {
+            "name": "DejaVu Sans",
+            "family": "DejaVu Sans",
+            "fromFontGroup": false,
+            "fromLanguagePrefs": true,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 7,
+                "start": 0,
+                "text": "العربية"
+              }
+            ],
+            "names": [
+              "DejaVu Sans",
+              "Book",
+              "DejaVu Sans",
+              "DejaVu Sans",
+              "Version 2.37",
+              "DejaVuSans"
+            ],
+            "source": ""
+          }
+        ]
+      },
+      {
+        "id": "mixed",
+        "faces": [
+          {
+            "name": "Liberation Sans",
+            "family": "Liberation Sans",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 6,
+                "start": 0,
+                "text": "Latin "
+              },
+              {
+                "end": 14,
+                "start": 13,
+                "text": " "
+              }
+            ],
+            "names": [
+              "Liberation Sans",
+              "Regular",
+              "Ascender - Liberation Sans",
+              "Liberation Sans",
+              "Version 1.07.4",
+              "LiberationSans"
+            ],
+            "source": ""
+          },
+          {
+            "name": "DejaVu Sans",
+            "family": "DejaVu Sans",
+            "fromFontGroup": false,
+            "fromLanguagePrefs": true,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 13,
+                "start": 6,
+                "text": "العربية"
+              }
+            ],
+            "names": [
+              "DejaVu Sans",
+              "Book",
+              "DejaVu Sans",
+              "DejaVu Sans",
+              "Version 2.37",
+              "DejaVuSans"
+            ],
+            "source": ""
+          },
+          {
+            "name": "IPAMincho",
+            "family": "IPAMincho",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 17,
+                "start": 14,
+                "text": "日本語"
+              }
+            ],
+            "names": [
+              "IPAMincho",
+              "Regular",
+              "IPAMincho Version 003.03",
+              "IPAMincho",
+              "Version 003.03",
+              "IPAMincho"
+            ],
+            "source": ""
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "case": "anonymized-arabic-fixed",
+    "elements": [
+      {
+        "id": "arabic",
+        "faces": [
+          {
+            "name": "DejaVu Sans",
+            "family": "AuditArabic",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 7,
+                "start": 0,
+                "text": "العربية"
+              }
+            ],
+            "names": [
+              "DejaVu Sans",
+              "Book",
+              "DejaVu Sans",
+              "DejaVu Sans",
+              "Version 2.37",
+              "DejaVuSans"
+            ],
+            "source": "data URL",
+            "sha256": "abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322"
+          }
+        ]
+      },
+      {
+        "id": "mixed",
+        "faces": [
+          {
+            "name": "Liberation Sans",
+            "family": "Liberation Sans",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 6,
+                "start": 0,
+                "text": "Latin "
+              },
+              {
+                "end": 14,
+                "start": 13,
+                "text": " "
+              }
+            ],
+            "names": [
+              "Liberation Sans",
+              "Regular",
+              "Ascender - Liberation Sans",
+              "Liberation Sans",
+              "Version 1.07.4",
+              "LiberationSans"
+            ],
+            "source": ""
+          },
+          {
+            "name": "DejaVu Sans",
+            "family": "AuditArabic",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 13,
+                "start": 6,
+                "text": "العربية"
+              }
+            ],
+            "names": [
+              "DejaVu Sans",
+              "Book",
+              "DejaVu Sans",
+              "DejaVu Sans",
+              "Version 2.37",
+              "DejaVuSans"
+            ],
+            "source": "data URL",
+            "sha256": "abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322"
+          },
+          {
+            "name": "IPAMincho",
+            "family": "IPAMincho",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 17,
+                "start": 14,
+                "text": "日本語"
+              }
+            ],
+            "names": [
+              "IPAMincho",
+              "Regular",
+              "IPAMincho Version 003.03",
+              "IPAMincho",
+              "Version 003.03",
+              "IPAMincho"
+            ],
+            "source": ""
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "case": "anonymized-arabic-primary",
+    "elements": [
+      {
+        "id": "arabic",
+        "faces": [
+          {
+            "name": "DejaVu Sans",
+            "family": "AuditArabic",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 7,
+                "start": 0,
+                "text": "العربية"
+              }
+            ],
+            "names": [
+              "DejaVu Sans",
+              "Book",
+              "DejaVu Sans",
+              "DejaVu Sans",
+              "Version 2.37",
+              "DejaVuSans"
+            ],
+            "source": "data URL",
+            "sha256": "abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322"
+          }
+        ]
+      },
+      {
+        "id": "mixed",
+        "faces": [
+          {
+            "name": "DejaVu Sans",
+            "family": "AuditArabic",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 6,
+                "start": 0,
+                "text": "Latin "
+              },
+              {
+                "end": 13,
+                "start": 6,
+                "text": "العربية"
+              },
+              {
+                "end": 14,
+                "start": 13,
+                "text": " "
+              }
+            ],
+            "names": [
+              "DejaVu Sans",
+              "Book",
+              "DejaVu Sans",
+              "DejaVu Sans",
+              "Version 2.37",
+              "DejaVuSans"
+            ],
+            "source": "data URL",
+            "sha256": "abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322"
+          },
+          {
+            "name": "IPAMincho",
+            "family": "IPAMincho",
+            "fromFontGroup": true,
+            "fromLanguagePrefs": false,
+            "fromSystemFallback": false,
+            "ranges": [
+              {
+                "end": 17,
+                "start": 14,
+                "text": "日本語"
+              }
+            ],
+            "names": [
+              "IPAMincho",
+              "Regular",
+              "IPAMincho Version 003.03",
+              "IPAMincho",
+              "Version 003.03",
+              "IPAMincho"
+            ],
+            "source": ""
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -5835,6 +5835,8 @@ impl Canvas {
 }
 
 #[cfg(test)]
+mod font_data_url_tests;
+#[cfg(test)]
 mod font_selection_tests;
 #[cfg(test)]
 mod tests;

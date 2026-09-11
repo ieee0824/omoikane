@@ -21,7 +21,6 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "mask-position" | "-webkit-mask-position" => {
             expand_mask_position_shorthand(value, important)
         }
-        "font" => expand_font_shorthand(value, important),
         "overflow" => expand_overflow_shorthand(value, important),
         "flex" => expand_flex_shorthand(value, important),
         "text-decoration" => expand_text_decoration_shorthand(value, important),
@@ -1235,81 +1234,6 @@ fn collapse_mask_values(values: &[Value]) -> Value {
         [value] => value.clone(),
         values => Value::List(values.to_vec()),
     }
-}
-
-fn expand_font_shorthand(value: Value, important: bool) -> Vec<Declaration> {
-    let values = match value {
-        Value::List(values) => values,
-        single => vec![single],
-    };
-
-    let mut declarations = Vec::new();
-    for item in &values {
-        match item {
-            Value::Length(_, unit) if unit == "px" || unit == "em" => {
-                declarations.push(Declaration {
-                    name: "font-size".to_string(),
-                    value: item.clone(),
-                    important,
-                })
-            }
-            Value::Percentage(_) => declarations.push(Declaration {
-                name: "font-size".to_string(),
-                value: item.clone(),
-                important,
-            }),
-            Value::Keyword(keyword) => {
-                if let Some((font_size, line_height)) = keyword.split_once('/') {
-                    if let Some(size) = parse_font_shorthand_length(font_size.trim()) {
-                        declarations.push(Declaration {
-                            name: "font-size".to_string(),
-                            value: size,
-                            important,
-                        });
-                    }
-                    if let Some(height) = parse_font_shorthand_length(line_height.trim()) {
-                        declarations.push(Declaration {
-                            name: "line-height".to_string(),
-                            value: height,
-                            important,
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if declarations.is_empty() {
-        vec![Declaration {
-            name: "font".to_string(),
-            value: Value::List(values),
-            important,
-        }]
-    } else {
-        declarations
-    }
-}
-
-fn parse_font_shorthand_length(value: &str) -> Option<Value> {
-    if let Some(unit) = value.strip_suffix("px") {
-        return unit
-            .trim()
-            .parse()
-            .ok()
-            .map(|number| Value::Length(number, "px".to_string()));
-    }
-    if let Some(unit) = value.strip_suffix("em") {
-        return unit
-            .trim()
-            .parse()
-            .ok()
-            .map(|number| Value::Length(number, "em".to_string()));
-    }
-    if let Some(unit) = value.strip_suffix('%') {
-        return unit.trim().parse().ok().map(Value::Percentage);
-    }
-    None
 }
 
 fn expand_overflow_shorthand(value: Value, important: bool) -> Vec<Declaration> {

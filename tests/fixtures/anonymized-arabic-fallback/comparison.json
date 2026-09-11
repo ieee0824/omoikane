@@ -1,0 +1,1053 @@
+[
+  {
+    "case": {
+      "name": "anonymized-text",
+      "path": "anonymized-text.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "b87de36edcf105bdcec9141b57ade5155cda86c68664bb9de05f09badeebcd6a"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-text.before.png",
+        "sha256": "2b0b560c8212bd32425498e180b34829aa17c6a4a8055f61544fe696efa34748"
+      },
+      "after": {
+        "path": "anonymized-text.after.png",
+        "sha256": "e15f3bb5928808441115b3789953ff8e5a3b1283ba9bd5d39fefa7a951fe8dc4"
+      },
+      "firefox": {
+        "path": "anonymized-text.firefox.png",
+        "sha256": "84a3df61353d9d2536c6d9582effb242c6a45dc0c916dffb64b782438a9ba349"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "MAIN",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 218,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              218
+            ]
+          ],
+          "text": "The quick brown fox jumps over the lazy dog. This paragraph checks word wrapping and line height at a fixed width.Bold text 0123456789Normal highlighted inline textAfter an explicit line break.café naïve Ω العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "wrap",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 74,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              74
+            ]
+          ],
+          "text": "The quick brown fox jumps over the lazy dog. This paragraph checks word wrapping and line height at a fixed width.",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "bold",
+          "x": 24,
+          "y": 114,
+          "width": 330,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              114,
+              330,
+              24
+            ]
+          ],
+          "text": "Bold text 0123456789",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inline",
+          "x": 24,
+          "y": 154,
+          "width": 330,
+          "height": 48,
+          "clientRects": [
+            [
+              24,
+              154,
+              330,
+              48
+            ]
+          ],
+          "text": "Normal highlighted inline textAfter an explicit line break.",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "unicode",
+          "x": 24,
+          "y": 218,
+          "width": 330,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              218,
+              330,
+              24
+            ]
+          ],
+          "text": "café naïve Ω العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "MAIN",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 218,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              218
+            ]
+          ],
+          "text": "The quick brown fox jumps over the lazy dog. This paragraph checks word wrapping and line height at a fixed width.Bold text 0123456789Normal highlighted inline textAfter an explicit line break.café naïve Ω العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "wrap",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 74,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              74
+            ]
+          ],
+          "text": "The quick brown fox jumps over the lazy dog. This paragraph checks word wrapping and line height at a fixed width.",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "bold",
+          "x": 24,
+          "y": 114,
+          "width": 330,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              114,
+              330,
+              24
+            ]
+          ],
+          "text": "Bold text 0123456789",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inline",
+          "x": 24,
+          "y": 154,
+          "width": 330,
+          "height": 48,
+          "clientRects": [
+            [
+              24,
+              154,
+              330,
+              48
+            ]
+          ],
+          "text": "Normal highlighted inline textAfter an explicit line break.",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "unicode",
+          "x": 24,
+          "y": 218,
+          "width": 330,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              218,
+              330,
+              24
+            ]
+          ],
+          "text": "café naïve Ω العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "MAIN",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 218,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              218
+            ]
+          ],
+          "text": "The quick brown fox jumps over the lazy dog. This paragraph checks word wrapping and line height at a fixed width.Bold text 0123456789Normal highlighted inline textAfter an explicit line break.café naïve Ω العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "wrap",
+          "x": 24,
+          "y": 24,
+          "width": 330,
+          "height": 74,
+          "clientRects": [
+            [
+              24,
+              24,
+              330,
+              74
+            ]
+          ],
+          "text": "The quick brown fox jumps over the lazy dog. This paragraph checks word wrapping and line height at a fixed width.",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "bold",
+          "x": 24,
+          "y": 114,
+          "width": 330,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              114,
+              330,
+              24
+            ]
+          ],
+          "text": "Bold text 0123456789",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "inline",
+          "x": 24,
+          "y": 154,
+          "width": 330,
+          "height": 48,
+          "clientRects": [
+            [
+              24,
+              154,
+              330,
+              48
+            ]
+          ],
+          "text": "Normal highlighted inline textAfter an explicit line break.",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "unicode",
+          "x": 24,
+          "y": 218,
+          "width": 330,
+          "height": 24,
+          "clientRects": [
+            [
+              24,
+              218,
+              330,
+              24
+            ]
+          ],
+          "text": "café naïve Ω العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-text",
+      "path": "anonymized-text.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "b87de36edcf105bdcec9141b57ade5155cda86c68664bb9de05f09badeebcd6a",
+      "changed_pixels": 14129,
+      "changed_percent": 2.9435416666666665,
+      "strong_difference_pixels": 12505,
+      "mean_absolute_channel_error": 2.804817361111111,
+      "max_channel_error": 232,
+      "diff_bbox": [
+        24,
+        31,
+        344,
+        240
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "84a3df61353d9d2536c6d9582effb242c6a45dc0c916dffb64b782438a9ba349",
+        "omoikane": "2b0b560c8212bd32425498e180b34829aa17c6a4a8055f61544fe696efa34748"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-text",
+      "path": "anonymized-text.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "b87de36edcf105bdcec9141b57ade5155cda86c68664bb9de05f09badeebcd6a",
+      "changed_pixels": 13024,
+      "changed_percent": 2.7133333333333334,
+      "strong_difference_pixels": 11252,
+      "mean_absolute_channel_error": 2.636053472222222,
+      "max_channel_error": 232,
+      "diff_bbox": [
+        24,
+        31,
+        344,
+        241
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "84a3df61353d9d2536c6d9582effb242c6a45dc0c916dffb64b782438a9ba349",
+        "omoikane": "e15f3bb5928808441115b3789953ff8e5a3b1283ba9bd5d39fefa7a951fe8dc4"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-arabic-system",
+      "path": "anonymized-arabic-system.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "bf74e3f82f7c3c1baf12821a5332885e6bf587fcaa1e1638668b103067c62222"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-arabic-system.before.png",
+        "sha256": "243766ecbed3e657b1baaf5057c2661ad8fec6b58f1f6a84aeef2204a4c26d4a"
+      },
+      "after": {
+        "path": "anonymized-arabic-system.after.png",
+        "sha256": "5d2da706273782df6f9622e4a622afc8316a8d05a6217740f6f93af270fa1d75"
+      },
+      "firefox": {
+        "path": "anonymized-arabic-system.firefox.png",
+        "sha256": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "arabic",
+          "x": 24,
+          "y": 24,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              24,
+              600,
+              40
+            ]
+          ],
+          "text": "العربية",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "mixed",
+          "x": 24,
+          "y": 64,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              64,
+              600,
+              40
+            ]
+          ],
+          "text": "Latin العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "arabic",
+          "x": 24,
+          "y": 24,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              24,
+              600,
+              40
+            ]
+          ],
+          "text": "العربية",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "mixed",
+          "x": 24,
+          "y": 64,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              64,
+              600,
+              40
+            ]
+          ],
+          "text": "Latin العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "arabic",
+          "x": 24,
+          "y": 24,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              24,
+              600,
+              40
+            ]
+          ],
+          "text": "العربية",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "mixed",
+          "x": 24,
+          "y": 64,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              64,
+              600,
+              40
+            ]
+          ],
+          "text": "Latin العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-arabic-system",
+      "path": "anonymized-arabic-system.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "bf74e3f82f7c3c1baf12821a5332885e6bf587fcaa1e1638668b103067c62222",
+      "changed_pixels": 2904,
+      "changed_percent": 0.605,
+      "strong_difference_pixels": 2717,
+      "mean_absolute_channel_error": 0.7892333333333333,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        34,
+        225,
+        97
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a",
+        "omoikane": "243766ecbed3e657b1baaf5057c2661ad8fec6b58f1f6a84aeef2204a4c26d4a"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-arabic-system",
+      "path": "anonymized-arabic-system.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "bf74e3f82f7c3c1baf12821a5332885e6bf587fcaa1e1638668b103067c62222",
+      "changed_pixels": 2601,
+      "changed_percent": 0.541875,
+      "strong_difference_pixels": 2306,
+      "mean_absolute_channel_error": 0.7317833333333333,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        25,
+        34,
+        225,
+        101
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a",
+        "omoikane": "5d2da706273782df6f9622e4a622afc8316a8d05a6217740f6f93af270fa1d75"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-arabic-fixed",
+      "path": "anonymized-arabic-fixed.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "1dee27d049445d0843a8218a329ad209e8fd2f96fe06e6db27ef361c8d2d3e5f"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-arabic-fixed.before.png",
+        "sha256": "243766ecbed3e657b1baaf5057c2661ad8fec6b58f1f6a84aeef2204a4c26d4a"
+      },
+      "after": {
+        "path": "anonymized-arabic-fixed.after.png",
+        "sha256": "5d2da706273782df6f9622e4a622afc8316a8d05a6217740f6f93af270fa1d75"
+      },
+      "firefox": {
+        "path": "anonymized-arabic-fixed.firefox.png",
+        "sha256": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "arabic",
+          "x": 24,
+          "y": 24,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              24,
+              600,
+              40
+            ]
+          ],
+          "text": "العربية",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "mixed",
+          "x": 24,
+          "y": 64,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              64,
+              600,
+              40
+            ]
+          ],
+          "text": "Latin العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "arabic",
+          "x": 24,
+          "y": 24,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              24,
+              600,
+              40
+            ]
+          ],
+          "text": "العربية",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "mixed",
+          "x": 24,
+          "y": 64,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              64,
+              600,
+              40
+            ]
+          ],
+          "text": "Latin العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "arabic",
+          "x": 24,
+          "y": 24,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              24,
+              600,
+              40
+            ]
+          ],
+          "text": "العربية",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "mixed",
+          "x": 24,
+          "y": 64,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              64,
+              600,
+              40
+            ]
+          ],
+          "text": "Latin العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-arabic-fixed",
+      "path": "anonymized-arabic-fixed.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "1dee27d049445d0843a8218a329ad209e8fd2f96fe06e6db27ef361c8d2d3e5f",
+      "changed_pixels": 2904,
+      "changed_percent": 0.605,
+      "strong_difference_pixels": 2717,
+      "mean_absolute_channel_error": 0.7892333333333333,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        34,
+        225,
+        97
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a",
+        "omoikane": "243766ecbed3e657b1baaf5057c2661ad8fec6b58f1f6a84aeef2204a4c26d4a"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-arabic-fixed",
+      "path": "anonymized-arabic-fixed.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "1dee27d049445d0843a8218a329ad209e8fd2f96fe06e6db27ef361c8d2d3e5f",
+      "changed_pixels": 2601,
+      "changed_percent": 0.541875,
+      "strong_difference_pixels": 2306,
+      "mean_absolute_channel_error": 0.7317833333333333,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        25,
+        34,
+        225,
+        101
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "8d1dd2ed06b247d3b8144cda3ff363dc33b53c57a03d2f16cb5f6b5418de1e4a",
+        "omoikane": "5d2da706273782df6f9622e4a622afc8316a8d05a6217740f6f93af270fa1d75"
+      }
+    }
+  },
+  {
+    "case": {
+      "name": "anonymized-arabic-primary",
+      "path": "anonymized-arabic-primary.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "a7a8e6dbb598c3d9c5897f73c884cf747342379d0a4c20ee8879adc4cae57e16"
+    },
+    "images": {
+      "before": {
+        "path": "anonymized-arabic-primary.before.png",
+        "sha256": "243766ecbed3e657b1baaf5057c2661ad8fec6b58f1f6a84aeef2204a4c26d4a"
+      },
+      "after": {
+        "path": "anonymized-arabic-primary.after.png",
+        "sha256": "2a3ae67d641028f1a424fa576b2628e9a40b339f1f0cc44e2a89d8cef8bce9f1"
+      },
+      "firefox": {
+        "path": "anonymized-arabic-primary.firefox.png",
+        "sha256": "1de3163644b0b34e615f68477f89dc856a31452224622fba131a2a3e6f42c16d"
+      }
+    },
+    "before": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "arabic",
+          "x": 24,
+          "y": 24,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              24,
+              600,
+              40
+            ]
+          ],
+          "text": "العربية",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "mixed",
+          "x": 24,
+          "y": 64,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              64,
+              600,
+              40
+            ]
+          ],
+          "text": "Latin العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "after": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "arabic",
+          "x": 24,
+          "y": 24,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              24,
+              600,
+              40
+            ]
+          ],
+          "text": "العربية",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "mixed",
+          "x": 24,
+          "y": 64,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              64,
+              600,
+              40
+            ]
+          ],
+          "text": "Latin العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "firefox": {
+      "viewport": [
+        800,
+        600
+      ],
+      "dpr": 1,
+      "elements": [
+        {
+          "key": "arabic",
+          "x": 24,
+          "y": 24,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              24,
+              600,
+              40
+            ]
+          ],
+          "text": "العربية",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        },
+        {
+          "key": "mixed",
+          "x": 24,
+          "y": 64,
+          "width": 600,
+          "height": 40,
+          "clientRects": [
+            [
+              24,
+              64,
+              600,
+              40
+            ]
+          ],
+          "text": "Latin العربية 日本語",
+          "value": null,
+          "selectionStart": null,
+          "selectionEnd": null
+        }
+      ]
+    },
+    "comparison_before": {
+      "name": "anonymized-arabic-primary",
+      "path": "anonymized-arabic-primary.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "a7a8e6dbb598c3d9c5897f73c884cf747342379d0a4c20ee8879adc4cae57e16",
+      "changed_pixels": 3041,
+      "changed_percent": 0.6335416666666667,
+      "strong_difference_pixels": 2876,
+      "mean_absolute_channel_error": 0.8494979166666666,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        24,
+        35,
+        235,
+        98
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "1de3163644b0b34e615f68477f89dc856a31452224622fba131a2a3e6f42c16d",
+        "omoikane": "243766ecbed3e657b1baaf5057c2661ad8fec6b58f1f6a84aeef2204a4c26d4a"
+      }
+    },
+    "comparison_after": {
+      "name": "anonymized-arabic-primary",
+      "path": "anonymized-arabic-primary.html",
+      "width": 800,
+      "height": 600,
+      "fixture_sha256": "a7a8e6dbb598c3d9c5897f73c884cf747342379d0a4c20ee8879adc4cae57e16",
+      "changed_pixels": 2556,
+      "changed_percent": 0.5325,
+      "strong_difference_pixels": 2323,
+      "mean_absolute_channel_error": 0.7362395833333333,
+      "max_channel_error": 255,
+      "diff_bbox": [
+        25,
+        35,
+        235,
+        101
+      ],
+      "repeat_stable": {
+        "firefox": true,
+        "omoikane": true
+      },
+      "max_geometry_delta": 0.0,
+      "differences": [],
+      "image_sha256": {
+        "firefox": "1de3163644b0b34e615f68477f89dc856a31452224622fba131a2a3e6f42c16d",
+        "omoikane": "2a3ae67d641028f1a424fa576b2628e9a40b339f1f0cc44e2a89d8cef8bce9f1"
+      }
+    }
+  }
+]

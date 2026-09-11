@@ -1,0 +1,104 @@
+[
+  {
+    "clusters": [
+      12,
+      10,
+      8,
+      6,
+      4,
+      2,
+      0
+    ],
+    "face": {
+      "face_index": 0,
+      "families": [
+        "DejaVu Sans"
+      ],
+      "full_name": "DejaVu Sans",
+      "path": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+      "style": "Normal",
+      "weight": 400,
+      "width": 5,
+      "sha256": "abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322",
+      "bytes": 759720
+    },
+    "glyph_ids": [
+      5262,
+      5358,
+      5259,
+      5288,
+      5318,
+      5337,
+      1365
+    ],
+    "range": [
+      0,
+      14
+    ],
+    "text": "العربية"
+  },
+  {
+    "clusters": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "face": {
+      "face_index": 0,
+      "families": [
+        "Liberation Sans"
+      ],
+      "full_name": "Liberation Sans",
+      "path": "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+      "style": "Normal",
+      "weight": 400,
+      "width": 5,
+      "sha256": "f8ace1f892b2bd9dc1792ba7f097fa7588f84fed48321480e04de5390828221f",
+      "bytes": 139512
+    },
+    "glyph_ids": [
+      47,
+      68,
+      87,
+      76,
+      81
+    ],
+    "range": [
+      0,
+      5
+    ],
+    "text": "Latin"
+  },
+  {
+    "clusters": [
+      0,
+      3,
+      6
+    ],
+    "face": {
+      "face_index": 0,
+      "families": [
+        "Noto Sans CJK JP"
+      ],
+      "full_name": "Noto Sans CJK JP",
+      "path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+      "style": "Normal",
+      "weight": 400,
+      "width": 5,
+      "sha256": "b76b0433203017ca80401b2ee0dd69350349871c4b19d504c34dbdd80541690a",
+      "bytes": 19484784
+    },
+    "glyph_ids": [
+      20220,
+      20758,
+      37860
+    ],
+    "range": [
+      0,
+      9
+    ],
+    "text": "日本語"
+  }
+]
