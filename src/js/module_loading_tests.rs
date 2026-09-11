@@ -2,7 +2,7 @@ use super::JsRuntime;
 use crate::html::TreeBuilder;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -21,6 +21,46 @@ struct ModuleServer {
     peak: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+}
+
+fn read_module_request(stream: &mut TcpStream) -> std::io::Result<String> {
+    // Accepted sockets can inherit the listener's nonblocking flag on BSD.
+    // The accept loop polls for shutdown, but each handler waits for a request.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut reader = BufReader::new(stream);
+    let mut request = String::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "incomplete test HTTP request",
+            ));
+        }
+        request.push_str(&line);
+        if line == "\r\n" {
+            return Ok(request);
+        }
+    }
+}
+
+fn join_module_workers(workers: impl IntoIterator<Item = thread::JoinHandle<()>>) {
+    let mut failure = None;
+    for worker in workers {
+        if let Err(error) = worker.join() {
+            failure.get_or_insert(error);
+        }
+    }
+    if let Some(error) = failure {
+        if thread::panicking() {
+            // Preserve the original failed assertion instead of aborting the
+            // entire test process with a second panic from Drop.
+            eprintln!("module test server also failed during test cleanup");
+        } else {
+            std::panic::resume_unwind(error);
+        }
+    }
 }
 
 impl ModuleServer {
@@ -54,16 +94,7 @@ impl ModuleServer {
                 let peak = worker_peak.clone();
                 let gate = gate.clone();
                 handlers.push(thread::spawn(move || {
-                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                    let mut reader = BufReader::new(&mut stream);
-                    let mut request = String::new();
-                    loop {
-                        let mut line = String::new();
-                        reader.read_line(&mut line).unwrap();
-                        assert!(!line.is_empty(), "incomplete request");
-                        request.push_str(&line);
-                        if line == "\r\n" { break; }
-                    }
+                    let request = read_module_request(&mut stream).unwrap();
                     let path = request.split_whitespace().nth(1).unwrap().to_owned();
                     requests.lock().unwrap().push((path.clone(), request));
                     let route = routes.get(&path).unwrap_or_else(|| panic!("unexpected request: {path}"));
@@ -88,9 +119,7 @@ impl ModuleServer {
                     write!(stream, "HTTP/1.1 {} Result\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}", route.status, route.body.len(), route.headers, route.body).unwrap();
                 }));
             }
-            for handler in handlers {
-                handler.join().unwrap();
-            }
+            join_module_workers(handlers);
         });
         Self {
             origin,
@@ -114,9 +143,12 @@ impl ModuleServer {
 impl Drop for ModuleServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap();
+        join_module_workers(self.worker.take());
     }
 }
+
+#[path = "module_server_tests.rs"]
+mod server_tests;
 
 #[test]
 fn imports_overlap_share_identity_and_cookies_and_keep_dynamic_imports_lazy() {
