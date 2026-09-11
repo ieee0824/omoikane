@@ -1,0 +1,545 @@
+{
+  "issue": 672,
+  "environment": {
+    "date": "2026-09-11",
+    "platform": "Linux ARM64",
+    "firefox": "155.0.1",
+    "geckodriver": "0.37.1",
+    "viewport": [
+      800,
+      600
+    ],
+    "device_pixel_ratio": 1,
+    "omoikane_path": "production C FFI, dev build"
+  },
+  "base_revision": "468d0f4a605ab602a6f5945e0b0c2ec53bb6c048",
+  "source_sha256": {
+    "src/html/tree_builder.rs": "d7986af8b42ffd721fd7a27a23ff38826061987ec725897d676997d022ecf79b",
+    "src/layout/mod.rs": "11751af654208474b4e56348caab009348df3464295d41040c75356c64b1ff5d",
+    "src/layout/table.rs": "52bc71068960554b98dfe484e0f44d331cf81c07e8476ed7ec8a5831607bd31a",
+    "src/layout/table/columns.rs": "107d2b0f5269f62d79d8b3759c66731aa568a36c20ae964f0e9a508c2795c11e",
+    "src/layout/table/geometry_tests.rs": "49ed060201746fc3981952cd12e6ccbf0b17551b0f6cdf2a816b37ad3858cf24",
+    "src/paint/border.rs": "7b61018c04c1377076c71720f5a4d6a69756603a7762ef2f3d50e1938352dfee"
+  },
+  "summary": {
+    "cases": 20,
+    "all_repeats_stable": true,
+    "table_sizes_match": 20,
+    "exact_relative_geometry": 18,
+    "max_relative_deltas": {
+      "anonymized-table-auto-collapse": 1.409006103515651,
+      "anonymized-table-auto-separate": 1.309000000000026
+    },
+    "library_sha256": "a924b49ca64e3aece8122d3fea46ff7d106821c72ab1003c369c30ae5df59d40"
+  },
+  "before": {
+    "fixed_collapse": {
+      "firefox_table": [
+        500,
+        128
+      ],
+      "omoikane_table": [
+        500,
+        192
+      ],
+      "firefox_colspan_width": 498,
+      "omoikane_colspan_width": 520
+    },
+    "fixed_separate": {
+      "firefox_table": [
+        500,
+        156
+      ],
+      "omoikane_table": [
+        500,
+        208
+      ]
+    }
+  },
+  "coordinates": "[x relative to table, y relative to table, width, height], CSS pixels; origin_delta is Omoikane minus Firefox in absolute page coordinates",
+  "cases": [
+    {
+      "fixture": "anonymized-table-fixed-collapse.html",
+      "fixture_sha256": "9b97ea3a0284a47720ae695628f07895a707dd0d67dbba9e2946533bce8b535b",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2198,
+        "pixels": 64000,
+        "percent": 3.434375,
+        "max_channel_error": 232
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 128], "omoikane": [0, 0, 500, 128]},
+        {"key": "h1", "firefox": [1, 1, 249, 42], "omoikane": [1, 1, 249, 42]},
+        {"key": "h2", "firefox": [250, 1, 249, 42], "omoikane": [250, 1, 249, 42]},
+        {"key": "d1", "firefox": [1, 43, 249, 42], "omoikane": [1, 43, 249, 42]},
+        {"key": "d2", "firefox": [250, 43, 249, 42], "omoikane": [250, 43, 249, 42]},
+        {"key": "span", "firefox": [1, 85, 498, 42], "omoikane": [1, 85, 498, 42]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-fixed-separate.html",
+      "fixture_sha256": "ce900136e084f1bad95f3945b923f2560df3365327efa98c97bb8c1e6ae84a3a",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2198,
+        "pixels": 78000,
+        "percent": 2.817948717948718,
+        "max_channel_error": 232
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 156], "omoikane": [0, 0, 500, 156]},
+        {"key": "h1", "firefox": [4, 6, 244, 44], "omoikane": [4, 6, 244, 44]},
+        {"key": "h2", "firefox": [252, 6, 244, 44], "omoikane": [252, 6, 244, 44]},
+        {"key": "d1", "firefox": [4, 56, 244, 44], "omoikane": [4, 56, 244, 44]},
+        {"key": "d2", "firefox": [252, 56, 244, 44], "omoikane": [252, 56, 244, 44]},
+        {"key": "span", "firefox": [4, 106, 492, 44], "omoikane": [4, 106, 492, 44]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-auto-collapse.html",
+      "fixture_sha256": "cf94e2eadf0dd76997b8e78ae9fd8c28097e6cae89e820d5ff4e6bd463f01a5b",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 1.409006103515651,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2485,
+        "pixels": 64000,
+        "percent": 3.8828125,
+        "max_channel_error": 232
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 128], "omoikane": [0, 0, 500, 128]},
+        {"key": "h1", "firefox": [1, 1, 247.14999389648438, 42], "omoikane": [1, 1, 248.559, 42]},
+        {"key": "h2", "firefox": [248.14999389648438, 1, 250.85000610351562, 42], "omoikane": [249.55900000000003, 1, 249.441, 42]},
+        {"key": "d1", "firefox": [1, 43, 247.14999389648438, 42], "omoikane": [1, 43, 248.559, 42]},
+        {"key": "d2", "firefox": [248.14999389648438, 43, 250.85000610351562, 42], "omoikane": [249.55900000000003, 43, 249.441, 42]},
+        {"key": "span", "firefox": [1, 85, 498, 42], "omoikane": [1, 85, 498, 42]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-auto-separate.html",
+      "fixture_sha256": "017b680bda6d9445f81e6ef5fa86dd286e0197817555a617fa6998caac7dcb56",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 1.309000000000026,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2726,
+        "pixels": 78000,
+        "percent": 3.494871794871795,
+        "max_channel_error": 232
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 156], "omoikane": [0, 0, 500, 156]},
+        {"key": "h1", "firefox": [4, 6, 242.25, 44], "omoikane": [4, 6, 243.559, 44]},
+        {"key": "h2", "firefox": [250.25, 6, 245.75, 44], "omoikane": [251.55900000000003, 6, 244.441, 44]},
+        {"key": "d1", "firefox": [4, 56, 242.25, 44], "omoikane": [4, 56, 243.559, 44]},
+        {"key": "d2", "firefox": [250.25, 56, 245.75, 44], "omoikane": [251.55900000000003, 56, 244.441, 44]},
+        {"key": "span", "firefox": [4, 106, 492, 44], "omoikane": [4, 106, 492, 44]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-col-collapse.html",
+      "fixture_sha256": "bf97f3503b0ee61ec1aec387abaffb8128e266a4a871a4a875faf3882d06f4e5",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2484,
+        "pixels": 67000,
+        "percent": 3.707462686567164,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 134], "omoikane": [0, 0, 500, 134]},
+        {"key": "a", "firefox": [1, 1, 100, 42], "omoikane": [1, 1, 100, 42]},
+        {"key": "b", "firefox": [101, 1, 398, 42], "omoikane": [101, 1, 398, 42]},
+        {"key": "c", "firefox": [1, 43, 100, 90], "omoikane": [1, 43, 100, 90]},
+        {"key": "d", "firefox": [101, 43, 398, 90], "omoikane": [101, 43, 398, 90]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-first-row-collapse.html",
+      "fixture_sha256": "a85edc8d057502a26ba2dfa6a361cb1bbb402b6d1d929ffe7494f1cff3444814",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2484,
+        "pixels": 67000,
+        "percent": 3.707462686567164,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 134], "omoikane": [0, 0, 500, 134]},
+        {"key": "a", "firefox": [1, 1, 100, 42], "omoikane": [1, 1, 100, 42]},
+        {"key": "b", "firefox": [101, 1, 398, 42], "omoikane": [101, 1, 398, 42]},
+        {"key": "c", "firefox": [1, 43, 100, 90], "omoikane": [1, 43, 100, 90]},
+        {"key": "d", "firefox": [101, 43, 398, 90], "omoikane": [101, 43, 398, 90]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-equal-collapse.html",
+      "fixture_sha256": "8bb6741ae0bd49ecbcb9c78d167aaf67c2e93057552af646639e7ffd6993e0c5",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2347,
+        "pixels": 43000,
+        "percent": 5.4581395348837205,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 86], "omoikane": [0, 0, 500, 86]},
+        {"key": "a", "firefox": [1, 1, 249, 42], "omoikane": [1, 1, 249, 42]},
+        {"key": "b", "firefox": [250, 1, 249, 42], "omoikane": [250, 1, 249, 42]},
+        {"key": "c", "firefox": [1, 43, 249, 42], "omoikane": [1, 43, 249, 42]},
+        {"key": "d", "firefox": [250, 43, 249, 42], "omoikane": [250, 43, 249, 42]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-rowspan-collapse.html",
+      "fixture_sha256": "197728cc77f12790d36e9510095bf9f95c6ae6f39baaeae4a5229b1f3a69e302",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 1272,
+        "pixels": 71000,
+        "percent": 1.791549295774648,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 142], "omoikane": [0, 0, 500, 142]},
+        {"key": "a", "firefox": [1, 1, 249, 140], "omoikane": [1, 1, 249, 140]},
+        {"key": "b", "firefox": [250, 1, 249, 70], "omoikane": [250, 1, 249, 70]},
+        {"key": "c", "firefox": [250, 71, 249, 70], "omoikane": [250, 71, 249, 70]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-colspan-hint-collapse.html",
+      "fixture_sha256": "59a8f91246772dc4272985caf0966ef417f924deb4537fd5410f6ae51f1d8ba8",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 1022,
+        "pixels": 43000,
+        "percent": 2.3767441860465115,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 86], "omoikane": [0, 0, 500, 86]},
+        {"key": "a", "firefox": [1, 1, 200, 42], "omoikane": [1, 1, 200, 42]},
+        {"key": "b", "firefox": [201, 1, 298, 42], "omoikane": [201, 1, 298, 42]},
+        {"key": "c", "firefox": [1, 43, 100, 42], "omoikane": [1, 43, 100, 42]},
+        {"key": "d", "firefox": [101, 43, 100, 42], "omoikane": [101, 43, 100, 42]},
+        {"key": "e", "firefox": [201, 43, 298, 42], "omoikane": [201, 43, 298, 42]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-min-height-collapse.html",
+      "fixture_sha256": "264a00b44dbd9ab9922cbffbff4063bc7280ed6cff875e97485ee9365fe447dc",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 867,
+        "pixels": 22000,
+        "percent": 3.940909090909091,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 44], "omoikane": [0, 0, 500, 44]},
+        {"key": "a", "firefox": [1, 1, 249, 42], "omoikane": [1, 1, 249, 42]},
+        {"key": "b", "firefox": [250, 1, 249, 42], "omoikane": [250, 1, 249, 42]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-decorated-rowspan-collapse.html",
+      "fixture_sha256": "ceabe58e80c23af7701be09330ee54cd5709bd6259f88927503575c06fa73b12",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 1752,
+        "pixels": 92000,
+        "percent": 1.9043478260869566,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 184], "omoikane": [0, 0, 500, 184]},
+        {"key": "a", "firefox": [1, 1, 249, 42], "omoikane": [1, 1, 249, 42]},
+        {"key": "b", "firefox": [250, 1, 249, 42], "omoikane": [250, 1, 249, 42]},
+        {"key": "c", "firefox": [1, 43, 249, 140], "omoikane": [1, 43, 249, 140]},
+        {"key": "d", "firefox": [250, 43, 249, 70], "omoikane": [250, 43, 249, 70]},
+        {"key": "e", "firefox": [250, 113, 249, 70], "omoikane": [250, 113, 249, 70]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-col-separate.html",
+      "fixture_sha256": "f9e1c3d6b5965ae85a535002845969f16f17f3e8de678bc59275788843bed1aa",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2485,
+        "pixels": 77000,
+        "percent": 3.227272727272727,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 154], "omoikane": [0, 0, 500, 154]},
+        {"key": "a", "firefox": [4, 6, 100, 44], "omoikane": [4, 6, 100, 44]},
+        {"key": "b", "firefox": [108, 6, 388, 44], "omoikane": [108, 6, 388, 44]},
+        {"key": "c", "firefox": [4, 56, 100, 92], "omoikane": [4, 56, 100, 92]},
+        {"key": "d", "firefox": [108, 56, 388, 92], "omoikane": [108, 56, 388, 92]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-first-row-separate.html",
+      "fixture_sha256": "8a31a153c8916f910c1d0ebd031c650a99d8ea84c9ffa0d4cc6aee978930dcbe",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2485,
+        "pixels": 77000,
+        "percent": 3.227272727272727,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 154], "omoikane": [0, 0, 500, 154]},
+        {"key": "a", "firefox": [4, 6, 100, 44], "omoikane": [4, 6, 100, 44]},
+        {"key": "b", "firefox": [108, 6, 388, 44], "omoikane": [108, 6, 388, 44]},
+        {"key": "c", "firefox": [4, 56, 100, 92], "omoikane": [4, 56, 100, 92]},
+        {"key": "d", "firefox": [108, 56, 388, 92], "omoikane": [108, 56, 388, 92]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-equal-separate.html",
+      "fixture_sha256": "5df4c0989fd930dcd672e326b89a3df66786f874ab151d3d09bf8d7ea3e968f7",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2347,
+        "pixels": 53000,
+        "percent": 4.428301886792453,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 106], "omoikane": [0, 0, 500, 106]},
+        {"key": "a", "firefox": [4, 6, 244, 44], "omoikane": [4, 6, 244, 44]},
+        {"key": "b", "firefox": [252, 6, 244, 44], "omoikane": [252, 6, 244, 44]},
+        {"key": "c", "firefox": [4, 56, 244, 44], "omoikane": [4, 56, 244, 44]},
+        {"key": "d", "firefox": [252, 56, 244, 44], "omoikane": [252, 56, 244, 44]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-rowspan-separate.html",
+      "fixture_sha256": "1dfd572ee80c8e82d6511626a6d77e32673333f0c9ae28f6fd5bef9c5ca7ba3d",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 1225,
+        "pixels": 76000,
+        "percent": 1.611842105263158,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 152], "omoikane": [0, 0, 500, 152]},
+        {"key": "a", "firefox": [4, 6, 244, 140], "omoikane": [4, 6, 244, 140]},
+        {"key": "b", "firefox": [252, 6, 244, 67], "omoikane": [252, 6, 244, 67]},
+        {"key": "c", "firefox": [252, 79, 244, 67], "omoikane": [252, 79, 244, 67]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-colspan-hint-separate.html",
+      "fixture_sha256": "241010cf2978b87bdeb7173072c8a0d5480795b97b52fec3e9d31d2364fb6642",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 1022,
+        "pixels": 53000,
+        "percent": 1.9283018867924528,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 106], "omoikane": [0, 0, 500, 106]},
+        {"key": "a", "firefox": [4, 6, 200, 44], "omoikane": [4, 6, 200, 44]},
+        {"key": "b", "firefox": [208, 6, 288, 44], "omoikane": [208, 6, 288, 44]},
+        {"key": "c", "firefox": [4, 56, 98, 44], "omoikane": [4, 56, 98, 44]},
+        {"key": "d", "firefox": [106, 56, 98, 44], "omoikane": [106, 56, 98, 44]},
+        {"key": "e", "firefox": [208, 56, 288, 44], "omoikane": [208, 56, 288, 44]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-min-height-separate.html",
+      "fixture_sha256": "65c21e78ff0f5c77bdf019841e873f16e8fc23131ea4624fb9e4020696fddcbf",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 867,
+        "pixels": 28000,
+        "percent": 3.0964285714285715,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 56], "omoikane": [0, 0, 500, 56]},
+        {"key": "a", "firefox": [4, 6, 244, 44], "omoikane": [4, 6, 244, 44]},
+        {"key": "b", "firefox": [252, 6, 244, 44], "omoikane": [252, 6, 244, 44]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-decorated-rowspan-separate.html",
+      "fixture_sha256": "bf3982d85a1e4135bcb1a7a6dabcd2c281fbdf73f60178014bc79225b35e9c08",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 1752,
+        "pixels": 101000,
+        "percent": 1.7346534653465346,
+        "max_channel_error": 255
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 202], "omoikane": [0, 0, 500, 202]},
+        {"key": "a", "firefox": [4, 6, 244, 44], "omoikane": [4, 6, 244, 44]},
+        {"key": "b", "firefox": [252, 6, 244, 44], "omoikane": [252, 6, 244, 44]},
+        {"key": "c", "firefox": [4, 56, 244, 140], "omoikane": [4, 56, 244, 140]},
+        {"key": "d", "firefox": [252, 56, 244, 67], "omoikane": [252, 56, 244, 67]},
+        {"key": "e", "firefox": [252, 129, 244, 67], "omoikane": [252, 129, 244, 67]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-border-paint.html",
+      "fixture_sha256": "6f12d76c54b1b543bca6b6cb1339b94724f6cf4d36d507fb2ceb84bb906c3a2f",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 0,
+        "pixels": 43000,
+        "percent": 0.0,
+        "max_channel_error": 0
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 86], "omoikane": [0, 0, 500, 86]},
+        {"key": "a", "firefox": [1, 1, 249, 42], "omoikane": [1, 1, 249, 42]},
+        {"key": "b", "firefox": [250, 1, 249, 42], "omoikane": [250, 1, 249, 42]},
+        {"key": "c", "firefox": [1, 43, 249, 42], "omoikane": [1, 43, 249, 42]},
+        {"key": "d", "firefox": [250, 43, 249, 42], "omoikane": [250, 43, 249, 42]}
+      ]
+    },
+    {
+      "fixture": "anonymized-table-mixed-case.html",
+      "fixture_sha256": "4f226dba268b878cd98f572460fb69e84da8f1d50ee5c83a969661be2746ad10",
+      "origin_delta": [
+        0,
+        -24
+      ],
+      "table_size_match": true,
+      "max_relative_delta": 0,
+      "repeat_stable": true,
+      "aligned_image_difference": {
+        "changed_pixels": 2198,
+        "pixels": 64000,
+        "percent": 3.434375,
+        "max_channel_error": 232
+      },
+      "rectangles": [
+        {"key": "table", "firefox": [0, 0, 500, 128], "omoikane": [0, 0, 500, 128]},
+        {"key": "h1", "firefox": [1, 1, 249, 42], "omoikane": [1, 1, 249, 42]},
+        {"key": "h2", "firefox": [250, 1, 249, 42], "omoikane": [250, 1, 249, 42]},
+        {"key": "d1", "firefox": [1, 43, 249, 42], "omoikane": [1, 43, 249, 42]},
+        {"key": "d2", "firefox": [250, 43, 249, 42], "omoikane": [250, 43, 249, 42]},
+        {"key": "span", "firefox": [1, 85, 498, 42], "omoikane": [1, 85, 498, 42]}
+      ]
+    }
+  ]
+}

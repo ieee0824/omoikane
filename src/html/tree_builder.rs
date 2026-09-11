@@ -16,6 +16,8 @@ pub enum InsertionMode {
     InHead,
     InBody,
     InTable,
+    /// Collecting column definitions in an explicit or implicit `colgroup`.
+    InColumnGroup,
     InTableBody,
     InRow,
     InCell,
@@ -173,6 +175,7 @@ impl Builder {
             InsertionMode::InHead => self.handle_in_head(token, errors),
             InsertionMode::InBody => self.handle_in_body(token, errors),
             InsertionMode::InTable => self.handle_in_table(token, errors),
+            InsertionMode::InColumnGroup => self.handle_in_column_group(token, errors),
             InsertionMode::InTableBody => self.handle_in_table_body(token, errors),
             InsertionMode::InRow => self.handle_in_row(token, errors),
             InsertionMode::InCell => self.handle_in_cell(token, errors),
@@ -441,6 +444,32 @@ impl Builder {
                 attributes,
                 self_closing,
             } => match name.as_str() {
+                "colgroup" => {
+                    self.clear_stack_to_table_context();
+                    let table = self
+                        .current_table()
+                        .unwrap_or_else(|| self.ensure_table_element());
+                    let group = self.insert_into(&table, "colgroup", &attributes);
+                    self.open_elements.push(group);
+                    self.mode = InsertionMode::InColumnGroup;
+                }
+                "col" => {
+                    self.clear_stack_to_table_context();
+                    let table = self
+                        .current_table()
+                        .unwrap_or_else(|| self.ensure_table_element());
+                    let group = self.insert_into(&table, "colgroup", &[]);
+                    self.open_elements.push(group);
+                    self.mode = InsertionMode::InColumnGroup;
+                    self.process_token(
+                        Token::StartTag {
+                            name,
+                            attributes,
+                            self_closing,
+                        },
+                        errors,
+                    );
+                }
                 "tbody" | "thead" | "tfoot" => {
                     // Explicit section: insert it under the table and switch to
                     // the "in table body" insertion mode.
@@ -511,6 +540,42 @@ impl Builder {
         }
     }
 
+    fn handle_in_column_group(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
+        match token {
+            Token::Character(data) if data.trim().is_empty() => self.insert_text(&data),
+            Token::Comment(data) => {
+                self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
+            }
+            Token::StartTag {
+                name, attributes, ..
+            } if name == "col" => {
+                self.insert_element_with_attributes("col", &attributes);
+            }
+            Token::EndTag { name } if name == "col" => {}
+            Token::EndTag { name } if name == "colgroup" => {
+                if self.current_node().tag_name().as_deref() == Some("colgroup") {
+                    self.open_elements.pop();
+                    self.mode = InsertionMode::InTable;
+                }
+            }
+            token if matches!(&token, Token::StartTag { name, .. } if name == "html") => {
+                self.handle_in_body(token, errors);
+            }
+            token if matches!(&token, Token::StartTag { name, .. } | Token::EndTag { name } if name == "template") => {
+                self.handle_in_table(token, errors)
+            }
+            Token::Doctype(_) => {}
+            Token::Eof => self.handle_in_body(Token::Eof, errors),
+            other => {
+                if self.current_node().tag_name().as_deref() == Some("colgroup") {
+                    self.open_elements.pop();
+                    self.mode = InsertionMode::InTable;
+                    self.process_token(other, errors);
+                }
+            }
+        }
+    }
+
     /// The HTML "in table body" insertion mode: the current node is a
     /// `<tbody>` / `<thead>` / `<tfoot>` section and we are placing rows.
     fn handle_in_table_body(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
@@ -567,9 +632,7 @@ impl Builder {
                     errors,
                 ),
             },
-            Token::EndTag { name }
-                if matches!(name.as_str(), "tbody" | "tfoot" | "thead") =>
-            {
+            Token::EndTag { name } if matches!(name.as_str(), "tbody" | "tfoot" | "thead") => {
                 self.clear_stack_to_table_body_context();
                 // Per the HTML "in table body" insertion mode, act on the end
                 // tag only when an element with the same tag name is in table
@@ -876,15 +939,16 @@ impl Builder {
         self_closing: bool,
     ) {
         if let Some(table) = self.current_table()
-            && let Some(parent) = table.parent_node() {
-                let element = self.insert_into(&parent, name, attributes);
-                let _ = parent.remove_child(&element);
-                let _ = parent.insert_before(element.clone(), &table);
-                if !self_closing && !is_void_element(name) {
-                    self.open_elements.push(element);
-                }
-                return;
+            && let Some(parent) = table.parent_node()
+        {
+            let element = self.insert_into(&parent, name, attributes);
+            let _ = parent.remove_child(&element);
+            let _ = parent.insert_before(element.clone(), &table);
+            if !self_closing && !is_void_element(name) {
+                self.open_elements.push(element);
             }
+            return;
+        }
 
         let element = self.insert_element_with_attributes(name, attributes);
         if !self_closing && !is_void_element(name) {
@@ -958,6 +1022,7 @@ impl Builder {
                 Some("td" | "th") => Some(InsertionMode::InCell),
                 Some("tr") => Some(InsertionMode::InRow),
                 Some("tbody" | "thead" | "tfoot") => Some(InsertionMode::InTableBody),
+                Some("colgroup") => Some(InsertionMode::InColumnGroup),
                 Some("table") => Some(InsertionMode::InTable),
                 Some("body") => Some(InsertionMode::InBody),
                 Some("head") => Some(InsertionMode::InHead),
@@ -976,6 +1041,7 @@ impl Builder {
                 Some("td" | "th") => return InsertionMode::InCell,
                 Some("tr") => return InsertionMode::InRow,
                 Some("tbody" | "thead" | "tfoot") => return InsertionMode::InTableBody,
+                Some("colgroup") => return InsertionMode::InColumnGroup,
                 Some("table") => return InsertionMode::InTable,
                 _ => continue,
             }
@@ -1048,6 +1114,37 @@ fn should_close_p_before_start_tag(tag_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn table_columns_stay_in_explicit_or_implicit_column_groups() {
+        for columns in [
+            "<colgroup><col id='a' style='width:100px'><col id='b'></colgroup>",
+            "<col id='a' style='width:100px'><col id='b'>",
+            "<colgroup> \n<!--columns--><col id='a' style='width:100px'><col id='b'>",
+        ] {
+            let document = super::TreeBuilder::parse(&format!(
+                "<table>{columns}<tr><td>Cell</td></tr></table>"
+            ))
+            .document();
+            let table = document.query_selector("table").unwrap();
+            let group = table.query_selector("colgroup").unwrap();
+            assert_eq!(group.parent_node().unwrap(), table);
+            for id in ["a", "b"] {
+                let column = document.query_selector(&format!("#{id}")).unwrap();
+                assert_eq!(column.parent_node().unwrap(), group);
+            }
+            let cell = document.query_selector("td").unwrap();
+            assert_eq!(
+                cell.parent_node()
+                    .unwrap()
+                    .parent_node()
+                    .unwrap()
+                    .parent_node()
+                    .unwrap(),
+                table
+            );
+        }
+    }
+
     use crate::dom::Node;
 
     use super::*;
@@ -1140,7 +1237,10 @@ mod tests {
             .iter()
             .filter_map(|n| n.tag_name())
             .collect();
-        assert_eq!(body_children, vec!["span".to_string(), "script".to_string()]);
+        assert_eq!(
+            body_children,
+            vec!["span".to_string(), "script".to_string()]
+        );
     }
 
     #[test]

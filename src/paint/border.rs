@@ -20,9 +20,26 @@ pub(crate) fn paint_borders(
     if !has_any_solid_border(style) {
         return;
     }
-    let border_box = offset.rect(border_box_rect(layout));
+    let mut border_box = offset.rect(border_box_rect(layout));
     let padding_box = offset.rect(padding_box_rect(layout));
-    let border = layout.dimensions.border;
+    let mut border = layout.dimensions.border;
+    let table_cell = matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("table-cell"))
+        || (style.get("display").is_none()
+            && matches!(layout.node.tag_name().as_deref(), Some("td" | "th")));
+    if table_cell
+        && matches!(style.get("border-collapse"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("collapse"))
+    {
+        // Collapsed cell boxes end at the grid line. Paint both halves of the
+        // shared border around that line, without enlarging the measured box.
+        border_box.x -= border.left;
+        border_box.y -= border.top;
+        border_box.width += border.left + border.right;
+        border_box.height += border.top + border.bottom;
+        border.top *= 2.0;
+        border.right *= 2.0;
+        border.bottom *= 2.0;
+        border.left *= 2.0;
+    }
 
     if has_border_radius(style) {
         // 角丸ありのボーダー: ボーダー領域（border_box の角丸内 かつ padding_box の角丸外）を

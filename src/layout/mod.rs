@@ -1387,6 +1387,30 @@ fn layout_element(
     subgrid: Option<grid::SubgridContext>,
     used_height: Option<UsedHeight>,
 ) -> Option<LayoutBox> {
+    layout_element_with_cell(
+        node,
+        resolver,
+        containing_block,
+        viewport,
+        positioned_ancestor,
+        subgrid,
+        used_height,
+        None,
+    )
+}
+
+// Table tracks assign the cell's border-box width, independently of its width
+// hint. Collapsed borders contribute half of the shared edge to that box.
+fn layout_element_with_cell(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    containing_block: Rect,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
+    subgrid: Option<grid::SubgridContext>,
+    used_height: Option<UsedHeight>,
+    table_cell: Option<EdgeSizes>,
+) -> Option<LayoutBox> {
     if is_non_rendered_html_element(node) {
         return None;
     }
@@ -1404,8 +1428,12 @@ fn layout_element(
         }
 
     let padding = edge_sizes(&style, "padding");
-    let border = edge_sizes(&style, "border");
-    let mut margin = edge_sizes(&style, "margin");
+    let border = table_cell.unwrap_or_else(|| edge_sizes(&style, "border"));
+    let mut margin = if table_cell.is_some() {
+        EdgeSizes::default()
+    } else {
+        edge_sizes(&style, "margin")
+    };
     let used_height = used_height.map(|height| UsedHeight {
         value: clamp_content_height(
             &style,
@@ -1418,6 +1446,10 @@ fn layout_element(
     });
 
     let mut width = compute_width(&style, containing_block.width, padding, border, &mut margin);
+    if table_cell.is_some() {
+        margin = EdgeSizes::default();
+        width = (containing_block.width - padding.horizontal() - border.horizontal()).max(0.0);
+    }
     if float_side(&style) != FloatSide::None
         && resolved_length(&style, "width", containing_block.width).is_none()
     {
