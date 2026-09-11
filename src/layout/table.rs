@@ -1,16 +1,18 @@
 //! Table layout: `display: table`, rows, cells, and column width calculation.
 
-use crate::css::{AffineTransform, ComputedStyle, StyleResolver};
+use crate::css::{AffineTransform, ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 
 use super::{
-    BoxDimensions, EdgeSizes, LayoutBox, Overflow, Rect,
-    Visibility, VerticalAlign,
-    explicit_length,
-    intrinsic_width, layout_node, normalized_min_max_lengths, overflow, resolved_length,
+    BoxDimensions, EdgeSizes, LayoutBox, Overflow, Rect, VerticalAlign, Visibility,
+    explicit_length, intrinsic_width, normalized_min_max_lengths, overflow, resolved_length,
     translate_layout_box_to_outer, translate_layout_contents, vertical_align, visibility, z_index,
 };
 
+mod columns;
+
+#[cfg(test)]
+mod geometry_tests;
 #[cfg(test)]
 mod offset_tests;
 
@@ -33,20 +35,50 @@ pub(super) fn layout_table_container(
     shrink_to_fit: bool,
     used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
-    let spacing = table_border_spacing(&style);
-    let collapse_spacing = spacing * 2.0;
+    let collapsed = is_collapsed(&style);
+    let (spacing, row_spacing) = table_border_spacing_hv(&style);
     let mut entries = collect_table_entries(node, resolver);
-    let column_count = table_column_count(&entries);
+    let entry_columns = table_column_count(&entries);
+    let (x, y, width, padding, border) = if collapsed {
+        let outer = collapsed_outer_border(&entries, resolver, entry_columns, border);
+        (
+            x - padding.left - border.left + outer.left,
+            y - padding.top - border.top + outer.top,
+            (width + padding.horizontal() + border.horizontal() - outer.horizontal()).max(0.0),
+            EdgeSizes::default(),
+            outer,
+        )
+    } else {
+        (x, y, width, padding, border)
+    };
+    let hints = columns::column_hints(node, resolver, width);
+    let column_count = entry_columns.max(hints.len());
     let total_spacing = spacing * (column_count as f32 + 1.0);
-    let column_widths = compute_table_column_widths(
-        &entries,
-        resolver,
-        column_count,
-        (width - total_spacing).max(0.0),
-        shrink_to_fit,
-    );
+    let column_widths = if !shrink_to_fit
+        && matches!(style.get("table-layout"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("fixed"))
+    {
+        columns::fixed_column_widths(
+            entries.first(),
+            resolver,
+            hints,
+            column_count,
+            (width - total_spacing).max(0.0),
+            spacing,
+            collapsed,
+        )
+    } else {
+        compute_table_column_widths(
+            &entries,
+            resolver,
+            column_count,
+            (width - total_spacing).max(0.0),
+            shrink_to_fit,
+            collapsed,
+        )
+    };
+    let width = width.max(column_widths.iter().sum::<f32>() + total_spacing);
     let column_offsets = column_x_offsets(&column_widths, spacing);
-    let inner_width = (width - collapse_spacing).max(0.0);
+    let inner_width = (width - spacing * 2.0).max(0.0);
 
     // === Pass 1: Layout all rows and collect rowspan info ===
     let mut row_boxes = Vec::new();
@@ -55,7 +87,7 @@ pub(super) fn layout_table_container(
     let mut row_groups: Vec<Option<NodeHandle>> = Vec::new();
     let mut occupied_columns = vec![0usize; column_count];
 
-    let mut pass1_cursor_y = y + spacing;
+    let mut pass1_cursor_y = y + row_spacing;
     for (row_index, entry) in entries.drain(..).enumerate() {
         for occupied in &mut occupied_columns {
             if *occupied > 0 {
@@ -75,11 +107,12 @@ pub(super) fn layout_table_container(
             &column_offsets,
             spacing,
             viewport,
+            collapsed,
         )?;
         row_boxes.push(row_box);
         row_heights.push(row_height);
         row_groups.push(entry.row_group);
-        pass1_cursor_y += row_height + spacing;
+        pass1_cursor_y += row_height + row_spacing;
 
         for cell_info in rowspan_cells {
             all_rowspan_cells.push((row_index, cell_info));
@@ -90,7 +123,7 @@ pub(super) fn layout_table_container(
     for (start_row, cell_info) in &all_rowspan_cells {
         let end_row = (*start_row + cell_info.rowspan).min(row_heights.len());
         let spanned_height: f32 = row_heights[*start_row..end_row].iter().sum();
-        let spanned_spacing = (end_row - *start_row).saturating_sub(1) as f32 * spacing;
+        let spanned_spacing = (end_row - *start_row).saturating_sub(1) as f32 * row_spacing;
         let total_spanned = spanned_height + spanned_spacing;
         if cell_info.cell_height > total_spanned {
             let deficit = cell_info.cell_height - total_spanned;
@@ -102,7 +135,7 @@ pub(super) fn layout_table_container(
     }
 
     // === Pass 3: Adjust row positions and cell heights after redistribution ===
-    let mut cursor_y = y + spacing;
+    let mut cursor_y = y + row_spacing;
     let mut children = Vec::new();
     let mut pending_group: Option<(NodeHandle, Vec<LayoutBox>, f32, f32)> = None;
 
@@ -112,63 +145,31 @@ pub(super) fn layout_table_container(
         if dy.abs() > 0.01 {
             let row_x = row_box.dimensions.content.x;
             translate_layout_box_to_outer(&mut row_box, row_x, cursor_y);
-            // Re-translate children to new row y
-            for child in &mut row_box.children {
-                let cx = child.dimensions.content.x;
-                translate_layout_box_to_outer(child, cx, cursor_y);
-            }
         }
-        // Stretch row and cells to final height
-        let height_increase = final_height - row_box.dimensions.content.height;
-        if height_increase > 0.01 {
-            row_box.dimensions.content.height = final_height;
-        }
+        // Assign final content heights once, after the row tracks are settled.
+        // Vertical alignment depends on the used contents, even when an explicit
+        // cell height already equals the final height.
+        row_box.dimensions.content.height = final_height;
         for child in &mut row_box.children {
-            let rs = html_table_span_attribute(&child.node, "rowspan").unwrap_or(1);
-            let cell_style = resolver.computed_style(&child.node);
-            let valign = vertical_align(&cell_style);
-            if rs <= 1 {
-                // Non-rowspan cells stretch to match the row height
-                if height_increase > 0.01 {
-                    // Reset contents to top first so used_content_height is accurate
-                    reset_content_to_top(child);
-                    let content_used_height = used_content_height(child);
-                    child.dimensions.content.height += height_increase;
-                    // Re-apply vertical-align offset for middle/bottom
-                    let extra = (child.dimensions.content.height - content_used_height).max(0.0);
-                    let offset = match valign {
-                        VerticalAlign::Bottom => extra,
-                        VerticalAlign::Middle => extra / 2.0,
-                        _ => 0.0,
-                    };
-                    if offset > 0.01 {
-                        translate_layout_contents(child, 0.0, offset);
-                    }
-                }
-            } else {
-                // Rowspan cells stretch to span all their rows
-                let end = (row_index + rs).min(row_heights.len());
-                let spanned: f32 = row_heights[row_index..end].iter().sum();
-                let spanned_spacing = (end - row_index).saturating_sub(1) as f32 * spacing;
-                let old_height = child.dimensions.content.height;
-                child.dimensions.content.height = spanned + spanned_spacing;
-                let new_height = child.dimensions.content.height;
-                if (new_height - old_height).abs() > 0.01 {
-                    reset_content_to_top(child);
-                    let content_used_height = used_content_height(child);
-                    let extra = (new_height - content_used_height).max(0.0);
-                    let offset = match valign {
-                        VerticalAlign::Bottom => extra,
-                        VerticalAlign::Middle => extra / 2.0,
-                        _ => 0.0,
-                    };
-                    if offset > 0.01 {
-                        translate_layout_contents(child, 0.0, offset);
-                    }
-                }
+            let span = html_table_span_attribute(&child.node, "rowspan").unwrap_or(1);
+            let end = row_index.saturating_add(span).min(row_heights.len());
+            let height = row_heights[row_index..end].iter().sum::<f32>()
+                + (end - row_index - 1) as f32 * row_spacing;
+            let used = used_content_height(child);
+            child.dimensions.content.height =
+                (height - child.dimensions.padding.vertical() - child.dimensions.border.vertical())
+                    .max(0.0);
+            let extra = (child.dimensions.content.height - used).max(0.0);
+            let offset = match vertical_align(&resolver.computed_style(&child.node)) {
+                VerticalAlign::Bottom => extra,
+                VerticalAlign::Middle => extra / 2.0,
+                _ => 0.0,
+            };
+            if offset != 0.0 {
+                translate_layout_contents(child, 0.0, offset);
             }
         }
-        cursor_y += final_height + spacing;
+        cursor_y += final_height + row_spacing;
 
         if let Some(group_node) = row_groups[row_index].clone() {
             match &mut pending_group {
@@ -185,11 +186,16 @@ pub(super) fn layout_table_container(
                     );
                     children.push(group_box);
                     *current_group = group_node.clone();
-                    *group_start_y = cursor_y - final_height - spacing;
+                    *group_start_y = cursor_y - final_height - row_spacing;
                     rows.push(row_box);
                 }
                 None => {
-                    pending_group = Some((group_node, vec![row_box], inner_width, cursor_y - final_height - spacing));
+                    pending_group = Some((
+                        group_node,
+                        vec![row_box],
+                        inner_width,
+                        cursor_y - final_height - row_spacing,
+                    ));
                 }
             }
         } else {
@@ -211,7 +217,7 @@ pub(super) fn layout_table_container(
     let auto_height = if super::has_block_size_containment(&style) {
         0.0
     } else {
-        (cursor_y - y).max(spacing)
+        (cursor_y - y).max(row_spacing)
     };
     let mut content_height = used_height
         .map(|height| height.value)
@@ -263,6 +269,73 @@ pub(super) enum TableDisplay {
     Cell,
 }
 
+fn is_collapsed(style: &ComputedStyle) -> bool {
+    matches!(style.get("border-collapse"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("collapse"))
+}
+
+fn half_border(border: EdgeSizes) -> EdgeSizes {
+    EdgeSizes {
+        top: border.top / 2.0,
+        right: border.right / 2.0,
+        bottom: border.bottom / 2.0,
+        left: border.left / 2.0,
+    }
+}
+
+fn cell_border(style: &ComputedStyle, collapsed: bool) -> EdgeSizes {
+    let border = super::edge_sizes(style, "border");
+    if collapsed {
+        half_border(border)
+    } else {
+        border
+    }
+}
+
+fn collapsed_outer_border(
+    entries: &[TableRowEntry],
+    resolver: &mut StyleResolver,
+    count: usize,
+    mut border: EdgeSizes,
+) -> EdgeSizes {
+    let mut occupied = vec![0usize; count];
+    for (row, entry) in entries.iter().enumerate() {
+        for slot in &mut occupied {
+            *slot = slot.saturating_sub(1);
+        }
+        let mut column = 0;
+        for cell in &entry.cells {
+            while column < count && occupied[column] > 0 {
+                column += 1;
+            }
+            if column == count {
+                break;
+            }
+            let span = html_table_span_attribute(cell, "colspan")
+                .unwrap_or(1)
+                .min(count - column);
+            let rows = html_table_span_attribute(cell, "rowspan").unwrap_or(1);
+            let edge = super::edge_sizes(&resolver.computed_style(cell), "border");
+            if row == 0 {
+                border.top = border.top.max(edge.top);
+            }
+            if row.saturating_add(rows) >= entries.len() {
+                border.bottom = border.bottom.max(edge.bottom);
+            }
+            if column == 0 {
+                border.left = border.left.max(edge.left);
+            }
+            if column + span == count {
+                border.right = border.right.max(edge.right);
+            }
+            for slot in &mut occupied[column..column + span] {
+                *slot = rows;
+            }
+            column += span;
+        }
+    }
+    half_border(border)
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct TableRowEntry {
     row_node: NodeHandle,
@@ -270,11 +343,17 @@ pub(super) struct TableRowEntry {
     pub(super) cells: Vec<NodeHandle>,
 }
 
-pub(super) fn collect_table_entries(node: &NodeHandle, resolver: &mut StyleResolver) -> Vec<TableRowEntry> {
+pub(super) fn collect_table_entries(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+) -> Vec<TableRowEntry> {
     let mut entries = Vec::new();
     let mut anonymous_cells = Vec::new();
 
     for child in node.layout_child_nodes() {
+        if columns::is_column(&child, &resolver.computed_style(&child)) {
+            continue;
+        }
         match table_display_for_node(&child, &resolver.computed_style(&child)) {
             Some(TableDisplay::RowGroup) => {
                 flush_anonymous_row(&mut entries, &mut anonymous_cells);
@@ -339,7 +418,12 @@ fn collect_row_cells(row: &NodeHandle, resolver: &mut StyleResolver) -> Vec<Node
         .collect()
 }
 
-pub(super) fn spanned_cell_width(column_widths: &[f32], start: usize, span: usize, spacing: f32) -> f32 {
+pub(super) fn spanned_cell_width(
+    column_widths: &[f32],
+    start: usize,
+    span: usize,
+    spacing: f32,
+) -> f32 {
     let end = (start + span).min(column_widths.len());
     let content: f32 = column_widths[start..end].iter().sum();
     let gaps = span.saturating_sub(1) as f32 * spacing;
@@ -370,6 +454,7 @@ fn layout_table_row_entry(
     column_offsets: &[f32],
     spacing: f32,
     viewport: Rect,
+    collapsed: bool,
 ) -> Option<(LayoutBox, f32, Vec<RowspanCellInfo>)> {
     let mut measured = Vec::new();
     let mut row_height = 0.0f32;
@@ -398,18 +483,31 @@ fn layout_table_row_entry(
             width: cell_width,
             height: 0.0,
         };
-        let mut layout_cell = layout_node(cell, resolver, cell_containing, viewport, None)?;
         let cell_style = resolver.computed_style(cell);
-        let cell_height =
-            explicit_length(&cell_style, "height").unwrap_or(layout_cell.total_height());
-        layout_cell.dimensions.content.width = cell_width;
-        layout_cell.dimensions.content.height = cell_height;
+        let border = cell_border(&cell_style, collapsed);
+        let mut layout_cell = super::layout_element_with_cell(
+            cell,
+            resolver,
+            cell_containing,
+            viewport,
+            None,
+            None,
+            None,
+            Some(border),
+        )?;
+        // A cell's height is a minimum; row sizing consumes its border box.
+        // Never store total_height() in content.height and count decorations twice.
+        layout_cell.dimensions.content.height = layout_cell
+            .dimensions
+            .content
+            .height
+            .max(used_content_height(&layout_cell));
         // Only non-rowspan cells contribute to the row's initial height.
         // Rowspan cells will be distributed in a second pass.
         if rowspan <= 1 {
             row_height = row_height.max(layout_cell.total_height());
         }
-        measured.push((column_cursor, span, rowspan, layout_cell, cell_style));
+        measured.push((column_cursor, layout_cell));
         if rowspan > 1 {
             for column in column_cursor..column_cursor.saturating_add(span) {
                 if let Some(occupied) = occupied_columns.get_mut(column) {
@@ -421,21 +519,8 @@ fn layout_table_row_entry(
     }
 
     let mut children = Vec::new();
-    for (column_start, _span, _rowspan, mut cell, cell_style) in measured {
+    for (column_start, mut cell) in measured {
         let outer_x = x + column_offsets[column_start];
-        let original_total_height = cell.total_height();
-        let extra_height = (row_height - original_total_height).max(0.0);
-        if extra_height > 0.0 {
-            cell.dimensions.content.height += extra_height;
-            let content_offset = match vertical_align(&cell_style) {
-                VerticalAlign::Bottom => extra_height,
-                VerticalAlign::Middle => extra_height / 2.0,
-                _ => 0.0,
-            };
-            if content_offset > 0.0 {
-                translate_layout_contents(&mut cell, 0.0, content_offset);
-            }
-        }
         let outer_y = y;
         translate_layout_box_to_outer(&mut cell, outer_x, outer_y);
         children.push(cell);
@@ -503,28 +588,6 @@ fn used_content_height(layout: &LayoutBox) -> f32 {
     (bottom - top).max(0.0)
 }
 
-/// Reset cell contents to the top of the content box (undo previous vertical offsets).
-fn reset_content_to_top(layout: &mut LayoutBox) {
-    let cell_top = layout.dimensions.content.y;
-    // Find the current topmost content position
-    let mut current_top = f32::INFINITY;
-    for child in &layout.children {
-        current_top = current_top.min(
-            child.dimensions.content.y
-                - child.dimensions.margin.top
-                - child.dimensions.border.top
-                - child.dimensions.padding.top,
-        );
-    }
-    for line in &layout.lines {
-        current_top = current_top.min(line.rect.y);
-    }
-    if current_top.is_finite() && (current_top - cell_top).abs() > 0.01 {
-        let dy = cell_top - current_top;
-        translate_layout_contents(layout, 0.0, dy);
-    }
-}
-
 pub(super) fn table_column_count(entries: &[TableRowEntry]) -> usize {
     let mut occupied_columns = Vec::<usize>::new();
     let mut max_columns = 0usize;
@@ -572,6 +635,7 @@ pub(super) fn compute_table_column_widths(
     column_count: usize,
     available_width: f32,
     shrink_to_fit: bool,
+    collapsed: bool,
 ) -> Vec<f32> {
     let mut column_min_widths = vec![0.0f32; column_count];
     let mut column_max_widths = vec![0.0f32; column_count];
@@ -603,14 +667,21 @@ pub(super) fn compute_table_column_widths(
             let end = (col + span).min(column_count);
             if span == 1 {
                 let cell_style = resolver.computed_style(cell);
+                let padding = super::edge_sizes(&cell_style, "padding");
+                let border = cell_border(&cell_style, collapsed);
                 if let Some(w) = explicit_length(&cell_style, "width") {
+                    let decorations = padding.horizontal() + border.horizontal();
+                    let w = super::border_box_adjust_length(&cell_style, w, decorations, 0.0)
+                        + decorations;
                     column_min_widths[col] = column_min_widths[col].max(w);
                     column_max_widths[col] = column_max_widths[col].max(w);
                     column_hints[col] = column_hints[col].max(w);
                     explicit_flags[col] = true;
                 } else {
-                    let max_w = intrinsic_width(cell, resolver);
-                    let min_w = super::minimum_content_width(cell, resolver);
+                    let shared =
+                        super::edge_sizes(&cell_style, "border").horizontal() - border.horizontal();
+                    let max_w = (intrinsic_width(cell, resolver) - shared).max(0.0);
+                    let min_w = (super::minimum_content_width(cell, resolver) - shared).max(0.0);
                     column_min_widths[col] = column_min_widths[col].max(min_w);
                     column_max_widths[col] = column_max_widths[col].max(max_w);
                     column_hints[col] = column_hints[col].max(max_w);
@@ -799,9 +870,10 @@ pub(super) fn is_table_container_element(node: &NodeHandle, style: &ComputedStyl
     }
     // HTML default: <table> is display: table
     if style.get("display").is_none()
-        && let Some(tag) = node.tag_name() {
-            return tag.eq_ignore_ascii_case("table");
-        }
+        && let Some(tag) = node.tag_name()
+    {
+        return tag.eq_ignore_ascii_case("table");
+    }
     false
 }
 
@@ -826,21 +898,25 @@ pub(super) fn table_display(style: &ComputedStyle) -> Option<TableDisplay> {
     }
 }
 
-pub(super) fn table_display_for_node(node: &NodeHandle, style: &ComputedStyle) -> Option<TableDisplay> {
+pub(super) fn table_display_for_node(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+) -> Option<TableDisplay> {
     if let Some(display) = table_display(style) {
         return Some(display);
     }
     // HTML default display values for table elements
     if style.get("display").is_none()
-        && let Some(tag) = node.tag_name() {
-            return match tag.to_ascii_lowercase().as_str() {
-                "table" => Some(TableDisplay::Table),
-                "thead" | "tbody" | "tfoot" => Some(TableDisplay::RowGroup),
-                "tr" => Some(TableDisplay::Row),
-                "td" | "th" => Some(TableDisplay::Cell),
-                _ => None,
-            };
-        }
+        && let Some(tag) = node.tag_name()
+    {
+        return match tag.to_ascii_lowercase().as_str() {
+            "table" => Some(TableDisplay::Table),
+            "thead" | "tbody" | "tfoot" => Some(TableDisplay::RowGroup),
+            "tr" => Some(TableDisplay::Row),
+            "td" | "th" => Some(TableDisplay::Cell),
+            _ => None,
+        };
+    }
     None
 }
 
