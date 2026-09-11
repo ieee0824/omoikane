@@ -11,9 +11,12 @@ use super::{
     translate_layout_box_to_outer, visibility, z_index,
 };
 
+mod anonymous;
+
 #[derive(Debug, Clone)]
 struct FlexItemSpec {
     node: NodeHandle,
+    text_nodes: Vec<NodeHandle>,
     base_main_size: f32,
     min_main_size: f32,
     explicit_cross_size: Option<f32>,
@@ -70,7 +73,12 @@ pub(super) fn layout_flex_container(
         FlexDirection::Row => width,
         FlexDirection::Column => definite_height.unwrap_or(0.0),
     };
+    let mut pending_text = Vec::new();
     for child in node.layout_child_nodes() {
+        if child.node_type() == NodeType::Text {
+            pending_text.push(child);
+            continue;
+        }
         if child.node_type() != NodeType::Element {
             continue;
         }
@@ -78,6 +86,14 @@ pub(super) fn layout_flex_container(
         if is_display_none(&child_style) {
             continue;
         }
+        anonymous::append(
+            &mut items,
+            &mut pending_text,
+            resolver,
+            direction,
+            align,
+            width,
+        );
         if is_out_of_flow_positioned(&child_style) {
             positioned_children.push((child, child_style));
             continue;
@@ -92,6 +108,7 @@ pub(super) fn layout_flex_container(
         };
         items.push(FlexItemSpec {
             node: child,
+            text_nodes: Vec::new(),
             base_main_size,
             min_main_size,
             explicit_cross_size: explicit_cross_size(&child_style, direction),
@@ -100,6 +117,15 @@ pub(super) fn layout_flex_container(
             align_self: align_self(&child_style),
         });
     }
+
+    anonymous::append(
+        &mut items,
+        &mut pending_text,
+        resolver,
+        direction,
+        align,
+        width,
+    );
 
     let available_main_size = match direction {
         FlexDirection::Row => width,
@@ -132,6 +158,19 @@ pub(super) fn layout_flex_container(
         let mut line_cross_size = 0.0f32;
 
         for (item, main_size) in line.items.iter().zip(resolved_main_sizes.iter()) {
+            let child_style = resolver.computed_style(&item.node);
+            let column_width = item.explicit_cross_size.unwrap_or_else(|| {
+                if direction == FlexDirection::Column
+                    && item.align_self.unwrap_or(align) != AlignItems::Stretch
+                    && resolved_length(&child_style, "width", width).is_none()
+                {
+                    (intrinsic_width(&item.node, resolver)
+                        + edge_sizes(&child_style, "margin").horizontal())
+                    .min(width)
+                } else {
+                    width
+                }
+            });
             let child_containing = match direction {
                 FlexDirection::Row => Rect {
                     x: 0.0,
@@ -142,7 +181,7 @@ pub(super) fn layout_flex_container(
                 FlexDirection::Column => Rect {
                     x: 0.0,
                     y: 0.0,
-                    width: item.explicit_cross_size.unwrap_or(width),
+                    width: column_width,
                     height: *main_size,
                 },
             };
@@ -150,7 +189,6 @@ pub(super) fn layout_flex_container(
             // A definite single-line row already knows its stretch height.
             // Apply it on the first pass so nested stretched flex containers
             // do not recursively double their layout work.
-            let child_style = resolver.computed_style(&item.node);
             let stretch_height = if direction == FlexDirection::Row
                 && wrap == FlexWrap::NoWrap
                 && stretches_height(&child_style, item.align_self.unwrap_or(align))
@@ -166,15 +204,8 @@ pub(super) fn layout_flex_container(
             } else {
                 None
             };
-            let layout_child = super::layout_element(
-                &item.node,
-                resolver,
-                child_containing,
-                viewport,
-                None,
-                None,
-                stretch_height,
-            );
+            let layout_child =
+                layout_item(item, resolver, child_containing, viewport, stretch_height);
             if let Some(layout_child) = layout_child {
                 let cross_size = match direction {
                     FlexDirection::Row => layout_child.total_height(),
@@ -213,16 +244,14 @@ pub(super) fn layout_flex_container(
                 if height != child.dimensions.content.height
                     || (definite && explicit_length(&child_style, "height").is_none())
                 {
-                    if let Some(reflowed) = super::layout_element(
-                        &item.node,
+                    if let Some(reflowed) = layout_item(
+                        item,
                         resolver,
                         Rect {
                             height: percentage_basis,
                             ..*containing
                         },
                         viewport,
-                        None,
-                        None,
                         Some(super::UsedHeight {
                             value: height,
                             definite,
@@ -288,13 +317,11 @@ pub(super) fn layout_flex_container(
                 if used_height.is_some() && child.dimensions.content.height == height {
                     continue;
                 }
-                if let Some(reflowed) = super::layout_element(
-                    &item.node,
+                if let Some(reflowed) = layout_item(
+                    item,
                     resolver,
                     *containing,
                     viewport,
-                    None,
-                    None,
                     Some(super::UsedHeight {
                         value: height,
                         definite: true,
@@ -624,6 +651,52 @@ fn grown_column_heights(
     heights
 }
 
+// Parent flex/table/shrink-to-fit sizing must count the same anonymous items
+// as layout. Otherwise nested text is squeezed into the adjacent icon's width.
+pub(super) fn intrinsic_content_width(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+) -> f32 {
+    let direction = flex_direction(style);
+    let mut content_width = 0.0f32;
+    let mut count = 0usize;
+    let mut add = |width: f32| {
+        content_width = match direction {
+            FlexDirection::Row => content_width + width,
+            FlexDirection::Column => content_width.max(width),
+        };
+        count += 1;
+    };
+    let mut pending = Vec::new();
+    for child in node.layout_child_nodes() {
+        if child.node_type() == NodeType::Text {
+            pending.push(child);
+            continue;
+        }
+        if child.node_type() != NodeType::Element {
+            continue;
+        }
+        let child_style = resolver.computed_style(&child);
+        if is_display_none(&child_style) {
+            continue;
+        }
+        if let Some(text) = anonymous::take_text(&mut pending) {
+            add(anonymous::max_width(&text, resolver));
+        }
+        if !is_out_of_flow_positioned(&child_style) {
+            add(intrinsic_width(&child, resolver));
+        }
+    }
+    if let Some(text) = anonymous::take_text(&mut pending) {
+        add(anonymous::max_width(&text, resolver));
+    }
+    if direction == FlexDirection::Row {
+        content_width += flex_main_axis_gap(style, direction) * count.saturating_sub(1) as f32;
+    }
+    content_width
+}
+
 fn auto_flex_base_main_size(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -746,4 +819,25 @@ fn align_offset(align: AlignItems, line_cross_size: f32, child_cross_size: f32) 
         AlignItems::Center => (line_cross_size - child_cross_size).max(0.0) / 2.0,
         AlignItems::FlexEnd => (line_cross_size - child_cross_size).max(0.0),
     }
+}
+
+fn layout_item(
+    item: &FlexItemSpec,
+    resolver: &mut StyleResolver,
+    containing: Rect,
+    viewport: Rect,
+    used_height: Option<super::UsedHeight>,
+) -> Option<LayoutBox> {
+    if !item.text_nodes.is_empty() {
+        return Some(anonymous::layout(item, resolver, containing, used_height));
+    }
+    super::layout_element(
+        &item.node,
+        resolver,
+        containing,
+        viewport,
+        None,
+        None,
+        used_height,
+    )
 }

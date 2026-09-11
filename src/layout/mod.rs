@@ -20,9 +20,10 @@ use rusqlite::{Connection, params};
 mod flex;
 mod grid;
 mod inline;
+mod margins;
 mod table;
 
-use flex::{flex_direction, is_flex_container, layout_flex_container};
+use flex::{is_flex_container, layout_flex_container};
 use grid::{is_grid_container, layout_grid_container};
 use inline::{
     InlineSegmentContent,
@@ -858,13 +859,15 @@ impl InlineFragment {
 
 /// Lays out a DOM subtree as block boxes inside `containing_block`.
 ///
-/// Nodes with `display: none` are omitted from the result. Non-element nodes do
-/// not currently produce layout boxes.
+/// Nodes with `display: none` are omitted from the result. Text nodes do
+/// not produce standalone layout roots; text runs inside a flex container
+/// can produce anonymous flex item boxes.
 pub fn layout_tree(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
 ) -> Option<LayoutBox> {
+    let _margin_scope = margins::Scope::new();
     let mut layout = layout_node(node, resolver, containing_block, containing_block, None)?;
     if resolver.has_container_queries() {
         for _ in 0..4 {
@@ -1309,26 +1312,6 @@ fn layout_float_child(
     }
 }
 
-/// Advances cursor_y after laying out a block child, handling margin collapse.
-fn update_cursor_after_child(
-    layout_child: &LayoutBox,
-    cursor_y: &mut f32,
-    previous_margin_bottom: &mut Option<f32>,
-    effective_collapse_delta: f32,
-    collapse_delta: f32,
-) {
-    if is_empty_for_margin_collapse(layout_child) {
-        let prev = previous_margin_bottom.unwrap_or(0.0);
-        let empty_collapsed = collapse_through_empty(layout_child);
-        let combined = collapse_margins(prev, empty_collapsed);
-        *cursor_y += combined - prev - (effective_collapse_delta - collapse_delta);
-        *previous_margin_bottom = Some(combined);
-    } else {
-        *cursor_y += layout_child.total_height() - effective_collapse_delta;
-        *previous_margin_bottom = Some(layout_child.dimensions.margin.bottom);
-    }
-}
-
 /// Computes the containing block for a child element, accounting for float offsets.
 fn child_containing_rect(
     child_style: &ComputedStyle,
@@ -1411,6 +1394,7 @@ fn layout_element_with_cell(
     used_height: Option<UsedHeight>,
     table_cell: Option<EdgeSizes>,
 ) -> Option<LayoutBox> {
+    margins::forget(node);
     if is_non_rendered_html_element(node) {
         return None;
     }
@@ -1660,14 +1644,49 @@ fn layout_element_with_cell(
     }
 
     let BlockChildrenResult {
-        mut children, lines, cursor_y, float_bottom, positioned_children,
+        mut children,
+        mut lines,
+        cursor_y,
+        float_bottom,
+        mut positioned_children,
+        margin_info,
+        child_shifts,
     } = layout_block_children(
         node, resolver, &style, padding, border, margin,
         x, y, width, containing_block.height, viewport, positioned_ancestor,
         used_height,
     );
 
-    let effective_cursor_y = cursor_y.max(float_bottom);
+    let margin_delta = margin_info.map_or(0.0, |info| {
+        let delta = info.top.value() - margin.top;
+        margin.top = info.top.value();
+        margin.bottom = info.bottom.value();
+        margins::remember(node, info);
+        delta
+    });
+    let mut shifts = child_shifts.into_iter().peekable();
+    for (index, child) in children.iter_mut().enumerate() {
+        let correction = if shifts
+            .peek()
+            .is_some_and(|(child_index, _)| *child_index == index)
+        {
+            shifts.next().unwrap().1
+        } else {
+            0.0
+        };
+        margins::shift_flow(
+            child,
+            correction + margin_delta,
+            resolver,
+            establishes_positioned_containing_block(&style),
+        );
+    }
+    margins::shift_lines(&mut lines, margin_delta);
+    for (_, _, static_position) in &mut positioned_children {
+        static_position.y += margin_delta;
+    }
+    let y = y + margin_delta;
+    let effective_cursor_y = cursor_y.max(float_bottom) + margin_delta;
     let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
         resolve_content_height(
             &style,
@@ -1732,6 +1751,8 @@ struct BlockChildrenResult {
     cursor_y: f32,
     float_bottom: f32,
     positioned_children: Vec<(NodeHandle, ComputedStyle, Rect)>,
+    margin_info: Option<margins::Info>,
+    child_shifts: Vec<(usize, f32)>,
 }
 
 /// Lays out block-level children, returning in-flow children, lines,
@@ -1769,148 +1790,21 @@ fn layout_block_children(
         );
     }
 
-    let child_height_basis = used_height
-        .and_then(UsedHeight::percentage_basis)
-        .or_else(|| {
-            resolved_length(style, "height", containing_height)
-                .map(|height| border_box_adjust_height(style, height, &padding, &border))
-        })
-        .unwrap_or(0.0);
-    let mut children = Vec::new();
-    let mut positioned_children = Vec::new();
-    let mut lines = Vec::new();
-    let mut cursor_y = y;
-    let mut previous_margin_bottom: Option<f32> = None;
-    let mut pending_inline_nodes = Vec::new();
-    let mut float_regions = Vec::new();
-
-    for child in node.layout_child_nodes() {
-        // Comments do not generate boxes and do not interrupt an inline
-        // formatting context. Keeping pending text together also preserves
-        // word-boundary behavior across framework hydration comments.
-        if child.node_type() == NodeType::Comment {
-            continue;
-        }
-        if is_inline_child(&child, resolver) {
-            pending_inline_nodes.push(child);
-            continue;
-        }
-
-        flush_pending_inline_nodes(
-            &mut pending_inline_nodes, resolver, style,
-            &float_regions, &mut cursor_y, x, width, &mut lines,
-        );
-
-        let child_style = match child.node_type() {
-            NodeType::Element => Some(resolver.computed_style(&child)),
-            _ => None,
-        };
-        let child_margin_top = child_style
-            .as_ref()
-            .map(|s| edge_sizes(s, "margin").top)
-            .unwrap_or(0.0);
-        let collapse_delta = previous_margin_bottom
-            .map(|mb| mb + child_margin_top - collapse_margins(mb, child_margin_top))
-            .unwrap_or(0.0);
-
-        if let Some(cs) = &child_style {
-            apply_clear(&mut cursor_y, cs, child_margin_top, collapse_delta, &float_regions);
-        }
-
-        if let Some(child_style) = &child_style {
-            let parent_top_collapse = previous_margin_bottom.is_none()
-                && lines.is_empty()
-                && pending_inline_nodes.is_empty()
-                && !has_containment(style, "layout")
-                && border.top == 0.0
-                && padding.top == 0.0
-                && clear_side(child_style) == ClearSide::None
-                && !is_out_of_flow_positioned(child_style)
-                && float_side(child_style) == FloatSide::None;
-            let effective_collapse_delta = if parent_top_collapse {
-                collapse_delta + child_margin_top
-            } else {
-                collapse_delta
-            };
-            let child_y = cursor_y - effective_collapse_delta;
-            let offsets = active_float_offsets(&float_regions, child_y, x, width);
-            let child_containing = child_containing_rect(
-                child_style,
-                child_y,
-                &offsets,
-                x,
-                width,
-                child_height_basis,
-            );
-
-            if is_out_of_flow_positioned(child_style) {
-                positioned_children.push((child, child_style.clone(), child_containing));
-                continue;
-            }
-
-            let side = float_side(child_style);
-            if side != FloatSide::None {
-                layout_float_child(
-                    &child, child_style, resolver, side, child_y, x, width,
-                    viewport, positioned_ancestor, &mut float_regions, &mut children,
-                );
-                continue;
-            }
-
-            let next_pos_ancestor = if establishes_positioned_containing_block(style) {
-                Some(BoxDimensions {
-                    content: Rect { x, y, width, height: 0.0 },
-                    padding, border, margin,
-                })
-            } else {
-                positioned_ancestor
-            };
-            if let Some(layout_child) = layout_node(
-                &child, resolver, child_containing, viewport, next_pos_ancestor,
-            ) {
-                update_cursor_after_child(
-                    &layout_child, &mut cursor_y, &mut previous_margin_bottom,
-                    effective_collapse_delta, collapse_delta,
-                );
-                children.push(layout_child);
-            }
-            continue;
-        }
-
-        // Non-element child (comment, etc.) — fallback path
-        let child_containing = Rect {
-            x, y: cursor_y - collapse_delta, width, height: 0.0,
-        };
-        if let Some(layout_child) = layout_node(
-            &child, resolver, child_containing, viewport, positioned_ancestor,
-        ) {
-            update_cursor_after_child(
-                &layout_child, &mut cursor_y, &mut previous_margin_bottom,
-                collapse_delta, collapse_delta,
-            );
-            children.push(layout_child);
-        }
-    }
-
-    flush_pending_inline_nodes(
-        &mut pending_inline_nodes, resolver, style,
-        &float_regions, &mut cursor_y, x, width, &mut lines,
-    );
-
-    let float_bottom = float_regions
-        .iter()
-        .map(|region| region.outer.y + region.outer.height)
-        .fold(y, f32::max);
-
-    sort_children_by_z_index(&mut children);
-
-    BlockChildrenResult {
-        children,
-        lines,
-        cursor_y,
-        float_bottom,
-        positioned_children,
-    }
+    margins::layout_children(
+        node,
+        resolver,
+        style,
+        padding,
+        border,
+        margin,
+        x,
+        y,
+        width,
+        containing_height,
+        viewport,
+        positioned_ancestor,
+        used_height,
+    )
 }
 
 /// Block formatting context for vertical writing modes.
@@ -2060,6 +1954,8 @@ fn layout_vertical_block_children(
         cursor_y: inline_bottom,
         float_bottom: inline_bottom,
         positioned_children,
+        margin_info: None,
+        child_shifts: Vec::new(),
     }
 }
 
@@ -2523,35 +2419,6 @@ fn collapse_margins(first: f32, second: f32) -> f32 {
     }
 }
 
-/// CSS 2.1 section 8.3.1: An element is "empty" for margin collapsing when it has
-/// zero height, zero vertical border/padding, no line boxes, and all
-/// children (if any) are themselves empty for margin collapsing.
-fn is_empty_for_margin_collapse(layout: &LayoutBox) -> bool {
-    layout.dimensions.content.height == 0.0
-        && layout.dimensions.padding.top == 0.0
-        && layout.dimensions.padding.bottom == 0.0
-        && layout.dimensions.border.top == 0.0
-        && layout.dimensions.border.bottom == 0.0
-        && layout.lines.is_empty()
-        && layout
-            .children
-            .iter()
-            .all(is_empty_for_margin_collapse)
-}
-
-/// Collapse all margins through an empty element and its empty descendants.
-/// Returns the single collapsed margin value that represents the entire chain.
-fn collapse_through_empty(layout: &LayoutBox) -> f32 {
-    let mut result = collapse_margins(
-        layout.dimensions.margin.top,
-        layout.dimensions.margin.bottom,
-    );
-    for child in &layout.children {
-        result = collapse_margins(result, collapse_through_empty(child));
-    }
-    result
-}
-
 // ── Positioning helpers ─────────────────────────────────────────────────────
 
 fn is_out_of_flow_positioned(style: &ComputedStyle) -> bool {
@@ -2807,23 +2674,9 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     + img_border.right;
             }
             if is_flex_container(&style) {
-                let direction = flex_direction(&style);
-                let mut content_width = 0.0f32;
-                for child in node.layout_child_nodes() {
-                    if child.node_type() != NodeType::Element {
-                        continue;
-                    }
-                    let child_style = resolver.computed_style(&child);
-                    if is_display_none(&child_style) {
-                        continue;
-                    }
-                    let child_width = intrinsic_width(&child, resolver);
-                    match direction {
-                        FlexDirection::Row => content_width += child_width,
-                        FlexDirection::Column => content_width = content_width.max(child_width),
-                    }
-                }
-                return content_width + padding.horizontal() + border.horizontal();
+                return flex::intrinsic_content_width(node, resolver, &style)
+                    + padding.horizontal()
+                    + border.horizontal();
             }
             // Content width = max of children's outer widths
             let mut content_width: f32 = 0.0;
@@ -3362,3 +3215,12 @@ mod tests;
 
 #[cfg(test)]
 mod flex_reflow_tests;
+
+#[cfg(test)]
+mod grid_stretch_tests;
+
+#[cfg(test)]
+mod flex_text_tests;
+
+#[cfg(test)]
+mod margin_collapse_tests;

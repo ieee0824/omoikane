@@ -9650,15 +9650,18 @@ fn scroll_container_inside_a_fixed_subtree_still_scrolls_its_content() {
 
 #[test]
 fn nested_scroll_containers_accumulate_offsets_when_painting() {
-    let html = "<html><head><style>\
-         body { margin: 0 } \
-         #outer { width: 30px; height: 30px; overflow: hidden } \
-         #inner { width: 20px; height: 20px; overflow: hidden; margin-top: 10px } \
-         #top { width: 20px; height: 20px; background-color: #ff0000 } \
-         #bottom { width: 20px; height: 20px; background-color: #00ff00 } \
-         </style></head><body><div id=\"outer\"><div id=\"inner\"><div id=\"top\"></div>\
-         <div id=\"bottom\"></div></div></div></body></html>";
+    // A 10px trailing spacer gives the outer box a real scroll range. Without
+    // it, Firefox clamps its scrollTop to zero (10px margin + 20px inner box
+    // exactly fill the 30px outer box).
+    let html = include_str!(
+        "../../tests/fixtures/anonymized-layout-corrections/anonymized-scroll-nested.html"
+    );
     let green = Some(Color::rgba(0, 255, 0, 255));
+
+    let unscrolled = render_with_scroll(html, 40.0, &[], (0.0, 0.0));
+    assert_eq!(unscrolled.pixel(5, 9).unwrap().a, 0);
+    assert_eq!(unscrolled.pixel(5, 10), Some(Color::rgba(255, 0, 0, 255)));
+    assert_eq!(unscrolled.pixel(5, 29), Some(Color::rgba(255, 0, 0, 255)));
 
     // The inner container starts 10px down; scrolling the outer container by 10
     // lifts it to the top, and scrolling the inner one by 20 shows its second
@@ -9672,6 +9675,47 @@ fn nested_scroll_containers_accumulate_offsets_when_painting() {
     assert_eq!(canvas.pixel(5, 0), green);
     assert_eq!(canvas.pixel(5, 19), green);
     assert_eq!(canvas.pixel(5, 25).unwrap().a, 0);
+}
+
+#[test]
+fn nested_scroll_container_without_outer_overflow_clamps_the_outer_offset() {
+    let html = include_str!(
+        "../../tests/fixtures/anonymized-layout-corrections/anonymized-scroll-clamped.html"
+    );
+    let canvas = render_with_scroll(
+        html,
+        40.0,
+        &[("#outer", 0.0, 10.0), ("#inner", 0.0, 20.0)],
+        (0.0, 0.0),
+    );
+    assert_eq!(canvas.pixel(5, 0).unwrap().a, 0);
+    assert_eq!(canvas.pixel(5, 9).unwrap().a, 0);
+    assert_eq!(canvas.pixel(5, 10), Some(Color::rgba(0, 255, 0, 255)));
+    assert_eq!(canvas.pixel(5, 29), Some(Color::rgba(0, 255, 0, 255)));
+}
+
+#[test]
+fn collapsed_intro_margin_covers_fixed_bars_without_moving_them() {
+    let html = r#"<html><head><style>
+        html,body { margin:0; padding:0 }
+        #intro { position:relative; z-index:2; margin:84px 48px;
+                 width:704px; height:80px; background:white }
+        #picture { position:relative; margin-top:1200px }
+        #bar { position:fixed; top:108px; left:132px;
+               width:48px; height:18px; background:black }
+        </style></head><body><div id="intro"></div><div id="picture"><div id="bar"></div></div></body></html>"#;
+    let covered = render_with_scroll(html, 800.0, &[], (0.0, 0.0));
+    assert_eq!(
+        covered.pixel(135, 110),
+        Some(Color::rgba(255, 255, 255, 255))
+    );
+    let exposed = render_with_scroll(
+        &html.replace("background:white", "background:transparent"),
+        800.0,
+        &[],
+        (0.0, 0.0),
+    );
+    assert_eq!(exposed.pixel(135, 110), Some(Color::rgba(0, 0, 0, 255)));
 }
 
 #[test]

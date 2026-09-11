@@ -1,0 +1,2 @@
+# Preserve the exact whitespace-only text run used by both browser captures.
+anonymized-flex-whitespace.html whitespace=-blank-at-eol

@@ -1,0 +1,352 @@
+[
+  {
+    "name": "anonymized-block",
+    "path": "anonymized-block.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "2ee5280bff1d8698f90b0ee0c4779c4069983f05c8405483262e8171c7ef2eee"
+  },
+  {
+    "name": "anonymized-flex",
+    "path": "anonymized-flex.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "c41fa2edd9ecbe68ac9e2ec5853c106c230751601d61f6132b39b7da7ab48fae"
+  },
+  {
+    "name": "anonymized-grid",
+    "path": "anonymized-grid.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "f06d22ee475c6b3ea301d0ed552291bd4cea40eab3c19c136e73ee5150e38f32"
+  },
+  {
+    "name": "anonymized-portal-1280",
+    "path": "anonymized-portal.html",
+    "width": 1280,
+    "height": 900,
+    "fixture_sha256": "99da401fabf61dfdfe709a3fba5aa1e735a90fe666c16c88cb683b139964d543"
+  },
+  {
+    "name": "anonymized-portal-800",
+    "path": "anonymized-portal.html",
+    "width": 800,
+    "height": 900,
+    "fixture_sha256": "99da401fabf61dfdfe709a3fba5aa1e735a90fe666c16c88cb683b139964d543"
+  },
+  {
+    "name": "anonymized-block-padding-control",
+    "path": "anonymized-block-padding-control.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "56412d4bdec37a314f97d5bad9422533de15812806dbee5fcfa9b14bfcafb135"
+  },
+  {
+    "name": "anonymized-flex-padding-control",
+    "path": "anonymized-flex-padding-control.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "29b7e81b415d5411c3cb6792bc8e64f676b5d6f23f40b26992141723ea711555"
+  },
+  {
+    "name": "anonymized-grid-padding-control",
+    "path": "anonymized-grid-padding-control.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "66de4938342a8251d8749d32c36357641234deb927dc9bdb6de43b4439859afa"
+  },
+  {
+    "name": "anonymized-grid-explicit-height-control",
+    "path": "anonymized-grid-explicit-height-control.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "5187d47f767d6fc1248f81260f3be201653bcf7cffd5349a1619dba618eb6f36"
+  },
+  {
+    "name": "anonymized-flex-text",
+    "path": "anonymized-flex-text.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "2f977f3d9f3b00647f825b7afe211f95a2b6f96dc1adfa3f0af6c6149cc3c720"
+  },
+  {
+    "name": "anonymized-portal-no-scrollbar-1280",
+    "path": "anonymized-portal-no-scrollbar.html",
+    "width": 1280,
+    "height": 900,
+    "fixture_sha256": "baf71331cddc2824607a35394ed6915d29893c321db913b71fc9cc8e30602193"
+  },
+  {
+    "name": "anonymized-portal-no-scrollbar-800",
+    "path": "anonymized-portal-no-scrollbar.html",
+    "width": 800,
+    "height": 900,
+    "fixture_sha256": "baf71331cddc2824607a35394ed6915d29893c321db913b71fc9cc8e30602193"
+  },
+  {
+    "name": "anonymized-margin-nested-positive",
+    "path": "anonymized-margin-nested-positive.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "845726441036b3a0c3b48d1d4ecd84e8c5ae6ed1eb4e947753e1a1043b058190"
+  },
+  {
+    "name": "anonymized-margin-nested-mixed",
+    "path": "anonymized-margin-nested-mixed.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "8c8658a4bf76ee88ba777c9bbae687d332c6ef8498f5f3670fc234723489e24c"
+  },
+  {
+    "name": "anonymized-margin-siblings-positive",
+    "path": "anonymized-margin-siblings-positive.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "e3e17817936035130d941977d7c36aa08aca1a2b35c011c1df72d6fb320f0e0b"
+  },
+  {
+    "name": "anonymized-margin-siblings-mixed",
+    "path": "anonymized-margin-siblings-mixed.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "47f3ff244e8ef2dd027ed6fc7d97a4d23c552325d724439e5131e5ccccd553fb"
+  },
+  {
+    "name": "anonymized-margin-empty-chain",
+    "path": "anonymized-margin-empty-chain.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "24459e5f18822068d2b45ece91b8acdfd23e85009a54a52914e060bfeb2db614"
+  },
+  {
+    "name": "anonymized-margin-empty-first",
+    "path": "anonymized-margin-empty-first.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "ba9a15ef5ca87b1f652acbb192a14a5ab5ca8ed9ba8470c92286e807dd51cca5"
+  },
+  {
+    "name": "anonymized-margin-bottom",
+    "path": "anonymized-margin-bottom.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "13769a0e9a680096f66fc90a3bdf657217d16ddeaf1cbd749384f90259a2c670"
+  },
+  {
+    "name": "anonymized-margin-root",
+    "path": "anonymized-margin-root.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "52b73efa7cf210df9572b88b27a2a80ad6da4a6c3ed44a382ac20027e92e0417"
+  },
+  {
+    "name": "anonymized-margin-clear",
+    "path": "anonymized-margin-clear.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "0a96884ca5cc9ed4e605aaf9e96413842ab8a9c533de0fbffbeab534aec3222e"
+  },
+  {
+    "name": "anonymized-margin-flow-root",
+    "path": "anonymized-margin-flow-root.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "3b7417f3f1b18143fd0b840acf5432681b5f50b4a7ee1113c60cea9e69c56a17"
+  },
+  {
+    "name": "anonymized-margin-overflow",
+    "path": "anonymized-margin-overflow.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "43e293238c1afb55e538faf2ae5cd861e19bbb94f27c60902312a851a102a615"
+  },
+  {
+    "name": "anonymized-margin-border",
+    "path": "anonymized-margin-border.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "f07994473bf5371f6a2923784d7f27e0343f2dcf83c13fbc6d89f357520dc629"
+  },
+  {
+    "name": "anonymized-margin-padding",
+    "path": "anonymized-margin-padding.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "39300ab3362f1770153e03443e04f0343c417ad4755fefab98bfe21b2e65d588"
+  },
+  {
+    "name": "anonymized-margin-float",
+    "path": "anonymized-margin-float.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "956f1028a14c0f14b2e44ca35396fa0425c992d7f961e91b1758acb466f88f2e"
+  },
+  {
+    "name": "anonymized-margin-absolute",
+    "path": "anonymized-margin-absolute.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "8f8f8bad68713d497079bbf744784bec61716daaf9440f31a4405943de0b18c9"
+  },
+  {
+    "name": "anonymized-grid-content",
+    "path": "anonymized-grid-content.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "9226fd28483697832935f54701e4c62d72f0e5ebf316e02503929f8bdbb3d783"
+  },
+  {
+    "name": "anonymized-grid-explicit",
+    "path": "anonymized-grid-explicit.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "034e687b8b36c4489c2e30b374af058ae34fe36de481d633941f6bb891c5ff06"
+  },
+  {
+    "name": "anonymized-grid-start",
+    "path": "anonymized-grid-start.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "390787bf2242237d35d0335e1baf7f03e82ad158f1e11ae9a84a5727a7d9fc1c"
+  },
+  {
+    "name": "anonymized-grid-padding",
+    "path": "anonymized-grid-padding.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "581c7d076b9cc0dde82b1aeb0f88c9fdd123f8576d1aebe0331dcd9f60d6dfff"
+  },
+  {
+    "name": "anonymized-grid-minimum",
+    "path": "anonymized-grid-minimum.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "aa9d9fb73719ef2761b34ad1b1c39934beb790c96f0dd5aa58194e94dd516eea"
+  },
+  {
+    "name": "anonymized-grid-maximum",
+    "path": "anonymized-grid-maximum.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "842a880f12f0ba07d0139ff70fd2e98331d8ce2495beb9c834f511cbbe1fe176"
+  },
+  {
+    "name": "anonymized-grid-min-over-max",
+    "path": "anonymized-grid-min-over-max.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "41f57c3586d617e9d3c02abbf544d9187789ba0d900704595f4d134838a3f6f4"
+  },
+  {
+    "name": "anonymized-grid-percentage",
+    "path": "anonymized-grid-percentage.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "de1d5962f0a21d2c12cf5295ef16dedc2e948cd461ca14bfb5fc5164a261bb6e"
+  },
+  {
+    "name": "anonymized-grid-subgrid",
+    "path": "anonymized-grid-subgrid.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "0a4cbe9ed244e366c17e3b6868359a5dbcc330186b319d220113dc35224c9d8c"
+  },
+  {
+    "name": "anonymized-flex-text-wrap",
+    "path": "anonymized-flex-text-wrap.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "3aee809a0eb1c7865c718f2e57214c144f12790fa1f4b334fc2d8a1da9c20521"
+  },
+  {
+    "name": "anonymized-flex-text-wrap-items",
+    "path": "anonymized-flex-text-wrap-items.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "c2da639139ae5b4fe84df4c5f0288d3a2b7c69f9e31ed066fa5bcd6cce57e411"
+  },
+  {
+    "name": "anonymized-flex-text-column",
+    "path": "anonymized-flex-text-column.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "9bf163369bfa0fecf3ef5d16d70894d2b032107a8712a4e8099830f13e87fe46"
+  },
+  {
+    "name": "anonymized-flex-text-column-center",
+    "path": "anonymized-flex-text-column-center.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "7ef5bc94f61e5939397ce4da4ee01cb3cba1e9a94fffbbcf2318ddc0f765c8db"
+  },
+  {
+    "name": "anonymized-flex-text-adjacent",
+    "path": "anonymized-flex-text-adjacent.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "4fb4ed78a05697cd91cfb203af102f70f921e2f2de96261c3a4e82685bebce6a"
+  },
+  {
+    "name": "anonymized-flex-whitespace",
+    "path": "anonymized-flex-whitespace.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "6691d59024086022336b1a663d802e184acb8f9d39a5d7982c38cfa210b63ee8"
+  },
+  {
+    "name": "anonymized-margin-positioned",
+    "path": "anonymized-margin-positioned.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "e921795abe1399ec5d584f146458a40e3ee495755cef7682d3700e501a78325a"
+  },
+  {
+    "name": "anonymized-margin-flex-item",
+    "path": "anonymized-margin-flex-item.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "4b9bc642a9a9d31cb0464d1fb54eaff2a3e3e276db37e154a7deb0cd8a4643a3"
+  },
+  {
+    "name": "anonymized-margin-grid-item",
+    "path": "anonymized-margin-grid-item.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "cc0e013f51481310e4e3191a168edeff0bc889342021d18c8bdb64fba5d637da"
+  },
+  {
+    "name": "anonymized-margin-nested-negative",
+    "path": "anonymized-margin-nested-negative.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "1f0784c9c264049cf4391150980a1b4968f217af96dbd297bac304b62ce74342"
+  },
+  {
+    "name": "anonymized-margin-siblings-negative",
+    "path": "anonymized-margin-siblings-negative.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "158fa04c7148bf3b1a3185c3a6f30fa832b2ff2bb2a2f03559a854d67b6aa960"
+  },
+  {
+    "name": "anonymized-margin-overflow-clip",
+    "path": "anonymized-margin-overflow-clip.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "2b5ce612b4f5a947c08240b480930b16a74c6131ee0d1ad01f51eebd1b44902b"
+  },
+  {
+    "name": "anonymized-margin-empty-min-height",
+    "path": "anonymized-margin-empty-min-height.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "eebfb129956528ef03939ea1332fb05fe5ea35a7aaf9ed03d298d831179b1463"
+  },
+  {
+    "name": "anonymized-margin-empty-border",
+    "path": "anonymized-margin-empty-border.html",
+    "width": 800,
+    "height": 600,
+    "fixture_sha256": "edd0557adea091790685775a4786b6e25334e244a66e7c2c4d99b45a00f97552"
+  }
+]
