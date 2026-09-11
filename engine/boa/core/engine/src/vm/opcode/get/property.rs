@@ -1,5 +1,5 @@
 use crate::{
-    Context, JsObject, JsResult,
+    Context, JsObject, JsResult, js_str,
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::PropertyKey,
     value::PrimitiveLookup,
@@ -30,6 +30,24 @@ enum LookupTarget {
     Resolved(crate::JsValue),
 }
 
+// Keep primitive-only name classification outside the object inline-cache
+// dispatch. The common string length needs neither a PropertyKey nor a wrapper.
+#[inline(never)]
+fn primitive_named_lookup_target(
+    value: &crate::JsValue,
+    index: usize,
+    context: &mut Context,
+) -> JsResult<LookupTarget> {
+    let name = &context.vm.frame().code_block().ic[index].name;
+    if *name == js_str!("length")
+        && let Some(string) = value.as_string()
+    {
+        return Ok(LookupTarget::Resolved(string.len().into()));
+    }
+    let key: PropertyKey = name.clone().into();
+    primitive_lookup_target(value, &key, context)
+}
+
 /// `GetPropertyByName` implements the Opcode Operation for `Opcode::GetPropertyByName`
 ///
 /// Operation:
@@ -48,7 +66,6 @@ impl GetPropertyByName {
         ),
         context: &mut Context,
     ) -> JsResult<()> {
-        let receiver = context.vm.get_register(receiver.into()).clone();
         let value = context.vm.get_register(value.into()).clone();
         // The object case is deliberately first and self-contained: building the
         // `PropertyKey` is only needed to answer a primitive, and the inline
@@ -56,11 +73,7 @@ impl GetPropertyByName {
         let object = if let Some(object) = value.as_object() {
             object.clone()
         } else {
-            let key: PropertyKey = context.vm.frame().code_block().ic[usize::from(index)]
-                .name
-                .clone()
-                .into();
-            match primitive_lookup_target(&value, &key, context)? {
+            match primitive_named_lookup_target(&value, usize::from(index), context)? {
                 LookupTarget::Resolved(value) => {
                     context.vm.set_register(dst.into(), value);
                     return Ok(());
@@ -69,6 +82,7 @@ impl GetPropertyByName {
             }
         };
 
+        let receiver = context.vm.get_register(receiver.into()).clone();
         let ic = &context.vm.frame().code_block().ic[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape_edge();
