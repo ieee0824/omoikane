@@ -494,6 +494,11 @@ pub enum InlineFragmentContent {
     Text(String),
     /// The border area of a non-replaced inline element on one line.
     InlineBox(ComputedStyle),
+    /// Placement marker for an atomic inline-level box stored in the owning
+    /// [`LayoutBox`]'s `children`. The child owns its formatting context; this
+    /// marker preserves its position in the parent line. Its value is the
+    /// baseline offset from the atomic box's margin-box top.
+    AtomicInline(f32),
     Image(Image, ComputedStyle),
     GeneratedBox(ComputedStyle),
     FormControl(ComputedStyle, String, Option<TextControlPaintState>),
@@ -1187,14 +1192,21 @@ fn flush_pending_inline_nodes(
     cursor_y: &mut f32,
     x: f32,
     width: f32,
+    containing_height: f32,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
     lines: &mut Vec<LineBox>,
+    children: &mut Vec<LayoutBox>,
 ) {
     if pending.is_empty() || all_whitespace_only(pending) {
         pending.clear();
         return;
     }
     let offsets = active_float_offsets(float_regions, *cursor_y, x, width);
-    let inline_lines = layout_inline_nodes(
+    let inline::InlineLayoutResult {
+        lines: inline_lines,
+        atomic_boxes,
+    } = layout_inline_nodes(
         pending,
         resolver,
         x + offsets.left,
@@ -1203,11 +1215,16 @@ fn flush_pending_inline_nodes(
         text_align(style),
         line_height(style),
         direction_is_rtl(style),
+        containing_height,
+        viewport,
+        positioned_ancestor,
+        true,
     );
     if let Some(last_line) = inline_lines.last() {
         *cursor_y = last_line.rect.y + last_line.rect.height;
     }
     lines.extend(inline_lines);
+    children.extend(atomic_boxes);
     pending.clear();
 }
 
@@ -1463,7 +1480,12 @@ fn layout_element_with_cell(
             text_align(&style),
             0.0,
             direction_is_rtl(&style),
-        );
+            containing_block.height,
+            viewport,
+            positioned_ancestor,
+            false,
+        )
+        .lines;
         if !lines.iter().any(|line| {
             line.fragments
                 .iter()
@@ -1554,7 +1576,12 @@ fn layout_element_with_cell(
             inline::TextAlign::Left,
             0.0,
             direction_is_rtl(&style),
-        );
+            containing_block.height,
+            viewport,
+            positioned_ancestor,
+            false,
+        )
+        .lines;
         if let Some(fragment) = lines.first().and_then(|line| line.fragments.first()) {
             let intrinsic_height =
                 (fragment.rect.height - padding.top - padding.bottom - border.top - border.bottom)
@@ -1865,10 +1892,13 @@ fn layout_vertical_block_children(
             y,
             width,
             available_inline_height,
+            viewport,
+            positioned_ancestor,
             &mut cursor_x,
             vertical_rl,
             &mut lines,
             &mut inline_bottom,
+            &mut children,
         );
 
         let child_style = match child.node_type() {
@@ -1940,10 +1970,13 @@ fn layout_vertical_block_children(
         y,
         width,
         available_inline_height,
+        viewport,
+        positioned_ancestor,
         &mut cursor_x,
         vertical_rl,
         &mut lines,
         &mut inline_bottom,
+        &mut children,
     );
     sort_children_by_z_index(&mut children);
 
@@ -1970,10 +2003,13 @@ fn flush_pending_vertical_inline_nodes(
     y: f32,
     width: f32,
     height: f32,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
     cursor_x: &mut f32,
     vertical_rl: bool,
     lines: &mut Vec<LineBox>,
     inline_bottom: &mut f32,
+    children: &mut Vec<LayoutBox>,
 ) {
     if pending.is_empty() || all_whitespace_only(pending) {
         pending.clear();
@@ -1985,7 +2021,10 @@ fn flush_pending_vertical_inline_nodes(
     } else {
         (*cursor_x, (x + width - *cursor_x).max(0.0))
     };
-    let inline_lines = layout_vertical_inline_nodes(
+    let inline::InlineLayoutResult {
+        lines: inline_lines,
+        atomic_boxes,
+    } = layout_vertical_inline_nodes(
         pending,
         resolver,
         region_x,
@@ -1996,6 +2035,9 @@ fn flush_pending_vertical_inline_nodes(
         line_height(style),
         vertical_rl,
         direction_is_rtl(style),
+        width,
+        viewport,
+        positioned_ancestor,
     );
     if let Some(last_line) = inline_lines
         .iter()
@@ -2014,6 +2056,7 @@ fn flush_pending_vertical_inline_nodes(
         *cursor_x = (*cursor_x + used_width).min(x + width);
     }
     lines.extend(inline_lines);
+    children.extend(atomic_boxes);
     pending.clear();
 }
 
@@ -2730,6 +2773,7 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                                 padding.right + border.right
                             }
                         }
+                        InlineSegmentContent::AtomicInline(width, _, _) => width,
                         InlineSegmentContent::Image(_, style, rendered_width, _) => {
                             let padding = edge_sizes(&style, "padding");
                             let border = edge_sizes(&style, "border");

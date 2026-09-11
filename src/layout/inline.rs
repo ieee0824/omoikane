@@ -16,8 +16,8 @@ use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
-    FontMetrics, FragmentStyle, InlineFragment, InlineFragmentContent,
-    LineBox, Rect, TextControlPaintState, VerticalAlign,
+    BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, InlineFragmentContent,
+    LayoutBox, LineBox, Rect, TextControlPaintState, VerticalAlign,
     border_box_adjust_length, edge_sizes, explicit_length, is_border_box, is_display_none,
     is_non_rendered_html_element,
     HTTP_CLIENT, IMAGE_ANIMATION_CACHE, IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE,
@@ -67,6 +67,20 @@ pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
 
 // ── Inline layout entry point ───────────────────────────────────────────────
 
+pub(super) struct InlineLayoutResult {
+    pub(super) lines: Vec<LineBox>,
+    pub(super) atomic_boxes: Vec<LayoutBox>,
+}
+
+#[derive(Clone, Copy)]
+struct InlineLayoutContext {
+    available_width: f32,
+    containing_height: f32,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
+    allow_atomic_boxes: bool,
+}
+
 pub(super) fn layout_inline_nodes(
     nodes: &[NodeHandle],
     resolver: &mut StyleResolver,
@@ -76,10 +90,22 @@ pub(super) fn layout_inline_nodes(
     align: TextAlign,
     strut_line_height: f32,
     direction_rtl: bool,
-) -> Vec<LineBox> {
+    containing_height: f32,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
+    allow_atomic_boxes: bool,
+) -> InlineLayoutResult {
+    let context = InlineLayoutContext {
+        available_width,
+        containing_height,
+        viewport,
+        positioned_ancestor,
+        allow_atomic_boxes,
+    };
     let mut segments = Vec::new();
+    let mut atomic_boxes = Vec::new();
     for node in nodes {
-        collect_inline_segments(node, resolver, &mut segments);
+        collect_inline_segments(node, resolver, &mut segments, context, &mut atomic_boxes);
     }
     coalesce_adjacent_text_segments(&mut segments);
 
@@ -93,7 +119,8 @@ pub(super) fn layout_inline_nodes(
         direction_rtl,
     );
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
-    lines
+    position_atomic_boxes(&lines, &mut atomic_boxes);
+    InlineLayoutResult { lines, atomic_boxes }
 }
 
 /// Lays out an inline formatting context whose inline axis is vertical.
@@ -117,10 +144,21 @@ pub(super) fn layout_vertical_inline_nodes(
     strut_line_height: f32,
     vertical_rl: bool,
     direction_rtl: bool,
-) -> Vec<LineBox> {
+    containing_width: f32,
+    viewport: Rect,
+    positioned_ancestor: Option<BoxDimensions>,
+) -> InlineLayoutResult {
+    let context = InlineLayoutContext {
+        available_width: containing_width,
+        containing_height: available_height,
+        viewport,
+        positioned_ancestor,
+        allow_atomic_boxes: true,
+    };
     let mut segments = Vec::new();
+    let mut atomic_boxes = Vec::new();
     for node in nodes {
-        collect_inline_segments(node, resolver, &mut segments);
+        collect_inline_segments(node, resolver, &mut segments, context, &mut atomic_boxes);
     }
     coalesce_adjacent_text_segments(&mut segments);
 
@@ -138,7 +176,7 @@ pub(super) fn layout_vertical_inline_nodes(
     );
 
     boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
-    horizontal_lines
+    let lines = horizontal_lines
         .into_iter()
         .map(|line| {
             // Horizontal line stacking (local y) becomes vertical block-axis
@@ -185,7 +223,44 @@ pub(super) fn layout_vertical_inline_nodes(
                 fragments,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    position_atomic_boxes(&lines, &mut atomic_boxes);
+    InlineLayoutResult { lines, atomic_boxes }
+}
+
+fn position_atomic_boxes(lines: &[LineBox], atomic_boxes: &mut [LayoutBox]) {
+    for fragment in lines.iter().flat_map(|line| &line.fragments) {
+        if matches!(fragment.content, InlineFragmentContent::AtomicInline(_))
+            && let Some(layout) = atomic_boxes
+                .iter_mut()
+                .find(|layout| layout.node == fragment.node)
+        {
+            super::translate_layout_box_to_outer(layout, fragment.rect.x, fragment.rect.y);
+        }
+    }
+}
+
+fn atomic_inline_baseline(layout: &LayoutBox) -> f32 {
+    fn last_line_baseline(layout: &LayoutBox) -> Option<f32> {
+        layout
+            .lines
+            .iter()
+            .map(|line| line.baseline)
+            .chain(layout.children.iter().filter_map(last_line_baseline))
+            .max_by(f32::total_cmp)
+    }
+
+    let fallback = layout.total_height();
+    if layout.overflow != super::Overflow::Visible {
+        return fallback;
+    }
+    let outer_y = layout.dimensions.content.y
+        - layout.dimensions.padding.top
+        - layout.dimensions.border.top
+        - layout.dimensions.margin.top;
+    last_line_baseline(layout)
+        .map(|baseline| (baseline - outer_y).clamp(0.0, fallback))
+        .unwrap_or(fallback)
 }
 
 /// Adjacent text nodes with identical formatting form one continuous inline
@@ -277,6 +352,7 @@ pub(super) struct InlineSegment {
 pub(super) enum InlineSegmentContent {
     Text(String),
     InlineEdge(ComputedStyle, bool),
+    AtomicInline(f32, f32, f32),
     Image(Image, ComputedStyle, f32, f32),
     GeneratedBox(ComputedStyle),
     FormControl(ComputedStyle, String, Option<TextControlPaintState>, f32, f32),
@@ -314,6 +390,8 @@ fn collect_inline_segments(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     out: &mut Vec<InlineSegment>,
+    context: InlineLayoutContext,
+    atomic_boxes: &mut Vec<LayoutBox>,
 ) {
     match node.node_type() {
         NodeType::Text => {
@@ -326,7 +404,7 @@ fn collect_inline_segments(
             }
         }
         NodeType::Element => {
-            collect_element_inline_segments(node, resolver, out);
+            collect_element_inline_segments(node, resolver, out, context, atomic_boxes);
         }
         _ => {}
     }
@@ -336,6 +414,8 @@ fn collect_element_inline_segments(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     out: &mut Vec<InlineSegment>,
+    context: InlineLayoutContext,
+    atomic_boxes: &mut Vec<LayoutBox>,
 ) {
     if is_non_rendered_html_element(node) {
         return;
@@ -398,6 +478,57 @@ fn collect_element_inline_segments(
             return;
         }
 
+    if context.allow_atomic_boxes
+        && matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("inline-block"))
+    {
+        let available_width = context.available_width.max(0.0);
+        let containing_width = if super::resolved_length(&style, "width", available_width).is_some() {
+            available_width
+        } else {
+            super::shrink_to_fit_layout_width(node, resolver, available_width)
+        };
+        let containing = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: containing_width,
+            height: context.containing_height,
+        };
+        if let Some(mut layout) = super::layout_element(
+            node,
+            resolver,
+            containing,
+            context.viewport,
+            context.positioned_ancestor,
+            None,
+            None,
+        ) {
+            if super::margin_start_is_auto(&style) {
+                let auto_margin = layout.dimensions.margin.left;
+                layout.dimensions.margin.left = 0.0;
+                super::translate_layout_box(&mut layout, -auto_margin, 0.0);
+            }
+            if super::margin_end_is_auto(&style) {
+                layout.dimensions.margin.right = 0.0;
+            }
+            let width = layout.total_width();
+            let height = layout.total_height();
+            let baseline = atomic_inline_baseline(&layout);
+            atomic_boxes.push(layout);
+            out.push(InlineSegment {
+                node: node.clone(),
+                content: InlineSegmentContent::AtomicInline(width, height, baseline),
+                metrics: font_metrics(&style),
+                line_height: height,
+                vertical_align: vertical_align(&style),
+                style: FragmentStyle::from_computed(&style),
+                word_break: word_break(&style),
+                overflow_wrap: overflow_wrap(&style),
+                white_space_mode: white_space(&style),
+            });
+        }
+        return;
+    }
+
     let inline_box = super::is_inline_child(node, resolver);
     if inline_box {
         boxes::edge(node, &style, true, out);
@@ -411,7 +542,7 @@ fn collect_element_inline_segments(
                 }
             }
             NodeType::Element => {
-                collect_inline_segments(&child, resolver, out);
+                collect_inline_segments(&child, resolver, out, context, atomic_boxes);
             }
             _ => {}
         }
@@ -1937,6 +2068,11 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
                 height: 0.0,
             }]
         }
+        InlineSegmentContent::AtomicInline(width, height, baseline) => vec![InlinePiece::Fragment {
+            content: InlineFragmentContent::AtomicInline(*baseline),
+            width: *width,
+            height: *height,
+        }],
         InlineSegmentContent::Image(image, style, rendered_width, rendered_height) => {
             let padding = edge_sizes(style, "padding");
             let border = edge_sizes(style, "border");
@@ -2276,49 +2412,35 @@ fn push_line(
 
     resolve_line_bidi_geometry(fragments, x + offset_x, direction_rtl);
 
+    let has_atomic_inline = fragments
+        .iter()
+        .any(|fragment| matches!(fragment.content, InlineFragmentContent::AtomicInline(_)));
+    let fragment_ascent = |fragment: &InlineFragment| match &fragment.content {
+        InlineFragmentContent::AtomicInline(baseline) => *baseline,
+        InlineFragmentContent::Image(_, _) | InlineFragmentContent::FormControl(_, _, _)
+            if fragment.rect.height >= height =>
+        {
+            fragment.rect.height
+        }
+        _ => fragment.metrics.ascent,
+    };
     let baseline = fragments
         .iter()
         .filter_map(|fragment| match fragment.vertical_align {
-            VerticalAlign::Baseline | VerticalAlign::Length(_) => Some(
-                if matches!(
-                    &fragment.content,
-                    InlineFragmentContent::Image(_, _)
-                        | InlineFragmentContent::FormControl(_, _, _)
-                ) && fragment.rect.height >= height {
-                    fragment.rect.height
-                } else {
-                    fragment.metrics.ascent
-                },
-            ),
+            VerticalAlign::Baseline | VerticalAlign::Length(_) => Some(fragment_ascent(fragment)),
             _ => None,
         })
         .fold(0.0f32, f32::max)
-        .max(height * 0.8);
+        .max(if has_atomic_inline { 0.0 } else { height * 0.8 });
 
     for fragment in fragments.iter_mut() {
         fragment.rect.y = match fragment.vertical_align {
             VerticalAlign::Baseline => {
-                let ascent = if matches!(
-                    &fragment.content,
-                    InlineFragmentContent::Image(_, _)
-                        | InlineFragmentContent::FormControl(_, _, _)
-                ) && fragment.rect.height >= height {
-                    fragment.rect.height
-                } else {
-                    fragment.metrics.ascent
-                };
+                let ascent = fragment_ascent(fragment);
                 y + baseline - ascent
             },
             VerticalAlign::Length(shift) => {
-                let ascent = if matches!(
-                    &fragment.content,
-                    InlineFragmentContent::Image(_, _)
-                        | InlineFragmentContent::FormControl(_, _, _)
-                ) && fragment.rect.height >= height {
-                    fragment.rect.height
-                } else {
-                    fragment.metrics.ascent
-                };
+                let ascent = fragment_ascent(fragment);
                 y + baseline - ascent - shift
             },
             VerticalAlign::Top => y,

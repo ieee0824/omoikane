@@ -1802,6 +1802,9 @@ fn hit_test_box(
     }
     for line in layout.lines.iter().rev() {
         for fragment in line.fragments.iter().rev() {
+            if matches!(fragment.content, InlineFragmentContent::AtomicInline(_)) {
+                continue;
+            }
             if rect_contains_point(fragment.rect, local_point.0, local_point.1) {
                 if fragment.node.identity() != layout.node.identity()
                     && fragment.node.tag_name().as_deref() == Some("svg")
@@ -2986,6 +2989,14 @@ fn paint_box_internal_to(
     let mut auto_positioned_children = Vec::new();
     let mut positive_positioned_children = Vec::new();
     for child in &layout.children {
+        if layout.lines.iter().any(|line| {
+            line.fragments.iter().any(|fragment| {
+                matches!(fragment.content, InlineFragmentContent::AtomicInline(_))
+                    && fragment.node == child.node
+            })
+        }) {
+            continue;
+        }
         let child_style = resolver.computed_style(&child.node);
         if is_positioned_for_paint(&child_style) {
             if include_phase_descendants {
@@ -3044,7 +3055,7 @@ fn paint_box_internal_to(
         );
     }
     text::paint_text_with_registry(
-        canvas, layout, style, clip, viewport, text_fonts, web_fonts, offset,
+        canvas, layout, resolver, style, clip, viewport, text_fonts, web_fonts, offset,
     );
     text::paint_list_marker(canvas, layout, style, clip, text_fonts, offset);
     for child in inline_children {

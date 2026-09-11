@@ -1543,17 +1543,7 @@ fn google_style_form_controls_create_visible_replaced_fragments() {
         Rect { x: 0.0, y: 0.0, width: 1000.0, height: 0.0 },
     )
     .unwrap();
-    let fragments: Vec<_> = layout.children[0]
-        .lines
-        .iter()
-        .flat_map(|line| &line.fragments)
-        .filter_map(|fragment| match &fragment.content {
-            InlineFragmentContent::FormControl(_, value, _) => {
-                Some((fragment.rect, value.clone()))
-            }
-            _ => None,
-        })
-        .collect();
+    let fragments = form_control_fragments(&layout.children[0]);
 
     assert_eq!(fragments.len(), 2, "hidden input must not create a fragment");
     assert!(fragments[0].0.width > 400.0, "size=57 search input should be wide");
@@ -1565,7 +1555,7 @@ fn google_style_form_controls_create_visible_replaced_fragments() {
 /// Collects `(rect, value)` for every `FormControl` fragment in `container`'s
 /// line boxes. Used by the `<button>`/`<textarea>`/`<select>` layout tests.
 fn form_control_fragments(container: &LayoutBox) -> Vec<(Rect, String)> {
-    container
+    let mut fragments: Vec<_> = container
         .lines
         .iter()
         .flat_map(|line| &line.fragments)
@@ -1573,7 +1563,11 @@ fn form_control_fragments(container: &LayoutBox) -> Vec<(Rect, String)> {
             InlineFragmentContent::FormControl(_, value, _) => Some((fragment.rect, value.clone())),
             _ => None,
         })
-        .collect()
+        .collect();
+    for child in &container.children {
+        fragments.extend(form_control_fragments(child));
+    }
+    fragments
 }
 
 fn layout_single_control_container(body: &NodeHandle) -> LayoutBox {
@@ -7856,11 +7850,24 @@ fn flush_pending_inline_nodes_clears_whitespace_only() {
     let style = ComputedStyle::default();
     let mut cursor_y = 0.0;
     let mut lines = Vec::new();
+    let mut children = Vec::new();
     flush_pending_inline_nodes(
-        &mut pending, &mut resolver, &style, &[], &mut cursor_y, 0.0, 200.0, &mut lines,
+        &mut pending,
+        &mut resolver,
+        &style,
+        &[],
+        &mut cursor_y,
+        0.0,
+        200.0,
+        0.0,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        None,
+        &mut lines,
+        &mut children,
     );
     assert!(pending.is_empty());
     assert!(lines.is_empty());
+    assert!(children.is_empty());
     assert_eq!(cursor_y, 0.0);
 }
 
