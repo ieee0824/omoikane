@@ -22,7 +22,7 @@ mod grid;
 mod inline;
 mod table;
 
-use flex::{flex_direction, is_flex_container, layout_flex_container};
+use flex::{is_flex_container, layout_flex_container};
 use grid::{is_grid_container, layout_grid_container};
 use inline::{
     InlineSegmentContent,
@@ -858,8 +858,9 @@ impl InlineFragment {
 
 /// Lays out a DOM subtree as block boxes inside `containing_block`.
 ///
-/// Nodes with `display: none` are omitted from the result. Non-element nodes do
-/// not currently produce layout boxes.
+/// Nodes with `display: none` are omitted from the result. Text nodes do
+/// not produce standalone layout roots; text runs inside a flex container
+/// can produce anonymous flex item boxes.
 pub fn layout_tree(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -2807,23 +2808,9 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
                     + img_border.right;
             }
             if is_flex_container(&style) {
-                let direction = flex_direction(&style);
-                let mut content_width = 0.0f32;
-                for child in node.layout_child_nodes() {
-                    if child.node_type() != NodeType::Element {
-                        continue;
-                    }
-                    let child_style = resolver.computed_style(&child);
-                    if is_display_none(&child_style) {
-                        continue;
-                    }
-                    let child_width = intrinsic_width(&child, resolver);
-                    match direction {
-                        FlexDirection::Row => content_width += child_width,
-                        FlexDirection::Column => content_width = content_width.max(child_width),
-                    }
-                }
-                return content_width + padding.horizontal() + border.horizontal();
+                return flex::intrinsic_content_width(node, resolver, &style)
+                    + padding.horizontal()
+                    + border.horizontal();
             }
             // Content width = max of children's outer widths
             let mut content_width: f32 = 0.0;
@@ -3365,3 +3352,6 @@ mod flex_reflow_tests;
 
 #[cfg(test)]
 mod grid_stretch_tests;
+
+#[cfg(test)]
+mod flex_text_tests;
