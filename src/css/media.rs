@@ -74,9 +74,7 @@ pub fn parse_media_query_list(prelude: &str) -> Option<Vec<MediaQuery>> {
 
 fn parse_single_media_query(input: &str) -> Option<MediaQuery> {
     let input = input.trim();
-    let (negated, rest) = if input.len() >= 3
-        && input[..3].eq_ignore_ascii_case("not")
-    {
+    let (negated, rest) = if input.len() >= 3 && input[..3].eq_ignore_ascii_case("not") {
         let after = &input[3..];
         let next = after.chars().next();
         if next.is_none() || next == Some(' ') || next == Some('\t') || next == Some('(') {
@@ -286,20 +284,36 @@ fn parse_range_media_feature(inner: &str) -> Option<MediaCondition> {
         return match (left.as_str(), right.as_str(), operator) {
             ("width", value, ">=") => parse_length_to_px(value).map(MediaCondition::MinWidth),
             ("width", value, "<=") => parse_length_to_px(value).map(MediaCondition::MaxWidth),
-            ("width", value, ">") => parse_length_to_px(value).map(MediaCondition::MinWidthExclusive),
-            ("width", value, "<") => parse_length_to_px(value).map(MediaCondition::MaxWidthExclusive),
+            ("width", value, ">") => {
+                parse_length_to_px(value).map(MediaCondition::MinWidthExclusive)
+            }
+            ("width", value, "<") => {
+                parse_length_to_px(value).map(MediaCondition::MaxWidthExclusive)
+            }
             ("height", value, ">=") => parse_length_to_px(value).map(MediaCondition::MinHeight),
             ("height", value, "<=") => parse_length_to_px(value).map(MediaCondition::MaxHeight),
-            ("height", value, ">") => parse_length_to_px(value).map(MediaCondition::MinHeightExclusive),
-            ("height", value, "<") => parse_length_to_px(value).map(MediaCondition::MaxHeightExclusive),
+            ("height", value, ">") => {
+                parse_length_to_px(value).map(MediaCondition::MinHeightExclusive)
+            }
+            ("height", value, "<") => {
+                parse_length_to_px(value).map(MediaCondition::MaxHeightExclusive)
+            }
             (value, "width", "<=") => parse_length_to_px(value).map(MediaCondition::MinWidth),
             (value, "width", ">=") => parse_length_to_px(value).map(MediaCondition::MaxWidth),
-            (value, "width", "<") => parse_length_to_px(value).map(MediaCondition::MinWidthExclusive),
-            (value, "width", ">") => parse_length_to_px(value).map(MediaCondition::MaxWidthExclusive),
+            (value, "width", "<") => {
+                parse_length_to_px(value).map(MediaCondition::MinWidthExclusive)
+            }
+            (value, "width", ">") => {
+                parse_length_to_px(value).map(MediaCondition::MaxWidthExclusive)
+            }
             (value, "height", "<=") => parse_length_to_px(value).map(MediaCondition::MinHeight),
             (value, "height", ">=") => parse_length_to_px(value).map(MediaCondition::MaxHeight),
-            (value, "height", "<") => parse_length_to_px(value).map(MediaCondition::MinHeightExclusive),
-            (value, "height", ">") => parse_length_to_px(value).map(MediaCondition::MaxHeightExclusive),
+            (value, "height", "<") => {
+                parse_length_to_px(value).map(MediaCondition::MinHeightExclusive)
+            }
+            (value, "height", ">") => {
+                parse_length_to_px(value).map(MediaCondition::MaxHeightExclusive)
+            }
             _ => None,
         };
     }

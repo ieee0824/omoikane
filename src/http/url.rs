@@ -129,9 +129,7 @@ impl std::str::FromStr for Url {
 
         // Split authority from path+query.
         // Authority ends at the first '/' or '?' (handles "http://host?q=1").
-        let authority_end = rest
-            .find(['/', '?'])
-            .unwrap_or(rest.len());
+        let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
         let authority = &rest[..authority_end];
         let path_and_query = if authority_end < rest.len() {
             let remainder = &rest[authority_end..];

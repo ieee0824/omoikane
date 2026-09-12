@@ -133,7 +133,13 @@ impl StorageManager {
         state
             .caches
             .get(origin)
-            .map(|storage| storage.caches.iter().map(|cache| cache.name.clone()).collect())
+            .map(|storage| {
+                storage
+                    .caches
+                    .iter()
+                    .map(|cache| cache.name.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -197,16 +203,15 @@ impl StorageManager {
         let id = state.next_cache_entry_id;
         let storage = state.caches.get_mut(origin)?;
         let cache = storage.caches.iter_mut().find(|cache| cache.name == name)?;
-        cache.entries.push(CacheEntrySnapshot { id, request, response });
+        cache.entries.push(CacheEntrySnapshot {
+            id,
+            request,
+            response,
+        });
         Some(id)
     }
 
-    pub(crate) fn cache_delete_entry(
-        &self,
-        origin: &StorageOrigin,
-        name: &str,
-        id: u64,
-    ) -> bool {
+    pub(crate) fn cache_delete_entry(&self, origin: &StorageOrigin, name: &str, id: u64) -> bool {
         let mut state = self.0.lock().expect("storage manager mutex poisoned");
         let Some(storage) = state.caches.get_mut(origin) else {
             return false;
@@ -410,7 +415,10 @@ mod tests {
             .unwrap();
         assert_eq!(first_id, replacement_id);
         assert_eq!(manager.cache_entries(&first, "v1").unwrap().len(), 1);
-        assert_eq!(manager.cache_entries(&first, "v1").unwrap()[0].response, r#"{"status":201}"#);
+        assert_eq!(
+            manager.cache_entries(&first, "v1").unwrap()[0].response,
+            r#"{"status":201}"#
+        );
 
         let malformed_id = manager
             .cache_put(&first, "v1", "not-json".to_string(), "{}".to_string())

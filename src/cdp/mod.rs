@@ -801,7 +801,9 @@ impl CdpSession {
         Ok(session)
     }
 
-    fn runtime_timeout(&self) -> Duration { self.runtime.sandbox_timeout() }
+    fn runtime_timeout(&self) -> Duration {
+        self.runtime.sandbox_timeout()
+    }
 
     /// Dispatches a CDP domain method and returns the result payload.
     pub fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, JsonRpcError> {
@@ -974,9 +976,7 @@ impl CdpSession {
         self.prepare_page_navigation_request(&url, commit)
     }
 
-    pub(crate) fn prepare_page_reload(
-        &mut self,
-    ) -> Result<PreparedPageNavigation, JsonRpcError> {
+    pub(crate) fn prepare_page_reload(&mut self) -> Result<PreparedPageNavigation, JsonRpcError> {
         let url = self.current_url.clone();
         self.prepare_page_navigation_request(&url, NavigationCommit::Reload)
     }
@@ -1026,11 +1026,7 @@ impl CdpSession {
         })
     }
 
-    fn navigate_to(
-        &mut self,
-        url: &str,
-        commit: NavigationCommit,
-    ) -> Result<Value, JsonRpcError> {
+    fn navigate_to(&mut self, url: &str, commit: NavigationCommit) -> Result<Value, JsonRpcError> {
         self.navigate_with_request(url, commit, Method::Get, None, None)
     }
 
@@ -1045,7 +1041,8 @@ impl CdpSession {
         let loader_id = self.next_loader_id.to_string();
         self.next_loader_id += 1;
 
-        if method == Method::Get && commit != NavigationCommit::Reload
+        if method == Method::Get
+            && commit != NavigationCommit::Reload
             && is_fragment_only_navigation(&self.current_url, url)
         {
             let previous_url = self.current_url.clone();
@@ -1082,8 +1079,7 @@ impl CdpSession {
                 message,
             })?;
 
-        let (next_history_length, next_history_state) =
-            self.prospective_history_state(commit);
+        let (next_history_length, next_history_state) = self.prospective_history_state(commit);
         self.install_document_with_csp(
             &document_url,
             &html,
@@ -1091,10 +1087,10 @@ impl CdpSession {
             &next_history_state,
             &csp_headers,
         )
-            .map_err(|message| JsonRpcError {
-                code: -32000,
-                message,
-            })?;
+        .map_err(|message| JsonRpcError {
+            code: -32000,
+            message,
+        })?;
 
         self.commit_history_url(&document_url, commit, None);
         self.sync_history_length()?;
@@ -1239,9 +1235,7 @@ impl CdpSession {
                     }
                     let url = self.history_entries[target].url.clone();
                     let previous_url = self.current_url.clone();
-                    if let Err(error) =
-                        self.navigate_to(&url, NavigationCommit::Traverse(target))
-                    {
+                    if let Err(error) = self.navigate_to(&url, NavigationCommit::Traverse(target)) {
                         self.restore_active_location(&previous_url);
                         return Err(error);
                     }
@@ -1852,12 +1846,14 @@ impl CdpSession {
             self.validate_remote_object(object_id)?;
         }
         let this_value = match params.get("objectId").and_then(Value::as_str) {
-            Some(object_id) => self.runtime.remote_object(object_id).ok_or_else(|| {
-                JsonRpcError {
-                    code: -32000,
-                    message: format!("Cannot find remote object: {object_id}"),
-                }
-            })?,
+            Some(object_id) => {
+                self.runtime
+                    .remote_object(object_id)
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32000,
+                        message: format!("Cannot find remote object: {object_id}"),
+                    })?
+            }
             None => JsValue::undefined(),
         };
 
@@ -2017,7 +2013,11 @@ impl CdpSession {
         let target_node_id = self.ensure_node_id(&target_node);
         let button = mouse_button(params.get("button").and_then(Value::as_str))?;
         let modifiers = params.get("modifiers").and_then(Value::as_u64).unwrap_or(0);
-        let default_buttons = if dom_type == "mousedown" { button_mask(button) } else { 0 };
+        let default_buttons = if dom_type == "mousedown" {
+            button_mask(button)
+        } else {
+            0
+        };
         let buttons = params
             .get("buttons")
             .and_then(Value::as_u64)
@@ -2185,7 +2185,11 @@ impl CdpSession {
         // Evaluate the requested source directly. Calling JavaScript `eval()`
         // from an async outer script would use Boa's synchronous nested-eval
         // path and reject a native-call suspension.
-        let value = self.runtime.eval_async(expression).await.map_err(js_error)?;
+        let value = self
+            .runtime
+            .eval_async(expression)
+            .await
+            .map_err(js_error)?;
         self.runtime.run_until_idle().map_err(js_error)?;
         let result = self.serialize_evaluation_value(value, return_by_value)?;
         self.drive_navigation_requests()?;
@@ -2720,9 +2724,7 @@ fn nearest_ax_ancestor_path<'a>(
     None
 }
 
-type SessionEvaluation = Pin<
-    Box<dyn Future<Output = (CdpSession, Result<Value, JsonRpcError>)>>,
->;
+type SessionEvaluation = Pin<Box<dyn Future<Output = (CdpSession, Result<Value, JsonRpcError>)>>>;
 
 struct PendingSessionEvaluation {
     token: DeferredResponseToken,
@@ -2762,9 +2764,7 @@ fn deadline_after(timeout: Duration) -> Instant {
     now.checked_add(timeout).unwrap_or(now)
 }
 
-fn page_task_script_error_lines(
-    result: &Result<Vec<String>, PageTaskError>,
-) -> Vec<String> {
+fn page_task_script_error_lines(result: &Result<Vec<String>, PageTaskError>) -> Vec<String> {
     result
         .as_ref()
         .map(|errors| {
@@ -2807,10 +2807,9 @@ impl BrowserSessionState {
         token: DeferredResponseToken,
         params: &Value,
     ) -> Result<CdpMethodResult, JsonRpcError> {
-        if let Some(message) = pending_evaluation_busy_message(
-            self.pending.is_some(),
-            self.pending_page.is_some(),
-        ) {
+        if let Some(message) =
+            pending_evaluation_busy_message(self.pending.is_some(), self.pending_page.is_some())
+        {
             return Err(JsonRpcError {
                 code: -32000,
                 message: message.to_string(),
@@ -2836,9 +2835,8 @@ impl BrowserSessionState {
         let evaluation_cancelled = Rc::clone(&cancelled);
         let future = Box::pin(async move {
             let result = {
-                let mut evaluation = Box::pin(
-                    session.evaluate_expression_async(&expression, return_by_value),
-                );
+                let mut evaluation =
+                    Box::pin(session.evaluate_expression_async(&expression, return_by_value));
                 std::future::poll_fn(|context| {
                     if evaluation_cancelled.get() {
                         return Poll::Ready(Err(JsonRpcError {
@@ -3096,7 +3094,6 @@ impl BrowserSessionState {
         pending.cancelled.set(true);
         self.poll_evaluation();
     }
-
 }
 
 /// CDP transport and page-session coordinator with deferred modal-dialog support.
@@ -3125,7 +3122,9 @@ impl BrowserSession {
 
         let evaluation_state = Rc::clone(&state);
         server.register_deferred_method("Runtime.evaluate", move |token, params| {
-            evaluation_state.borrow_mut().begin_evaluation(token, params)
+            evaluation_state
+                .borrow_mut()
+                .begin_evaluation(token, params)
         });
         let dialog_state = Rc::clone(&state);
         server.register_method("Page.handleJavaScriptDialog", move |params| {
@@ -3195,8 +3194,7 @@ impl BrowserSession {
         let owner_disconnect = WebSocketFrame::decode(bytes)
             .ok()
             .is_some_and(|(frame, _)| {
-                frame.opcode == WebSocketOpcode::Close
-                    && self.owner_client_id == Some(client_id)
+                frame.opcode == WebSocketOpcode::Close && self.owner_client_id == Some(client_id)
             });
         if owner_disconnect {
             let mut state = self.state.borrow_mut();
@@ -3216,20 +3214,14 @@ impl BrowserSession {
         self.flush_actions()
     }
 
-    pub fn drain_outgoing(
-        &mut self,
-        client_id: u64,
-    ) -> Result<Vec<WebSocketFrame>, CdpError> {
+    pub fn drain_outgoing(&mut self, client_id: u64) -> Result<Vec<WebSocketFrame>, CdpError> {
         self.flush_actions()?;
         self.server.drain_outgoing(client_id)
     }
 
     /// Waits for queued output or the next pending timeout deadline, then drains
     /// the current outbound frames for a client.
-    pub fn wait_for_outgoing(
-        &mut self,
-        client_id: u64,
-    ) -> Result<Vec<WebSocketFrame>, CdpError> {
+    pub fn wait_for_outgoing(&mut self, client_id: u64) -> Result<Vec<WebSocketFrame>, CdpError> {
         self.flush_actions()?;
         let mut outgoing = self.server.drain_outgoing(client_id)?;
         if !outgoing.is_empty() || self.server.pending_response_count() == 0 {
@@ -3325,14 +3317,17 @@ fn require_u64(params: &Value, key: &'static str) -> Result<u64, JsonRpcError> {
 }
 
 fn invalid_params(message: String) -> JsonRpcError {
-    JsonRpcError { code: -32602, message }
+    JsonRpcError {
+        code: -32602,
+        message,
+    }
 }
 
 fn optional_f64(params: &Value, key: &'static str, default: f64) -> Result<f64, JsonRpcError> {
     let value = params.get(key).map(Value::as_f64).unwrap_or(Some(default));
-    value.filter(|value| value.is_finite()).ok_or_else(|| {
-        invalid_params(format!("Missing or invalid numeric parameter: {key}"))
-    })
+    value
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| invalid_params(format!("Missing or invalid numeric parameter: {key}")))
 }
 
 fn mouse_button(button: Option<&str>) -> Result<i32, JsonRpcError> {
@@ -3366,11 +3361,12 @@ fn percent_decode(input: &str) -> String {
         match bytes[index] {
             b'%' if index + 2 < bytes.len() => {
                 if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3])
-                    && let Ok(value) = u8::from_str_radix(hex, 16) {
-                        output.push(value as char);
-                        index += 3;
-                        continue;
-                    }
+                    && let Ok(value) = u8::from_str_radix(hex, 16)
+                {
+                    output.push(value as char);
+                    index += 3;
+                    continue;
+                }
                 output.push('%');
                 index += 1;
             }
@@ -3528,8 +3524,8 @@ mod tests {
         let mut task = Box::pin(runtime.into_page_task(
             1,
             vec![PageTaskSource::Classic {
-                source: "setTimeout(() => { throw new Error('startup timer failed') }, 0)"
-                    .to_string(),
+                source:
+                    "setTimeout(() => { throw new Error('startup timer failed') }, 0)".to_string(),
                 label: "startup".to_string(),
                 script_node_id: None,
             }],
@@ -3803,12 +3799,13 @@ mod tests {
         );
         let completed = browser_payloads(&mut session, client.client_id);
         assert!(completed.iter().any(|value| {
-            value["method"] == "Page.javascriptDialogClosed"
-                && value["params"]["result"] == true
+            value["method"] == "Page.javascriptDialogClosed" && value["params"]["result"] == true
         }));
-        assert!(completed.iter().any(|value| {
-            value["id"] == "eval" && value["result"]["result"]["value"] == true
-        }));
+        assert!(
+            completed.iter().any(|value| {
+                value["id"] == "eval" && value["result"]["result"]["value"] == true
+            })
+        );
         assert_eq!(session.pending_response_count(), 0);
     }
 
@@ -3910,8 +3907,7 @@ mod tests {
         );
         let between = browser_payloads(&mut session, client.client_id);
         assert!(between.iter().any(|value| {
-            value["method"] == "Page.javascriptDialogClosed"
-                && value["params"]["result"] == true
+            value["method"] == "Page.javascriptDialogClosed" && value["params"]["result"] == true
         }));
         assert!(between.iter().any(|value| {
             value["method"] == "Page.javascriptDialogOpening"
@@ -3927,12 +3923,13 @@ mod tests {
         );
         let completed = browser_payloads(&mut session, client.client_id);
         assert!(completed.iter().any(|value| {
-            value["method"] == "Page.javascriptDialogClosed"
-                && value["params"]["result"] == false
+            value["method"] == "Page.javascriptDialogClosed" && value["params"]["result"] == false
         }));
-        assert!(completed.iter().any(|value| {
-            value["id"] == "eval" && value["result"]["result"]["value"] == false
-        }));
+        assert!(
+            completed.iter().any(|value| {
+                value["id"] == "eval" && value["result"]["result"]["value"] == false
+            })
+        );
         assert_eq!(session.pending_response_count(), 0);
     }
 
@@ -3991,14 +3988,19 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":"handle","method":"Page.handleJavaScriptDialog","params":{"accept":true}}"#,
         );
         let completed = browser_payloads(&mut session, client.client_id);
-        assert!(completed.iter().any(|value| {
-            value["id"] == "eval"
-                && value["result"]["result"]["value"] == "navigating"
-        }), "{completed:?}");
-        assert!(completed.iter().any(|value| {
-            value["method"] == "Page.frameNavigated"
-                && value["params"]["frame"]["url"] == next_url
-        }), "{completed:?}");
+        assert!(
+            completed.iter().any(|value| {
+                value["id"] == "eval" && value["result"]["result"]["value"] == "navigating"
+            }),
+            "{completed:?}"
+        );
+        assert!(
+            completed.iter().any(|value| {
+                value["method"] == "Page.frameNavigated"
+                    && value["params"]["frame"]["url"] == next_url
+            }),
+            "{completed:?}"
+        );
 
         browser_request(
             &mut session,
@@ -4014,7 +4016,10 @@ mod tests {
     fn async_remote_objects_match_sync_serialization_for_functions_and_edge_objects() {
         for (index, (expression, return_by_value)) in [
             ("(function namedEdge(value) { return value; })", true),
-            ("({ kept: 1, omitted: undefined, nested: [NaN, null] })", true),
+            (
+                "({ kept: 1, omitted: undefined, nested: [NaN, null] })",
+                true,
+            ),
             ("(function referenced(value) { return value; })", false),
             ("null", false),
         ]
@@ -4192,10 +4197,13 @@ mod tests {
             );
             let payloads = browser_payloads(&mut session, client.client_id);
             if expected == "startup" {
-                assert!(payloads.iter().any(|value| {
-                    value["method"] == "Page.javascriptDialogOpening"
-                        && value["params"]["message"] == "load"
-                }), "{payloads:#?}");
+                assert!(
+                    payloads.iter().any(|value| {
+                        value["method"] == "Page.javascriptDialogOpening"
+                            && value["params"]["message"] == "load"
+                    }),
+                    "{payloads:#?}"
+                );
                 assert!(!payloads.iter().any(|value| value["id"] == "nav"));
             } else {
                 assert!(payloads.iter().any(|value| value["id"] == "nav"));
@@ -4283,11 +4291,19 @@ mod tests {
         );
         let payloads = browser_payloads(&mut session, client.client_id);
         assert!(payloads.iter().any(|value| {
-            value["method"] == "Page.javascriptDialogClosed"
-                && value["params"]["result"] == false
+            value["method"] == "Page.javascriptDialogClosed" && value["params"]["result"] == false
         }));
-        assert!(payloads.iter().any(|value| value["id"] == "old-nav" && value["error"].is_object()), "{payloads:#?}");
-        assert!(payloads.iter().any(|value| value["id"] == "new-nav" && value["result"].is_object()));
+        assert!(
+            payloads
+                .iter()
+                .any(|value| value["id"] == "old-nav" && value["error"].is_object()),
+            "{payloads:#?}"
+        );
+        assert!(
+            payloads
+                .iter()
+                .any(|value| value["id"] == "new-nav" && value["result"].is_object())
+        );
 
         browser_request(
             &mut session,
@@ -4345,7 +4361,10 @@ mod tests {
         state.poll_page_navigation();
         assert!(matches!(
             state.actions.first(),
-            Some(BrowserSessionAction::Notify("Page.javascriptDialogOpening", _))
+            Some(BrowserSessionAction::Notify(
+                "Page.javascriptDialogOpening",
+                _
+            ))
         ));
         state.actions.clear();
 
@@ -4419,8 +4438,7 @@ mod tests {
         assert_eq!(session.pending_response_count(), 0);
         let events = browser_payloads(&mut session, observer.client_id);
         assert!(events.iter().any(|value| {
-            value["method"] == "Page.javascriptDialogClosed"
-                && value["params"]["result"] == false
+            value["method"] == "Page.javascriptDialogClosed" && value["params"]["result"] == false
         }));
         browser_request(
             &mut session,
@@ -4429,8 +4447,7 @@ mod tests {
         );
         let state = browser_payloads(&mut session, observer.client_id);
         assert!(state.iter().any(|value| {
-            value["id"] == "state"
-                && value["result"]["result"]["value"] == "about:blank:undefined"
+            value["id"] == "state" && value["result"]["result"]["value"] == "about:blank:undefined"
         }));
     }
 
@@ -4452,8 +4469,7 @@ mod tests {
         );
         let navigation = browser_payloads(&mut session, client.client_id);
         assert!(navigation.iter().any(|value| {
-            value["method"] == "Page.javascriptDialogClosed"
-                && value["params"]["result"] == false
+            value["method"] == "Page.javascriptDialogClosed" && value["params"]["result"] == false
         }));
         assert!(navigation.iter().any(|value| value["id"] == "old"));
         assert!(navigation.iter().any(|value| value["id"] == "nav"));
@@ -4503,8 +4519,7 @@ mod tests {
         );
         let reload = browser_payloads(&mut session, client.client_id);
         assert!(reload.iter().any(|value| {
-            value["method"] == "Page.javascriptDialogClosed"
-                && value["params"]["result"] == false
+            value["method"] == "Page.javascriptDialogClosed" && value["params"]["result"] == false
         }));
         assert!(reload.iter().any(|value| value["id"] == "old-eval"));
         assert!(reload.iter().any(|value| value["id"] == "reload"));
@@ -4516,8 +4531,7 @@ mod tests {
         );
         let checked = browser_payloads(&mut session, client.client_id);
         assert!(checked.iter().any(|value| {
-            value["id"] == "check"
-                && value["result"]["result"]["value"] == "undefined"
+            value["id"] == "check" && value["result"]["result"]["value"] == "undefined"
         }));
     }
 
@@ -4535,17 +4549,20 @@ mod tests {
         browser_payloads(&mut session, observer.client_id);
 
         session
-            .receive(owner.client_id, &WebSocketFrame {
-                fin: true,
-                opcode: WebSocketOpcode::Close,
-                payload: Vec::new(),
-            }.encode(true))
+            .receive(
+                owner.client_id,
+                &WebSocketFrame {
+                    fin: true,
+                    opcode: WebSocketOpcode::Close,
+                    payload: Vec::new(),
+                }
+                .encode(true),
+            )
             .unwrap();
         assert_eq!(session.pending_response_count(), 0);
         let observer_events = browser_payloads(&mut session, observer.client_id);
         assert!(observer_events.iter().any(|value| {
-            value["method"] == "Page.javascriptDialogClosed"
-                && value["params"]["result"] == false
+            value["method"] == "Page.javascriptDialogClosed" && value["params"]["result"] == false
         }));
 
         browser_request(
@@ -4555,8 +4572,7 @@ mod tests {
         );
         let response = browser_payloads(&mut session, observer.client_id);
         assert!(response.iter().any(|value| {
-            value["id"] == 2
-                && value["result"]["result"]["value"] == "undefined"
+            value["id"] == 2 && value["result"]["result"]["value"] == "undefined"
         }));
     }
 
@@ -4699,9 +4715,7 @@ mod tests {
     fn deferred_token_exhaustion_does_not_reuse_a_token() {
         let mut server = CdpServer::new();
         server.next_deferred_token = u64::MAX;
-        server.register_deferred_method("Runtime.evaluate", |_, _| {
-            Ok(CdpMethodResult::Deferred)
-        });
+        server.register_deferred_method("Runtime.evaluate", |_, _| Ok(CdpMethodResult::Deferred));
         let client = server.accept_upgrade(sample_upgrade_request()).unwrap();
         let request = WebSocketFrame::text(
             r#"{"jsonrpc":"2.0","id":10,"method":"Runtime.evaluate","params":{}}"#,
@@ -4873,7 +4887,11 @@ mod tests {
                     0 => b"<html><body><main id='content'>rendered</main><script>                           const s = document.createElement('script');                           s.type = 'module';                           s.src = '/module.js';                           document.head.appendChild(s);                           </script></body></html>",
                     _ => b"export const answer = 42; throw new Error('module boom');",
                 };
-                let content_type = if index == 0 { "text/html" } else { "text/javascript" };
+                let content_type = if index == 0 {
+                    "text/html"
+                } else {
+                    "text/javascript"
+                };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
@@ -4916,22 +4934,40 @@ mod tests {
                     sender.send(request).unwrap();
                 }
                 let body = match index {
-                    0 => "<form id='f' action='/search?old=1' method='get'><input name='q' value='hello world'><button name='via' value='button'>Search</button></form>",
-                    1 => "<form id='f' action='/submit' method='post'><input name='q' value='hello world'><button name='via' value='button'>Send</button></form>",
+                    0 => {
+                        "<form id='f' action='/search?old=1' method='get'><input name='q' value='hello world'><button name='via' value='button'>Search</button></form>"
+                    }
+                    1 => {
+                        "<form id='f' action='/submit' method='post'><input name='q' value='hello world'><button name='via' value='button'>Send</button></form>"
+                    }
                     _ => "<html><body><main id='submitted'>Saved</main></body></html>",
                 };
-                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });
         let origin = format!("http://127.0.0.1:{}", address.port());
         let mut session = CdpSession::new().unwrap();
-        session.dispatch("Page.navigate", json!({ "url": format!("{origin}/form") })).unwrap();
+        session
+            .dispatch("Page.navigate", json!({ "url": format!("{origin}/form") }))
+            .unwrap();
         session.dispatch("Runtime.evaluate", json!({ "expression": "document.getElementById('f').requestSubmit(document.querySelector('button'))" })).unwrap();
-        assert_eq!(session.current_url(), format!("{origin}/search?q=hello+world&via=button"));
+        assert_eq!(
+            session.current_url(),
+            format!("{origin}/search?q=hello+world&via=button")
+        );
         session.dispatch("Runtime.evaluate", json!({ "expression": "document.getElementById('f').requestSubmit(document.querySelector('button'))" })).unwrap();
         assert_eq!(session.current_url(), format!("{origin}/submit"));
-        let installed = session.dispatch("Runtime.evaluate", json!({ "expression": "document.getElementById('submitted').textContent" })).unwrap();
+        let installed = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "document.getElementById('submitted').textContent" }),
+            )
+            .unwrap();
         assert_eq!(installed["result"]["value"], "Saved");
         let get_request = receiver.recv().unwrap();
         assert!(get_request.starts_with("GET /search?q=hello+world&via=button HTTP/1.1\r\n"));
@@ -4954,7 +4990,8 @@ mod tests {
                 let body = "<html><body></body></html>";
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(), body
+                    body.len(),
+                    body
                 );
                 stream.write_all(response.as_bytes()).unwrap();
             }
@@ -4972,7 +5009,10 @@ mod tests {
             )
             .unwrap();
         session
-            .dispatch("Page.navigate", json!({ "url": format!("{origin}/second") }))
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": format!("{origin}/second") }),
+            )
             .unwrap();
         let result = session
             .dispatch(
@@ -5002,10 +5042,12 @@ mod tests {
                     .unwrap_or("/");
                 let body = match path {
                     "/first" => "<html><body><main id='first'></main></body></html>",
-                    "/second" => r#"<html><body><main id='second'></main><script>
+                    "/second" => {
+                        r#"<html><body><main id='second'></main><script>
                         document.addEventListener('DOMContentLoaded', () => document.body.setAttribute('data-dcl', 'yes'));
                         window.addEventListener('load', () => document.body.setAttribute('data-load', 'yes'));
-                    </script></body></html>"#,
+                    </script></body></html>"#
+                    }
                     "/third" => "<html><body><main id='third'></main></body></html>",
                     _ => "<html><body>missing</body></html>",
                 };
@@ -5021,10 +5063,7 @@ mod tests {
         let origin = format!("http://127.0.0.1:{}", address.port());
         let mut session = CdpSession::new().unwrap();
         session
-            .dispatch(
-                "Page.navigate",
-                json!({ "url": format!("{origin}/first") }),
-            )
+            .dispatch("Page.navigate", json!({ "url": format!("{origin}/first") }))
             .unwrap();
         session
             .dispatch(
@@ -5098,10 +5137,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state["result"]["value"], true);
-        assert!(session
-            .drain_events()
-            .iter()
-            .any(|event| event.method == "Page.navigatedWithinDocument"));
+        assert!(
+            session
+                .drain_events()
+                .iter()
+                .any(|event| event.method == "Page.navigatedWithinDocument")
+        );
         server.join().unwrap();
     }
 
@@ -5139,10 +5180,7 @@ mod tests {
         let origin = format!("http://127.0.0.1:{}", address.port());
         let mut session = CdpSession::new().unwrap();
         session
-            .dispatch(
-                "Page.navigate",
-                json!({ "url": format!("{origin}/start") }),
-            )
+            .dispatch("Page.navigate", json!({ "url": format!("{origin}/start") }))
             .unwrap();
         session
             .dispatch(
@@ -5251,7 +5289,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(session.current_url(), format!("{origin}/final"));
-        assert_eq!(session.history_entries[session.history_index].url, format!("{origin}/final"));
+        assert_eq!(
+            session.history_entries[session.history_index].url,
+            format!("{origin}/final")
+        );
         let state = session
             .dispatch(
                 "Runtime.evaluate",
@@ -5290,10 +5331,7 @@ mod tests {
         let origin = format!("http://127.0.0.1:{}", address.port());
         let mut session = CdpSession::new().unwrap();
         session
-            .dispatch(
-                "Page.navigate",
-                json!({ "url": format!("{origin}/start") }),
-            )
+            .dispatch("Page.navigate", json!({ "url": format!("{origin}/start") }))
             .unwrap();
         session
             .dispatch(
@@ -6074,9 +6112,11 @@ mod tests {
         let new_root_id = new_document["root"]["nodeId"].as_u64().unwrap();
 
         assert_ne!(new_root_id, old_root_id);
-        assert!(session
-            .dispatch("DOM.getOuterHTML", json!({ "nodeId": old_main_id }))
-            .is_err());
+        assert!(
+            session
+                .dispatch("DOM.getOuterHTML", json!({ "nodeId": old_main_id }))
+                .is_err()
+        );
     }
 
     #[test]
@@ -6158,16 +6198,18 @@ mod tests {
         session
             .dispatch("Runtime.releaseObject", json!({ "objectId": object_id }))
             .unwrap();
-        assert!(session
-            .dispatch(
-                "Runtime.callFunctionOn",
-                json!({
-                    "objectId": object_id,
-                    "functionDeclaration": "function() { return this.count; }",
-                    "returnByValue": true,
-                }),
-            )
-            .is_err());
+        assert!(
+            session
+                .dispatch(
+                    "Runtime.callFunctionOn",
+                    json!({
+                        "objectId": object_id,
+                        "functionDeclaration": "function() { return this.count; }",
+                        "returnByValue": true,
+                    }),
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -6190,16 +6232,18 @@ mod tests {
             )
             .unwrap();
 
-        assert!(session
-            .dispatch(
-                "Runtime.callFunctionOn",
-                json!({
-                    "objectId": object_id,
-                    "functionDeclaration": "function() { return this.old; }",
-                    "returnByValue": true,
-                }),
-            )
-            .is_err());
+        assert!(
+            session
+                .dispatch(
+                    "Runtime.callFunctionOn",
+                    json!({
+                        "objectId": object_id,
+                        "functionDeclaration": "function() { return this.old; }",
+                        "returnByValue": true,
+                    }),
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -6434,12 +6478,42 @@ mod tests {
             .unwrap();
 
         session.dispatch("Input.dispatchMouseEvent", json!({"type":"mousePressed","x":10,"y":10,"button":"left","buttons":1,"modifiers":9})).unwrap();
-        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":10,"y":10,"button":"left","buttons":0})).unwrap();
-        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mousePressed","x":10,"y":10,"button":"left","modifiers":9})).unwrap();
-        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":110,"y":10,"button":"left"})).unwrap();
-        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseMoved","x":10,"y":10})).unwrap();
-        let prevented = session.dispatch("Input.dispatchMouseEvent", json!({"type":"mousePressed","x":110,"y":10,"button":"left"})).unwrap();
-        session.dispatch("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":110,"y":10,"button":"left"})).unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseReleased","x":10,"y":10,"button":"left","buttons":0}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mousePressed","x":10,"y":10,"button":"left","modifiers":9}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseReleased","x":110,"y":10,"button":"left"}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":10,"y":10}),
+            )
+            .unwrap();
+        let prevented = session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mousePressed","x":110,"y":10,"button":"left"}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseReleased","x":110,"y":10,"button":"left"}),
+            )
+            .unwrap();
 
         assert_eq!(prevented["defaultPrevented"], true);
         let state = session.dispatch("Runtime.evaluate", json!({
@@ -6664,10 +6738,9 @@ mod tests {
                 }),
             )
             .unwrap();
-        let bounds: Vec<f32> = serde_json::from_str(
-            bounds["result"]["value"].as_str().expect("SVG bounds JSON"),
-        )
-        .unwrap();
+        let bounds: Vec<f32> =
+            serde_json::from_str(bounds["result"]["value"].as_str().expect("SVG bounds JSON"))
+                .unwrap();
         assert_eq!(bounds.len(), 4);
         for (x, y) in [
             (bounds[0] + 2.0, bounds[1] + bounds[3] / 2.0),
@@ -6756,12 +6829,27 @@ mod tests {
         let down = session.dispatch("Input.dispatchKeyEvent", json!({
             "type":"keyDown","key":"A","code":"KeyA","windowsVirtualKeyCode":65,"modifiers":10
         })).unwrap();
-        session.dispatch("Input.dispatchKeyEvent", json!({"type":"keyUp","key":"A","code":"KeyA"})).unwrap();
-        session.dispatch("Input.dispatchKeyEvent", json!({"type":"char","text":"a","key":"a"})).unwrap();
+        session
+            .dispatch(
+                "Input.dispatchKeyEvent",
+                json!({"type":"keyUp","key":"A","code":"KeyA"}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchKeyEvent",
+                json!({"type":"char","text":"a","key":"a"}),
+            )
+            .unwrap();
         assert_eq!(down["defaultPrevented"], true);
-        let keys = session.dispatch("Runtime.evaluate", json!({
-            "expression":"keys.join('|')","returnByValue":true
-        })).unwrap();
+        let keys = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({
+                    "expression":"keys.join('|')","returnByValue":true
+                }),
+            )
+            .unwrap();
         assert_eq!(
             keys["result"]["value"],
             "field:keydown:A:KeyA:65:true:true:true:true|document:field|field:keyup:A|field:keypress:a:97"

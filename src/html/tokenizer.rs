@@ -362,12 +362,14 @@ impl IncrementalTokenizer {
                         current_comment.clear();
                         current_comment.push('?');
                         while let Some(next) = cursor.consume() {
-                            if next == '>' { break; }
+                            if next == '>' {
+                                break;
+                            }
                             current_comment.push(next);
                         }
                         tokens.push(Token::Comment(std::mem::take(&mut current_comment)));
                         state = State::Data;
-                    },
+                    }
                     c if is_tag_name_start(c) => {
                         current_tag_name.clear();
                         current_tag_name.push(c.to_ascii_lowercase());
@@ -1937,7 +1939,11 @@ mod tests {
         assert_eq!(
             Tokenizer::new("<p><?processing data?></p>").tokenize(),
             vec![
-                Token::StartTag { name: "p".into(), attributes: vec![], self_closing: false },
+                Token::StartTag {
+                    name: "p".into(),
+                    attributes: vec![],
+                    self_closing: false
+                },
                 Token::Comment("?processing data?".into()),
                 Token::EndTag { name: "p".into() },
                 Token::Eof,
@@ -1970,10 +1976,9 @@ mod tests {
 
     #[test]
     fn tokenizes_doctype_with_public_identifier_only() {
-        let tokens = Tokenizer::new(
-            "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">",
-        )
-        .tokenize();
+        let tokens =
+            Tokenizer::new("<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">")
+                .tokenize();
         assert_eq!(
             tokens,
             vec![
@@ -2012,8 +2017,7 @@ mod tests {
     #[test]
     fn tokenizes_doctype_with_system_identifier_via_system_keyword() {
         // A `SYSTEM`-keyword DOCTYPE has a system identifier but no public one.
-        let tokens =
-            Tokenizer::new("<!DOCTYPE html SYSTEM \"about:legacy-compat\">").tokenize();
+        let tokens = Tokenizer::new("<!DOCTYPE html SYSTEM \"about:legacy-compat\">").tokenize();
         assert_eq!(
             tokens,
             vec![
@@ -2113,7 +2117,10 @@ mod tests {
             ]
         );
         // Exactly one script element, no spurious <div>.
-        assert_eq!(count_start_tags("<script>if (a < b) { x('</div>'); }</script>", "div"), 0);
+        assert_eq!(
+            count_start_tags("<script>if (a < b) { x('</div>'); }</script>", "div"),
+            0
+        );
     }
 
     #[test]

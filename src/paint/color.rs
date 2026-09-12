@@ -176,11 +176,7 @@ fn split_color_function_args(args: &str) -> Option<(Vec<&str>, Option<&str>, boo
         if !matches!(parts.len(), 3 | 4) {
             return None;
         }
-        let alpha = if parts.len() == 4 {
-            parts.pop()
-        } else {
-            None
-        };
+        let alpha = if parts.len() == 4 { parts.pop() } else { None };
         (parts, alpha)
     } else {
         let mut split = args.split('/');
@@ -191,9 +187,7 @@ fn split_color_function_args(args: &str) -> Option<(Vec<&str>, Option<&str>, boo
         }
         let channels = channel_source.split_whitespace().collect::<Vec<_>>();
         if channels.len() != 3
-            || alpha.is_some_and(|value| {
-                value.is_empty() || value.split_whitespace().count() != 1
-            })
+            || alpha.is_some_and(|value| value.is_empty() || value.split_whitespace().count() != 1)
         {
             return None;
         }

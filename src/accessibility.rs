@@ -1604,7 +1604,10 @@ fn accessibility_properties(
         let level = node
             .get_attribute("aria-level")
             .and_then(|level| level.parse::<i64>().ok())
-            .or_else(|| tag.strip_prefix('h').and_then(|level| level.parse::<i64>().ok()));
+            .or_else(|| {
+                tag.strip_prefix('h')
+                    .and_then(|level| level.parse::<i64>().ok())
+            });
         if let Some(level) = level {
             properties.push(AccessibilityProperty {
                 name: "level".to_string(),
@@ -1818,8 +1821,7 @@ mod tests {
         };
         let has_level = |node: &AccessibilityNode, level| {
             node.properties.iter().any(|property| {
-                property.name == "level"
-                    && property.value == AccessibilityValue::Integer(level)
+                property.name == "level" && property.value == AccessibilityValue::Integer(level)
             })
         };
 

@@ -197,9 +197,10 @@ impl Client {
             }
 
             if matches!(response.status_code(), 307 | 308)
-                && let Some(body) = request.body() {
-                    new_request.set_body(body.to_vec());
-                }
+                && let Some(body) = request.body()
+            {
+                new_request.set_body(body.to_vec());
+            }
 
             request = new_request;
         }
@@ -229,9 +230,7 @@ impl Client {
             request.set_header("User-Agent", self.user_agent.clone());
         }
         request.remove_header("cookie");
-        if credentials
-            && let Some(cookie_header) = self.cookie_jar.cookie_header(request.url())
-        {
+        if credentials && let Some(cookie_header) = self.cookie_jar.cookie_header(request.url()) {
             request.add_header("Cookie", cookie_header);
         }
 

@@ -39,7 +39,9 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "grid-template" => expand_grid_template_shorthand(value, important),
         "place-items" => expand_place_shorthand("align-items", "justify-items", value, important),
         "place-self" => expand_place_shorthand("align-self", "justify-self", value, important),
-        "place-content" => expand_place_shorthand("align-content", "justify-content", value, important),
+        "place-content" => {
+            expand_place_shorthand("align-content", "justify-content", value, important)
+        }
         // `word-wrap` is a legacy alias for `overflow-wrap`
         "word-wrap" => vec![Declaration {
             name: "overflow-wrap".to_string(),
@@ -92,11 +94,15 @@ fn expand_revert_layer_shorthand(
                 "border-style".to_string(),
                 "border-color".to_string(),
             ];
-            names.extend(["top", "right", "bottom", "left"].into_iter().flat_map(|side| {
-                ["width", "style", "color"]
+            names.extend(
+                ["top", "right", "bottom", "left"]
                     .into_iter()
-                    .map(move |suffix| format!("border-{side}-{suffix}"))
-            }));
+                    .flat_map(|side| {
+                        ["width", "style", "color"]
+                            .into_iter()
+                            .map(move |suffix| format!("border-{side}-{suffix}"))
+                    }),
+            );
             names
         }
         "border-top" | "border-right" | "border-bottom" | "border-left" => {
@@ -133,12 +139,10 @@ fn expand_revert_layer_shorthand(
         .into_iter()
         .map(str::to_string)
         .collect(),
-        "mask-position" | "-webkit-mask-position" => {
-            ["mask-position-x", "mask-position-y"]
-                .into_iter()
-                .map(str::to_string)
-                .collect()
-        }
+        "mask-position" | "-webkit-mask-position" => ["mask-position-x", "mask-position-y"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         "overflow" => ["overflow-x", "overflow-y"]
             .into_iter()
             .map(str::to_string)
@@ -245,9 +249,9 @@ fn expand_background_position_shorthand(value: Value, important: bool) -> Vec<De
     for layer in layers {
         let components = match layer {
             Value::List(values) if (1..=2).contains(&values.len()) => values,
-            single @ (Value::Keyword(_)
-            | Value::Length(_, _)
-            | Value::Percentage(_)) => vec![single],
+            single @ (Value::Keyword(_) | Value::Length(_, _) | Value::Percentage(_)) => {
+                vec![single]
+            }
             Value::Number(number) if number == 0.0 => vec![Value::Number(number)],
             _ => {
                 return vec![Declaration {
@@ -348,11 +352,7 @@ fn normalize_background_position(values: &[Value]) -> Option<(Value, Value)> {
     }
 }
 
-fn expand_logical_axis_shorthand(
-    name: &str,
-    value: Value,
-    important: bool,
-) -> Vec<Declaration> {
+fn expand_logical_axis_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
     let values = match value {
         Value::List(values) => values,
         value => vec![value],
@@ -398,8 +398,16 @@ fn expand_place_shorthand(
         _ => return Vec::new(),
     };
     vec![
-        Declaration { name: first_name.to_string(), value: first, important },
-        Declaration { name: second_name.to_string(), value: second, important },
+        Declaration {
+            name: first_name.to_string(),
+            value: first,
+            important,
+        },
+        Declaration {
+            name: second_name.to_string(),
+            value: second,
+            important,
+        },
     ]
 }
 
@@ -432,18 +440,31 @@ fn expand_grid_axis_shorthand(name: &str, value: Value, important: bool) -> Vec<
         value => vec![value],
     };
     let values = split_compact_grid_slash(values);
-    let slash = values.iter().position(|value| matches!(value, Value::Keyword(keyword) if keyword == "/"));
+    let slash = values
+        .iter()
+        .position(|value| matches!(value, Value::Keyword(keyword) if keyword == "/"));
     let (start, end) = match slash {
         Some(index) if index > 0 && index + 1 < values.len() => (
             collapse_grid_line(&values[..index]),
             collapse_grid_line(&values[index + 1..]),
         ),
         Some(_) => return Vec::new(),
-        None => (collapse_grid_line(&values), Value::Keyword("auto".to_string())),
+        None => (
+            collapse_grid_line(&values),
+            Value::Keyword("auto".to_string()),
+        ),
     };
     vec![
-        Declaration { name: format!("{name}-start"), value: start, important },
-        Declaration { name: format!("{name}-end"), value: end, important },
+        Declaration {
+            name: format!("{name}-start"),
+            value: start,
+            important,
+        },
+        Declaration {
+            name: format!("{name}-end"),
+            value: end,
+            important,
+        },
     ]
 }
 
@@ -467,7 +488,10 @@ fn expand_grid_area_shorthand(value: Value, important: bool) -> Vec<Declaration>
             }
             parts.push(Vec::new());
         } else {
-            parts.last_mut().expect("grid area has one part").push(value);
+            parts
+                .last_mut()
+                .expect("grid area has one part")
+                .push(value);
         }
     }
     if parts.last().is_some_and(Vec::is_empty) {
@@ -475,15 +499,18 @@ fn expand_grid_area_shorthand(value: Value, important: bool) -> Vec<Declaration>
     }
 
     let row_start = collapse_grid_line(&parts[0]);
-    let column_start = parts.get(1).map(|part| collapse_grid_line(part)).unwrap_or_else(|| {
-        custom_grid_identifier(&row_start).unwrap_or_else(auto_grid_line)
-    });
-    let row_end = parts.get(2).map(|part| collapse_grid_line(part)).unwrap_or_else(|| {
-        custom_grid_identifier(&row_start).unwrap_or_else(auto_grid_line)
-    });
-    let column_end = parts.get(3).map(|part| collapse_grid_line(part)).unwrap_or_else(|| {
-        custom_grid_identifier(&column_start).unwrap_or_else(auto_grid_line)
-    });
+    let column_start = parts
+        .get(1)
+        .map(|part| collapse_grid_line(part))
+        .unwrap_or_else(|| custom_grid_identifier(&row_start).unwrap_or_else(auto_grid_line));
+    let row_end = parts
+        .get(2)
+        .map(|part| collapse_grid_line(part))
+        .unwrap_or_else(|| custom_grid_identifier(&row_start).unwrap_or_else(auto_grid_line));
+    let column_end = parts
+        .get(3)
+        .map(|part| collapse_grid_line(part))
+        .unwrap_or_else(|| custom_grid_identifier(&column_start).unwrap_or_else(auto_grid_line));
 
     [
         ("grid-row-start", row_start),
@@ -492,12 +519,18 @@ fn expand_grid_area_shorthand(value: Value, important: bool) -> Vec<Declaration>
         ("grid-column-end", column_end),
     ]
     .into_iter()
-    .map(|(name, value)| Declaration { name: name.to_string(), value, important })
+    .map(|(name, value)| Declaration {
+        name: name.to_string(),
+        value,
+        important,
+    })
     .collect()
 }
 
 fn custom_grid_identifier(value: &Value) -> Option<Value> {
-    let Value::Keyword(keyword) = value else { return None; };
+    let Value::Keyword(keyword) = value else {
+        return None;
+    };
     if keyword.eq_ignore_ascii_case("auto")
         || keyword.eq_ignore_ascii_case("span")
         || keyword.parse::<isize>().is_ok()
@@ -509,7 +542,9 @@ fn custom_grid_identifier(value: &Value) -> Option<Value> {
     }
 }
 
-fn auto_grid_line() -> Value { Value::Keyword("auto".to_string()) }
+fn auto_grid_line() -> Value {
+    Value::Keyword("auto".to_string())
+}
 
 fn expand_grid_template_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     let values = match value {
@@ -538,7 +573,11 @@ fn expand_grid_template_shorthand(value: Value, important: bool) -> Vec<Declarat
                 value: collapse_grid_line(before),
                 important,
             },
-            Declaration { name: "grid-template-columns".to_string(), value: columns, important },
+            Declaration {
+                name: "grid-template-columns".to_string(),
+                value: columns,
+                important,
+            },
         ];
     }
 
@@ -546,7 +585,9 @@ fn expand_grid_template_shorthand(value: Value, important: bool) -> Vec<Declarat
     let mut rows = Vec::new();
     let mut index = 0;
     while index < before.len() {
-        let Value::String(row) = &before[index] else { return Vec::new(); };
+        let Value::String(row) = &before[index] else {
+            return Vec::new();
+        };
         areas.push(Value::String(row.clone()));
         index += 1;
         if index < before.len() && !matches!(before[index], Value::String(_)) {
@@ -568,7 +609,11 @@ fn expand_grid_template_shorthand(value: Value, important: bool) -> Vec<Declarat
             value: Value::List(rows),
             important,
         },
-        Declaration { name: "grid-template-columns".to_string(), value: columns, important },
+        Declaration {
+            name: "grid-template-columns".to_string(),
+            value: columns,
+            important,
+        },
     ]
 }
 
@@ -762,7 +807,11 @@ fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
             value: width.clone(),
             important,
         });
-        declarations.extend(expand_border_axis_shorthand("border-width", width, important));
+        declarations.extend(expand_border_axis_shorthand(
+            "border-width",
+            width,
+            important,
+        ));
     }
     if let Some(style) = style {
         declarations.push(Declaration {
@@ -770,7 +819,11 @@ fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
             value: style.clone(),
             important,
         });
-        declarations.extend(expand_border_axis_shorthand("border-style", style, important));
+        declarations.extend(expand_border_axis_shorthand(
+            "border-style",
+            style,
+            important,
+        ));
     }
     if let Some(color) = color {
         declarations.push(Declaration {
@@ -778,7 +831,11 @@ fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
             value: color.clone(),
             important,
         });
-        declarations.extend(expand_border_axis_shorthand("border-color", color, important));
+        declarations.extend(expand_border_axis_shorthand(
+            "border-color",
+            color,
+            important,
+        ));
     }
 
     if declarations.is_empty() {
@@ -1002,7 +1059,10 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
         if Some(index) == slash {
             continue;
         }
-        if size_range.as_ref().is_some_and(|range| range.contains(&index)) {
+        if size_range
+            .as_ref()
+            .is_some_and(|range| range.contains(&index))
+        {
             continue;
         }
         match item {
@@ -1038,8 +1098,10 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
                 }
             }
             Value::Keyword(keyword)
-                if matches!(keyword.to_ascii_lowercase().as_str(), "scroll" | "fixed" | "local")
-                    && !saw_attachment =>
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "scroll" | "fixed" | "local"
+                ) && !saw_attachment =>
             {
                 layer.attachment = item.clone();
                 saw_attachment = true;
@@ -1048,7 +1110,10 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
                 if matches!(
                     keyword.to_ascii_lowercase().as_str(),
                     "border-box" | "padding-box" | "content-box"
-                ) => boxes.push(item.clone()),
+                ) =>
+            {
+                boxes.push(item.clone())
+            }
             Value::Color(_) => {
                 if !allow_color || layer.color.is_some() {
                     return None;
@@ -1071,12 +1136,13 @@ fn parse_background_layer(value: &Value, allow_color: bool) -> Option<Background
                 if matches!(
                     keyword.to_ascii_lowercase().as_str(),
                     "left" | "right" | "top" | "bottom" | "center"
-                ) => {
-                    if slash.is_some_and(|slash| index > slash) {
-                        return None;
-                    }
-                    position.push(item.clone());
+                ) =>
+            {
+                if slash.is_some_and(|slash| index > slash) {
+                    return None;
                 }
+                position.push(item.clone());
+            }
             Value::Length(_, _) | Value::Percentage(_) => {
                 if slash.is_some_and(|slash| index > slash) {
                     return None;
@@ -1126,7 +1192,10 @@ fn is_background_size_value(value: &Value) -> bool {
             matches!(name.to_ascii_lowercase().as_str(), "calc" | "clamp")
         }
         Value::Keyword(keyword) => {
-            matches!(keyword.to_ascii_lowercase().as_str(), "auto" | "cover" | "contain")
+            matches!(
+                keyword.to_ascii_lowercase().as_str(),
+                "auto" | "cover" | "contain"
+            )
         }
         _ => false,
     }
@@ -1145,7 +1214,10 @@ fn is_background_image_function(name: &str) -> bool {
 }
 
 fn is_color_function(name: &str) -> bool {
-    matches!(name.to_ascii_lowercase().as_str(), "rgb" | "rgba" | "hsl" | "hsla")
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "rgb" | "rgba" | "hsl" | "hsla"
+    )
 }
 
 fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {
@@ -1390,8 +1462,16 @@ fn expand_mask_position_values(values: &[Value], important: bool) -> Vec<Declara
         }
     };
     vec![
-        Declaration { name: "mask-position-x".to_string(), value: x, important },
-        Declaration { name: "mask-position-y".to_string(), value: y, important },
+        Declaration {
+            name: "mask-position-x".to_string(),
+            value: x,
+            important,
+        },
+        Declaration {
+            name: "mask-position-y".to_string(),
+            value: y,
+            important,
+        },
     ]
 }
 
@@ -1403,13 +1483,20 @@ fn value_keyword(value: &Value) -> Option<&str> {
 }
 
 fn is_mask_position_value(value: &Value) -> bool {
-    matches!(value, Value::Length(..) | Value::Percentage(_) | Value::Number(_))
-        || matches!(value_keyword(value), Some("left" | "right" | "top" | "bottom" | "center"))
+    matches!(
+        value,
+        Value::Length(..) | Value::Percentage(_) | Value::Number(_)
+    ) || matches!(
+        value_keyword(value),
+        Some("left" | "right" | "top" | "bottom" | "center")
+    )
 }
 
 fn is_mask_size_value(value: &Value) -> bool {
-    matches!(value, Value::Length(..) | Value::Percentage(_) | Value::Number(_))
-        || matches!(value_keyword(value), Some("auto" | "contain" | "cover"))
+    matches!(
+        value,
+        Value::Length(..) | Value::Percentage(_) | Value::Number(_)
+    ) || matches!(value_keyword(value), Some("auto" | "contain" | "cover"))
 }
 
 fn collapse_mask_values(values: &[Value]) -> Value {
@@ -1554,93 +1641,98 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
 
     // flex: <basis> → grow=1 shrink=1 basis  (単独の length/percentage)
     if let [basis] = values.as_slice()
-        && matches!(basis, Value::Length(_, _) | Value::Percentage(_)) {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: Value::Number(1.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: Value::Number(1.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: basis.clone(),
-                    important,
-                },
-            ];
-        }
+        && matches!(basis, Value::Length(_, _) | Value::Percentage(_))
+    {
+        return vec![
+            Declaration {
+                name: "flex-grow".to_string(),
+                value: Value::Number(1.0),
+                important,
+            },
+            Declaration {
+                name: "flex-shrink".to_string(),
+                value: Value::Number(1.0),
+                important,
+            },
+            Declaration {
+                name: "flex-basis".to_string(),
+                value: basis.clone(),
+                important,
+            },
+        ];
+    }
 
     // flex: <grow> <shrink> <basis>
     if let [grow, shrink, basis] = values.as_slice()
-        && matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: grow.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: shrink.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: basis.clone(),
-                    important,
-                },
-            ];
-        }
+        && matches!(grow, Value::Number(_))
+        && matches!(shrink, Value::Number(_))
+    {
+        return vec![
+            Declaration {
+                name: "flex-grow".to_string(),
+                value: grow.clone(),
+                important,
+            },
+            Declaration {
+                name: "flex-shrink".to_string(),
+                value: shrink.clone(),
+                important,
+            },
+            Declaration {
+                name: "flex-basis".to_string(),
+                value: basis.clone(),
+                important,
+            },
+        ];
+    }
 
     // flex: <grow> <basis>  (数値 + length/percentage)
     if let [grow, basis] = values.as_slice()
         && matches!(grow, Value::Number(_))
-            && matches!(basis, Value::Length(_, _) | Value::Percentage(_))
-        {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: grow.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: Value::Number(1.0),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: basis.clone(),
-                    important,
-                },
-            ];
-        }
+        && matches!(basis, Value::Length(_, _) | Value::Percentage(_))
+    {
+        return vec![
+            Declaration {
+                name: "flex-grow".to_string(),
+                value: grow.clone(),
+                important,
+            },
+            Declaration {
+                name: "flex-shrink".to_string(),
+                value: Value::Number(1.0),
+                important,
+            },
+            Declaration {
+                name: "flex-basis".to_string(),
+                value: basis.clone(),
+                important,
+            },
+        ];
+    }
 
     // flex: <grow> <shrink>  (2値でどちらも数値)
     if let [grow, shrink] = values.as_slice()
-        && matches!(grow, Value::Number(_)) && matches!(shrink, Value::Number(_)) {
-            return vec![
-                Declaration {
-                    name: "flex-grow".to_string(),
-                    value: grow.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-shrink".to_string(),
-                    value: shrink.clone(),
-                    important,
-                },
-                Declaration {
-                    name: "flex-basis".to_string(),
-                    value: Value::Number(0.0),
-                    important,
-                },
-            ];
-        }
+        && matches!(grow, Value::Number(_))
+        && matches!(shrink, Value::Number(_))
+    {
+        return vec![
+            Declaration {
+                name: "flex-grow".to_string(),
+                value: grow.clone(),
+                important,
+            },
+            Declaration {
+                name: "flex-shrink".to_string(),
+                value: shrink.clone(),
+                important,
+            },
+            Declaration {
+                name: "flex-basis".to_string(),
+                value: Value::Number(0.0),
+                important,
+            },
+        ];
+    }
 
     // フォールバック: そのまま保持（単一値はListで包まない）
     let fallback_value = if values.len() == 1 {
@@ -1707,17 +1799,15 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
                             style = Some(Value::Keyword(lower));
                         }
                     }
-                    _ if crate::css::style::is_color_keyword(&lower)
-                        && color.is_none() => {
-                            color = Some(Value::Keyword(lower));
-                        }
+                    _ if crate::css::style::is_color_keyword(&lower) && color.is_none() => {
+                        color = Some(Value::Keyword(lower));
+                    }
                     _ => {}
                 }
             }
-            Value::Color(_) | Value::Function { .. }
-                if color.is_none() => {
-                    color = Some(item.clone());
-                }
+            Value::Color(_) | Value::Function { .. } if color.is_none() => {
+                color = Some(item.clone());
+            }
             _ => {}
         }
     }
@@ -1782,8 +1872,17 @@ fn expand_box_shadow_shorthand(value: Value, important: bool) -> Vec<Declaration
 fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     const POSITION_KEYWORDS: &[&str] = &["inside", "outside"];
     const TYPE_KEYWORDS: &[&str] = &[
-        "disc", "circle", "square", "decimal", "lower-roman", "upper-roman",
-        "lower-alpha", "upper-alpha", "lower-latin", "upper-latin", "none",
+        "disc",
+        "circle",
+        "square",
+        "decimal",
+        "lower-roman",
+        "upper-roman",
+        "lower-alpha",
+        "upper-alpha",
+        "lower-latin",
+        "upper-latin",
+        "none",
     ];
 
     let values: Vec<Value> = match value {
@@ -1798,25 +1897,26 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
     // Check for bare `none` — sets both type and image to none
     if values.len() == 1
         && let Value::Keyword(kw) = &values[0]
-            && kw.eq_ignore_ascii_case("none") {
-                return vec![
-                    Declaration {
-                        name: "list-style-type".to_string(),
-                        value: Value::Keyword("none".to_string()),
-                        important,
-                    },
-                    Declaration {
-                        name: "list-style-position".to_string(),
-                        value: Value::Keyword("outside".to_string()),
-                        important,
-                    },
-                    Declaration {
-                        name: "list-style-image".to_string(),
-                        value: Value::Keyword("none".to_string()),
-                        important,
-                    },
-                ];
-            }
+        && kw.eq_ignore_ascii_case("none")
+    {
+        return vec![
+            Declaration {
+                name: "list-style-type".to_string(),
+                value: Value::Keyword("none".to_string()),
+                important,
+            },
+            Declaration {
+                name: "list-style-position".to_string(),
+                value: Value::Keyword("outside".to_string()),
+                important,
+            },
+            Declaration {
+                name: "list-style-image".to_string(),
+                value: Value::Keyword("none".to_string()),
+                important,
+            },
+        ];
+    }
 
     // First pass: detect if a non-none type keyword is present (order-independent)
     let has_explicit_type = values.iter().any(|v| {
@@ -1854,19 +1954,23 @@ fn expand_list_style_shorthand(value: Value, important: bool) -> Vec<Declaration
     // CSS shorthand rule: always emit all three longhands, using initial values
     // for any subproperty that was not explicitly present in the shorthand.
     // Initial values: list-style-type = disc, list-style-position = outside, list-style-image = none
-    vec![Declaration {
-        name: "list-style-type".to_string(),
-        value: list_style_type.unwrap_or(Value::Keyword("disc".to_string())),
-        important,
-    }, Declaration {
-        name: "list-style-position".to_string(),
-        value: list_style_position.unwrap_or(Value::Keyword("outside".to_string())),
-        important,
-    }, Declaration {
-        name: "list-style-image".to_string(),
-        value: list_style_image.unwrap_or(Value::Keyword("none".to_string())),
-        important,
-    }]
+    vec![
+        Declaration {
+            name: "list-style-type".to_string(),
+            value: list_style_type.unwrap_or(Value::Keyword("disc".to_string())),
+            important,
+        },
+        Declaration {
+            name: "list-style-position".to_string(),
+            value: list_style_position.unwrap_or(Value::Keyword("outside".to_string())),
+            important,
+        },
+        Declaration {
+            name: "list-style-image".to_string(),
+            value: list_style_image.unwrap_or(Value::Keyword("none".to_string())),
+            important,
+        },
+    ]
 }
 
 /// Expands `flex-flow` shorthand into `flex-direction` and `flex-wrap` longhands.
@@ -1990,9 +2094,11 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
                 }
             }
         } else if let Value::Length(_, unit) = item
-            && (unit == "s" || unit == "ms") && duration.is_none() {
-                duration = Some(item.clone());
-            }
+            && (unit == "s" || unit == "ms")
+            && duration.is_none()
+        {
+            duration = Some(item.clone());
+        }
     }
 
     let mut decls = Vec::new();
@@ -2044,16 +2150,29 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
 
     // CSS-wide keywords apply to all longhands at once.
     if values.len() == 1
-        && let Value::Keyword(kw) = &values[0] {
-            let lower = kw.to_ascii_lowercase();
-            if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
-                return vec![
-                    Declaration { name: "outline-style".to_string(), value: Value::Keyword(lower.clone()), important },
-                    Declaration { name: "outline-width".to_string(), value: Value::Keyword(lower.clone()), important },
-                    Declaration { name: "outline-color".to_string(), value: Value::Keyword(lower), important },
-                ];
-            }
+        && let Value::Keyword(kw) = &values[0]
+    {
+        let lower = kw.to_ascii_lowercase();
+        if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
+            return vec![
+                Declaration {
+                    name: "outline-style".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "outline-width".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "outline-color".to_string(),
+                    value: Value::Keyword(lower),
+                    important,
+                },
+            ];
         }
+    }
 
     let mut style = None;
     let mut width = None;
@@ -2074,10 +2193,9 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
                         width = Some(item.clone());
                     }
                 }
-                _ if is_background_color_keyword(&lower)
-                    && color.is_none() => {
-                        color = Some(item.clone());
-                    }
+                _ if is_background_color_keyword(&lower) && color.is_none() => {
+                    color = Some(item.clone());
+                }
                 _ => {
                     // Unknown keyword — skip rather than mis-classify as color
                 }

@@ -291,9 +291,10 @@ impl TransitionTimeline {
             .collect::<Vec<_>>();
         for node_id in detached {
             if let Some(state) = self.elements.remove(&node_id) {
-                self.events.extend(state.running.into_iter().map(|(property, running)| {
-                    running.event_record(node_id, "transitioncancel", property, self.now_ms)
-                }));
+                self.events
+                    .extend(state.running.into_iter().map(|(property, running)| {
+                        running.event_record(node_id, "transitioncancel", property, self.now_ms)
+                    }));
             }
         }
     }
@@ -333,9 +334,10 @@ impl TransitionTimeline {
             .collect::<Vec<_>>();
         for node_id in detached {
             if let Some(state) = self.elements.remove(&node_id) {
-                self.events.extend(state.running.into_iter().map(|(property, running)| {
-                    running.event_record(node_id, "transitioncancel", property, self.now_ms)
-                }));
+                self.events
+                    .extend(state.running.into_iter().map(|(property, running)| {
+                        running.event_record(node_id, "transitioncancel", property, self.now_ms)
+                    }));
             }
         }
     }
@@ -1235,9 +1237,7 @@ mod tests {
                 &ComputedValue::Keyword("brightness(2) blur(10px)".into()),
                 0.5,
             ),
-            Some(ComputedValue::Keyword(
-                "brightness(1.5) blur(5px)".into()
-            ))
+            Some(ComputedValue::Keyword("brightness(1.5) blur(5px)".into()))
         );
     }
 }

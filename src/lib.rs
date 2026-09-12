@@ -4,21 +4,21 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod accessibility;
-pub mod cdp;
 pub mod canvas;
+pub mod cdp;
 pub mod css;
 pub mod data;
 pub mod dom;
 pub mod ffi;
-pub mod frame;
 pub mod font;
+pub mod frame;
 pub mod html;
 pub mod http;
 pub mod js;
 pub mod layout;
 pub mod paint;
-pub mod platform_dialog;
 pub mod platform_browser;
+pub mod platform_dialog;
 pub mod platform_input;
 pub mod realtime;
 mod screenshot;

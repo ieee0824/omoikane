@@ -96,10 +96,8 @@ impl HttpRequest {
         req.headers.push(("Host".to_string(), host));
         req.headers
             .push(("User-Agent".to_string(), default_user_agent()));
-        req.headers.push((
-            "Accept-Language".to_string(),
-            "en-US,en;q=0.5".to_string(),
-        ));
+        req.headers
+            .push(("Accept-Language".to_string(), "en-US,en;q=0.5".to_string()));
         req.headers
             .push(("Accept-Encoding".to_string(), "gzip".to_string()));
         req

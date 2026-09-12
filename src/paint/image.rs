@@ -8,9 +8,9 @@ use flate2::read::ZlibDecoder;
 
 use super::{DataUri, GifDisposal, Image, ImageAnimation, ImageFrame, PaintError};
 
-use crate::layout::Rect;
 use crate::css::ComputedStyle;
 use crate::css::ComputedValue;
+use crate::layout::Rect;
 
 pub(crate) fn decode_gif(bytes: &[u8]) -> Result<Image, PaintError> {
     let mut options = gif::DecodeOptions::new();
@@ -28,8 +28,8 @@ pub(crate) fn decode_gif(bytes: &[u8]) -> Result<Image, PaintError> {
     let frame_width = usize::from(frame.width);
     for y in 0..usize::from(frame.height) {
         let source_start = y * frame_width * 4;
-        let target_start = ((y + usize::from(frame.top)) * canvas_width as usize
-            + usize::from(frame.left)) * 4;
+        let target_start =
+            ((y + usize::from(frame.top)) * canvas_width as usize + usize::from(frame.left)) * 4;
         let length = frame_width * 4;
         if target_start + length > pixels.len() || source_start + length > frame.buffer.len() {
             return Err(PaintError::InvalidImageBuffer);
@@ -50,14 +50,19 @@ pub(crate) fn decode_gif_animation(bytes: &[u8]) -> Result<ImageAnimation, Paint
     let canvas_height = u32::from(decoder.height());
     let mut canvas = vec![0; canvas_width as usize * canvas_height as usize * 4];
     let mut frames = Vec::new();
-    while let Some(frame) = decoder.read_next_frame().map_err(|_| PaintError::InvalidImageBuffer)? {
+    while let Some(frame) = decoder
+        .read_next_frame()
+        .map_err(|_| PaintError::InvalidImageBuffer)?
+    {
         let before = canvas.clone();
         let frame_width = usize::from(frame.width);
         for y in 0..usize::from(frame.height) {
             for x in 0..frame_width {
                 let source = (y * frame_width + x) * 4;
                 let target = ((y + usize::from(frame.top)) * canvas_width as usize
-                    + x + usize::from(frame.left)) * 4;
+                    + x
+                    + usize::from(frame.left))
+                    * 4;
                 if target + 4 > canvas.len() || source + 4 > frame.buffer.len() {
                     return Err(PaintError::InvalidImageBuffer);
                 }
@@ -82,29 +87,46 @@ pub(crate) fn decode_gif_animation(bytes: &[u8]) -> Result<ImageAnimation, Paint
             GifDisposal::Background => {
                 for y in 0..usize::from(frame.height) {
                     let start = ((y + usize::from(frame.top)) * canvas_width as usize
-                        + usize::from(frame.left)) * 4;
+                        + usize::from(frame.left))
+                        * 4;
                     let end = start + frame_width * 4;
-                    if end > canvas.len() { return Err(PaintError::InvalidImageBuffer); }
+                    if end > canvas.len() {
+                        return Err(PaintError::InvalidImageBuffer);
+                    }
                     canvas[start..end].fill(0);
                 }
             }
         }
     }
-    if frames.is_empty() { return Err(PaintError::InvalidImageBuffer); }
-    let duration_ms = frames.iter().map(|frame| u64::from(frame.delay_ms.max(1))).sum();
-    Ok(ImageAnimation { frames, duration_ms })
+    if frames.is_empty() {
+        return Err(PaintError::InvalidImageBuffer);
+    }
+    let duration_ms = frames
+        .iter()
+        .map(|frame| u64::from(frame.delay_ms.max(1)))
+        .sum();
+    Ok(ImageAnimation {
+        frames,
+        duration_ms,
+    })
 }
 
 pub(crate) fn decode_webp(bytes: &[u8]) -> Result<Image, PaintError> {
     let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes))
         .map_err(|_| PaintError::InvalidImageBuffer)?;
     let (width, height) = decoder.dimensions();
-    let size = decoder.output_buffer_size().ok_or(PaintError::InvalidImageBuffer)?;
+    let size = decoder
+        .output_buffer_size()
+        .ok_or(PaintError::InvalidImageBuffer)?;
     let mut pixels = vec![0; size];
-    decoder.read_image(&mut pixels).map_err(|_| PaintError::InvalidImageBuffer)?;
+    decoder
+        .read_image(&mut pixels)
+        .map_err(|_| PaintError::InvalidImageBuffer)?;
     if !decoder.has_alpha() {
         let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-        for rgb in pixels.chunks_exact(3) { rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]); }
+        for rgb in pixels.chunks_exact(3) {
+            rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+        }
         pixels = rgba;
     }
     Image::new(width, height, pixels)
@@ -415,14 +437,15 @@ pub(crate) fn percent_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0usize;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len()
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
             && let (Some(high), Some(low)) =
                 (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-            {
-                out.push((high << 4) | low);
-                index += 3;
-                continue;
-            }
+        {
+            out.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
         out.push(bytes[index]);
         index += 1;
     }
@@ -576,12 +599,22 @@ fn resolve_object_position_component(component: Option<&str>, free_space: f32) -
 
 /// Computes the background-size dimensions given the style and the painting area.
 /// Returns `(tile_width, tile_height)`.
-pub(crate) fn background_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
+pub(crate) fn background_size(
+    style: &ComputedStyle,
+    area: Rect,
+    image_w: f32,
+    image_h: f32,
+) -> (f32, f32) {
     image_size(style, "background-size", area, image_w, image_h)
 }
 
 /// Computes mask tile dimensions with the same sizing rules as backgrounds.
-pub(crate) fn mask_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (f32, f32) {
+pub(crate) fn mask_size(
+    style: &ComputedStyle,
+    area: Rect,
+    image_w: f32,
+    image_h: f32,
+) -> (f32, f32) {
     image_size(style, "mask-size", area, image_w, image_h)
 }
 

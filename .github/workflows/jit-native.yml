@@ -35,6 +35,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: native-jit-v1-${{ matrix.target }}

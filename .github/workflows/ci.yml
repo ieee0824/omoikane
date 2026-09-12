@@ -10,11 +10,26 @@ on:
     - cron: "17 3 * * 1"
 
 jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - name: Test formatting failure detection
+        run: python3 -m unittest discover -s scripts/tests -p 'test_check_rustfmt.py'
+      - name: Verify root crate formatting
+        run: python3 scripts/check_rustfmt.py
+
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           # Keep the repository crate artifacts as well as dependencies so a
@@ -153,6 +168,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: workspace-v1

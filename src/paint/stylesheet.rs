@@ -114,18 +114,18 @@ pub(crate) fn collect_author_stylesheets(
                     } else if let Some(base) = base_url
                         && let Some((css, resolved)) =
                             fetch_relative_stylesheet(base, &href, client, base_url)
-                        {
-                            let mut active_import_urls = HashSet::new();
-                            collect_stylesheet_with_imports(
-                                css,
-                                Some(&resolved),
-                                base_url,
-                                out,
-                                client,
-                                0,
-                                &mut active_import_urls,
-                            )?;
-                        }
+                    {
+                        let mut active_import_urls = HashSet::new();
+                        collect_stylesheet_with_imports(
+                            css,
+                            Some(&resolved),
+                            base_url,
+                            out,
+                            client,
+                            0,
+                            &mut active_import_urls,
+                        )?;
+                    }
                     wrap_stylesheets_in_media(&mut out[start..], media);
                 }
             }
@@ -165,20 +165,13 @@ pub(crate) fn collect_stylesheet_with_imports(
             let chars: Vec<char> = css.chars().collect();
             let mut cursor = 0usize;
             for directive in directives {
-                push_stylesheet_chunk(
-                    &chars[cursor..directive.start],
-                    stylesheet_url,
-                    out,
-                );
+                push_stylesheet_chunk(&chars[cursor..directive.start], stylesheet_url, out);
                 cursor = directive.end;
 
                 let mut imported = Vec::new();
                 if let Some(base) = import_base
-                    && let Some(import_url) = resolve_relative_stylesheet_url(
-                        base,
-                        &directive.href,
-                        document_base,
-                    )
+                    && let Some(import_url) =
+                        resolve_relative_stylesheet_url(base, &directive.href, document_base)
                 {
                     let import_url_string = import_url.to_string();
                     if active_import_urls.insert(import_url_string.clone()) {
@@ -260,7 +253,10 @@ pub(crate) fn resolve_stylesheet_asset_urls(
         let unquoted = raw
             .strip_prefix('"')
             .and_then(|value| value.strip_suffix('"'))
-            .or_else(|| raw.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')))
+            .or_else(|| {
+                raw.strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\''))
+            })
             .unwrap_or(raw);
         if unquoted.starts_with("data:") || unquoted.starts_with('#') {
             output.push_str(&rest[start..start + 4 + end + 1]);
@@ -503,10 +499,7 @@ pub(crate) fn parse_import_prelude(prelude: &str) -> Option<(String, Option<Impo
                 if value.is_empty() {
                     return None;
                 }
-                parsed = Some((
-                    value.to_string(),
-                    prelude[index + ch.len_utf8()..].trim(),
-                ));
+                parsed = Some((value.to_string(), prelude[index + ch.len_utf8()..].trim()));
                 break;
             }
         }
@@ -942,9 +935,10 @@ pub(crate) fn same_origin(a: &crate::http::Url, b: &crate::http::Url) -> bool {
 /// Recursively finds all `<base>` elements in document order.
 pub(crate) fn find_base_elements(node: &NodeHandle, result: &mut Vec<NodeHandle>) {
     if node.node_type() == crate::dom::NodeType::Element
-        && node.tag_name().as_deref() == Some("base") {
-            result.push(node.clone());
-        }
+        && node.tag_name().as_deref() == Some("base")
+    {
+        result.push(node.clone());
+    }
     for child in node.child_nodes() {
         find_base_elements(&child, result);
     }
@@ -965,33 +959,36 @@ pub(crate) fn extract_document_base_url(
 
     for base_elem in base_elements {
         if let Some(attrs) = base_elem.attributes()
-            && let Some(href) = attrs.get("href") {
-                let href = href.trim();
-                if href.is_empty() {
-                    continue; // Skip empty href, try next <base>
-                }
+            && let Some(href) = attrs.get("href")
+        {
+            let href = href.trim();
+            if href.is_empty() {
+                continue; // Skip empty href, try next <base>
+            }
 
-                // Absolute URL
-                if href.contains("://") {
-                    if let Ok(url) = href.parse::<crate::http::Url>() {
-                        // SSRF protection: only honor same-origin absolute base URLs
-                        if let Some(original) = fallback_base
-                            && same_origin(&url, original) {
-                                return Some(url);
-                            }
-                        // If no fallback_base provided, don't enable fetching via <base>
-                        continue;
-                    }
-                    continue; // Invalid absolute URL, try next <base>
-                }
-
-                // Relative URL (resolve against fallback_base)
-                if let Some(base) = fallback_base
-                    && let Ok(url) = resolve_url(base, href) {
-                        // Relative URLs always resolve to same origin
+            // Absolute URL
+            if href.contains("://") {
+                if let Ok(url) = href.parse::<crate::http::Url>() {
+                    // SSRF protection: only honor same-origin absolute base URLs
+                    if let Some(original) = fallback_base
+                        && same_origin(&url, original)
+                    {
                         return Some(url);
                     }
+                    // If no fallback_base provided, don't enable fetching via <base>
+                    continue;
+                }
+                continue; // Invalid absolute URL, try next <base>
             }
+
+            // Relative URL (resolve against fallback_base)
+            if let Some(base) = fallback_base
+                && let Ok(url) = resolve_url(base, href)
+            {
+                // Relative URLs always resolve to same origin
+                return Some(url);
+            }
+        }
     }
     fallback_base.cloned()
 }
@@ -1012,7 +1009,10 @@ pub(crate) fn collect_text_contents(node: &NodeHandle) -> String {
     text
 }
 
-pub(crate) fn materialize_local_assets(node: &NodeHandle, base_path: &std::path::Path) -> Result<(), PaintError> {
+pub(crate) fn materialize_local_assets(
+    node: &NodeHandle,
+    base_path: &std::path::Path,
+) -> Result<(), PaintError> {
     if node.node_type() == NodeType::Element {
         match node.tag_name().as_deref() {
             Some("img") => rewrite_local_asset_attribute(node, "src", base_path)?,
@@ -1094,19 +1094,18 @@ pub(crate) fn fetch_font_face_fonts(
 
             // Skip WOFF2 when format hint says so (not supported yet)
             if let Some(ref fmt) = ff_rule.format
-                && fmt.eq_ignore_ascii_case("woff2") {
-                    continue;
-                }
+                && fmt.eq_ignore_ascii_case("woff2")
+            {
+                continue;
+            }
 
             let url_str = &ff_rule.src_url;
 
             // Parse variant descriptors
-            let weight = crate::font::FontWeight::parse(
-                ff_rule.font_weight.as_deref().unwrap_or("normal"),
-            );
-            let style = crate::font::FontStyle::parse(
-                ff_rule.font_style.as_deref().unwrap_or("normal"),
-            );
+            let weight =
+                crate::font::FontWeight::parse(ff_rule.font_weight.as_deref().unwrap_or("normal"));
+            let style =
+                crate::font::FontStyle::parse(ff_rule.font_style.as_deref().unwrap_or("normal"));
 
             // Deduplicate: encode style as u8 (0=normal, 1=italic, 2=oblique)
             let style_ord: u8 = match style {

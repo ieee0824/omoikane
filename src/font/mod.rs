@@ -5,11 +5,11 @@
 
 use ab_glyph::{Font as AbGlyphFont, FontVec, GlyphId, ScaleFont};
 use rustybuzz::{Direction, Face, UnicodeBuffer};
-use unicode_segmentation::UnicodeSegmentation;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::{fmt, io};
+use unicode_segmentation::UnicodeSegmentation;
 
 mod diagnostics;
 pub use diagnostics::{FontSelectionRecord, with_font_selection_diagnostics};
@@ -98,7 +98,9 @@ pub enum ShapingDirection {
 /// Shaping can fold multiple grapheme clusters into one glyph, so callers
 /// must derive spacing from source clusters rather than shaped glyph count.
 pub(crate) fn grapheme_spacing_boundaries(text: &str) -> usize {
-    grapheme_spacing_cluster_starts(text).len().saturating_sub(1)
+    grapheme_spacing_cluster_starts(text)
+        .len()
+        .saturating_sub(1)
 }
 
 /// Byte offsets of source grapheme clusters that participate in CSS spacing.
@@ -133,7 +135,9 @@ pub(crate) fn shape_text_with_fallback(
         return Ok(Vec::new());
     }
     if fonts.is_empty() {
-        return Err(FontError::Other("No fonts available for shaping".to_string()));
+        return Err(FontError::Other(
+            "No fonts available for shaping".to_string(),
+        ));
     }
 
     // Most runs are fully covered by the primary font. Shape them once and
@@ -176,9 +180,16 @@ pub(crate) fn shape_text_with_fallback(
         for glyph in &mut glyphs {
             glyph.cluster += range.start;
         }
-        runs.push(ShapedRun { font_index, text_range: range, glyphs });
+        runs.push(ShapedRun {
+            font_index,
+            text_range: range,
+            glyphs,
+        });
     }
-    if matches!(direction, ShapingDirection::RightToLeft | ShapingDirection::BottomToTop) {
+    if matches!(
+        direction,
+        ShapingDirection::RightToLeft | ShapingDirection::BottomToTop
+    ) {
         runs.reverse();
     }
     Ok(runs)
@@ -190,9 +201,10 @@ fn cluster_supported_by_font(
     size_px: f32,
     direction: ShapingDirection,
 ) -> bool {
-    if !cluster.chars().all(|ch| {
-        ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch)
-    }) {
+    if !cluster
+        .chars()
+        .all(|ch| ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch))
+    {
         return false;
     }
     font.shape_text(cluster, size_px, direction)
@@ -290,7 +302,9 @@ impl Font {
 
         // Get scaled advance width for layout
         let advance_x = {
-            let scaled = self.inner.as_scaled(self.ab_glyph_scale_for_css_px(size_px));
+            let scaled = self
+                .inner
+                .as_scaled(self.ab_glyph_scale_for_css_px(size_px));
             scaled.h_advance(glyph_id)
         };
 
@@ -414,7 +428,9 @@ impl Font {
     /// Get the horizontal advance width for a character at a given font size.
     pub fn glyph_advance(&self, ch: char, size_px: f32) -> f32 {
         let glyph_id = self.inner.glyph_id(ch);
-        let scaled = self.inner.as_scaled(self.ab_glyph_scale_for_css_px(size_px));
+        let scaled = self
+            .inner
+            .as_scaled(self.ab_glyph_scale_for_css_px(size_px));
         scaled.h_advance(glyph_id)
     }
 
@@ -422,7 +438,9 @@ impl Font {
     pub fn glyph_kerning(&self, previous: char, current: char, size_px: f32) -> f32 {
         let prev_id = self.inner.glyph_id(previous);
         let curr_id = self.inner.glyph_id(current);
-        let scaled = self.inner.as_scaled(self.ab_glyph_scale_for_css_px(size_px));
+        let scaled = self
+            .inner
+            .as_scaled(self.ab_glyph_scale_for_css_px(size_px));
         scaled.kern(prev_id, curr_id)
     }
 
@@ -547,7 +565,9 @@ fn decode_woff1(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
     for i in 0..num_tables {
         let base = 44 + i * 20;
         if base + 20 > data.len() {
-            return Err(FontError::InvalidFont("WOFF table directory truncated".to_string()));
+            return Err(FontError::InvalidFont(
+                "WOFF table directory truncated".to_string(),
+            ));
         }
         let mut tag = [0u8; 4];
         tag.copy_from_slice(&data[base..base + 4]);
@@ -582,20 +602,26 @@ fn decode_woff1(data: Vec<u8>) -> Result<Vec<u8>, FontError> {
 
         if entry.comp_length >= entry.orig_length {
             // Not compressed — copy raw
-            let end = entry.comp_offset
+            let end = entry
+                .comp_offset
                 .checked_add(entry.orig_length)
                 .ok_or_else(|| FontError::InvalidFont("WOFF table offset overflow".to_string()))?;
             if end > data.len() {
-                return Err(FontError::InvalidFont("WOFF table data out of bounds".to_string()));
+                return Err(FontError::InvalidFont(
+                    "WOFF table data out of bounds".to_string(),
+                ));
             }
             sfnt.extend_from_slice(&data[entry.comp_offset..end]);
         } else {
             // Zlib compressed
-            let end = entry.comp_offset
+            let end = entry
+                .comp_offset
                 .checked_add(entry.comp_length)
                 .ok_or_else(|| FontError::InvalidFont("WOFF table offset overflow".to_string()))?;
             if end > data.len() {
-                return Err(FontError::InvalidFont("WOFF table data out of bounds".to_string()));
+                return Err(FontError::InvalidFont(
+                    "WOFF table data out of bounds".to_string(),
+                ));
             }
             let mut decoder = ZlibDecoder::new(&data[entry.comp_offset..end]);
             let mut decompressed = Vec::with_capacity(entry.orig_length);
@@ -690,14 +716,13 @@ pub(crate) fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
     //
     // Known tag indices (WOFF2 spec Table 3):
     const KNOWN_TAGS: [&[u8; 4]; 63] = [
-        b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post",
-        b"cvt ", b"fpgm", b"glyf", b"loca", b"prep", b"CFF ", b"VORG", b"EBDT",
-        b"EBLC", b"gasp", b"hdmx", b"kern", b"LTSH", b"PCLT", b"VDMX", b"vhea",
-        b"vmtx", b"BASE", b"GDEF", b"GPOS", b"GSUB", b"EBSC", b"JSTF", b"MATH",
-        b"CBDT", b"CBLC", b"COLR", b"CPAL", b"SVG ", b"sbix", b"acnt", b"avar",
-        b"bdat", b"bloc", b"bsln", b"cvar", b"fdsc", b"feat", b"fmtx", b"fvar",
-        b"gvar", b"hsty", b"just", b"lcar", b"mort", b"morx", b"opbd", b"prop",
-        b"trak", b"Zapf", b"Silf", b"Glat", b"Gloc", b"Feat", b"Sill",
+        b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post", b"cvt ", b"fpgm",
+        b"glyf", b"loca", b"prep", b"CFF ", b"VORG", b"EBDT", b"EBLC", b"gasp", b"hdmx", b"kern",
+        b"LTSH", b"PCLT", b"VDMX", b"vhea", b"vmtx", b"BASE", b"GDEF", b"GPOS", b"GSUB", b"EBSC",
+        b"JSTF", b"MATH", b"CBDT", b"CBLC", b"COLR", b"CPAL", b"SVG ", b"sbix", b"acnt", b"avar",
+        b"bdat", b"bloc", b"bsln", b"cvar", b"fdsc", b"feat", b"fmtx", b"fvar", b"gvar", b"hsty",
+        b"just", b"lcar", b"mort", b"morx", b"opbd", b"prop", b"trak", b"Zapf", b"Silf", b"Glat",
+        b"Gloc", b"Feat", b"Sill",
     ];
 
     struct Woff2TableEntry {
@@ -792,21 +817,29 @@ pub(crate) fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
             match transform_version {
                 0 => true,  // transformed format (transform_length present)
                 3 => false, // no transform
-                v => return Err(FontError::InvalidFont(format!(
-                    "WOFF2 glyf/loca reserved transform_version {}", v
-                ))),
+                v => {
+                    return Err(FontError::InvalidFont(format!(
+                        "WOFF2 glyf/loca reserved transform_version {}",
+                        v
+                    )));
+                }
             }
         } else {
             match transform_version {
                 0 => false, // no transform
-                3 => return Err(FontError::InvalidFont(format!(
-                    "WOFF2 table '{}' transform version 3 is not supported",
-                    std::str::from_utf8(&tag).unwrap_or("????")
-                ))),
-                v => return Err(FontError::InvalidFont(format!(
-                    "WOFF2 table '{}' reserved transform_version {}",
-                    std::str::from_utf8(&tag).unwrap_or("????"), v
-                ))),
+                3 => {
+                    return Err(FontError::InvalidFont(format!(
+                        "WOFF2 table '{}' transform version 3 is not supported",
+                        std::str::from_utf8(&tag).unwrap_or("????")
+                    )));
+                }
+                v => {
+                    return Err(FontError::InvalidFont(format!(
+                        "WOFF2 table '{}' reserved transform_version {}",
+                        std::str::from_utf8(&tag).unwrap_or("????"),
+                        v
+                    )));
+                }
             }
         };
 
@@ -837,10 +870,15 @@ pub(crate) fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
     // Decompress the data block with brotli
     // Use checked_add to avoid overflow, and cap at 100 MB as a sanity limit.
     const MAX_ORIG_SIZE: usize = 100 * 1024 * 1024; // 100 MB
-    let total_orig: usize = entries.iter().try_fold(0usize, |acc, e| {
-        let stored = e.transform_length.unwrap_or(e.orig_length);
-        acc.checked_add(stored)
-    }).ok_or_else(|| FontError::InvalidFont("WOFF2 total decompressed size overflow".to_string()))?;
+    let total_orig: usize = entries
+        .iter()
+        .try_fold(0usize, |acc, e| {
+            let stored = e.transform_length.unwrap_or(e.orig_length);
+            acc.checked_add(stored)
+        })
+        .ok_or_else(|| {
+            FontError::InvalidFont("WOFF2 total decompressed size overflow".to_string())
+        })?;
     if total_orig > MAX_ORIG_SIZE {
         return Err(FontError::InvalidFont(format!(
             "WOFF2 total decompressed size {} exceeds limit {}",
@@ -850,10 +888,7 @@ pub(crate) fn decode_woff2(data: &[u8]) -> Result<Vec<u8>, FontError> {
 
     let mut decompressed = Vec::with_capacity(total_orig);
     {
-        let mut reader = brotli::Decompressor::new(
-            &data[compressed_start..compressed_end],
-            4096,
-        );
+        let mut reader = brotli::Decompressor::new(&data[compressed_start..compressed_end], 4096);
         reader.read_to_end(&mut decompressed).map_err(|e| {
             FontError::InvalidFont(format!("WOFF2 brotli decompression failed: {}", e))
         })?;
@@ -1212,7 +1247,6 @@ impl FontStyle {
     }
 }
 
-
 /// Cache key for a specific font variant (weight + style).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontVariantKey {
@@ -1349,8 +1383,17 @@ impl FontCache {
     /// The font data can be TTF, OTF, WOFF (zlib-compressed), or WOFF2 (brotli-compressed).
     /// Web fonts take priority over system fonts in `get_or_load`.
     /// If the cache is at capacity, an existing entry is evicted to make room.
-    pub fn register_web_font(&mut self, family: &str, data: Vec<u8>) -> Result<Arc<Font>, FontError> {
-        self.register_web_font_with_variant(family, FontWeight::default(), FontStyle::default(), data)
+    pub fn register_web_font(
+        &mut self,
+        family: &str,
+        data: Vec<u8>,
+    ) -> Result<Arc<Font>, FontError> {
+        self.register_web_font_with_variant(
+            family,
+            FontWeight::default(),
+            FontStyle::default(),
+            data,
+        )
     }
 
     /// Register a web font with explicit weight and style descriptors.
@@ -1593,9 +1636,10 @@ impl GlyphCache {
     pub fn insert(&mut self, ch: char, size_px: f32, raster: GlyphRaster) {
         // Evict an arbitrary entry if at capacity (HashMap iteration order is non-deterministic)
         if self.glyphs.len() >= self.max_entries
-            && let Some(oldest_key) = self.glyphs.keys().next().cloned() {
-                self.glyphs.remove(&oldest_key);
-            }
+            && let Some(oldest_key) = self.glyphs.keys().next().cloned()
+        {
+            self.glyphs.remove(&oldest_key);
+        }
 
         let key = GlyphCacheKey::new(ch, size_px);
         self.glyphs.insert(key, raster);
@@ -1614,9 +1658,10 @@ impl GlyphCache {
         if !self.glyphs.contains_key(&key) {
             // Evict an arbitrary entry if at capacity
             if self.glyphs.len() >= self.max_entries
-                && let Some(oldest_key) = self.glyphs.keys().next().cloned() {
-                    self.glyphs.remove(&oldest_key);
-                }
+                && let Some(oldest_key) = self.glyphs.keys().next().cloned()
+            {
+                self.glyphs.remove(&oldest_key);
+            }
 
             let raster = font.rasterize(ch, size_px)?;
             self.glyphs.insert(key, raster);
@@ -1656,7 +1701,9 @@ impl Font {
     ///
     /// This sums advances and pair kerning for all characters in the string.
     pub fn measure_text_width(&self, text: &str, size_px: f32) -> f32 {
-        let scaled = self.inner.as_scaled(self.ab_glyph_scale_for_css_px(size_px));
+        let scaled = self
+            .inner
+            .as_scaled(self.ab_glyph_scale_for_css_px(size_px));
         let mut width = 0.0;
         let mut previous_id = None;
 

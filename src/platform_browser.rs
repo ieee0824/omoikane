@@ -78,7 +78,10 @@ pub enum BrowserEvent {
         total: Option<u64>,
     },
     DownloadFinished(DownloadInfo),
-    DownloadFailed { id: DownloadId, error: String },
+    DownloadFailed {
+        id: DownloadId,
+        error: String,
+    },
     DownloadCancelled(DownloadId),
 }
 
@@ -197,7 +200,13 @@ impl PlatformBrowser {
             tab.info.active = false;
         }
         self.active_tab = Some(id);
-        self.tabs.insert(id, BrowserTab { info: info.clone(), session });
+        self.tabs.insert(
+            id,
+            BrowserTab {
+                info: info.clone(),
+                session,
+            },
+        );
         self.events.push_back(BrowserEvent::TabOpened(info));
         Ok(id)
     }
@@ -276,7 +285,8 @@ impl PlatformBrowser {
             .dispatch("Page.navigate", json!({ "url": url }))
             .map_err(BrowserError::Navigation)?;
         refresh_tab_info(tab);
-        self.events.push_back(BrowserEvent::TabNavigated(tab.info.clone()));
+        self.events
+            .push_back(BrowserEvent::TabNavigated(tab.info.clone()));
         Ok(&tab.info)
     }
 
@@ -288,7 +298,8 @@ impl PlatformBrowser {
             .dispatch("Page.reload", json!({}))
             .map_err(BrowserError::Navigation)?;
         refresh_tab_info(tab);
-        self.events.push_back(BrowserEvent::TabNavigated(tab.info.clone()));
+        self.events
+            .push_back(BrowserEvent::TabNavigated(tab.info.clone()));
         Ok(&tab.info)
     }
 
@@ -306,7 +317,8 @@ impl PlatformBrowser {
             )
             .map_err(BrowserError::Navigation)?;
         refresh_tab_info(tab);
-        self.events.push_back(BrowserEvent::TabNavigated(tab.info.clone()));
+        self.events
+            .push_back(BrowserEvent::TabNavigated(tab.info.clone()));
         Ok(&tab.info)
     }
 
@@ -349,7 +361,8 @@ impl PlatformBrowser {
                 total: None,
             },
         };
-        self.events.push_back(BrowserEvent::DownloadStarted(info.clone()));
+        self.events
+            .push_back(BrowserEvent::DownloadStarted(info.clone()));
         self.downloads.insert(id, info.clone());
 
         let response = match tab.session.http_client_mut().get(url) {
@@ -358,7 +371,10 @@ impl PlatformBrowser {
                 let message = error.to_string();
                 info.state = DownloadState::Failed(message.clone());
                 self.downloads.insert(id, info);
-                self.events.push_back(BrowserEvent::DownloadFailed { id, error: message.clone() });
+                self.events.push_back(BrowserEvent::DownloadFailed {
+                    id,
+                    error: message.clone(),
+                });
                 return Err(BrowserError::DownloadFailed { id, error: message });
             }
         };
@@ -500,9 +516,15 @@ mod tests {
     #[test]
     fn tab_strip_selects_adjacent_tab_when_active_tab_closes() {
         let mut browser = PlatformBrowser::new();
-        let first = browser.open_tab(Some(&navigate_url("<title>one</title>"))).unwrap();
-        let second = browser.open_tab(Some(&navigate_url("<title>two</title>"))).unwrap();
-        let third = browser.open_tab(Some(&navigate_url("<title>three</title>"))).unwrap();
+        let first = browser
+            .open_tab(Some(&navigate_url("<title>one</title>")))
+            .unwrap();
+        let second = browser
+            .open_tab(Some(&navigate_url("<title>two</title>")))
+            .unwrap();
+        let third = browser
+            .open_tab(Some(&navigate_url("<title>three</title>")))
+            .unwrap();
         assert_eq!(browser.active_tab(), Some(third));
         assert_eq!(browser.tab_info(first).unwrap().title, "one");
 
@@ -517,7 +539,9 @@ mod tests {
     #[test]
     fn navigation_refreshes_address_and_title_without_recreating_tab() {
         let mut browser = PlatformBrowser::new();
-        let tab = browser.open_tab(Some(&navigate_url("<title>before</title>"))).unwrap();
+        let tab = browser
+            .open_tab(Some(&navigate_url("<title>before</title>")))
+            .unwrap();
         browser
             .navigate(tab, &navigate_url("<title>after</title>"))
             .unwrap();
@@ -560,8 +584,14 @@ mod tests {
     #[test]
     fn filename_is_safe_and_has_a_fallback() {
         assert_eq!(sanitize_filename("../a/b.txt"), "_a_b.txt");
-        assert_eq!(filename_from_url("https://example.test/path/?q=1"), "download");
-        assert_eq!(filename_from_url("https://example.test/file.txt#part"), "file.txt");
+        assert_eq!(
+            filename_from_url("https://example.test/path/?q=1"),
+            "download"
+        );
+        assert_eq!(
+            filename_from_url("https://example.test/file.txt#part"),
+            "file.txt"
+        );
     }
 
     #[test]
@@ -611,7 +641,9 @@ mod tests {
     fn download_fails_when_download_id_space_exhausts() {
         let mut browser = PlatformBrowser::with_tab(None).unwrap();
         browser.next_download_id = u64::MAX;
-        let error = browser.download("http://127.0.0.1:1/download", None).unwrap_err();
+        let error = browser
+            .download("http://127.0.0.1:1/download", None)
+            .unwrap_err();
         assert!(matches!(error, BrowserError::IdExhausted("download")));
         let events = browser.drain_events();
         assert_eq!(events.len(), 1);

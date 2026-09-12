@@ -138,8 +138,14 @@ fn vertical_rl_flows_blocks_right_to_left_and_inline_text_top_to_bottom() {
     assert_eq!(first_box.dimensions.content.height, 20.0);
 
     let body_style = resolver.computed_style(&body);
-    assert_eq!(body_style.get("writing-mode"), Some(&ComputedValue::Keyword("vertical-rl".into())));
-    assert!(!layout.lines.is_empty(), "direct text should form a vertical line");
+    assert_eq!(
+        body_style.get("writing-mode"),
+        Some(&ComputedValue::Keyword("vertical-rl".into()))
+    );
+    assert!(
+        !layout.lines.is_empty(),
+        "direct text should form a vertical line"
+    );
     let fragment = &layout.lines[0].fragments[0];
     assert!(fragment.rect.width > 0.0 && fragment.rect.height > 0.0);
     assert!(fragment.rect.y >= layout.lines[0].rect.y);
@@ -148,7 +154,10 @@ fn vertical_rl_flows_blocks_right_to_left_and_inline_text_top_to_bottom() {
 #[test]
 fn vertical_logical_padding_maps_inline_to_y_and_block_to_x() {
     let (_document, _html, body, card) = sample_tree();
-    body.set_attribute("style", "writing-mode: vertical-lr; width: 160px; height: 100px");
+    body.set_attribute(
+        "style",
+        "writing-mode: vertical-lr; width: 160px; height: 100px",
+    );
     card.set_attribute(
         "style",
         "width: 40px; height: 20px; padding-inline-start: 7px; padding-block-start: 11px",
@@ -259,11 +268,20 @@ fn bidi_line_reorders_adjacent_rtl_fragments_without_changing_dom_order() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let line = &layout.children[0].lines[0];
-    let texts: Vec<&str> = line.fragments.iter().filter_map(InlineFragment::text).collect();
+    let texts: Vec<&str> = line
+        .fragments
+        .iter()
+        .filter_map(InlineFragment::text)
+        .collect();
     assert_eq!(texts, vec!["A", " ", "אב", "גד", " ", "Z"]);
 
     let text_fragments: Vec<_> = line
@@ -278,8 +296,14 @@ fn bidi_line_reorders_adjacent_rtl_fragments_without_changing_dom_order() {
     assert!(leading.rect.x < second_rtl.rect.x);
     assert!(second_rtl.rect.x < first_rtl.rect.x);
     assert!(first_rtl.rect.x < trailing.rect.x);
-    assert_eq!(first_rtl.style.resolved_bidi_level.map(|level| level % 2), Some(1));
-    assert_eq!(second_rtl.style.resolved_bidi_level.map(|level| level % 2), Some(1));
+    assert_eq!(
+        first_rtl.style.resolved_bidi_level.map(|level| level % 2),
+        Some(1)
+    );
+    assert_eq!(
+        second_rtl.style.resolved_bidi_level.map(|level| level % 2),
+        Some(1)
+    );
 }
 
 #[test]
@@ -310,7 +334,12 @@ fn vertical_bidi_line_uses_the_same_cross_fragment_run_order() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 80.0, height: 120.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 120.0,
+        },
     )
     .unwrap();
     let line = &layout.lines[0];
@@ -915,7 +944,12 @@ fn text_overflow_ellipsis_keeps_scroll_geometry_and_grapheme_boundaries() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let target_box = find_layout_box(&layout, &target).unwrap();
@@ -983,7 +1017,11 @@ fn text_overflow_ellipsis_uses_the_inline_end_for_rtl() {
     )
     .unwrap();
     let target_box = find_layout_box(&layout, &target).unwrap();
-    let painted = &target_box.lines[0].text_overflow.as_ref().unwrap().fragments;
+    let painted = &target_box.lines[0]
+        .text_overflow
+        .as_ref()
+        .unwrap()
+        .fragments;
     let marker = painted
         .iter()
         .find(|fragment| {
@@ -1700,13 +1738,25 @@ fn google_style_form_controls_create_visible_replaced_fragments() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 1000.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let fragments = form_control_fragments(&layout.children[0]);
 
-    assert_eq!(fragments.len(), 2, "hidden input must not create a fragment");
-    assert!(fragments[0].0.width > 400.0, "size=57 search input should be wide");
+    assert_eq!(
+        fragments.len(),
+        2,
+        "hidden input must not create a fragment"
+    );
+    assert!(
+        fragments[0].0.width > 400.0,
+        "size=57 search input should be wide"
+    );
     assert!(fragments[0].0.height >= 27.0);
     assert_eq!(fragments[1].1, "Google 検索");
     assert!(fragments[1].0.width > 80.0);
@@ -1739,7 +1789,12 @@ fn layout_control_container(body: &NodeHandle, resolver: &mut StyleResolver) -> 
     let layout = layout_tree(
         body,
         resolver,
-        Rect { x: 0.0, y: 0.0, width: 1000.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     layout.children.into_iter().next().expect("container box")
@@ -1865,7 +1920,12 @@ fn icon_only_button_preserves_nested_svg() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 100.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let fragment = &layout.children[0].lines[0].fragments[0];
@@ -1907,15 +1967,17 @@ fn icon_only_button_skips_hidden_and_non_rendered_images() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "button { width: 36px; height: 36px; padding: 0; border: 0; }",
-        )
-        .unwrap(),
+        parse_stylesheet("button { width: 36px; height: 36px; padding: 0; border: 0; }").unwrap(),
     );
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 100.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let fragment = &layout.children[0].lines[0].fragments[0];
@@ -1929,8 +1991,16 @@ fn icon_only_button_skips_hidden_and_non_rendered_images() {
 #[test]
 fn media_elements_create_placeholders_from_default_and_attribute_sizes() {
     for (tag, attributes, expected) in [
-        ("video", vec![("width", "320"), ("height", "180")], (320.0, 180.0)),
-        ("canvas", vec![("width", "200"), ("height", "100")], (200.0, 100.0)),
+        (
+            "video",
+            vec![("width", "320"), ("height", "180")],
+            (320.0, 180.0),
+        ),
+        (
+            "canvas",
+            vec![("width", "200"), ("height", "100")],
+            (200.0, 100.0),
+        ),
         ("audio", vec![("controls", "")], (300.0, 54.0)),
     ] {
         let body = NodeHandle::element("body");
@@ -2230,7 +2300,10 @@ fn select_display_none_option_excluded_from_label_and_width() {
     let container = layout_single_control_container(&body);
     let fragments = form_control_fragments(&container);
     assert_eq!(fragments.len(), 1);
-    assert_eq!(fragments[0].1, "Vis", "hidden selected option must not become the label");
+    assert_eq!(
+        fragments[0].1, "Vis",
+        "hidden selected option must not become the label"
+    );
 
     // Reference select with only the visible option: widths must match exactly.
     let document2 = NodeHandle::document();
@@ -2550,7 +2623,10 @@ fn lays_out_basic_table_rows_and_cells() {
     // Columns are proportional to intrinsic width; verify total table width and 2 cells present
     let cell0_w = row_box.children[0].dimensions.content.width;
     let cell1_w = row_box.children[1].dimensions.content.width;
-    assert!((cell0_w + cell1_w - 108.0).abs() < 1.0, "cells should share 108px (120 - 3*4 spacing)");
+    assert!(
+        (cell0_w + cell1_w - 108.0).abs() < 1.0,
+        "cells should share 108px (120 - 3*4 spacing)"
+    );
     assert_eq!(table_box.dimensions.content.width, 120.0);
 }
 
@@ -2726,7 +2802,10 @@ fn rowspan_keeps_following_row_cells_in_later_columns() {
     assert_eq!(first_row_box.children[1].dimensions.content.x, 150.0);
     let col1_w = first_row_box.children[1].dimensions.content.width;
     let col2_x = second_row_box.children[1].dimensions.content.x;
-    assert!((col2_x - (150.0 + col1_w)).abs() < 1.0, "col2 x should be after hero + col1");
+    assert!(
+        (col2_x - (150.0 + col1_w)).abs() < 1.0,
+        "col2 x should be after hero + col1"
+    );
 }
 
 #[test]
@@ -2833,14 +2912,33 @@ fn lays_out_grid_row_major_with_fractional_columns_and_gap() {
         )
         .unwrap(),
     );
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 210.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 210.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let children = &layout.children[0].children;
     assert_eq!(children.len(), 4);
-    let rects: Vec<_> = children.iter().map(|child| child.dimensions.content).collect();
+    let rects: Vec<_> = children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
     assert_eq!((rects[0].x, rects[0].y, rects[0].width), (0.0, 0.0, 100.0));
-    assert_eq!((rects[1].x, rects[1].y, rects[1].width), (110.0, 0.0, 100.0));
+    assert_eq!(
+        (rects[1].x, rects[1].y, rects[1].width),
+        (110.0, 0.0, 100.0)
+    );
     assert_eq!((rects[2].x, rects[2].y, rects[2].width), (0.0, 30.0, 100.0));
-    assert_eq!((rects[3].x, rects[3].y, rects[3].width), (110.0, 30.0, 100.0));
+    assert_eq!(
+        (rects[3].x, rects[3].y, rects[3].width),
+        (110.0, 30.0, 100.0)
+    );
 }
 
 #[test]
@@ -2873,7 +2971,12 @@ fn column_subgrid_inherits_spanned_parent_tracks_and_gap() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 100.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 100.0,
+        },
     )
     .unwrap();
     let subgrid_box = find_layout_box_by_tag(&layout, "section").unwrap();
@@ -2884,7 +2987,9 @@ fn column_subgrid_inherits_spanned_parent_tracks_and_gap() {
     assert_eq!(subgrid_box.children[1].dimensions.content.x, 140.0);
     assert_eq!(subgrid_box.children[1].dimensions.content.width, 90.0);
     assert_eq!(
-        resolver.computed_style(&subgrid).get("grid-template-columns"),
+        resolver
+            .computed_style(&subgrid)
+            .get("grid-template-columns"),
         Some(&ComputedValue::Keyword("subgrid".to_string()))
     );
 }
@@ -2919,7 +3024,12 @@ fn row_subgrid_inherits_spanned_parent_tracks_and_gap() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 120.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 120.0,
+        },
     )
     .unwrap();
     let subgrid_box = find_layout_box_by_tag(&layout, "section").unwrap();
@@ -2959,7 +3069,12 @@ fn row_subgrid_defers_auto_parent_tracks_during_intrinsic_sizing() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 120.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 120.0,
+        },
     )
     .unwrap();
     let grid_box = find_layout_box_by_tag(&layout, "main").unwrap();
@@ -2986,15 +3101,31 @@ fn sizes_repeat_auto_px_percent_and_fractional_grid_tracks() {
     let repeated = NodeHandle::element("section");
     repeated.set_attribute("class", "repeated");
     body.append_child(repeated.clone());
-    for _ in 0..3 { repeated.append_child(NodeHandle::element("i")); }
+    for _ in 0..3 {
+        repeated.append_child(NodeHandle::element("i"));
+    }
 
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } .mixed { display: grid; width: 400px; grid-template-columns: auto 50px 25% 1fr; } .auto { width: 40px; height: 10px; } article { height: 10px; } .repeated { display: grid; width: 300px; grid-template-columns: repeat(3, 1fr); } i { height: 5px; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let mixed = &layout.children[0];
-    let widths: Vec<_> = mixed.children.iter().map(|child| child.dimensions.content.width).collect();
+    let widths: Vec<_> = mixed
+        .children
+        .iter()
+        .map(|child| child.dimensions.content.width)
+        .collect();
     assert_eq!(widths, vec![40.0, 50.0, 100.0, 210.0]);
     let repeated = &layout.children[1];
     for child in &repeated.children {
@@ -3029,7 +3160,12 @@ fn grid_track_extension_rects(
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: viewport_width, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: viewport_width,
+            height: 0.0,
+        },
     )
     .unwrap();
     layout.children[0]
@@ -3041,7 +3177,8 @@ fn grid_track_extension_rects(
 
 #[test]
 fn resolves_viewport_and_calc_grid_tracks_to_exact_widths() {
-    let viewport = grid_track_extension_rects("10vw calc(30px * 2) calc(50% - 10px) 1fr", 4, 500.0, 1000.0);
+    let viewport =
+        grid_track_extension_rects("10vw calc(30px * 2) calc(50% - 10px) 1fr", 4, 500.0, 1000.0);
     assert_eq!((viewport[0].x, viewport[0].width), (0.0, 100.0));
     assert_eq!((viewport[1].x, viewport[1].width), (100.0, 60.0));
     assert_eq!((viewport[2].x, viewport[2].width), (160.0, 240.0));
@@ -3050,12 +3187,8 @@ fn resolves_viewport_and_calc_grid_tracks_to_exact_widths() {
 
 #[test]
 fn sizes_minmax_tracks_with_fractional_and_fixed_maxima() {
-    let fractional = grid_track_extension_rects(
-        "minmax(150px, 1fr) minmax(50px, 2fr)",
-        2,
-        400.0,
-        400.0,
-    );
+    let fractional =
+        grid_track_extension_rects("minmax(150px, 1fr) minmax(50px, 2fr)", 2, 400.0, 400.0);
     assert_eq!((fractional[0].x, fractional[0].width), (0.0, 150.0));
     assert_eq!((fractional[1].x, fractional[1].width), (150.0, 250.0));
 
@@ -3081,24 +3214,15 @@ fn expands_multiple_tracks_in_numeric_repeat() {
 
 #[test]
 fn auto_fill_keeps_empty_repetitions_for_fractional_sizing() {
-    let rects = grid_track_extension_rects(
-        "repeat(auto-fill, minmax(100px, 1fr))",
-        2,
-        400.0,
-        400.0,
-    );
+    let rects =
+        grid_track_extension_rects("repeat(auto-fill, minmax(100px, 1fr))", 2, 400.0, 400.0);
     assert_eq!((rects[0].x, rects[0].width), (0.0, 100.0));
     assert_eq!((rects[1].x, rects[1].width), (100.0, 100.0));
 }
 
 #[test]
 fn auto_fit_collapses_empty_repetitions_before_fractional_sizing() {
-    let rects = grid_track_extension_rects(
-        "repeat(auto-fit, minmax(100px, 1fr))",
-        2,
-        400.0,
-        400.0,
-    );
+    let rects = grid_track_extension_rects("repeat(auto-fit, minmax(100px, 1fr))", 2, 400.0, 400.0);
     assert_eq!((rects[0].x, rects[0].width), (0.0, 200.0));
     assert_eq!((rects[1].x, rects[1].width), (200.0, 200.0));
 }
@@ -3125,7 +3249,12 @@ fn auto_fit_collapses_gutters_adjacent_to_empty_repetitions() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 430.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 430.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let rects: Vec<_> = layout.children[0]
@@ -3175,7 +3304,12 @@ fn falls_back_only_unparseable_grid_tracks_to_auto() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 220.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 220.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let rects: Vec<_> = layout.children[0]
@@ -3204,7 +3338,17 @@ fn creates_implicit_grid_rows_using_row_content_height() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: inline-grid; width: 200px; grid-template-columns: repeat(2, 1fr); row-gap: 5px; } .h10 { height: 10px; } .h20 { height: 20px; } .h15 { height: 15px; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let grid = &layout.children[0];
     assert_eq!(grid.children[0].dimensions.content.y, 0.0);
     assert_eq!(grid.children[1].dimensions.content.y, 0.0);
@@ -3226,7 +3370,17 @@ fn resolves_percentage_grid_row_against_explicit_container_height() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; height: 200px; grid-template-rows: 50%; } article { height: 100%; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let child = &layout.children[0].children[0];
     assert_eq!(child.dimensions.content.height, 100.0);
 }
@@ -3248,11 +3402,34 @@ fn places_grid_items_by_explicit_lines_and_spans() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 320px; grid-template-columns: repeat(3, 100px); grid-template-rows: repeat(3, 20px); gap: 10px; } article { height: 100%; } .lines { grid-column: 1 / 3; } .column-span { grid-column: span 2; grid-row: 2; } .row-span { grid-column-start: 3; grid-row: 1 / span 3; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 320.0, height: 0.0 }).unwrap();
-    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
-    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (0.0, 0.0, 210.0, 20.0));
-    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (0.0, 30.0, 210.0, 20.0));
-    assert_eq!((rects[2].x, rects[2].y, rects[2].width, rects[2].height), (220.0, 0.0, 100.0, 80.0));
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!(
+        (rects[0].x, rects[0].y, rects[0].width, rects[0].height),
+        (0.0, 0.0, 210.0, 20.0)
+    );
+    assert_eq!(
+        (rects[1].x, rects[1].y, rects[1].width, rects[1].height),
+        (0.0, 30.0, 210.0, 20.0)
+    );
+    assert_eq!(
+        (rects[2].x, rects[2].y, rects[2].width, rects[2].height),
+        (220.0, 0.0, 100.0, 80.0)
+    );
 }
 
 #[test]
@@ -3272,11 +3449,34 @@ fn places_items_in_named_grid_areas_with_exact_rectangles() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 230px; grid-template-columns: 100px 120px; grid-template-rows: 30px 40px; gap: 10px; grid-template-areas: \"a a\" \"b c\"; } article { height: 100%; } .a { grid-area: a; } .b { grid-area: b; } .c { grid-area: c; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 230.0, height: 0.0 }).unwrap();
-    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
-    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (0.0, 0.0, 230.0, 30.0));
-    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (0.0, 40.0, 100.0, 40.0));
-    assert_eq!((rects[2].x, rects[2].y, rects[2].width, rects[2].height), (110.0, 40.0, 120.0, 40.0));
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 230.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!(
+        (rects[0].x, rects[0].y, rects[0].width, rects[0].height),
+        (0.0, 0.0, 230.0, 30.0)
+    );
+    assert_eq!(
+        (rects[1].x, rects[1].y, rects[1].width, rects[1].height),
+        (0.0, 40.0, 100.0, 40.0)
+    );
+    assert_eq!(
+        (rects[2].x, rects[2].y, rects[2].width, rects[2].height),
+        (110.0, 40.0, 120.0, 40.0)
+    );
 }
 
 #[test]
@@ -3296,11 +3496,34 @@ fn leaves_dot_cells_available_to_auto_placement() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 210px; grid-template-columns: 100px 100px; grid-template-rows: 20px 30px; gap: 10px; grid-template-areas: \"tall ...\" \"tall corner\"; } article { height: 100%; } .tall { grid-area: tall; } .corner { grid-area: corner; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 210.0, height: 0.0 }).unwrap();
-    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
-    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (0.0, 0.0, 100.0, 60.0));
-    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (110.0, 0.0, 100.0, 20.0));
-    assert_eq!((rects[2].x, rects[2].y, rects[2].width, rects[2].height), (110.0, 30.0, 100.0, 30.0));
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 210.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!(
+        (rects[0].x, rects[0].y, rects[0].width, rects[0].height),
+        (0.0, 0.0, 100.0, 60.0)
+    );
+    assert_eq!(
+        (rects[1].x, rects[1].y, rects[1].width, rects[1].height),
+        (110.0, 0.0, 100.0, 20.0)
+    );
+    assert_eq!(
+        (rects[2].x, rects[2].y, rects[2].width, rects[2].height),
+        (110.0, 30.0, 100.0, 30.0)
+    );
 }
 
 #[test]
@@ -3317,9 +3540,22 @@ fn auto_grid_line_keyword_does_not_resolve_to_an_area_named_auto() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 100px 100px; grid-template-rows: 20px; grid-template-areas: \"free auto\"; } article { grid-column: auto; grid-row: 1; height: 20px; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let rect = layout.children[0].children[0].dimensions.content;
-    assert_eq!((rect.x, rect.y, rect.width, rect.height), (0.0, 0.0, 100.0, 20.0));
+    assert_eq!(
+        (rect.x, rect.y, rect.width, rect.height),
+        (0.0, 0.0, 100.0, 20.0)
+    );
 }
 
 #[test]
@@ -3339,10 +3575,30 @@ fn area_columns_expand_the_explicit_grid_for_names_and_negative_lines() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 100px; grid-template-rows: 20px 20px; grid-template-areas: \"a b c\"; } article { height: 20px; } .named { grid-area: b; width: 60px; } .negative { grid-column: -2; grid-row: 2; width: 40px; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
-    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
-    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (100.0, 0.0, 60.0, 20.0));
-    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (160.0, 20.0, 40.0, 20.0));
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!(
+        (rects[0].x, rects[0].y, rects[0].width, rects[0].height),
+        (100.0, 0.0, 60.0, 20.0)
+    );
+    assert_eq!(
+        (rects[1].x, rects[1].y, rects[1].width, rects[1].height),
+        (160.0, 20.0, 40.0, 20.0)
+    );
 }
 
 #[test]
@@ -3360,9 +3616,22 @@ fn invalid_non_rectangular_area_falls_back_to_auto_placement() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 100px 100px; grid-template-rows: 20px 30px; grid-template-areas: \"bad bad\" \"bad .\"; } article { height: 100%; } .bad { grid-area: bad; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let rect = layout.children[0].children[0].dimensions.content;
-    assert_eq!((rect.x, rect.y, rect.width, rect.height), (0.0, 0.0, 100.0, 20.0));
+    assert_eq!(
+        (rect.x, rect.y, rect.width, rect.height),
+        (0.0, 0.0, 100.0, 20.0)
+    );
 }
 
 #[test]
@@ -3380,10 +3649,23 @@ fn grid_template_area_rows_create_implicit_auto_rows() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 200px; grid-template-rows: 25px; grid-template-areas: \"header\" \"footer\"; } article { height: 35px; } .footer { grid-area: footer; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let grid = &layout.children[0];
     let rect = grid.children[0].dimensions.content;
-    assert_eq!((rect.x, rect.y, rect.width, rect.height), (0.0, 25.0, 200.0, 35.0));
+    assert_eq!(
+        (rect.x, rect.y, rect.width, rect.height),
+        (0.0, 25.0, 200.0, 35.0)
+    );
     assert_eq!(grid.dimensions.content.height, 60.0);
 }
 
@@ -3405,11 +3687,34 @@ fn lays_out_grid_template_shorthand_with_calc_and_viewport_tracks() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 400px; grid-template: \"hero hero\" 30px \"side main\" auto / calc(10vw + 20px) 1fr; } article { height: 40px; } .hero { grid-area: hero; height: 100%; } .side { grid-area: side; } .main { grid-area: main; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 1000.0, height: 0.0 }).unwrap();
-    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
-    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (0.0, 0.0, 400.0, 30.0));
-    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (0.0, 30.0, 120.0, 40.0));
-    assert_eq!((rects[2].x, rects[2].y, rects[2].width, rects[2].height), (120.0, 30.0, 280.0, 40.0));
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!(
+        (rects[0].x, rects[0].y, rects[0].width, rects[0].height),
+        (0.0, 0.0, 400.0, 30.0)
+    );
+    assert_eq!(
+        (rects[1].x, rects[1].y, rects[1].width, rects[1].height),
+        (0.0, 30.0, 120.0, 40.0)
+    );
+    assert_eq!(
+        (rects[2].x, rects[2].y, rects[2].width, rects[2].height),
+        (120.0, 30.0, 280.0, 40.0)
+    );
 }
 
 #[test]
@@ -3452,13 +3757,30 @@ fn lays_out_kasaneteto_named_areas_with_compact_grid_slash() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 1000.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let children = &layout.children[0].children;
 
-    assert_eq!((children[0].dimensions.content.x, children[0].dimensions.content.y), (80.0, 0.0));
-    assert_eq!((children[1].dimensions.content.x, children[1].dimensions.content.y), (620.0, 0.0));
+    assert_eq!(
+        (
+            children[0].dimensions.content.x,
+            children[0].dimensions.content.y
+        ),
+        (80.0, 0.0)
+    );
+    assert_eq!(
+        (
+            children[1].dimensions.content.x,
+            children[1].dimensions.content.y
+        ),
+        (620.0, 0.0)
+    );
     assert_eq!(children[2].dimensions.content.y, 20.0);
     assert_eq!(children[3].dimensions.content.y, 40.0);
     assert_eq!(children[4].dimensions.content.y, 40.0);
@@ -3478,7 +3800,17 @@ fn resolves_negative_grid_line_to_explicit_grid_end() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 320px; grid-template-columns: repeat(3, 100px); column-gap: 10px; } article { grid-column: 1 / -1; height: 10px; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 320.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let rect = layout.children[0].children[0].dimensions.content;
     assert_eq!((rect.x, rect.width), (0.0, 320.0));
 }
@@ -3499,8 +3831,22 @@ fn auto_placement_skips_cells_occupied_by_explicit_items() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 210px; grid-template-columns: repeat(2, 100px); gap: 10px; } article { height: 20px; } .placed { grid-column: 1; grid-row: 1; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 210.0, height: 0.0 }).unwrap();
-    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 210.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
     assert_eq!((rects[0].x, rects[0].y), (110.0, 0.0));
     assert_eq!((rects[1].x, rects[1].y), (0.0, 0.0));
     assert_eq!((rects[2].x, rects[2].y), (0.0, 30.0));
@@ -3522,7 +3868,17 @@ fn overlapping_row_spans_assign_each_height_deficit_to_one_row() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; grid-template-columns: repeat(2, 100px); } article { height: 100px; } .first { grid-column: 1; grid-row: 1 / 3; } .second { grid-column: 2; grid-row: 2 / 4; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let grid = &layout.children[0];
     assert_eq!(grid.dimensions.content.height, 100.0);
     assert_eq!(grid.children[0].dimensions.content.y, 0.0);
@@ -3545,9 +3901,26 @@ fn span_only_item_remains_in_auto_placement_order() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 300px; grid-template-columns: repeat(3, 100px); } article { height: 20px; } .span-only { grid-column: span 2; } .placed { grid-column-start: 1; grid-row-start: 1; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 }).unwrap();
-    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
-    assert_eq!((rects[0].x, rects[0].y, rects[0].width), (100.0, 0.0, 200.0));
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!(
+        (rects[0].x, rects[0].y, rects[0].width),
+        (100.0, 0.0, 200.0)
+    );
     assert_eq!((rects[1].x, rects[1].y), (0.0, 20.0));
     assert_eq!((rects[2].x, rects[2].y), (0.0, 0.0));
 }
@@ -3565,9 +3938,22 @@ fn explicit_grid_placement_creates_implicit_columns_and_rows() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 100px; grid-template-rows: 20px; gap: 5px; } article { grid-column: 2 / 4; grid-row: 2 / 4; height: 100%; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let rect = layout.children[0].children[0].dimensions.content;
-    assert_eq!((rect.x, rect.y, rect.width, rect.height), (105.0, 25.0, 5.0, 5.0));
+    assert_eq!(
+        (rect.x, rect.y, rect.width, rect.height),
+        (105.0, 25.0, 5.0, 5.0)
+    );
 }
 
 #[test]
@@ -3586,10 +3972,30 @@ fn aligns_grid_items_inside_their_cells_and_allows_self_override() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 200px; height: 100px; grid-template-columns: repeat(2, 100px); grid-template-rows: 100px; justify-items: center; align-items: end; } article { width: 20px; height: 10px; } .override { justify-self: end; align-self: start; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
-    let rects: Vec<_> = layout.children[0].children.iter().map(|child| child.dimensions.content).collect();
-    assert_eq!((rects[0].x, rects[0].y, rects[0].width, rects[0].height), (40.0, 90.0, 20.0, 10.0));
-    assert_eq!((rects[1].x, rects[1].y, rects[1].width, rects[1].height), (180.0, 0.0, 20.0, 10.0));
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let rects: Vec<_> = layout.children[0]
+        .children
+        .iter()
+        .map(|child| child.dimensions.content)
+        .collect();
+    assert_eq!(
+        (rects[0].x, rects[0].y, rects[0].width, rects[0].height),
+        (40.0, 90.0, 20.0, 10.0)
+    );
+    assert_eq!(
+        (rects[1].x, rects[1].y, rects[1].width, rects[1].height),
+        (180.0, 0.0, 20.0, 10.0)
+    );
 }
 
 #[test]
@@ -3605,7 +4011,17 @@ fn grid_justify_self_start_resolves_percentage_width_against_cell() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 200px; } article { justify-self: start; width: 50%; height: 10px; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let rect = layout.children[0].children[0].dimensions.content;
     assert_eq!((rect.x, rect.width), (0.0, 100.0));
 }
@@ -3623,7 +4039,17 @@ fn grid_justify_self_auto_falls_back_to_justify_items() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 200px; grid-template-columns: 200px; justify-items: center; } article { justify-self: auto; width: 40px; height: 10px; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let rect = layout.children[0].children[0].dimensions.content;
     assert_eq!((rect.x, rect.width), (80.0, 40.0));
 }
@@ -3637,18 +4063,48 @@ fn distributes_grid_track_space_and_expands_place_shorthands() {
         let grid = NodeHandle::element("div");
         grid.set_attribute("class", class_name);
         body.append_child(grid.clone());
-        for _ in 0..2 { grid.append_child(NodeHandle::element("article")); }
+        for _ in 0..2 {
+            grid.append_child(NodeHandle::element("article"));
+        }
     }
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(
         "body { margin: 0; } div { display: grid; width: 300px; height: 100px; grid-template-columns: repeat(2, 50px); grid-template-rows: 20px; } article { width: 10px; height: 10px; } .between { justify-content: space-between; } .centered { place-content: center; place-items: center; }"
     ).unwrap());
-    let layout = layout_tree(&body, &mut resolver, Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 }).unwrap();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
     let between = &layout.children[0];
-    assert_eq!((between.children[0].dimensions.content.x, between.children[1].dimensions.content.x), (0.0, 250.0));
+    assert_eq!(
+        (
+            between.children[0].dimensions.content.x,
+            between.children[1].dimensions.content.x
+        ),
+        (0.0, 250.0)
+    );
     let centered = &layout.children[1];
-    assert_eq!((centered.children[0].dimensions.content.x, centered.children[0].dimensions.content.y), (120.0, 145.0));
-    assert_eq!((centered.children[1].dimensions.content.x, centered.children[1].dimensions.content.y), (170.0, 145.0));
+    assert_eq!(
+        (
+            centered.children[0].dimensions.content.x,
+            centered.children[0].dimensions.content.y
+        ),
+        (120.0, 145.0)
+    );
+    assert_eq!(
+        (
+            centered.children[1].dimensions.content.x,
+            centered.children[1].dimensions.content.y
+        ),
+        (170.0, 145.0)
+    );
 }
 
 #[test]
@@ -3725,10 +4181,18 @@ fn flex_auto_basis_sums_consecutive_inline_children() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
     )
     .unwrap();
-    assert_eq!(layout.children[0].children[0].dimensions.content.width, 90.0);
+    assert_eq!(
+        layout.children[0].children[0].dimensions.content.width,
+        90.0
+    );
 }
 
 #[test]
@@ -3759,7 +4223,12 @@ fn flex_auto_basis_preserves_content_width_when_item_has_margins() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let link_box = &layout.children[0].children[0];
@@ -3797,7 +4266,12 @@ fn flex_item_does_not_shrink_below_nowrap_content_width() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 30.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 30.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     assert!(layout.children[0].children[0].dimensions.content.width > 30.0);
@@ -3863,8 +4337,7 @@ fn lays_out_flex_column() {
     assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
     assert_eq!(container_box.children[1].dimensions.content.y, 30.0);
     assert_eq!(
-        container_box.dimensions.content.height,
-        60.0,
+        container_box.dimensions.content.height, 60.0,
         "auto-height column flex containers must use their main-axis content height",
     );
 }
@@ -4060,7 +4533,12 @@ fn flex_column_distributes_min_height_to_growing_child() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -4068,7 +4546,6 @@ fn flex_column_distributes_min_height_to_growing_child() {
     assert_eq!(container_box.dimensions.content.height, 100.0);
     assert_eq!(container_box.children[0].dimensions.content.height, 100.0);
 }
-
 
 #[test]
 fn wraps_flex_items_across_multiple_lines() {
@@ -4214,7 +4691,12 @@ fn flex_row_aligns_items_within_min_height() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
     )
     .unwrap();
 
@@ -4398,7 +4880,12 @@ fn centered_flex_button_keeps_intrinsic_text_on_one_line() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 384.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 384.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -4420,15 +4907,22 @@ fn centered_flex_button_keeps_intrinsic_text_on_one_line() {
         line.fragments,
     );
     assert_eq!(
-        line.fragments.iter().filter_map(InlineFragment::text).collect::<String>(),
+        line.fragments
+            .iter()
+            .filter_map(InlineFragment::text)
+            .collect::<String>(),
         "Continue with phone",
     );
 }
 
 #[test]
 fn inline_wrapping_ignores_subpixel_font_fragment_rounding() {
-    assert!(!super::inline::exceeds_available_inline_width(125.99748, 125.99));
-    assert!(super::inline::exceeds_available_inline_width(126.01, 125.99));
+    assert!(!super::inline::exceeds_available_inline_width(
+        125.99748, 125.99
+    ));
+    assert!(super::inline::exceeds_available_inline_width(
+        126.01, 125.99
+    ));
 }
 
 #[test]
@@ -4457,7 +4951,12 @@ fn collapsible_whitespace_around_full_width_image_does_not_create_lines() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 20.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let container = find_layout_box_by_tag(&layout, "div").unwrap();
@@ -4486,8 +4985,7 @@ fn block_svg_flex_item_keeps_its_replaced_image_fragment() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet("div { display: flex; width: 200px; } svg { display: block; }")
-            .unwrap(),
+        parse_stylesheet("div { display: flex; width: 200px; } svg { display: block; }").unwrap(),
     );
     let layout = layout_tree(
         &body,
@@ -4502,9 +5000,11 @@ fn block_svg_flex_item_keeps_its_replaced_image_fragment() {
     .unwrap();
 
     let svg_box = &layout.children[0].children[0];
-    assert!(svg_box.lines.iter().any(|line| line.fragments.iter().any(|fragment| {
-        matches!(fragment.content, InlineFragmentContent::Image(_, _))
-    })));
+    assert!(svg_box.lines.iter().any(|line| {
+        line.fragments
+            .iter()
+            .any(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
+    }));
     assert_eq!(svg_box.dimensions.content.height, 50.0);
 }
 
@@ -4793,7 +5293,12 @@ fn fixed_position_resolves_logical_insets() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        },
     )
     .unwrap();
 
@@ -4822,7 +5327,12 @@ fn fixed_position_inset_inline_end_maps_to_left_in_rtl() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        },
     )
     .unwrap();
 
@@ -5155,7 +5665,12 @@ fn absolute_image_does_not_generate_an_inline_fragment_or_line_box() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
     )
     .unwrap();
     let image_box = find_layout_box(&layout, &image).unwrap();
@@ -5182,13 +5697,22 @@ fn static_inline_image_still_generates_an_image_fragment() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
     )
     .unwrap();
 
-    assert!(layout.lines.iter().flat_map(|line| &line.fragments).any(|fragment| {
-        matches!(fragment.content, InlineFragmentContent::Image(_, _))
-    }));
+    assert!(
+        layout
+            .lines
+            .iter()
+            .flat_map(|line| &line.fragments)
+            .any(|fragment| { matches!(fragment.content, InlineFragmentContent::Image(_, _)) })
+    );
 }
 
 #[test]
@@ -5211,14 +5735,23 @@ fn absolute_object_keeps_its_inline_image_fragment_paint_path() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
     )
     .unwrap();
     let object_box = find_layout_box(&layout, &object).unwrap();
 
-    assert!(object_box.lines.iter().flat_map(|line| &line.fragments).any(|fragment| {
-        matches!(fragment.content, InlineFragmentContent::Image(_, _))
-    }));
+    assert!(
+        object_box
+            .lines
+            .iter()
+            .flat_map(|line| &line.fragments)
+            .any(|fragment| { matches!(fragment.content, InlineFragmentContent::Image(_, _)) })
+    );
 }
 
 #[test]
@@ -5336,16 +5869,18 @@ fn root_percentage_heights_resolve_against_viewport() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "html, body { height: 100%; margin: 0; } main { height: 100%; }",
-        )
-        .unwrap(),
+        parse_stylesheet("html, body { height: 100%; margin: 0; } main { height: 100%; }").unwrap(),
     );
 
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 1280.0, height: 720.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 720.0,
+        },
     )
     .unwrap();
 
@@ -5427,7 +5962,12 @@ fn grid_justify_items_center_shrink_wraps_auto_width_item() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
     )
     .unwrap();
 
@@ -5796,7 +6336,10 @@ fn negative_margin_float_fits_beside_full_width_float() {
     let main_box = find_layout_box_by_tag(&layout, "main").unwrap();
     let sidebar_box = find_layout_box_by_tag(&layout, "aside").unwrap();
     assert_eq!(sidebar_box.dimensions.content.x, 70.0);
-    assert_eq!(sidebar_box.dimensions.content.y, main_box.dimensions.content.y);
+    assert_eq!(
+        sidebar_box.dimensions.content.y,
+        main_box.dimensions.content.y
+    );
 }
 
 #[test]
@@ -6173,18 +6716,29 @@ fn letter_spacing_increases_text_width() {
     let layout_no_spacing = layout_tree(
         &document,
         &mut resolver_no_spacing,
-        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
     );
 
     let mut resolver_with_spacing = StyleResolver::new();
     resolver_with_spacing.add_stylesheet(
         Origin::Author,
-        parse_stylesheet("body { margin: 0; } p { font-size: 16px; letter-spacing: 10px; }").unwrap(),
+        parse_stylesheet("body { margin: 0; } p { font-size: 16px; letter-spacing: 10px; }")
+            .unwrap(),
     );
     let layout_with_spacing = layout_tree(
         &document,
         &mut resolver_with_spacing,
-        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
     );
 
     // Find the p box width in both layouts to compare text widths
@@ -6239,8 +6793,14 @@ fn zero_width_shaping_controls_do_not_change_inline_advance() {
     let emoji = super::measure_text_width("\u{1f600}", metrics);
     let emoji_with_selector = super::measure_text_width("\u{1f600}\u{fe0f}", metrics);
 
-    assert!((composed - base).abs() < 0.01, "combining mark added advance");
-    assert!((paired - unmarked).abs() < 0.01, "combining mark changed spacing");
+    assert!(
+        (composed - base).abs() < 0.01,
+        "combining mark added advance"
+    );
+    assert!(
+        (paired - unmarked).abs() < 0.01,
+        "combining mark changed spacing"
+    );
     assert!(
         (emoji_with_selector - emoji).abs() < 0.01,
         "variation selector added advance"
@@ -6254,7 +6814,10 @@ fn complex_script_layout_uses_run_shaping_advances() {
     let mut metrics = FontMetrics::from_font_size(32.0);
     metrics.letter_spacing = 2.0;
     let fonts = load_default_text_fonts();
-    let Some(font) = fonts.iter().find(|font| "لا".chars().all(|ch| font.has_glyph(ch))) else {
+    let Some(font) = fonts
+        .iter()
+        .find(|font| "لا".chars().all(|ch| font.has_glyph(ch)))
+    else {
         eprintln!("Skipping Arabic layout shaping test: no Arabic font available");
         return;
     };
@@ -6266,7 +6829,10 @@ fn complex_script_layout_uses_run_shaping_advances() {
         .sum::<f32>()
         + metrics.letter_spacing;
     let measured = super::measure_text_width("لا", metrics);
-    assert!((measured - expected).abs() < 0.01, "layout={measured}, shaped={expected}");
+    assert!(
+        (measured - expected).abs() < 0.01,
+        "layout={measured}, shaped={expected}"
+    );
 }
 
 #[test]
@@ -6308,7 +6874,12 @@ fn list_item_generates_disc_marker() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6319,7 +6890,10 @@ fn list_item_generates_disc_marker() {
         "li should have a marker for display:list-item"
     );
     let marker = li_box.marker.as_ref().unwrap();
-    assert_eq!(marker.text, "\u{2022}", "ul default marker should be disc (•)");
+    assert_eq!(
+        marker.text, "\u{2022}",
+        "ul default marker should be disc (•)"
+    );
     assert!(marker.outside, "default list-style-position is outside");
     let _ = li;
 }
@@ -6335,7 +6909,12 @@ fn list_item_marker_none_produces_no_marker() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6367,7 +6946,12 @@ fn ol_list_items_get_decimal_markers() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6390,7 +6974,12 @@ fn circle_marker_type() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6410,7 +6999,12 @@ fn square_marker_type() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6430,13 +7024,21 @@ fn inside_marker_position() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 300.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
     let li_box = find_layout_box_by_tag(&layout, "li").unwrap();
     let marker = li_box.marker.as_ref().unwrap();
-    assert!(!marker.outside, "list-style-position:inside should set outside=false");
+    assert!(
+        !marker.outside,
+        "list-style-position:inside should set outside=false"
+    );
 }
 
 /// text-transform must be applied even when the text node is the direct child of
@@ -6463,7 +7065,12 @@ fn text_transform_applied_to_direct_text_node() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6530,7 +7137,12 @@ fn inline_fragment_carries_per_element_style() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6539,7 +7151,10 @@ fn inline_fragment_carries_per_element_style() {
         for line in &layout.lines {
             for fragment in &line.fragments {
                 if let Some(t) = fragment.text() {
-                    let transform = fragment.style.text_transform.as_deref()
+                    let transform = fragment
+                        .style
+                        .text_transform
+                        .as_deref()
                         .map(|kw| kw.to_ascii_lowercase())
                         .unwrap_or_else(|| "none".to_string());
                     out.push((t.to_string(), transform));
@@ -6575,7 +7190,9 @@ fn inline_fragment_carries_per_element_style() {
 
     // The fragment for "UPPER" (already transformed in layout) should carry
     // text-transform:uppercase in its style.
-    let upper_frag = fragments.iter().find(|(text, _)| *text == text.to_uppercase() && text.contains("UPPER"));
+    let upper_frag = fragments
+        .iter()
+        .find(|(text, _)| *text == text.to_uppercase() && text.contains("UPPER"));
     assert!(
         upper_frag.is_some(),
         "expected a fragment containing \"UPPER\" (text after transform), got {:?}",
@@ -6620,7 +7237,12 @@ fn inline_fragment_carries_per_element_text_decoration() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6628,7 +7250,10 @@ fn inline_fragment_carries_per_element_text_decoration() {
         for line in &layout.lines {
             for fragment in &line.fragments {
                 if let Some(t) = fragment.text() {
-                    let decoration = fragment.style.text_decoration_line.as_deref()
+                    let decoration = fragment
+                        .style
+                        .text_decoration_line
+                        .as_deref()
                         .map(|kw| kw.to_ascii_lowercase())
                         .unwrap_or_else(|| "none".to_string());
                     out.push((t.to_string(), decoration));
@@ -6650,15 +7275,23 @@ fn inline_fragment_carries_per_element_text_decoration() {
     );
 
     let plain_frag = fragments.iter().find(|(text, _)| text.contains("plain"));
-    assert!(plain_frag.is_some(), "expected fragment containing \"plain\"");
+    assert!(
+        plain_frag.is_some(),
+        "expected fragment containing \"plain\""
+    );
     assert_ne!(
         plain_frag.unwrap().1,
         "underline",
         "\"plain\" fragment should not have text-decoration-line:underline"
     );
 
-    let decorated_frag = fragments.iter().find(|(text, _)| text.contains("decorated"));
-    assert!(decorated_frag.is_some(), "expected fragment containing \"decorated\"");
+    let decorated_frag = fragments
+        .iter()
+        .find(|(text, _)| text.contains("decorated"));
+    assert!(
+        decorated_frag.is_some(),
+        "expected fragment containing \"decorated\""
+    );
     assert_eq!(
         decorated_frag.unwrap().1,
         "underline",
@@ -6700,7 +7333,12 @@ fn border_box_width_subtracts_padding_and_border() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6734,7 +7372,12 @@ fn content_box_width_is_unchanged() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6763,7 +7406,12 @@ fn border_box_height_subtracts_padding_and_border() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6793,7 +7441,12 @@ fn border_box_min_width_is_applied_in_content_space() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6823,7 +7476,12 @@ fn border_box_max_width_is_applied_in_content_space() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -6905,7 +7563,12 @@ fn adjacent_text_nodes_do_not_create_wrap_opportunity() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 60.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 60.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let paragraph = &layout.children[0];
@@ -6977,7 +7640,12 @@ fn word_break_break_all_never_splits_extended_grapheme_clusters() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 1.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -7097,7 +7765,12 @@ fn overflow_wrap_break_word_never_splits_extended_grapheme_clusters() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 1.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -7171,21 +7844,33 @@ fn table_img_width_attribute_sets_column_intrinsic_width() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet("table { display: table; } tr { display: table-row; } td { display: table-cell; }").unwrap(),
+        parse_stylesheet(
+            "table { display: table; } tr { display: table-row; } td { display: table-cell; }",
+        )
+        .unwrap(),
     );
 
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
-    ).unwrap();
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
 
     let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
     let row_box = &table_box.children[0];
     assert_eq!(row_box.children.len(), 2, "should have 2 cells");
     let col0_width = row_box.children[0].dimensions.content.width;
     let col1_width = row_box.children[1].dimensions.content.width;
-    assert!(col0_width >= 350.0, "col0 should be >= 350px (img width), got {col0_width}");
+    assert!(
+        col0_width >= 350.0,
+        "col0 should be >= 350px (img width), got {col0_width}"
+    );
     assert!(col1_width > 0.0, "col1 should have some width");
 }
 
@@ -7240,7 +7925,12 @@ fn table_three_column_rowspan_distributes_widths_correctly() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -7303,14 +7993,23 @@ fn debug_abe_table_column_widths() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 },
-    ).unwrap();
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
 
     fn dump_table(layout: &LayoutBox, depth: usize) {
         let indent = "  ".repeat(depth);
         let tag = layout.node.tag_name().unwrap_or_default();
         let r = &layout.dimensions.content;
-        println!("{indent}{tag}: x={:.0} y={:.0} w={:.0} h={:.0}", r.x, r.y, r.width, r.height);
+        println!(
+            "{indent}{tag}: x={:.0} y={:.0} w={:.0} h={:.0}",
+            r.x, r.y, r.width, r.height
+        );
         for child in &layout.children {
             dump_table(child, depth + 1);
         }
@@ -7333,8 +8032,14 @@ fn debug_abe_real_table() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 1280.0, height: 900.0 },
-    ).unwrap();
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 900.0,
+        },
+    )
+    .unwrap();
 
     fn find_tables(lb: &LayoutBox, results: &mut Vec<(String, f32, f32, f32, f32)>) {
         let tag = lb.node.tag_name().unwrap_or_default();
@@ -7344,11 +8049,21 @@ fn debug_abe_real_table() {
             for (i, child) in lb.children.iter().enumerate() {
                 let child_tag = child.node.tag_name().unwrap_or_default();
                 let cr = &child.dimensions.content;
-                eprintln!("  {child_tag}[{i}]: x={:.0} y={:.0} w={:.0} h={:.0} children={}", cr.x, cr.y, cr.width, cr.height, child.children.len());
+                eprintln!(
+                    "  {child_tag}[{i}]: x={:.0} y={:.0} w={:.0} h={:.0} children={}",
+                    cr.x,
+                    cr.y,
+                    cr.width,
+                    cr.height,
+                    child.children.len()
+                );
                 for (j, cell) in child.children.iter().enumerate() {
                     let cell_tag = cell.node.tag_name().unwrap_or_default();
                     let ccr = &cell.dimensions.content;
-                    eprintln!("    {cell_tag}[{j}]: x={:.0} y={:.0} w={:.0} h={:.0}", ccr.x, ccr.y, ccr.width, ccr.height);
+                    eprintln!(
+                        "    {cell_tag}[{j}]: x={:.0} y={:.0} w={:.0} h={:.0}",
+                        ccr.x, ccr.y, ccr.width, ccr.height
+                    );
                 }
             }
         }
@@ -7387,8 +8102,14 @@ fn table_align_center_centers_with_auto_margins() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
-    ).unwrap();
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
 
     let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
     let table_left = table_box.dimensions.content.x
@@ -7451,8 +8172,14 @@ fn rowspan_cell_distributes_height_evenly_across_spanned_rows() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
-    ).unwrap();
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
 
     let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
     let row1_box = &table_box.children[0];
@@ -7468,14 +8195,8 @@ fn rowspan_cell_distributes_height_evenly_across_spanned_rows() {
     );
 
     // Each row should get at least 100px (200 / 2 = 100, initial 50 + 50 extra)
-    assert!(
-        row1_h >= 95.0,
-        "row1 should be ~100px, got {row1_h}"
-    );
-    assert!(
-        row2_h >= 95.0,
-        "row2 should be ~100px, got {row2_h}"
-    );
+    assert!(row1_h >= 95.0, "row1 should be ~100px, got {row1_h}");
+    assert!(row2_h >= 95.0, "row2 should be ~100px, got {row2_h}");
 
     // Row 2 should start below row 1
     assert!(
@@ -7530,15 +8251,22 @@ fn rowspan_expanded_row_preserves_vertical_align_bottom() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
-    ).unwrap();
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
 
     let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
     let row1_box = &table_box.children[0];
     let bottom_cell_box = &row1_box.children[1];
 
     // The bottom-aligned cell's text should be near the bottom of the cell
-    let cell_bottom = bottom_cell_box.dimensions.content.y + bottom_cell_box.dimensions.content.height;
+    let cell_bottom =
+        bottom_cell_box.dimensions.content.y + bottom_cell_box.dimensions.content.height;
     let line = &bottom_cell_box.lines[0];
     let line_bottom = line.rect.y + line.rect.height;
     assert!(
@@ -7599,14 +8327,21 @@ fn rowspan_second_pass_preserves_vertical_align_bottom_with_initial_offset() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
-    ).unwrap();
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
 
     let table_box = find_layout_box_by_tag(&layout, "table").unwrap();
     let row1_box = &table_box.children[0];
     let bottom_cell_box = &row1_box.children[1];
 
-    let cell_bottom = bottom_cell_box.dimensions.content.y + bottom_cell_box.dimensions.content.height;
+    let cell_bottom =
+        bottom_cell_box.dimensions.content.y + bottom_cell_box.dimensions.content.height;
     let line = &bottom_cell_box.lines[0];
     let line_bottom = line.rect.y + line.rect.height;
     assert!(
@@ -7661,10 +8396,13 @@ fn supported_html_tags_are_not_logged() {
     assert!(super::is_supported_html_tag("table"));
     assert!(super::is_supported_html_tag("img"));
     for tag in [
-        "canvas", "video", "audio", "source", "picture", "details", "summary", "dialog",
-        "time", "progress", "meter", "iframe", "label",
+        "canvas", "video", "audio", "source", "picture", "details", "summary", "dialog", "time",
+        "progress", "meter", "iframe", "label",
     ] {
-        assert!(super::is_supported_html_tag(tag), "{tag} should be supported");
+        assert!(
+            super::is_supported_html_tag(tag),
+            "{tag} should be supported"
+        );
     }
     assert!(super::is_supported_html_tag("form"));
     assert!(super::is_supported_html_tag("input"));
@@ -7705,7 +8443,12 @@ fn border_spacing_two_values_apply_to_table() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -7715,7 +8458,8 @@ fn border_spacing_two_values_apply_to_table() {
     let cell2 = &row.children[1];
 
     // Horizontal spacing = 10px: cell1 at x=10, cell2 at x=10+50+10=70
-    let h_gap = cell2.dimensions.content.x - (cell1.dimensions.content.x + cell1.dimensions.content.width);
+    let h_gap =
+        cell2.dimensions.content.x - (cell1.dimensions.content.x + cell1.dimensions.content.width);
     assert!(
         (h_gap - 10.0).abs() < 1.0,
         "horizontal spacing should be ~10px, got {h_gap}"
@@ -7743,7 +8487,12 @@ fn line_height_percentage_scales_by_font_size() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -7796,7 +8545,12 @@ fn shrink_to_fit_table_uses_min_max_column_distribution() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -7839,7 +8593,9 @@ fn nowrap_prevents_line_wrapping() {
     let body = NodeHandle::element("body");
     let div = NodeHandle::element("div");
     div.set_attribute("class", "nowrap");
-    div.append_child(NodeHandle::text("Hello world this is a long line of text that should not wrap"));
+    div.append_child(NodeHandle::text(
+        "Hello world this is a long line of text that should not wrap",
+    ));
     document.append_child(body.clone());
     body.append_child(div.clone());
 
@@ -7855,7 +8611,12 @@ fn nowrap_prevents_line_wrapping() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -7895,7 +8656,12 @@ fn nowrap_with_inline_elements_stays_on_one_line() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -7935,7 +8701,12 @@ fn calc_percent_minus_px_resolves_width_at_layout() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -7980,17 +8751,30 @@ fn flex_wrap_child_calc_width_resolves_correctly() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 800.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
     let flex_box = find_layout_box_by_tag(&layout, "div").unwrap();
-    assert!(flex_box.children.len() >= 2, "flex should have >= 2 children, got {}", flex_box.children.len());
+    assert!(
+        flex_box.children.len() >= 2,
+        "flex should have >= 2 children, got {}",
+        flex_box.children.len()
+    );
     // Find h3 and dl boxes by tag
-    let left_box = flex_box.children.iter()
+    let left_box = flex_box
+        .children
+        .iter()
         .find(|c| c.node.tag_name().as_deref() == Some("h3"))
         .expect("should have h3");
-    let right_box = flex_box.children.iter()
+    let right_box = flex_box
+        .children
+        .iter()
         .find(|c| c.node.tag_name().as_deref() == Some("dl"))
         .expect("should have dl");
 
@@ -8012,7 +8796,10 @@ fn flex_wrap_child_calc_width_resolves_correctly() {
     );
     // Both should be on the same flex line (right starts where left ends)
     assert!(
-        (right_box.dimensions.content.x - (left_box.dimensions.content.x + left_box.dimensions.content.width)).abs() < 1.0,
+        (right_box.dimensions.content.x
+            - (left_box.dimensions.content.x + left_box.dimensions.content.width))
+            .abs()
+            < 1.0,
         "right should start where left ends: left.x+w={} right.x={}",
         left_box.dimensions.content.x + left_box.dimensions.content.width,
         right_box.dimensions.content.x,
@@ -8091,36 +8878,74 @@ fn resolve_style_for_test(css: &str, tag: &str) -> ComputedStyle {
 #[test]
 fn resolve_content_height_uses_auto_when_no_explicit_height() {
     let style = ComputedStyle::default();
-    let height = resolve_content_height(&style, 0.0, EdgeSizes::default(), EdgeSizes::default(), 10.0, 50.0);
+    let height = resolve_content_height(
+        &style,
+        0.0,
+        EdgeSizes::default(),
+        EdgeSizes::default(),
+        10.0,
+        50.0,
+    );
     assert_eq!(height, 40.0);
 }
 
 #[test]
 fn resolve_content_height_uses_explicit_height() {
     let style = resolve_style_for_test("div { height: 100px; }", "div");
-    let height = resolve_content_height(&style, 500.0, EdgeSizes::default(), EdgeSizes::default(), 0.0, 50.0);
+    let height = resolve_content_height(
+        &style,
+        500.0,
+        EdgeSizes::default(),
+        EdgeSizes::default(),
+        0.0,
+        50.0,
+    );
     assert_eq!(height, 100.0);
 }
 
 #[test]
 fn resolve_content_height_clamps_to_min_height() {
     let style = resolve_style_for_test("div { min-height: 80px; }", "div");
-    let height = resolve_content_height(&style, 500.0, EdgeSizes::default(), EdgeSizes::default(), 0.0, 30.0);
+    let height = resolve_content_height(
+        &style,
+        500.0,
+        EdgeSizes::default(),
+        EdgeSizes::default(),
+        0.0,
+        30.0,
+    );
     assert_eq!(height, 80.0);
 }
 
 #[test]
 fn resolve_content_height_clamps_to_max_height() {
     let style = resolve_style_for_test("div { max-height: 20px; }", "div");
-    let height = resolve_content_height(&style, 500.0, EdgeSizes::default(), EdgeSizes::default(), 0.0, 50.0);
+    let height = resolve_content_height(
+        &style,
+        500.0,
+        EdgeSizes::default(),
+        EdgeSizes::default(),
+        0.0,
+        50.0,
+    );
     assert_eq!(height, 20.0);
 }
 
 #[test]
 fn resolve_content_height_border_box_subtracts_padding_and_border() {
     let style = resolve_style_for_test("div { height: 100px; box-sizing: border-box; }", "div");
-    let padding = EdgeSizes { top: 10.0, bottom: 10.0, left: 0.0, right: 0.0 };
-    let border = EdgeSizes { top: 5.0, bottom: 5.0, left: 0.0, right: 0.0 };
+    let padding = EdgeSizes {
+        top: 10.0,
+        bottom: 10.0,
+        left: 0.0,
+        right: 0.0,
+    };
+    let border = EdgeSizes {
+        top: 5.0,
+        bottom: 5.0,
+        left: 0.0,
+        right: 0.0,
+    };
     let height = resolve_content_height(&style, 500.0, padding, border, 0.0, 0.0);
     assert_eq!(height, 70.0);
 }
@@ -8148,7 +8973,12 @@ fn flush_pending_inline_nodes_clears_whitespace_only() {
         0.0,
         200.0,
         0.0,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
         None,
         &mut lines,
         &mut children,
@@ -8178,13 +9008,25 @@ fn block_children_inline_nodes_produce_line_boxes() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
-    ).unwrap();
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
 
     let div_box = &layout.children[0];
-    assert!(!div_box.lines.is_empty(), "inline text should produce line boxes");
+    assert!(
+        !div_box.lines.is_empty(),
+        "inline text should produce line boxes"
+    );
     let first_line = &div_box.lines[0];
-    assert!(!first_line.fragments.is_empty(), "line should have fragments");
+    assert!(
+        !first_line.fragments.is_empty(),
+        "line should have fragments"
+    );
 }
 
 #[test]
@@ -8203,7 +9045,12 @@ fn redistribute_auto_margins_left_auto_only() {
     let style = resolve_style_for_test("div { margin-left: auto; margin-right: 20px; }", "div");
     let padding = EdgeSizes::default();
     let border = EdgeSizes::default();
-    let mut margin = EdgeSizes { top: 0.0, right: 20.0, bottom: 0.0, left: 0.0 };
+    let mut margin = EdgeSizes {
+        top: 0.0,
+        right: 20.0,
+        bottom: 0.0,
+        left: 0.0,
+    };
     redistribute_auto_margins_for_table(&style, 100.0, &padding, &border, &mut margin, 300.0);
     assert_eq!(margin.left, 180.0);
     assert_eq!(margin.right, 20.0);
@@ -8212,7 +9059,10 @@ fn redistribute_auto_margins_left_auto_only() {
 #[test]
 fn child_containing_rect_uses_float_offsets_for_auto_width() {
     let style = ComputedStyle::default();
-    let offsets = FloatOffsets { left: 50.0, right: 30.0 };
+    let offsets = FloatOffsets {
+        left: 50.0,
+        right: 30.0,
+    };
     let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0, 120.0);
     assert_eq!(rect.x, 50.0);
     assert_eq!(rect.y, 10.0);
@@ -8223,7 +9073,10 @@ fn child_containing_rect_uses_float_offsets_for_auto_width() {
 #[test]
 fn child_containing_rect_ignores_offsets_for_explicit_width() {
     let style = resolve_style_for_test("div { width: 150px; }", "div");
-    let offsets = FloatOffsets { left: 50.0, right: 30.0 };
+    let offsets = FloatOffsets {
+        left: 50.0,
+        right: 30.0,
+    };
     let rect = child_containing_rect(&style, 10.0, &offsets, 0.0, 200.0, 120.0);
     assert_eq!(rect.x, 0.0);
     assert_eq!(rect.width, 200.0);
@@ -8255,13 +9108,21 @@ fn size_container_query_uses_named_ancestor_content_box() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 600.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
     let item_box = find_layout_box_by_tag(&layout, "article").unwrap();
     assert_eq!(item_box.dimensions.content.width, 100.0);
-    assert_eq!(item_box.dimensions.content.height, 0.0, "container names are case-sensitive");
+    assert_eq!(
+        item_box.dimensions.content.height, 0.0,
+        "container names are case-sensitive"
+    );
     assert_eq!(
         resolver.computed_style(&container).get("container-type"),
         Some(&ComputedValue::Keyword("inline-size".to_string()))
@@ -8288,7 +9149,12 @@ fn container_query_does_not_query_the_styled_element_itself() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -8325,7 +9191,12 @@ fn size_containment_uses_zero_intrinsic_and_auto_block_size() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
     )
     .unwrap();
     let box_ = find_layout_box_by_tag(&layout, "section").unwrap();
@@ -8359,7 +9230,12 @@ fn grid_size_containment_keeps_explicit_tracks_but_ignores_content_contributions
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
     )
     .unwrap();
     let grid_box = find_layout_box_by_tag(&layout, "section").unwrap();
@@ -8392,7 +9268,12 @@ fn layout_containment_establishes_positioned_descendant_boundary() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
     )
     .unwrap();
     let positioned = find_layout_box_by_tag(&layout, "div").unwrap();
@@ -8428,7 +9309,12 @@ fn scrollable_overflow_keywords_establish_a_scroll_container() {
         let layout = layout_tree(
             &document,
             &mut resolver,
-            Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 0.0,
+            },
         )
         .unwrap();
         let card_box = find_layout_box(&layout, &card).expect("card box");
@@ -8461,7 +9347,12 @@ fn scrollable_overflow_stops_at_clip_on_each_clipped_axis() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 600.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let card_box = find_layout_box(&layout, &card).unwrap();
@@ -8480,7 +9371,12 @@ fn scrollable_overflow_stops_at_clip_on_each_clipped_axis() {
 #[test]
 fn layout_root_records_whether_sticky_requires_zero_scroll_translation() {
     let (document, _html, _body, card) = sample_tree();
-    let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 100.0,
+    };
     let mut resolver = StyleResolver::new();
     let normal = layout_tree(&document, &mut resolver, viewport).unwrap();
     assert!(!normal.needs_scroll_translation);
@@ -8506,21 +9402,38 @@ fn scroll_offset_does_not_change_layout_geometry() {
         )
         .unwrap(),
     );
-    let viewport = Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 0.0,
+    };
     let unscrolled = layout_tree(&document, &mut resolver, viewport).unwrap();
-    let unscrolled_card = find_layout_box(&unscrolled, &card).unwrap().dimensions.content;
-    let unscrolled_inner = find_layout_box(&unscrolled, &inner).unwrap().dimensions.content;
+    let unscrolled_card = find_layout_box(&unscrolled, &card)
+        .unwrap()
+        .dimensions
+        .content;
+    let unscrolled_inner = find_layout_box(&unscrolled, &inner)
+        .unwrap()
+        .dimensions
+        .content;
     let _ = body;
 
     card.set_scroll_offset(30.0, 40.0);
     let scrolled = layout_tree(&document, &mut resolver, viewport).unwrap();
 
     assert_eq!(
-        find_layout_box(&scrolled, &card).unwrap().dimensions.content,
+        find_layout_box(&scrolled, &card)
+            .unwrap()
+            .dimensions
+            .content,
         unscrolled_card
     );
     assert_eq!(
-        find_layout_box(&scrolled, &inner).unwrap().dimensions.content,
+        find_layout_box(&scrolled, &inner)
+            .unwrap()
+            .dimensions
+            .content,
         unscrolled_inner
     );
 }
@@ -8545,7 +9458,12 @@ fn scrollable_overflow_includes_end_padding_after_overflowing_content() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let card_box = find_layout_box(&layout, &card).unwrap();
@@ -8561,7 +9479,12 @@ fn scrollable_overflow_includes_end_padding_after_overflowing_content() {
     let fitting = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 500.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let fitting_card = find_layout_box(&fitting, &card).unwrap();
@@ -8588,7 +9511,12 @@ fn scroll_offset_is_clamped_to_the_scrollable_extent() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let card_box = find_layout_box(&layout, &card).unwrap();
@@ -8636,7 +9564,12 @@ fn scrollable_overflow_stops_at_nested_scroll_containers() {
     let layout = layout_tree(
         &document,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 400.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
     )
     .unwrap();
 
@@ -8685,7 +9618,10 @@ fn image_size(declarations: &str) -> (f32, f32) {
 #[test]
 fn author_aspect_ratio_overrides_the_intrinsic_ratio() {
     // One axis specified: the other comes from the author ratio, not from 4:2.
-    assert_eq!(image_size("width: 100px; aspect-ratio: 1/1"), (100.0, 100.0));
+    assert_eq!(
+        image_size("width: 100px; aspect-ratio: 1/1"),
+        (100.0, 100.0)
+    );
     assert_eq!(image_size("height: 50px; aspect-ratio: 1/1"), (50.0, 50.0));
     assert_eq!(image_size("width: 100px; aspect-ratio: 4/1"), (100.0, 25.0));
     assert_eq!(image_size("height: 30px; aspect-ratio: 1/3"), (10.0, 30.0));
@@ -8745,7 +9681,10 @@ fn auto_aspect_ratio_prefers_the_intrinsic_ratio() {
 fn min_and_max_constraints_only_rescale_a_derived_axis() {
     // Specified width, derived height: the width survives the clamp.
     assert_eq!(image_size("width: 100px; max-height: 20px"), (100.0, 20.0));
-    assert_eq!(image_size("width: 100px; min-height: 200px"), (100.0, 200.0));
+    assert_eq!(
+        image_size("width: 100px; min-height: 200px"),
+        (100.0, 200.0)
+    );
     assert_eq!(image_size("height: 50px; max-width: 20px"), (20.0, 50.0));
     assert_eq!(image_size("height: 50px; min-width: 400px"), (400.0, 50.0));
     // With an author ratio the same rule applies.
@@ -8763,7 +9702,10 @@ fn min_and_max_constraints_only_rescale_a_derived_axis() {
     assert_eq!(image_size("max-height: 1px"), (2.0, 1.0));
     assert_eq!(image_size("min-width: 40px"), (40.0, 20.0));
     assert_eq!(image_size("aspect-ratio: 1/1; max-width: 2px"), (2.0, 2.0));
-    assert_eq!(image_size("aspect-ratio: 1/1; min-width: 40px"), (40.0, 40.0));
+    assert_eq!(
+        image_size("aspect-ratio: 1/1; min-width: 40px"),
+        (40.0, 40.0)
+    );
 }
 
 #[test]
@@ -8791,7 +9733,9 @@ fn replaced_element_sizing_respects_box_sizing() {
         (80.0, 40.0)
     );
     assert_eq!(
-        image_size("box-sizing: border-box; padding: 10px; border: 5px solid; width: 100px; aspect-ratio: 1/1"),
+        image_size(
+            "box-sizing: border-box; padding: 10px; border: 5px solid; width: 100px; aspect-ratio: 1/1"
+        ),
         (70.0, 70.0)
     );
 }
@@ -8799,11 +9743,15 @@ fn replaced_element_sizing_respects_box_sizing() {
 #[test]
 fn replaced_element_min_max_constraints_use_the_box_sizing_box() {
     assert_eq!(
-        image_size("box-sizing: border-box; padding: 10px; width: 200px; max-width: 100px; aspect-ratio: 1/1"),
+        image_size(
+            "box-sizing: border-box; padding: 10px; width: 200px; max-width: 100px; aspect-ratio: 1/1"
+        ),
         (80.0, 80.0)
     );
     assert_eq!(
-        image_size("box-sizing: border-box; padding: 10px; height: 200px; max-height: 100px; aspect-ratio: 1/1"),
+        image_size(
+            "box-sizing: border-box; padding: 10px; height: 200px; max-height: 100px; aspect-ratio: 1/1"
+        ),
         (80.0, 80.0)
     );
     assert_eq!(

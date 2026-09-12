@@ -72,9 +72,10 @@ impl ConnectionPool {
             session.set_timeout(session_timeout)?;
             match session.send_request(request) {
                 Ok(response) => {
-                    if response.header("connection").is_some_and(|value| {
-                        value.eq_ignore_ascii_case("close")
-                    }) {
+                    if response
+                        .header("connection")
+                        .is_some_and(|value| value.eq_ignore_ascii_case("close"))
+                    {
                         self.http1.remove(&key);
                     }
                     if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
@@ -456,7 +457,10 @@ mod tests {
 
         assert!(Arc::ptr_eq(&http2, &same_http2));
         assert!(!Arc::ptr_eq(&http2, &http1));
-        assert_eq!(http2.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert_eq!(
+            http2.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
         assert_eq!(http1.alpn_protocols, vec![b"http/1.1".to_vec()]);
     }
 

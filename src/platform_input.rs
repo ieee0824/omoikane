@@ -693,7 +693,9 @@ mod tests {
         assert_eq!(evaluate(&mut session, "parentKeys.join('|')"), json!(""));
         assert_eq!(
             evaluate(&mut session, "childEvents.join('|')"),
-            json!("key:field|beforeinput:x:insertText|input:x:insertText|compositionstart::|compositionupdate:に:|beforeinput:に:insertCompositionText|input:に:insertCompositionText|compositionupdate:日本:|beforeinput:日本:insertCompositionText|input:日本:insertCompositionText|compositionend:日本:")
+            json!(
+                "key:field|beforeinput:x:insertText|input:x:insertText|compositionstart::|compositionupdate:に:|beforeinput:に:insertCompositionText|input:に:insertCompositionText|compositionupdate:日本:|beforeinput:日本:insertCompositionText|input:日本:insertCompositionText|compositionend:日本:"
+            )
         );
 
         evaluate(&mut session, "topField.focus()");
@@ -710,7 +712,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(evaluate(&mut session, "topField.value"), json!("y"));
-        assert_eq!(evaluate(&mut session, "parentKeys.join('|')"), json!("topField"));
+        assert_eq!(
+            evaluate(&mut session, "parentKeys.join('|')"),
+            json!("topField")
+        );
         assert_eq!(evaluate(&mut session, "childField.value"), json!("x日本"));
     }
 

@@ -216,9 +216,7 @@ mod tests {
     #[test]
     fn accepted_sources_drop_only_the_invalid_top_level_rule() {
         assert_eq!(
-            accepted_rule_sources(
-                "[class=second two] { color: red; } p { color: blue; }"
-            ),
+            accepted_rule_sources("[class=second two] { color: red; } p { color: blue; }"),
             ["p { color: blue; }"]
         );
     }

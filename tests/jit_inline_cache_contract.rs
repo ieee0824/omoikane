@@ -1,6 +1,6 @@
 //! Downstream integration checks for Boa's Gate 2 inline-cache boundary.
 
-use boa_engine::{vm::InlineCacheState, Context, Script, Source};
+use boa_engine::{Context, Script, Source, vm::InlineCacheState};
 
 #[test]
 fn property_call_site_exposes_stable_state_and_opt_in_counters() {

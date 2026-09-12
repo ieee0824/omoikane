@@ -169,7 +169,10 @@ add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Numb
 
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
     let reason = if status == 200 { "OK" } else { "Error" };
-    let header = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body);
 }
@@ -309,7 +312,8 @@ fn escape_xml(value: &str) -> String {
 fn junit_xml(report: &WptReport) -> String {
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuite name=\"wpt-smoke\" tests=\"{}\" failures=\"{}\">\n",
-        report.results.len(), report.summary.regression
+        report.results.len(),
+        report.summary.regression
     );
     for result in &report.results {
         let details = serde_json::to_string(&result.subtests).expect("serialize WPT subtests");
@@ -429,7 +433,11 @@ fn diff_revision_reports(previous: &WptReport, current: &WptReport) -> WptRevisi
         .iter()
         .map(|result| (result.path.as_str(), result.classification))
         .collect::<BTreeMap<_, _>>();
-    let mut paths = previous_results.keys().chain(current_results.keys()).copied().collect::<Vec<_>>();
+    let mut paths = previous_results
+        .keys()
+        .chain(current_results.keys())
+        .copied()
+        .collect::<Vec<_>>();
     paths.sort_unstable();
     paths.dedup();
     let changed = paths
@@ -493,10 +501,8 @@ fn revision_reports_round_trip_and_split_by_area() {
 
     write_revision_reports(&root, &report).unwrap();
     assert_eq!(read_revision_report(&root, "abc123").unwrap(), report);
-    let area: WptAreaReport = serde_json::from_slice(
-        &fs::read(root.join("abc123/css.json")).unwrap(),
-    )
-    .unwrap();
+    let area: WptAreaReport =
+        serde_json::from_slice(&fs::read(root.join("abc123/css.json")).unwrap()).unwrap();
     assert_eq!(area.area, "css");
     assert_eq!(area.summary.known_failure, 1);
     assert_eq!(area.results.len(), 1);

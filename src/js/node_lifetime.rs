@@ -6,9 +6,9 @@
 //! Native records use Rc/Weak; no native weak-GC allocation owns their lifetime.
 
 use super::*;
+use crate::dom::WeakNodeHandle;
 use boa_engine::JsData;
 use boa_gc::{GcRefCell, Rooted};
-use crate::dom::WeakNodeHandle;
 
 type DocumentNodes = Rc<RefCell<HashMap<usize, NodeHandle>>>;
 type GroupKey = (usize, usize);

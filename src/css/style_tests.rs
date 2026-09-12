@@ -139,7 +139,11 @@ fn shadow_host_encapsulation_order_reverses_for_important_rules() {
             Origin::Author,
             parse_stylesheet(&format!(
                 "x-card {{ color: green{}; }}",
-                if document_important { " !important" } else { "" }
+                if document_important {
+                    " !important"
+                } else {
+                    ""
+                }
             ))
             .unwrap(),
         );
@@ -265,8 +269,16 @@ fn nested_exportparts_forwards_same_name_renames_and_ignores_invalid_entries() {
     assert_eq!(style.get("width"), Some(&ComputedValue::Px(1.0)));
     assert_eq!(style.get("height"), Some(&ComputedValue::Px(2.0)));
     assert_eq!(style.get("min-width"), Some(&ComputedValue::Px(3.0)));
-    assert_eq!(style.get("max-width"), None, "renaming does not retain the inner name");
-    assert_eq!(style.get("margin-left"), None, "unexported names do not cross the nested root");
+    assert_eq!(
+        style.get("max-width"),
+        None,
+        "renaming does not retain the inner name"
+    );
+    assert_eq!(
+        style.get("margin-left"),
+        None,
+        "unexported names do not cross the nested root"
+    );
 }
 
 #[test]
@@ -294,10 +306,8 @@ fn part_cascade_uses_shadow_encapsulation_order() {
     );
     resolver.add_scoped_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            ".label { width: 10px; height: 10px; min-width: 10px !important; }",
-        )
-        .unwrap(),
+        parse_stylesheet(".label { width: 10px; height: 10px; min-width: 10px !important; }")
+            .unwrap(),
         root,
     );
     let style = resolver.computed_style(&label);
@@ -328,10 +338,7 @@ fn part_cascade_uses_shadow_encapsulation_order() {
     let mut bare_resolver = StyleResolver::new();
     bare_resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "x-bare::part(label) { width: 6px; height: 6px !important; }",
-        )
-        .unwrap(),
+        parse_stylesheet("x-bare::part(label) { width: 6px; height: 6px !important; }").unwrap(),
     );
     let bare_style = bare_resolver.computed_style(&bare_part);
     assert_eq!(bare_style.get("width"), Some(&ComputedValue::Px(6.0)));
@@ -550,10 +557,8 @@ fn scoped_selector_ancestor_matching_stops_at_the_scope_root() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "p { color: black; } @scope (.root) { .outside p { color: red; } }",
-        )
-        .unwrap(),
+        parse_stylesheet("p { color: black; } @scope (.root) { .outside p { color: red; } }")
+            .unwrap(),
     );
     assert_eq!(
         resolver.computed_style(&target).get("color"),
@@ -677,7 +682,10 @@ fn important_origin_order_matches_css_cascade() {
     );
 
     let style = resolver.computed_style(&title);
-    assert_eq!(style.get("color"), Some(&ComputedValue::Color("blue".to_string())));
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
 }
 
 #[test]
@@ -691,7 +699,10 @@ fn inline_style_beats_author_specificity() {
     );
 
     let style = resolver.computed_style(&title);
-    assert_eq!(style.get("color"), Some(&ComputedValue::Color("green".to_string())));
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
 }
 
 #[test]
@@ -705,7 +716,10 @@ fn author_important_beats_normal_inline_style() {
     );
 
     let style = resolver.computed_style(&title);
-    assert_eq!(style.get("color"), Some(&ComputedValue::Color("red".to_string())));
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
 }
 
 #[test]
@@ -719,7 +733,10 @@ fn inline_important_beats_author_important() {
     );
 
     let style = resolver.computed_style(&title);
-    assert_eq!(style.get("color"), Some(&ComputedValue::Color("green".to_string())));
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
 }
 
 #[test]
@@ -733,7 +750,10 @@ fn user_important_beats_inline_important() {
     );
 
     let style = resolver.computed_style(&title);
-    assert_eq!(style.get("color"), Some(&ComputedValue::Color("purple".to_string())));
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("purple".to_string()))
+    );
 }
 
 #[test]
@@ -760,7 +780,10 @@ fn inline_style_does_not_apply_to_pseudo_elements() {
     let style = resolver
         .computed_pseudo_style(&title, PseudoElement::Before)
         .unwrap();
-    assert_eq!(style.get("color"), Some(&ComputedValue::Color("red".to_string())));
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
 }
 
 #[test]
@@ -846,7 +869,10 @@ fn position_accepts_sticky_and_discards_invalid_keywords() {
     let element = NodeHandle::element("div");
     element.set_attribute("style", "position: sticky; position: sideways");
     let style = StyleResolver::new().computed_style(&element);
-    assert_eq!(style.get("position"), Some(&ComputedValue::Keyword("sticky".to_string())));
+    assert_eq!(
+        style.get("position"),
+        Some(&ComputedValue::Keyword("sticky".to_string()))
+    );
 
     let plain = NodeHandle::element("div");
     assert_eq!(
@@ -955,27 +981,42 @@ fn expands_grid_placement_shorthands_and_keeps_longhands() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "h1 { grid-column: 1 / span 3; grid-row: span 2; grid-row-end: 4; }",
-        )
-        .unwrap(),
+        parse_stylesheet("h1 { grid-column: 1 / span 3; grid-row: span 2; grid-row-end: 4; }")
+            .unwrap(),
     );
     let style = resolver.computed_style(&title);
-    assert_eq!(style.get("grid-column-start"), Some(&ComputedValue::Keyword("1".to_string())));
-    assert_eq!(style.get("grid-column-end"), Some(&ComputedValue::Keyword("span 3".to_string())));
-    assert_eq!(style.get("grid-row-start"), Some(&ComputedValue::Keyword("span 2".to_string())));
-    assert_eq!(style.get("grid-row-end"), Some(&ComputedValue::Keyword("4".to_string())));
-    for property in ["grid-column", "grid-column-start", "grid-column-end", "grid-row", "grid-row-start", "grid-row-end"] {
+    assert_eq!(
+        style.get("grid-column-start"),
+        Some(&ComputedValue::Keyword("1".to_string()))
+    );
+    assert_eq!(
+        style.get("grid-column-end"),
+        Some(&ComputedValue::Keyword("span 3".to_string()))
+    );
+    assert_eq!(
+        style.get("grid-row-start"),
+        Some(&ComputedValue::Keyword("span 2".to_string()))
+    );
+    assert_eq!(
+        style.get("grid-row-end"),
+        Some(&ComputedValue::Keyword("4".to_string()))
+    );
+    for property in [
+        "grid-column",
+        "grid-column-start",
+        "grid-column-end",
+        "grid-row",
+        "grid-row-start",
+        "grid-row-end",
+    ] {
         assert!(is_supported_property(property));
     }
 }
 
 #[test]
 fn expands_grid_area_shorthand_with_named_and_numeric_lines() {
-    let stylesheet = parse_stylesheet(
-        ".named { grid-area: title; } .lines { grid-area: 1 / 2 / 4; }",
-    )
-    .unwrap();
+    let stylesheet =
+        parse_stylesheet(".named { grid-area: title; } .lines { grid-area: 1 / 2 / 4; }").unwrap();
 
     let Rule::Style(named) = &stylesheet.rules[0] else {
         panic!("expected named style rule");
@@ -1051,8 +1092,7 @@ fn preserves_grid_template_area_row_boundaries_in_computed_style() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet("h1 { grid-template-areas: \"header header\" \"side main\"; }")
-            .unwrap(),
+        parse_stylesheet("h1 { grid-template-areas: \"header header\" \"side main\"; }").unwrap(),
     );
 
     let style = resolver.computed_style(&title);
@@ -1079,12 +1119,30 @@ fn expands_grid_alignment_shorthands() {
         .unwrap(),
     );
     let style = resolver.computed_style(&title);
-    assert_eq!(style.get("align-items"), Some(&ComputedValue::Keyword("end".to_string())));
-    assert_eq!(style.get("justify-items"), Some(&ComputedValue::Keyword("center".to_string())));
-    assert_eq!(style.get("align-self"), Some(&ComputedValue::Keyword("center".to_string())));
-    assert_eq!(style.get("justify-self"), Some(&ComputedValue::Keyword("center".to_string())));
-    assert_eq!(style.get("align-content"), Some(&ComputedValue::Keyword("center".to_string())));
-    assert_eq!(style.get("justify-content"), Some(&ComputedValue::Keyword("center".to_string())));
+    assert_eq!(
+        style.get("align-items"),
+        Some(&ComputedValue::Keyword("end".to_string()))
+    );
+    assert_eq!(
+        style.get("justify-items"),
+        Some(&ComputedValue::Keyword("center".to_string()))
+    );
+    assert_eq!(
+        style.get("align-self"),
+        Some(&ComputedValue::Keyword("center".to_string()))
+    );
+    assert_eq!(
+        style.get("justify-self"),
+        Some(&ComputedValue::Keyword("center".to_string()))
+    );
+    assert_eq!(
+        style.get("align-content"),
+        Some(&ComputedValue::Keyword("center".to_string()))
+    );
+    assert_eq!(
+        style.get("justify-content"),
+        Some(&ComputedValue::Keyword("center".to_string()))
+    );
 }
 
 #[test]
@@ -1112,8 +1170,15 @@ fn canonicalizes_prefixed_flex_properties_to_standard_names() {
         );
 
         let style = resolver.computed_style(&element);
-        assert!(style.get(standard).is_some(), "{alias} should map to {standard}");
-        assert_eq!(style.get(alias), None, "{alias} should not remain in computed style");
+        assert!(
+            style.get(standard).is_some(),
+            "{alias} should map to {standard}"
+        );
+        assert_eq!(
+            style.get(alias),
+            None,
+            "{alias} should not remain in computed style"
+        );
     }
 }
 
@@ -1132,7 +1197,10 @@ fn standard_flex_property_overrides_prefixed_fallback() {
     );
 
     let style = resolver.computed_style(&element);
-    assert_eq!(style.get("align-items"), Some(&ComputedValue::Keyword("end".to_string())));
+    assert_eq!(
+        style.get("align-items"),
+        Some(&ComputedValue::Keyword("end".to_string()))
+    );
     assert_eq!(
         style.get("justify-content"),
         Some(&ComputedValue::Keyword("space-between".to_string()))
@@ -1328,7 +1396,9 @@ fn computes_3d_transform_and_perspective_properties() {
     );
 
     let style = resolver.computed_style(&title);
-    assert!(matches!(style.get("transform"), Some(ComputedValue::Keyword(value)) if value.contains("matrix3d")));
+    assert!(
+        matches!(style.get("transform"), Some(ComputedValue::Keyword(value)) if value.contains("matrix3d"))
+    );
     assert_eq!(
         style.get("transform-origin"),
         Some(&ComputedValue::Keyword("10px 20px 3px".to_string()))
@@ -1341,7 +1411,10 @@ fn computes_3d_transform_and_perspective_properties() {
         style.get("perspective-origin"),
         Some(&ComputedValue::Keyword("right bottom".to_string()))
     );
-    assert!(supports_declaration("transform", "rotateY(20deg) translateZ(3px)"));
+    assert!(supports_declaration(
+        "transform",
+        "rotateY(20deg) translateZ(3px)"
+    ));
     assert!(supports_declaration("perspective", "600px"));
     assert!(!supports_declaration("perspective", "-1px"));
     assert!(!supports_declaration("perspective", ""));
@@ -1414,9 +1487,7 @@ fn transition_property_preserves_unknown_custom_ident_case() {
     );
     let mut resolver = StyleResolver::new();
     assert_eq!(
-        resolver
-            .computed_style(&element)
-            .get("transition-property"),
+        resolver.computed_style(&element).get("transition-property"),
         Some(&ComputedValue::Keyword(
             "all, INVALID, SYNTAX, SRC, width".to_string()
         ))
@@ -1566,17 +1637,11 @@ fn reversing_transition_shortens_from_the_current_value() {
 #[test]
 fn negative_transition_delay_starts_from_the_advanced_value() {
     let element = NodeHandle::element("div");
-    element.set_attribute(
-        "style",
-        "opacity: 0; transition: opacity 1s linear -500ms;",
-    );
+    element.set_attribute("style", "opacity: 0; transition: opacity 1s linear -500ms;");
     let mut resolver = StyleResolver::new();
     let _ = resolver.computed_style(&element);
 
-    element.set_attribute(
-        "style",
-        "opacity: 1; transition: opacity 1s linear -500ms;",
-    );
+    element.set_attribute("style", "opacity: 1; transition: opacity 1s linear -500ms;");
     resolver.invalidate_style_cache_for_test();
     assert_eq!(
         resolver.computed_style(&element).get("opacity"),
@@ -1608,15 +1673,17 @@ fn invalid_transform_does_not_override_an_earlier_valid_declaration() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet("h1 { transform: rotate(45deg); transform: scale(2, nope); }")
-            .unwrap(),
+        parse_stylesheet("h1 { transform: rotate(45deg); transform: scale(2, nope); }").unwrap(),
     );
 
     assert_eq!(
         resolver.computed_style(&title).get("transform"),
         Some(&ComputedValue::Keyword("rotate(45deg)".to_string()))
     );
-    assert!(!supports_declaration("transform", "translateX(10px) bogus(1)"));
+    assert!(!supports_declaration(
+        "transform",
+        "translateX(10px) bogus(1)"
+    ));
     assert!(supports_declaration(
         "transform",
         "translate(50%, 2em) rotate(.5turn) scale(2)"
@@ -1745,14 +1812,19 @@ fn sqlite_audit_separates_vendor_prefixed_properties() {
         .prepare("SELECT property, category FROM unsupported_css_log ORDER BY property")
         .unwrap();
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
         rows,
         vec![
-            ("-moz-user-select".to_string(), "vendor-prefixed".to_string()),
+            (
+                "-moz-user-select".to_string(),
+                "vendor-prefixed".to_string()
+            ),
             ("future-layout".to_string(), "unsupported".to_string()),
         ]
     );
@@ -1781,7 +1853,10 @@ fn ignores_custom_properties_for_unsupported_logging() {
 #[test]
 fn audit_classifies_expanded_border_shorthands_and_vendor_prefixes() {
     for property in ["border-width", "border-style", "border-color"] {
-        assert!(is_supported_property(property), "{property} should be supported");
+        assert!(
+            is_supported_property(property),
+            "{property} should be supported"
+        );
         assert_eq!(css_audit_category(property), None);
     }
     let declarations = parse_style_attribute("border: 1px solid red");
@@ -2033,12 +2108,18 @@ fn border_width_keywords_resolve_to_pixels_before_none_style_zeroing() {
 
     let style = resolver.computed_style(&title);
     assert_eq!(style.get("border-top-width"), Some(&ComputedValue::Px(1.0)));
-    assert_eq!(style.get("border-right-width"), Some(&ComputedValue::Px(3.0)));
+    assert_eq!(
+        style.get("border-right-width"),
+        Some(&ComputedValue::Px(3.0))
+    );
     assert_eq!(
         style.get("border-bottom-width"),
         Some(&ComputedValue::Px(5.0))
     );
-    assert_eq!(style.get("border-left-width"), Some(&ComputedValue::Px(0.0)));
+    assert_eq!(
+        style.get("border-left-width"),
+        Some(&ComputedValue::Px(0.0))
+    );
 }
 
 #[test]
@@ -2286,10 +2367,7 @@ fn valid_color_grammar_remains_accepted() {
             "accepted invalid color function: {invalid}"
         );
     }
-    assert!(supports_declaration(
-        "color",
-        "hsl(120 100% 50% / 0.5)"
-    ));
+    assert!(supports_declaration("color", "hsl(120 100% 50% / 0.5)"));
 }
 
 #[test]
@@ -2533,9 +2611,8 @@ fn expands_margin_1_value() {
     };
     for side in ["margin-top", "margin-right", "margin-bottom", "margin-left"] {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == side && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")),
+            rule.declarations.iter().any(|d| d.name == side
+                && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")),
             "{side} not found with 10px"
         );
     }
@@ -2550,17 +2627,15 @@ fn expands_margin_2_values() {
     // top/bottom = 10px, right/left = 20px
     for side in ["margin-top", "margin-bottom"] {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == side && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")),
+            rule.declarations.iter().any(|d| d.name == side
+                && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")),
             "{side} not found with 10px"
         );
     }
     for side in ["margin-right", "margin-left"] {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == side && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")),
+            rule.declarations.iter().any(|d| d.name == side
+                && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")),
             "{side} not found with 20px"
         );
     }
@@ -2573,18 +2648,14 @@ fn expands_margin_3_values() {
         panic!("expected style rule");
     };
     // top=10px, right/left=20px, bottom=30px
-    assert!(rule.declarations.iter().any(
-        |d| d.name == "margin-top" && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")
-    ));
-    assert!(rule.declarations.iter().any(
-        |d| d.name == "margin-right" && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")
-    ));
-    assert!(rule.declarations.iter().any(
-        |d| d.name == "margin-bottom" && matches!(&d.value, Value::Length(v, u) if *v == 30.0 && u == "px")
-    ));
-    assert!(rule.declarations.iter().any(
-        |d| d.name == "margin-left" && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")
-    ));
+    assert!(rule.declarations.iter().any(|d| d.name == "margin-top"
+        && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")));
+    assert!(rule.declarations.iter().any(|d| d.name == "margin-right"
+        && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")));
+    assert!(rule.declarations.iter().any(|d| d.name == "margin-bottom"
+        && matches!(&d.value, Value::Length(v, u) if *v == 30.0 && u == "px")));
+    assert!(rule.declarations.iter().any(|d| d.name == "margin-left"
+        && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")));
 }
 
 #[test]
@@ -2601,9 +2672,8 @@ fn expands_margin_4_values() {
     ];
     for (side, px) in &expected {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == *side && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
+            rule.declarations.iter().any(|d| d.name == *side
+                && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
             "{side} not found with {px}px"
         );
     }
@@ -2623,9 +2693,8 @@ fn expands_padding_4_values() {
     ];
     for (side, px) in &expected {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == *side && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
+            rule.declarations.iter().any(|d| d.name == *side
+                && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
             "{side} not found with {px}px"
         );
     }
@@ -2645,9 +2714,8 @@ fn expands_border_width_4_values() {
     ];
     for (side, px) in &expected {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == *side && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
+            rule.declarations.iter().any(|d| d.name == *side
+                && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
             "{side} not found with {px}px"
         );
     }
@@ -2708,7 +2776,8 @@ fn expands_overflow_2_values() {
     assert!(
         rule.declarations
             .iter()
-            .any(|d| d.name == "overflow-y" && matches!(&d.value, Value::Keyword(v) if v == "scroll")),
+            .any(|d| d.name == "overflow-y"
+                && matches!(&d.value, Value::Keyword(v) if v == "scroll")),
         "overflow-y not found with scroll"
     );
 }
@@ -2732,9 +2801,8 @@ fn expands_flex_shorthand_grow_shrink_basis() {
         "flex-shrink not found with 1"
     );
     assert!(
-        rule.declarations
-            .iter()
-            .any(|d| d.name == "flex-basis" && matches!(&d.value, Value::Length(v, u) if *v == 100.0 && u == "px")),
+        rule.declarations.iter().any(|d| d.name == "flex-basis"
+            && matches!(&d.value, Value::Length(v, u) if *v == 100.0 && u == "px")),
         "flex-basis not found with 100px"
     );
 }
@@ -2840,9 +2908,8 @@ fn expands_flex_shorthand_basis_only() {
         "flex-shrink not found with 1"
     );
     assert!(
-        rule.declarations
-            .iter()
-            .any(|d| d.name == "flex-basis" && matches!(&d.value, Value::Length(v, u) if *v == 100.0 && u == "px")),
+        rule.declarations.iter().any(|d| d.name == "flex-basis"
+            && matches!(&d.value, Value::Length(v, u) if *v == 100.0 && u == "px")),
         "flex-basis not found with 100px"
     );
 }
@@ -2867,9 +2934,8 @@ fn expands_flex_shorthand_grow_basis() {
         "flex-shrink not found with 1"
     );
     assert!(
-        rule.declarations
-            .iter()
-            .any(|d| d.name == "flex-basis" && matches!(&d.value, Value::Length(v, u) if *v == 100.0 && u == "px")),
+        rule.declarations.iter().any(|d| d.name == "flex-basis"
+            && matches!(&d.value, Value::Length(v, u) if *v == 100.0 && u == "px")),
         "flex-basis not found with 100px"
     );
 }
@@ -2894,8 +2960,7 @@ fn expands_text_decoration_shorthand_underline() {
 
 #[test]
 fn expands_text_decoration_shorthand_line_through_with_color() {
-    let stylesheet =
-        parse_stylesheet("del { text-decoration: line-through red; }").unwrap();
+    let stylesheet = parse_stylesheet("del { text-decoration: line-through red; }").unwrap();
     let rule = match &stylesheet.rules[0] {
         crate::css::Rule::Style(r) => r,
         _ => panic!("expected style rule"),
@@ -3188,8 +3253,14 @@ fn resolves_tailwind_spacing_variable_in_logical_padding() {
     );
 
     let style = resolver.computed_style(&div);
-    assert_eq!(style.get("padding-inline-start"), Some(&ComputedValue::Px(16.0)));
-    assert_eq!(style.get("padding-inline-end"), Some(&ComputedValue::Px(16.0)));
+    assert_eq!(
+        style.get("padding-inline-start"),
+        Some(&ComputedValue::Px(16.0))
+    );
+    assert_eq!(
+        style.get("padding-inline-end"),
+        Some(&ComputedValue::Px(16.0))
+    );
 }
 
 #[test]
@@ -3211,7 +3282,10 @@ fn logical_padding_start_overrides_earlier_physical_reset() {
 
     let style = resolver.computed_style(&div);
     assert_eq!(style.get("padding-left"), Some(&ComputedValue::Px(36.0)));
-    assert_eq!(style.get("padding-inline-start"), Some(&ComputedValue::Px(36.0)));
+    assert_eq!(
+        style.get("padding-inline-start"),
+        Some(&ComputedValue::Px(36.0))
+    );
 }
 
 #[test]
@@ -3265,10 +3339,7 @@ fn applies_rules_nested_in_cascade_layer() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "@layer utilities { .grouped { padding-left: 12px; } }",
-        )
-        .unwrap(),
+        parse_stylesheet("@layer utilities { .grouped { padding-left: 12px; } }").unwrap(),
     );
 
     let style = resolver.computed_style(&div);
@@ -3656,18 +3727,13 @@ fn canonicalizes_grid_calc_multiplication_and_mixed_percentages() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "body { grid-template-rows: calc(20px * 3) calc(25% + 10px); }",
-        )
-        .unwrap(),
+        parse_stylesheet("body { grid-template-rows: calc(20px * 3) calc(25% + 10px); }").unwrap(),
     );
 
     let style = resolver.computed_style(&body);
     assert_eq!(
         style.get("grid-template-rows"),
-        Some(&ComputedValue::Keyword(
-            "60px calc(10px + 25%)".to_string()
-        ))
+        Some(&ComputedValue::Keyword("60px calc(10px + 25%)".to_string()))
     );
 }
 
@@ -3783,7 +3849,9 @@ fn canonicalizes_uppercase_clip_shape_function_names() {
     let style = resolver.computed_style(&body);
     assert_eq!(
         style.get("clip-path"),
-        Some(&ComputedValue::Keyword("circle(50% AT 50% 50%)".to_string()))
+        Some(&ComputedValue::Keyword(
+            "circle(50% AT 50% 50%)".to_string()
+        ))
     );
 }
 
@@ -3876,10 +3944,13 @@ fn validates_clip_shape_function_arguments() {
     assert!(!supports_declaration("mask-image", &oversized_mask));
     assert!(!supports_declaration(
         "mask-mode",
-        &format!("{}", (0..=crate::paint::MAX_MASK_LAYERS)
-            .map(|_| "alpha")
-            .collect::<Vec<_>>()
-            .join(", "))
+        &format!(
+            "{}",
+            (0..=crate::paint::MAX_MASK_LAYERS)
+                .map(|_| "alpha")
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     ));
     let oversized_mask_layers = |value: &str| {
         (0..=crate::paint::MAX_MASK_LAYERS)
@@ -3916,9 +3987,8 @@ fn expands_border_radius_1_value() {
         "border-bottom-left-radius",
     ] {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == corner && matches!(&d.value, Value::Length(v, u) if *v == 8.0 && u == "px")),
+            rule.declarations.iter().any(|d| d.name == corner
+                && matches!(&d.value, Value::Length(v, u) if *v == 8.0 && u == "px")),
             "{corner} not found with 8px"
         );
     }
@@ -3933,17 +4003,15 @@ fn expands_border_radius_2_values() {
     };
     for corner in ["border-top-left-radius", "border-bottom-right-radius"] {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == corner && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")),
+            rule.declarations.iter().any(|d| d.name == corner
+                && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")),
             "{corner} not found with 10px"
         );
     }
     for corner in ["border-top-right-radius", "border-bottom-left-radius"] {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == corner && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")),
+            rule.declarations.iter().any(|d| d.name == corner
+                && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")),
             "{corner} not found with 20px"
         );
     }
@@ -3956,18 +4024,30 @@ fn expands_border_radius_3_values() {
     let Rule::Style(rule) = &stylesheet.rules[0] else {
         panic!("expected style rule");
     };
-    assert!(rule.declarations.iter().any(
-        |d| d.name == "border-top-left-radius" && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px")
-    ));
-    assert!(rule.declarations.iter().any(
-        |d| d.name == "border-top-right-radius" && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")
-    ));
-    assert!(rule.declarations.iter().any(
-        |d| d.name == "border-bottom-right-radius" && matches!(&d.value, Value::Length(v, u) if *v == 30.0 && u == "px")
-    ));
-    assert!(rule.declarations.iter().any(
-        |d| d.name == "border-bottom-left-radius" && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px")
-    ));
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "border-top-left-radius"
+                && matches!(&d.value, Value::Length(v, u) if *v == 10.0 && u == "px"))
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "border-top-right-radius"
+                && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px"))
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "border-bottom-right-radius"
+                && matches!(&d.value, Value::Length(v, u) if *v == 30.0 && u == "px"))
+    );
+    assert!(
+        rule.declarations
+            .iter()
+            .any(|d| d.name == "border-bottom-left-radius"
+                && matches!(&d.value, Value::Length(v, u) if *v == 20.0 && u == "px"))
+    );
 }
 
 #[test]
@@ -3985,9 +4065,8 @@ fn expands_border_radius_4_values() {
     ];
     for (corner, px) in &expected {
         assert!(
-            rule.declarations
-                .iter()
-                .any(|d| d.name == *corner && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
+            rule.declarations.iter().any(|d| d.name == *corner
+                && matches!(&d.value, Value::Length(v, u) if *v == *px && u == "px")),
             "{corner} not found with {px}px"
         );
     }
@@ -4361,10 +4440,8 @@ fn media_only_screen_applies() {
     resolver.set_viewport(600.0, 900.0);
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "@media only screen and (max-width: 768px) { div { color: magenta; } }",
-        )
-        .unwrap(),
+        parse_stylesheet("@media only screen and (max-width: 768px) { div { color: magenta; } }")
+            .unwrap(),
     );
     let style = resolver.computed_style(&div);
     assert_eq!(
@@ -4382,10 +4459,7 @@ fn media_prefers_color_scheme_dark_applies_in_dark_mode() {
     resolver.set_color_scheme_dark(true);
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "@media (prefers-color-scheme: dark) { div { color: white; } }",
-        )
-        .unwrap(),
+        parse_stylesheet("@media (prefers-color-scheme: dark) { div { color: white; } }").unwrap(),
     );
     let style = resolver.computed_style(&div);
     assert_eq!(
@@ -4403,10 +4477,7 @@ fn media_prefers_color_scheme_dark_does_not_apply_in_light_mode() {
     // Default is light mode (color_scheme_dark = false).
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "@media (prefers-color-scheme: dark) { div { color: white; } }",
-        )
-        .unwrap(),
+        parse_stylesheet("@media (prefers-color-scheme: dark) { div { color: white; } }").unwrap(),
     );
     let style = resolver.computed_style(&div);
     assert_ne!(
@@ -4465,7 +4536,11 @@ fn media_query_cache_populated_after_resolution() {
         parse_stylesheet("@media screen { div { color: red; } }").unwrap(),
     );
     // Before resolving, cache is empty.
-    assert_eq!(resolver.media_query_cache_len(), 0, "cache should be empty before first resolution");
+    assert_eq!(
+        resolver.media_query_cache_len(),
+        0,
+        "cache should be empty before first resolution"
+    );
 
     // Resolve the first div — cache should be populated.
     let _ = resolver.computed_style(&divs[0]);
@@ -4503,7 +4578,8 @@ fn media_query_cache_consistent_results_across_nodes() {
         assert_eq!(
             style.get("color"),
             Some(&ComputedValue::Color("blue".to_string())),
-            "div[{}] should have color:blue (viewport 800px ≤ max-width 1024px)", i
+            "div[{}] should have color:blue (viewport 800px ≤ max-width 1024px)",
+            i
         );
     }
 }
@@ -4550,8 +4626,7 @@ fn expands_flex_flow_shorthand_direction_and_wrap() {
     assert!(
         rule.declarations
             .iter()
-            .any(|d| d.name == "flex-wrap"
-                && matches!(&d.value, Value::Keyword(v) if v == "wrap")),
+            .any(|d| d.name == "flex-wrap" && matches!(&d.value, Value::Keyword(v) if v == "wrap")),
         "flex-wrap: wrap not found"
     );
 }
@@ -4564,17 +4639,14 @@ fn expands_flex_flow_shorthand_direction_only() {
         panic!("expected style rule");
     };
     assert!(
-        rule.declarations
-            .iter()
-            .any(|d| d.name == "flex-direction"
-                && matches!(&d.value, Value::Keyword(v) if v == "column")),
+        rule.declarations.iter().any(|d| d.name == "flex-direction"
+            && matches!(&d.value, Value::Keyword(v) if v == "column")),
         "flex-direction: column not found"
     );
     assert!(
-        rule.declarations
-            .iter()
-            .any(|d| d.name == "flex-wrap"
-                && matches!(&d.value, Value::Keyword(v) if v == "nowrap")),
+        rule.declarations.iter().any(
+            |d| d.name == "flex-wrap" && matches!(&d.value, Value::Keyword(v) if v == "nowrap")
+        ),
         "flex-wrap: nowrap (initial) not found"
     );
 }
@@ -4596,8 +4668,7 @@ fn expands_flex_flow_shorthand_wrap_only() {
     assert!(
         rule.declarations
             .iter()
-            .any(|d| d.name == "flex-wrap"
-                && matches!(&d.value, Value::Keyword(v) if v == "wrap")),
+            .any(|d| d.name == "flex-wrap" && matches!(&d.value, Value::Keyword(v) if v == "wrap")),
         "flex-wrap: wrap not found"
     );
 }
@@ -4610,17 +4681,13 @@ fn expands_flex_flow_shorthand_column_reverse_wrap_reverse() {
         panic!("expected style rule");
     };
     assert!(
-        rule.declarations
-            .iter()
-            .any(|d| d.name == "flex-direction"
-                && matches!(&d.value, Value::Keyword(v) if v == "column-reverse")),
+        rule.declarations.iter().any(|d| d.name == "flex-direction"
+            && matches!(&d.value, Value::Keyword(v) if v == "column-reverse")),
         "flex-direction: column-reverse not found"
     );
     assert!(
-        rule.declarations
-            .iter()
-            .any(|d| d.name == "flex-wrap"
-                && matches!(&d.value, Value::Keyword(v) if v == "wrap-reverse")),
+        rule.declarations.iter().any(|d| d.name == "flex-wrap"
+            && matches!(&d.value, Value::Keyword(v) if v == "wrap-reverse")),
         "flex-wrap: wrap-reverse not found"
     );
 }
@@ -4633,10 +4700,8 @@ fn expands_flex_flow_shorthand_initial_keyword() {
         panic!("expected style rule");
     };
     assert!(
-        rule.declarations
-            .iter()
-            .any(|d| d.name == "flex-direction"
-                && matches!(&d.value, Value::Keyword(v) if v == "initial")),
+        rule.declarations.iter().any(|d| d.name == "flex-direction"
+            && matches!(&d.value, Value::Keyword(v) if v == "initial")),
         "flex-direction: initial not found"
     );
     assert!(
@@ -4849,7 +4914,10 @@ fn inherits_direction_and_writing_mode_but_not_unicode_bidi_from_parent() {
         .unwrap(),
     );
     let style = resolver.computed_style(&child);
-    assert_eq!(style.get("direction"), Some(&ComputedValue::Keyword("rtl".into())));
+    assert_eq!(
+        style.get("direction"),
+        Some(&ComputedValue::Keyword("rtl".into()))
+    );
     assert_eq!(
         style.get("writing-mode"),
         Some(&ComputedValue::Keyword("vertical-rl".into()))
@@ -4880,7 +4948,10 @@ fn writing_direction_initial_and_unset_resolve_deterministically() {
         .unwrap(),
     );
     let style = resolver.computed_style(&child);
-    assert_eq!(style.get("direction"), Some(&ComputedValue::Keyword("ltr".into())));
+    assert_eq!(
+        style.get("direction"),
+        Some(&ComputedValue::Keyword("ltr".into()))
+    );
     assert_eq!(
         style.get("writing-mode"),
         Some(&ComputedValue::Keyword("vertical-lr".into()))
@@ -5005,7 +5076,11 @@ fn author_css_overrides_heading_ua_margin() {
         margin_top,
         Some(ComputedValue::Px(v)) | Some(ComputedValue::Number(v)) if *v == 0.0
     );
-    assert!(is_zero, "author CSS margin:0 should override UA margin for h1, got {:?}", margin_top);
+    assert!(
+        is_zero,
+        "author CSS margin:0 should override UA margin for h1, got {:?}",
+        margin_top
+    );
 }
 
 #[test]
@@ -5035,8 +5110,14 @@ fn ua_defaults_pre_has_monospace_and_whitespace_pre() {
 
     let mut resolver = StyleResolver::new();
     let style = resolver.computed_style(&pre);
-    assert_eq!(style.get("font-family"), Some(&ComputedValue::Keyword("monospace".to_string())));
-    assert_eq!(style.get("white-space"), Some(&ComputedValue::Keyword("pre".to_string())));
+    assert_eq!(
+        style.get("font-family"),
+        Some(&ComputedValue::Keyword("monospace".to_string()))
+    );
+    assert_eq!(
+        style.get("white-space"),
+        Some(&ComputedValue::Keyword("pre".to_string()))
+    );
 }
 
 #[test]
@@ -5055,8 +5136,14 @@ fn ua_defaults_th_is_bold_centered() {
 
     let mut resolver = StyleResolver::new();
     let style = resolver.computed_style(&th);
-    assert_eq!(style.get("font-weight"), Some(&ComputedValue::Keyword("bold".to_string())));
-    assert_eq!(style.get("text-align"), Some(&ComputedValue::Keyword("center".to_string())));
+    assert_eq!(
+        style.get("font-weight"),
+        Some(&ComputedValue::Keyword("bold".to_string()))
+    );
+    assert_eq!(
+        style.get("text-align"),
+        Some(&ComputedValue::Keyword("center".to_string()))
+    );
 }
 
 #[test]
@@ -5071,8 +5158,14 @@ fn ua_defaults_a_has_underline_and_blue() {
 
     let mut resolver = StyleResolver::new();
     let style = resolver.computed_style(&a);
-    assert_eq!(style.get("text-decoration-line"), Some(&ComputedValue::Keyword("underline".to_string())));
-    assert_eq!(style.get("color"), Some(&ComputedValue::Color("#0000ee".to_string())));
+    assert_eq!(
+        style.get("text-decoration-line"),
+        Some(&ComputedValue::Keyword("underline".to_string()))
+    );
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("#0000ee".to_string()))
+    );
 }
 
 #[test]
@@ -5356,7 +5449,10 @@ fn animation_does_not_override_inline_important_declaration() {
     );
 
     let style = resolver.computed_style(&div);
-    assert_eq!(style.get("color"), Some(&ComputedValue::Color("blue".to_string())));
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
 }
 
 #[test]
@@ -5527,7 +5623,10 @@ fn ua_defaults_table_has_display_table() {
 
     let mut resolver = StyleResolver::new();
     let style = resolver.computed_style(&table);
-    assert_eq!(style.get("display"), Some(&ComputedValue::Keyword("table".to_string())));
+    assert_eq!(
+        style.get("display"),
+        Some(&ComputedValue::Keyword("table".to_string()))
+    );
 }
 
 #[test]
@@ -5549,7 +5648,10 @@ fn font_size_smaller_resolves_to_px() {
     // smaller = parent * 0.833 = 20 * 0.833 = 16.66
     match style.get("font-size") {
         Some(ComputedValue::Px(px)) => {
-            assert!((*px - 16.66).abs() < 0.1, "font-size: smaller should be ~16.66px, got {px}");
+            assert!(
+                (*px - 16.66).abs() < 0.1,
+                "font-size: smaller should be ~16.66px, got {px}"
+            );
         }
         other => panic!("expected Px, got {other:?}"),
     }
@@ -5574,7 +5676,10 @@ fn font_size_larger_resolves_to_px() {
     // larger = parent * 1.2 = 20 * 1.2 = 24.0
     match style.get("font-size") {
         Some(ComputedValue::Px(px)) => {
-            assert!((*px - 24.0).abs() < 0.1, "font-size: larger should be ~24px, got {px}");
+            assert!(
+                (*px - 24.0).abs() < 0.1,
+                "font-size: larger should be ~24px, got {px}"
+            );
         }
         other => panic!("expected Px, got {other:?}"),
     }
@@ -5614,15 +5719,24 @@ fn outline_shorthand_expands_to_longhands_with_correct_values() {
         panic!("expected style rule");
     };
 
-    let style_decl = rule.declarations.iter().find(|d| d.name == "outline-style")
+    let style_decl = rule
+        .declarations
+        .iter()
+        .find(|d| d.name == "outline-style")
         .expect("should have outline-style");
     assert_eq!(style_decl.value, Value::Keyword("solid".to_string()));
 
-    let width_decl = rule.declarations.iter().find(|d| d.name == "outline-width")
+    let width_decl = rule
+        .declarations
+        .iter()
+        .find(|d| d.name == "outline-width")
         .expect("should have outline-width");
     assert_eq!(width_decl.value, Value::Length(2.0, "px".to_string()));
 
-    let color_decl = rule.declarations.iter().find(|d| d.name == "outline-color")
+    let color_decl = rule
+        .declarations
+        .iter()
+        .find(|d| d.name == "outline-color")
         .expect("should have outline-color");
     assert_eq!(color_decl.value, Value::Keyword("red".to_string()));
 }
@@ -5636,16 +5750,25 @@ fn outline_none_resets_all_longhands() {
         panic!("expected style rule");
     };
 
-    let style_decl = rule.declarations.iter().find(|d| d.name == "outline-style")
+    let style_decl = rule
+        .declarations
+        .iter()
+        .find(|d| d.name == "outline-style")
         .expect("outline: none should produce outline-style");
     assert_eq!(style_decl.value, Value::Keyword("none".to_string()));
 
     // outline: none should also reset width and color to initial values
-    let width_decl = rule.declarations.iter().find(|d| d.name == "outline-width")
+    let width_decl = rule
+        .declarations
+        .iter()
+        .find(|d| d.name == "outline-width")
         .expect("outline: none should reset outline-width");
     assert_eq!(width_decl.value, Value::Keyword("medium".to_string()));
 
-    let color_decl = rule.declarations.iter().find(|d| d.name == "outline-color")
+    let color_decl = rule
+        .declarations
+        .iter()
+        .find(|d| d.name == "outline-color")
         .expect("outline: none should reset outline-color");
     assert_eq!(color_decl.value, Value::Keyword("currentcolor".to_string()));
 }
@@ -5660,10 +5783,16 @@ fn outline_inherit_applies_to_all_longhands() {
     };
 
     for longhand in ["outline-style", "outline-width", "outline-color"] {
-        let decl = rule.declarations.iter().find(|d| d.name == longhand)
+        let decl = rule
+            .declarations
+            .iter()
+            .find(|d| d.name == longhand)
             .unwrap_or_else(|| panic!("outline: inherit should produce {longhand}"));
-        assert_eq!(decl.value, Value::Keyword("inherit".to_string()),
-            "{longhand} should be inherit");
+        assert_eq!(
+            decl.value,
+            Value::Keyword("inherit".to_string()),
+            "{longhand} should be inherit"
+        );
     }
 }
 
@@ -5735,10 +5864,8 @@ fn text_overflow_accepts_one_value_keywords_and_rejects_other_grammars() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet(
-            "#target { text-overflow: ellipsis; text-overflow: clip ellipsis; }",
-        )
-        .unwrap(),
+        parse_stylesheet("#target { text-overflow: ellipsis; text-overflow: clip ellipsis; }")
+            .unwrap(),
     );
     assert_eq!(
         resolver.computed_style(&target).get("text-overflow"),
@@ -5934,7 +6061,10 @@ fn important_revert_layer_uses_the_next_important_layer() {
 fn important_inline_revert_layer_uses_stylesheet_important_rule() {
     let document = NodeHandle::document();
     let target = NodeHandle::element("div");
-    target.set_attribute("style", "color: red !important; color: revert-layer !important");
+    target.set_attribute(
+        "style",
+        "color: red !important; color: revert-layer !important",
+    );
     document.append_child(target.clone());
 
     let mut resolver = StyleResolver::new();
@@ -6244,7 +6374,9 @@ fn cursor_url_with_coordinate_pair_is_accepted() {
     let style = resolver.computed_style(&target);
     assert_eq!(
         style.get("cursor"),
-        Some(&ComputedValue::Keyword("url(cur.png) 1 2, pointer".to_string())),
+        Some(&ComputedValue::Keyword(
+            "url(cur.png) 1 2, pointer".to_string()
+        )),
         "a url() with an `<x> <y>` coordinate pair must be accepted and serialized"
     );
 }
@@ -6264,7 +6396,9 @@ fn cursor_multiple_url_groups_serialize_with_commas() {
     let style = resolver.computed_style(&target);
     assert_eq!(
         style.get("cursor"),
-        Some(&ComputedValue::Keyword("url(a), url(b), pointer".to_string())),
+        Some(&ComputedValue::Keyword(
+            "url(a), url(b), pointer".to_string()
+        )),
         "multiple url() groups must be serialized with a comma between each group"
     );
 }
@@ -6284,7 +6418,9 @@ fn cursor_multiple_url_groups_with_coordinates_serialize_with_commas() {
     let style = resolver.computed_style(&target);
     assert_eq!(
         style.get("cursor"),
-        Some(&ComputedValue::Keyword("url(a), url(b) 1 2, pointer".to_string())),
+        Some(&ComputedValue::Keyword(
+            "url(a), url(b) 1 2, pointer".to_string()
+        )),
         "coordinate-bearing url() groups must serialize as `url(a), url(b) 1 2, pointer`"
     );
 }
@@ -6326,7 +6462,10 @@ fn inline_cursor_validation_matches_cascade() {
     let computed_value = |style_attribute: &str, property: &str| {
         let element = NodeHandle::element("div");
         element.set_attribute("style", style_attribute);
-        StyleResolver::new().computed_style(&element).get(property).cloned()
+        StyleResolver::new()
+            .computed_style(&element)
+            .get(property)
+            .cloned()
     };
 
     assert_eq!(
@@ -6353,10 +6492,8 @@ fn inline_cursor_validation_matches_cascade() {
 
 #[test]
 fn expands_mask_shorthand_position_size_and_repeat() {
-    let stylesheet = parse_stylesheet(
-        "h1 { mask: url(mask.svg) 25% 6px / contain no-repeat; }",
-    )
-    .unwrap();
+    let stylesheet =
+        parse_stylesheet("h1 { mask: url(mask.svg) 25% 6px / contain no-repeat; }").unwrap();
     let Rule::Style(rule) = &stylesheet.rules[0] else {
         panic!("expected style rule");
     };
@@ -6435,7 +6572,10 @@ fn canonicalizes_webkit_mask_properties_to_standard_names() {
         Some(&ComputedValue::Keyword("url(mask.svg)".to_string()))
     );
     assert_eq!(style.get("mask-position-x"), Some(&ComputedValue::Px(3.0)));
-    assert_eq!(style.get("mask-position-y"), Some(&ComputedValue::Percentage(25.0)));
+    assert_eq!(
+        style.get("mask-position-y"),
+        Some(&ComputedValue::Percentage(25.0))
+    );
     assert_eq!(
         style.get("mask-size"),
         Some(&ComputedValue::Keyword("8px 4px".to_string()))
@@ -6492,10 +6632,7 @@ fn background_clip_resolves_initial_unset_and_inherit() {
     );
     for keyword in ["initial", "unset", "revert"] {
         assert_eq!(
-            image_computed_keyword(
-                &format!("background-clip: {keyword}"),
-                "background-clip"
-            ),
+            image_computed_keyword(&format!("background-clip: {keyword}"), "background-clip"),
             "border-box"
         );
     }
@@ -6665,17 +6802,14 @@ fn background_layer_computed_values_resolve_each_layers_relative_units() {
     );
     assert_eq!(
         style.get("background-size"),
-        Some(&ComputedValue::Keyword(
-            "32px 48px, 20px 50%".to_string()
-        ))
+        Some(&ComputedValue::Keyword("32px 48px, 20px 50%".to_string()))
     );
 }
 
 #[test]
 fn single_layer_two_axis_background_repeat_keeps_both_values() {
-    let style = image_computed_style(
-        "background-image: none; background-repeat: repeat no-repeat;",
-    );
+    let style =
+        image_computed_style("background-image: none; background-repeat: repeat no-repeat;");
     assert_eq!(
         style.get("background-repeat"),
         Some(&ComputedValue::Keyword("repeat no-repeat".to_string()))
@@ -6690,9 +6824,7 @@ fn background_shorthand_size_accepts_computed_math_functions_per_layer() {
     );
     assert_eq!(
         style.get("background-size"),
-        Some(&ComputedValue::Keyword(
-            "18px auto, 2px auto".to_string()
-        ))
+        Some(&ComputedValue::Keyword("18px auto, 2px auto".to_string()))
     );
 }
 
@@ -6741,9 +6873,8 @@ fn malformed_background_longhand_layer_drops_the_whole_declaration() {
 
 #[test]
 fn single_axis_background_position_keywords_center_the_other_axis() {
-    let style = image_computed_style(
-        "background-image: none, none; background-position: top, left;",
-    );
+    let style =
+        image_computed_style("background-image: none, none; background-position: top, left;");
     assert_eq!(
         style.get("background-position-x"),
         Some(&ComputedValue::Keyword("center, left".to_string()))
@@ -6915,7 +7046,10 @@ fn object_fit_accepts_the_css_images_keywords() {
         );
     }
     // Keywords are ASCII case-insensitive.
-    assert_eq!(image_computed_keyword("object-fit: SCALE-DOWN", "object-fit"), "scale-down");
+    assert_eq!(
+        image_computed_keyword("object-fit: SCALE-DOWN", "object-fit"),
+        "scale-down"
+    );
 }
 
 /// An invalid declaration is dropped, so the initial value stays in effect and
@@ -7041,7 +7175,10 @@ fn object_fit_and_position_resolve_css_wide_keywords() {
         }
     };
 
-    assert_eq!(inherited("object-position: inherit", "object-position"), "10px 20px");
+    assert_eq!(
+        inherited("object-position: inherit", "object-position"),
+        "10px 20px"
+    );
     assert_eq!(inherited("object-fit: inherit", "object-fit"), "cover");
     for keyword in ["initial", "unset", "revert"] {
         assert_eq!(

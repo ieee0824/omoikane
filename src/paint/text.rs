@@ -137,7 +137,10 @@ fn rasterize_glyph_cached(
     };
     if let Some(glyph) = RENDER_GLYPH_CACHE.with(|cache| {
         let cache = cache.borrow();
-        cache.active.then(|| cache.glyphs.get(&key).cloned()).flatten()
+        cache
+            .active
+            .then(|| cache.glyphs.get(&key).cloned())
+            .flatten()
     }) {
         #[cfg(test)]
         RENDER_GLYPH_CACHE.with(|cache| cache.borrow_mut().hits += 1);
@@ -199,7 +202,9 @@ pub(crate) fn paint_text_with_registry(
         let fragments = line
             .text_overflow
             .as_ref()
-            .map_or(line.fragments.as_slice(), |overflow| overflow.fragments.as_slice());
+            .map_or(line.fragments.as_slice(), |overflow| {
+                overflow.fragments.as_slice()
+            });
         for fragment in fragments {
             let fragment_rect = offset.rect(fragment.rect);
             match &fragment.content {
@@ -370,14 +375,7 @@ pub(crate) fn paint_text_with_registry(
                         .find(|child| child.node == fragment.node)
                     {
                         super::paint_box_internal(
-                            canvas,
-                            child,
-                            resolver,
-                            clip,
-                            _viewport,
-                            true,
-                            fonts,
-                            web_fonts,
+                            canvas, child, resolver, clip, _viewport, true, fonts, web_fonts,
                             offset,
                         );
                     }
@@ -971,7 +969,11 @@ fn horizontal_glyph_origin(
     zero_advance: bool,
     offset_x: f32,
 ) -> f32 {
-    (if zero_advance { cluster_origin_x } else { cursor_x }) + offset_x
+    (if zero_advance {
+        cluster_origin_x
+    } else {
+        cursor_x
+    }) + offset_x
 }
 
 fn is_invisible_shaping_control(ch: char) -> bool {
@@ -1088,7 +1090,9 @@ pub(crate) fn paint_shaped_horizontal_text(
     clip: Option<Rect>,
     letter_spacing: f32,
 ) -> Option<f32> {
-    let rtl = style.resolved_bidi_level.is_some_and(|level| level % 2 == 1)
+    let rtl = style
+        .resolved_bidi_level
+        .is_some_and(|level| level % 2 == 1)
         || style.resolved_bidi_level.is_none()
             && (style.direction.as_deref() == Some("rtl")
                 || text.chars().any(|ch| {
@@ -1138,8 +1142,7 @@ pub(crate) fn paint_shaped_horizontal_text(
             if applied_spacing < spacing_boundaries
                 && spacing_clusters.binary_search(&shaped.cluster).is_ok()
                 && next_cluster.is_some_and(|cluster| {
-                    cluster != shaped.cluster
-                        && spacing_clusters.binary_search(&cluster).is_ok()
+                    cluster != shaped.cluster && spacing_clusters.binary_search(&cluster).is_ok()
                 })
             {
                 cursor_x += letter_spacing;
@@ -2127,10 +2130,22 @@ mod bidi_tests {
         assert_eq!(horizontal_glyph_origin(18.0, 10.0, false, 1.5), 19.5);
 
         let previous = Some((20.0, 8.0, 0));
-        assert_eq!(vertical_glyph_cell(28.0, previous, true, false, 0.0), (20.0, 8.0));
-        assert_eq!(vertical_glyph_cell(20.0, previous, true, true, 0.0), (20.0, 8.0));
-        assert_eq!(vertical_cursor_after(28.0, 20.0, 0.0, 0.0, true, false), 28.0);
-        assert_eq!(vertical_cursor_after(20.0, 20.0, 0.0, 0.0, true, true), 20.0);
+        assert_eq!(
+            vertical_glyph_cell(28.0, previous, true, false, 0.0),
+            (20.0, 8.0)
+        );
+        assert_eq!(
+            vertical_glyph_cell(20.0, previous, true, true, 0.0),
+            (20.0, 8.0)
+        );
+        assert_eq!(
+            vertical_cursor_after(28.0, 20.0, 0.0, 0.0, true, false),
+            28.0
+        );
+        assert_eq!(
+            vertical_cursor_after(20.0, 20.0, 0.0, 0.0, true, true),
+            20.0
+        );
         assert!(is_invisible_shaping_control('\u{fe0f}'));
         assert!(is_invisible_shaping_control('\u{200c}'));
         assert!(is_invisible_shaping_control('\u{200d}'));
@@ -2147,7 +2162,10 @@ mod bidi_tests {
         };
         assert_eq!(bidi_visual_text("אב", &odd), "בא");
 
-        let even = FragmentStyle { resolved_bidi_level: Some(2), ..odd };
+        let even = FragmentStyle {
+            resolved_bidi_level: Some(2),
+            ..odd
+        };
         assert_eq!(bidi_visual_text("אב", &even), "אב");
     }
 }

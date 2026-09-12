@@ -194,10 +194,7 @@ mod tests {
         host.synchronize(controller.pending_request());
         assert_eq!(
             host.adapter().closed,
-            vec![(
-                request.dialog().id,
-                JavaScriptDialogCloseReason::Completed
-            )]
+            vec![(request.dialog().id, JavaScriptDialogCloseReason::Completed)]
         );
     }
 

@@ -221,7 +221,11 @@ pub(super) fn consume_ident(chars: &[char], index: &mut usize) -> String {
     ident
 }
 
-pub(super) fn consume_string(chars: &[char], index: &mut usize, quote: char) -> Result<String, CssParseError> {
+pub(super) fn consume_string(
+    chars: &[char],
+    index: &mut usize,
+    quote: char,
+) -> Result<String, CssParseError> {
     *index += 1;
     let mut value = String::new();
     while let Some(&ch) = chars.get(*index) {

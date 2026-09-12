@@ -4,8 +4,7 @@ use crate::css::{AffineTransform, ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 
 use super::{
-    AlignItems, BoxDimensions, EdgeSizes, FlexDirection, FlexWrap, JustifyContent, LayoutBox,
-    Rect,
+    AlignItems, BoxDimensions, EdgeSizes, FlexDirection, FlexWrap, JustifyContent, LayoutBox, Rect,
     edge_sizes, explicit_length, intrinsic_width, is_display_none, is_out_of_flow_positioned,
     layout_positioned_child, overflow, resolved_length, sort_children_by_z_index,
     translate_layout_box_to_outer, visibility, z_index,
@@ -108,8 +107,7 @@ pub(super) fn layout_flex_container(
                 .unwrap_or_else(|| super::minimum_content_width(&child, resolver)),
             FlexDirection::Column => explicit_length(&child_style, "min-height").unwrap_or(0.0),
         };
-        let (main_start_auto, main_end_auto) =
-            main_axis_auto_margins(&child_style, direction);
+        let (main_start_auto, main_end_auto) = main_axis_auto_margins(&child_style, direction);
         items.push(FlexItemSpec {
             node: child,
             text_nodes: Vec::new(),
@@ -338,21 +336,21 @@ pub(super) fn layout_flex_container(
             }
         }
 
-        let (total_main_size, auto_margin_count) = laid_out.iter().fold(
-            (0.0f32, 0usize),
-            |(total_size, auto_margins), item| {
-                let item_size = match direction {
-                    FlexDirection::Row => item.layout.total_width(),
-                    FlexDirection::Column => item.layout.total_height(),
-                };
-                (
-                    total_size + item_size,
-                    auto_margins
-                        + usize::from(item.spec.main_start_auto)
-                        + usize::from(item.spec.main_end_auto),
-                )
-            },
-        );
+        let (total_main_size, auto_margin_count) =
+            laid_out
+                .iter()
+                .fold((0.0f32, 0usize), |(total_size, auto_margins), item| {
+                    let item_size = match direction {
+                        FlexDirection::Row => item.layout.total_width(),
+                        FlexDirection::Column => item.layout.total_height(),
+                    };
+                    (
+                        total_size + item_size,
+                        auto_margins
+                            + usize::from(item.spec.main_start_auto)
+                            + usize::from(item.spec.main_end_auto),
+                    )
+                });
         let used_main_size = total_main_size + fixed_main_gap;
         let positive_free_space = (available_main_size - used_main_size).max(0.0);
         let auto_margin = if auto_margin_count > 0 && positive_free_space > 0.0 {
@@ -476,7 +474,6 @@ pub(super) fn layout_flex_container(
     })
 }
 
-
 pub(super) fn is_flex_container(style: &ComputedStyle) -> bool {
     matches!(
         style.get("display"),
@@ -502,10 +499,7 @@ fn flex_wrap(style: &ComputedStyle) -> FlexWrap {
     }
 }
 
-fn main_axis_auto_margins(
-    style: &ComputedStyle,
-    direction: FlexDirection,
-) -> (bool, bool) {
+fn main_axis_auto_margins(style: &ComputedStyle, direction: FlexDirection) -> (bool, bool) {
     match direction {
         FlexDirection::Row => (
             super::is_auto(style.get("margin-left")),

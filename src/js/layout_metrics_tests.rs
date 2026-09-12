@@ -25,11 +25,17 @@ fn inline_block_uses_its_internal_line_box_for_border_box_geometry() {
         .eval("globalThis.target=document.getElementById('target');globalThis.before=document.getElementById('before')")
         .unwrap();
 
-    assert_eq!(number(&mut runtime, "target.getBoundingClientRect().height"), 70.0);
+    assert_eq!(
+        number(&mut runtime, "target.getBoundingClientRect().height"),
+        70.0
+    );
     assert_eq!(number(&mut runtime, "target.offsetHeight"), 70.0);
     assert_eq!(number(&mut runtime, "target.clientHeight"), 66.0);
     assert_eq!(number(&mut runtime, "target.getClientRects().length"), 1.0);
-    assert_eq!(number(&mut runtime, "target.getBoundingClientRect().y"), 24.0);
+    assert_eq!(
+        number(&mut runtime, "target.getBoundingClientRect().y"),
+        24.0
+    );
     assert!(
         number(&mut runtime, "target.getBoundingClientRect().x")
             > number(&mut runtime, "before.getBoundingClientRect().x"),
@@ -47,14 +53,26 @@ fn inline_block_shrink_wraps_and_contains_block_children() {
         .eval("globalThis.target=document.getElementById('target');globalThis.inner=document.getElementById('inner')")
         .unwrap();
 
-    assert_eq!(number(&mut runtime, "target.getBoundingClientRect().width"), 48.0);
-    assert_eq!(number(&mut runtime, "target.getBoundingClientRect().height"), 20.0);
     assert_eq!(
-        number(&mut runtime, "inner.getBoundingClientRect().x-target.getBoundingClientRect().x"),
+        number(&mut runtime, "target.getBoundingClientRect().width"),
+        48.0
+    );
+    assert_eq!(
+        number(&mut runtime, "target.getBoundingClientRect().height"),
+        20.0
+    );
+    assert_eq!(
+        number(
+            &mut runtime,
+            "inner.getBoundingClientRect().x-target.getBoundingClientRect().x"
+        ),
         4.0,
     );
     assert_eq!(
-        number(&mut runtime, "inner.getBoundingClientRect().y-target.getBoundingClientRect().y"),
+        number(
+            &mut runtime,
+            "inner.getBoundingClientRect().y-target.getBoundingClientRect().y"
+        ),
         4.0,
     );
 }

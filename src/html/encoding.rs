@@ -8,10 +8,11 @@ pub(crate) fn decode_html_response(response: &crate::http::HttpResponse) -> Stri
         .or_else(|| detect_charset_from_html_meta(body));
 
     if let Some(label) = charset.as_deref()
-        && let Some(encoding) = Encoding::for_label(label.as_bytes()) {
-            let (decoded, _, _) = encoding.decode(body);
-            return decoded.into_owned();
-        }
+        && let Some(encoding) = Encoding::for_label(label.as_bytes())
+    {
+        let (decoded, _, _) = encoding.decode(body);
+        return decoded.into_owned();
+    }
 
     String::from_utf8_lossy(body).to_string()
 }
@@ -41,9 +42,10 @@ pub(crate) fn detect_charset_from_html_meta(body: &[u8]) -> Option<String> {
                 .unwrap_or(false);
             if has_content_type_equiv
                 && let Some(content) = attributes.get("content")
-                    && let Some(charset) = parse_charset_from_content_type(content) {
-                        return Some(charset);
-                    }
+                && let Some(charset) = parse_charset_from_content_type(content)
+            {
+                return Some(charset);
+            }
         }
         cursor = end;
     }

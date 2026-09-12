@@ -6,7 +6,12 @@ const FIXTURE: &str = include_str!("fixtures/anonymized-render-benchmark/page.ht
 
 #[test]
 fn render_benchmark_fixture_is_deterministic() {
-    let viewport = Rect { x: 0.0, y: 0.0, width: 1280.0, height: 720.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1280.0,
+        height: 720.0,
+    };
     let first_document = TreeBuilder::parse(FIXTURE).document();
     let second_document = TreeBuilder::parse(FIXTURE).document();
 
