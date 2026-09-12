@@ -55,6 +55,23 @@ pub(super) fn rule_sources(input: &str) -> Vec<String> {
     result
 }
 
+/// Returns the original source for every top-level rule accepted by the
+/// forgiving stylesheet parser.
+///
+/// Embedded and fetched stylesheets discard malformed rules independently.
+/// CSSOM enumeration must use the same accepted rule set instead of turning a
+/// single malformed selector into an exception for the entire stylesheet.
+pub(super) fn accepted_rule_sources(input: &str) -> Vec<String> {
+    rule_sources(input)
+        .into_iter()
+        .filter(|source| {
+            !crate::paint::stylesheet::parse_stylesheet_forgiving(source)
+                .rules
+                .is_empty()
+        })
+        .collect()
+}
+
 fn push_rule(input: &str, result: &mut Vec<String>) {
     let input = input.trim();
     if !input.is_empty() {
@@ -151,7 +168,7 @@ fn append(input: &str, result: &mut Vec<(String, String)>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{declarations, rule_sources};
+    use super::{accepted_rule_sources, declarations, rule_sources};
 
     #[test]
     fn retains_urls_and_top_level_rule_boundaries() {
@@ -194,5 +211,15 @@ mod tests {
         assert_eq!(declarations[0].1, r#""A\";B""#);
         assert_eq!(declarations[1].1, r"url(font\;one.ttf)");
         assert_eq!(declarations[2].1, "italic");
+    }
+
+    #[test]
+    fn accepted_sources_drop_only_the_invalid_top_level_rule() {
+        assert_eq!(
+            accepted_rule_sources(
+                "[class=second two] { color: red; } p { color: blue; }"
+            ),
+            ["p { color: blue; }"]
+        );
     }
 }
