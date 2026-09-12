@@ -3982,16 +3982,161 @@ fn extract_stylesheets_preserves_named_import_layer_order() {
 fn import_prelude_accepts_anonymous_and_named_layers() {
     use crate::paint::stylesheet::{ImportLayer, parse_import_prelude};
 
+    let anonymous = parse_import_prelude("url(theme.css) layer").unwrap();
+    assert_eq!(anonymous.href, "theme.css");
+    assert_eq!(anonymous.layer, Some(ImportLayer::Anonymous));
+    assert_eq!(anonymous.supports, None);
+    assert_eq!(anonymous.media, None);
+
+    let named = parse_import_prelude("'theme.css' layer(framework.components)").unwrap();
+    assert_eq!(named.href, "theme.css");
     assert_eq!(
-        parse_import_prelude("url(theme.css) layer"),
-        Some(("theme.css".to_string(), Some(ImportLayer::Anonymous)))
+        named.layer,
+        Some(ImportLayer::Named("framework.components".to_string()))
     );
+
+    let conditional = parse_import_prelude(
+        "url(theme.css) layer(framework.components) supports(display: grid) screen and (min-width: 600px)",
+    );
+    let conditional = conditional.expect("ordered import conditions must parse");
+    assert_eq!(conditional.href, "theme.css");
     assert_eq!(
-        parse_import_prelude("'theme.css' layer(framework.components)"),
-        Some((
-            "theme.css".to_string(),
-            Some(ImportLayer::Named("framework.components".to_string()))
-        ))
+        conditional.layer,
+        Some(ImportLayer::Named("framework.components".to_string()))
+    );
+    assert_eq!(conditional.supports.as_deref(), Some("display: grid"));
+    assert_eq!(
+        conditional.media.as_deref(),
+        Some("screen and (min-width: 600px)")
+    );
+
+    assert!(parse_import_prelude("url(theme.css) supports()").is_none());
+    let unsupported =
+        parse_import_prelude("url(theme.css) supports(unknown-property: value)").unwrap();
+    assert_eq!(
+        unsupported.supports.as_deref(),
+        Some("unknown-property: value")
+    );
+    let invalid_layer = parse_import_prelude("url(theme.css) layer(A, B, C)").unwrap();
+    assert_eq!(invalid_layer.layer, None);
+    assert_eq!(invalid_layer.media.as_deref(), Some("layer(A, B, C)"));
+}
+
+#[test]
+fn conditional_import_layer_order_tracks_viewport_changes() {
+    use crate::paint::stylesheet::{ImportLayer, append_imported_stylesheets};
+
+    let mut stylesheets = Vec::new();
+    for (name, media) in [
+        ("B", "(max-width: 300px)"),
+        ("A", "(max-width: 300px)"),
+        ("A", "(min-width: 500px)"),
+        ("B", "(min-width: 500px)"),
+    ] {
+        append_imported_stylesheets(
+            &mut stylesheets,
+            Vec::new(),
+            Some(ImportLayer::Named(name.to_string())),
+            None,
+            Some(media),
+        );
+    }
+    stylesheets.push(
+        "@layer A { #target { color: red; } } @layer B { #target { color: green; } }".to_string(),
+    );
+
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    let mut resolver = StyleResolver::new();
+    for stylesheet in stylesheets {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+    }
+
+    resolver.set_viewport(300.0, 300.0);
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&crate::css::ComputedValue::Color("red".to_string()))
+    );
+    resolver.set_viewport(500.0, 300.0);
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&crate::css::ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn conditional_import_layer_order_tracks_color_scheme_changes() {
+    use crate::paint::stylesheet::{ImportLayer, append_imported_stylesheets};
+
+    let mut stylesheets = Vec::new();
+    for (name, media) in [
+        ("B", "(prefers-color-scheme: light)"),
+        ("A", "(prefers-color-scheme: light)"),
+        ("A", "(prefers-color-scheme: dark)"),
+        ("B", "(prefers-color-scheme: dark)"),
+    ] {
+        append_imported_stylesheets(
+            &mut stylesheets,
+            Vec::new(),
+            Some(ImportLayer::Named(name.to_string())),
+            None,
+            Some(media),
+        );
+    }
+    stylesheets.push(
+        "@layer A { #target { color: red; } } @layer B { #target { color: green; } }".to_string(),
+    );
+
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    let mut resolver = StyleResolver::new();
+    for stylesheet in stylesheets {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+    }
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&crate::css::ComputedValue::Color("red".to_string()))
+    );
+    resolver.set_color_scheme_dark(true);
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&crate::css::ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn unsupported_import_condition_skips_fetch_and_layer_registration() {
+    use std::io::ErrorKind;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let document = TreeBuilder::parse(
+        r#"<style>
+            @import "/must-not-fetch.css" layer(hidden) supports(unknown-property: value);
+            @layer visible, hidden;
+            @layer visible { #target { color: red; } }
+            @layer hidden { #target { color: green; } }
+        </style>"#,
+    )
+    .document();
+    let base_url = format!("http://127.0.0.1:{port}/index.html")
+        .parse::<crate::http::Url>()
+        .unwrap();
+    let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+    assert!(matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock));
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    let mut resolver = StyleResolver::new();
+    for stylesheet in stylesheets {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+    }
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&crate::css::ComputedValue::Color("green".to_string()))
     );
 }
 
@@ -4168,7 +4313,7 @@ fn extract_stylesheets_supports_unquoted_url_import() {
 }
 
 #[test]
-fn extract_stylesheets_skips_import_with_media_condition() {
+fn extract_stylesheets_preserves_import_with_media_condition() {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
@@ -4218,9 +4363,10 @@ fn extract_stylesheets_skips_import_with_media_condition() {
         .unwrap();
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
 
-    assert_eq!(stylesheets.len(), 1);
-    assert!(stylesheets[0].contains(".main"));
-    assert!(!stylesheets.iter().any(|css| css.contains(".print")));
+    assert_eq!(stylesheets.len(), 2);
+    assert!(stylesheets[0].contains("@media print"));
+    assert!(stylesheets[0].contains(".print"));
+    assert!(stylesheets[1].contains(".main"));
 }
 
 #[test]

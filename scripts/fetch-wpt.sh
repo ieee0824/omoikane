@@ -39,7 +39,9 @@ git_wpt sparse-checkout add \
   "/css/css-cascade/layer-vs-inline-style.html" \
   "/css/css-cascade/layer-rules-cssom.html" \
   "/css/css-cascade/parsing/layer.html" \
-  "/css/css-cascade/layer-import.html"
+  "/css/css-cascade/layer-import.html" \
+  "/css/css-cascade/parsing/layer-import-parsing.html" \
+  "/css/css-cascade/parsing/supports-import-parsing.html"
 git_wpt sparse-checkout add "/css/cssom/CSSContainerRule.tentative.html"
 git_wpt sparse-checkout add \
   "/css/css-font-loading/fontfaceset-has.html" \

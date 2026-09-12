@@ -32,6 +32,25 @@ impl std::fmt::Debug for StylesheetLoader {
 }
 
 impl StylesheetLoader {
+    pub(super) fn cached_import(
+        &self,
+        href: &str,
+        base: Option<&Url>,
+        document_base: Option<&Url>,
+    ) -> Option<(String, String)> {
+        let key = if href.starts_with("data:") {
+            href.to_string()
+        } else {
+            css::resolve_relative_stylesheet_url(base?, href, document_base)?.to_string()
+        };
+        let resource = self.resources.get(&key)?.as_ref()?;
+        let resolved = resource
+            .url
+            .as_ref()
+            .map_or_else(|| key.clone(), ToString::to_string);
+        Some((resource.text.clone(), resolved))
+    }
+
     pub(super) fn load_node(
         &mut self,
         node: &NodeHandle,
@@ -219,13 +238,19 @@ impl StylesheetLoader {
                     cursor = directive.end;
 
                     let mut imported = Vec::new();
-                    if let Some(import) = self.fetch(
-                        &directive.href,
-                        resource.url.as_ref().or(document_base),
-                        document_base,
-                        policy,
-                        blocked,
-                    ) {
+                    let supports_matches = directive
+                        .supports
+                        .as_deref()
+                        .is_none_or(crate::css::supports_condition_matches);
+                    if supports_matches
+                        && let Some(import) = self.fetch(
+                            &directive.href,
+                            resource.url.as_ref().or(document_base),
+                            document_base,
+                            policy,
+                            blocked,
+                        )
+                    {
                         let key = import
                             .url
                             .as_ref()
@@ -243,7 +268,13 @@ impl StylesheetLoader {
                             active.remove(&key);
                         }
                     }
-                    css::append_imported_stylesheets(output, imported, directive.layer);
+                    css::append_imported_stylesheets(
+                        output,
+                        imported,
+                        directive.layer,
+                        directive.supports.as_deref(),
+                        directive.media.as_deref(),
+                    );
                 }
                 let trailing: String = chars[cursor..].iter().collect();
                 if !trailing.trim().is_empty() {

@@ -65,6 +65,13 @@ pub(super) fn accepted_rule_sources(input: &str) -> Vec<String> {
     rule_sources(input)
         .into_iter()
         .filter(|source| {
+            if source
+                .trim_start()
+                .get(..7)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("@import"))
+            {
+                return crate::paint::stylesheet::parse_import_rule(source).is_some();
+            }
             !crate::paint::stylesheet::parse_stylesheet_forgiving(source)
                 .rules
                 .is_empty()

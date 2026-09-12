@@ -8470,6 +8470,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(css_rule_count_native),
         ),
         (
+            js_string!("__omoikane_css_import_parts"),
+            1,
+            NativeFunction::from_copy_closure(css_import_parts_native),
+        ),
+        (
+            js_string!("__omoikane_imported_stylesheet"),
+            2,
+            NativeFunction::from_copy_closure(imported_stylesheet_native),
+        ),
+        (
             js_string!("__omoikane_css_rule_sources"),
             1,
             NativeFunction::from_copy_closure(css_rule_sources_native),
@@ -11091,6 +11101,79 @@ fn css_rule_count_native(
     let sheet = crate::css::parse_stylesheet(&css)
         .map_err(|error| JsError::from(JsNativeError::syntax().with_message(error.to_string())))?;
     Ok(JsValue::from(sheet.rules.len() as f64))
+}
+
+/// Parses a complete `@import` rule through the same parser used by paint and
+/// dynamic stylesheet expansion, returning its CSSOM-facing components.
+fn css_import_parts_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let css = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let Some(import) = crate::paint::stylesheet::parse_import_rule(&css) else {
+        return Ok(JsValue::null());
+    };
+    let layer_name = match import.layer {
+        Some(crate::paint::stylesheet::ImportLayer::Anonymous) => Some(String::new()),
+        Some(crate::paint::stylesheet::ImportLayer::Named(name)) => Some(name),
+        None => None,
+    };
+    let encoded = serde_json::json!({
+        "href": import.href,
+        "layerName": layer_name,
+        "supportsText": import.supports,
+        "mediaText": import.media.unwrap_or_default(),
+    })
+    .to_string();
+    Ok(js_string!(encoded.as_str()).into())
+}
+
+/// Returns an already loaded imported stylesheet without initiating a fetch.
+/// A non-matching `supports()` condition therefore remains `null` in CSSOM.
+fn imported_stylesheet_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let href = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    with_host_state(|host| {
+        let Some(node) = host.borrow().get_node(node_id) else {
+            return Ok(JsValue::null());
+        };
+        let Some(document) = document_root_for_node(&node) else {
+            return Ok(JsValue::null());
+        };
+        let document_id = document.identity();
+        let mut host = host.borrow_mut();
+        host.ensure_style_resolver(&document);
+        let base = crate::paint::stylesheet::extract_document_base_url(
+            &document,
+            host.base_url_for_document(document_id).as_ref(),
+        );
+        let Some((text, resolved_href)) =
+            host.document_styles.get(&document_id).and_then(|entry| {
+                entry
+                    .resources
+                    .cached_import(&href, base.as_ref(), base.as_ref())
+            })
+        else {
+            return Ok(JsValue::null());
+        };
+        let encoded = serde_json::json!({"text": text, "href": resolved_href}).to_string();
+        Ok(js_string!(encoded.as_str()).into())
+    })
 }
 
 /// Parses CSS forgivingly and returns each accepted top-level rule as an
@@ -25733,6 +25816,68 @@ b</textarea></form>"#,
                 "getComputedStyle(document.getElementById('target')).width"
             ),
             "47px"
+        );
+    }
+
+    #[test]
+    fn conditional_imports_share_rendering_and_cssom_state() {
+        let doc = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                @import url("data:text/css,%23target%7Bwidth%3A47px%7D") layer(imported) supports(display: grid) screen and (min-width: 1px);
+                @import url("data:text/css,%23target%7Bheight%3A99px%7D") layer(blocked) supports(unknown-property: value);
+            </style></head><body><div id="target"></div></body></html>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                        const target = document.getElementById('target');
+                        const style = getComputedStyle(target);
+                        const valid = document.styleSheets[0].cssRules[0];
+                        const blocked = document.styleSheets[0].cssRules[1];
+                        const imported = valid.styleSheet;
+                        return style.width === '47px' && style.height !== '99px' &&
+                            valid instanceof CSSImportRule &&
+                            valid.layerName === 'imported' &&
+                            valid.supportsText === 'display: grid' &&
+                            valid.media instanceof MediaList &&
+                            valid.media.length === 1 &&
+                            valid.media[0] === 'screen and (min-width: 1px)' &&
+                            valid.cssText === '@import url("data:text/css,%23target%7Bwidth%3A47px%7D") layer(imported) supports(display: grid) screen and (min-width: 1px);' &&
+                            imported instanceof CSSStyleSheet &&
+                            imported === valid.styleSheet &&
+                            imported.href === valid.href &&
+                            imported.cssRules.length === 1 &&
+                            imported.cssRules[0].selectorText === '#target' &&
+                            blocked.supportsText === 'unknown-property: value' &&
+                            blocked.styleSheet === null;
+                    })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                        const sheet = new CSSStyleSheet();
+                        sheet.replaceSync(
+                            '@import url("bad.css") supports();' +
+                            '@import url("media.css") layer(A, B, C);'
+                        );
+                        return sheet.cssRules.length === 1 &&
+                            sheet.cssRules[0] instanceof CSSImportRule &&
+                            sheet.cssRules[0].layerName === null &&
+                            sheet.cssRules[0].media.mediaText === 'layer(A, B, C)';
+                    })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
         );
     }
 

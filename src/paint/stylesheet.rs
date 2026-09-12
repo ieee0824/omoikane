@@ -169,7 +169,12 @@ pub(crate) fn collect_stylesheet_with_imports(
                 cursor = directive.end;
 
                 let mut imported = Vec::new();
-                if let Some(base) = import_base
+                let supports_matches = directive
+                    .supports
+                    .as_deref()
+                    .is_none_or(crate::css::supports_condition_matches);
+                if supports_matches
+                    && let Some(base) = import_base
                     && let Some(import_url) =
                         resolve_relative_stylesheet_url(base, &directive.href, document_base)
                 {
@@ -191,7 +196,13 @@ pub(crate) fn collect_stylesheet_with_imports(
                         active_import_urls.remove(&import_url_string);
                     }
                 }
-                append_imported_stylesheets(out, imported, directive.layer);
+                append_imported_stylesheets(
+                    out,
+                    imported,
+                    directive.layer,
+                    directive.supports.as_deref(),
+                    directive.media.as_deref(),
+                );
             }
             push_stylesheet_chunk(&chars[cursor..], stylesheet_url, out);
             return Ok(());
@@ -217,16 +228,31 @@ pub(crate) fn append_imported_stylesheets(
     out: &mut Vec<String>,
     imported: Vec<String>,
     layer: Option<ImportLayer>,
+    supports: Option<&str>,
+    media: Option<&str>,
 ) {
-    match layer {
-        None => out.extend(imported),
-        Some(ImportLayer::Anonymous) => {
-            out.push(format!("@layer {{\n{}\n}}", imported.join("\n")));
-        }
-        Some(ImportLayer::Named(name)) => {
-            out.push(format!("@layer {name} {{\n{}\n}}", imported.join("\n")));
-        }
+    if imported.is_empty() && layer.is_none() {
+        return;
     }
+    if layer.is_none() && supports.is_none() && media.is_none() {
+        out.extend(imported);
+        return;
+    }
+
+    let mut css = imported.join("\n");
+    if let Some(layer) = layer {
+        css = match layer {
+            ImportLayer::Anonymous => format!("@layer {{\n{css}\n}}"),
+            ImportLayer::Named(name) => format!("@layer {name} {{\n{css}\n}}"),
+        };
+    }
+    if let Some(condition) = supports {
+        css = format!("@supports {condition} {{\n{css}\n}}");
+    }
+    if let Some(query) = media {
+        css = format!("@media {query} {{\n{css}\n}}");
+    }
+    out.push(css);
 }
 
 /// Resolve relative `url()` references against the stylesheet URL, rather than
@@ -315,6 +341,16 @@ pub(crate) struct ImportDirective {
     pub(crate) end: usize,
     pub(crate) href: String,
     pub(crate) layer: Option<ImportLayer>,
+    pub(crate) supports: Option<String>,
+    pub(crate) media: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportPrelude {
+    pub(crate) href: String,
+    pub(crate) layer: Option<ImportLayer>,
+    pub(crate) supports: Option<String>,
+    pub(crate) media: Option<String>,
 }
 
 pub(crate) fn extract_import_directives(css: &str) -> Vec<ImportDirective> {
@@ -417,12 +453,14 @@ pub(crate) fn extract_import_directives(css: &str) -> Vec<ImportDirective> {
                 }
                 if c == ';' && local_paren_depth == 0 {
                     let prelude: String = chars[prelude_start..cursor].iter().collect();
-                    if let Some((href, layer)) = parse_import_prelude(&prelude) {
+                    if let Some(parsed) = parse_import_prelude(&prelude) {
                         directives.push(ImportDirective {
                             start: directive_start,
                             end: cursor + 1,
-                            href,
-                            layer,
+                            href: parsed.href,
+                            layer: parsed.layer,
+                            supports: parsed.supports,
+                            media: parsed.media,
                         });
                     }
                     cursor += 1;
@@ -459,8 +497,8 @@ pub(crate) fn at_import_starts_at(chars: &[char], index: usize) -> bool {
     true
 }
 
-pub(crate) fn parse_import_prelude(prelude: &str) -> Option<(String, Option<ImportLayer>)> {
-    let prelude = prelude.trim();
+pub(crate) fn parse_import_prelude(prelude: &str) -> Option<ImportPrelude> {
+    let prelude = trim_import_spacing(prelude.trim())?;
     if prelude.is_empty() {
         return None;
     }
@@ -508,19 +546,131 @@ pub(crate) fn parse_import_prelude(prelude: &str) -> Option<(String, Option<Impo
         return None;
     };
 
-    if trailing.is_empty() {
-        return Some((href, None));
+    let mut remaining = trim_import_spacing(trailing)?;
+    let mut layer = None;
+    if let Some(after_keyword) = strip_ascii_keyword(remaining, "layer") {
+        if after_keyword.starts_with('(') {
+            let close = find_matching_css_parenthesis(after_keyword)?;
+            if let Some(name) = normalize_import_layer_name(&after_keyword[1..close]) {
+                layer = Some(ImportLayer::Named(name));
+                remaining = trim_import_spacing(&after_keyword[close + 1..])?;
+            }
+        } else if after_keyword.is_empty()
+            || after_keyword
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+            || after_keyword.starts_with("/*")
+        {
+            layer = Some(ImportLayer::Anonymous);
+            remaining = trim_import_spacing(after_keyword)?;
+        }
     }
-    if trailing.eq_ignore_ascii_case("layer") {
-        return Some((href, Some(ImportLayer::Anonymous)));
-    }
-    if trailing
-        .get(0..6)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("layer("))
-        && trailing.ends_with(')')
+
+    let mut supports = None;
+    if remaining
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("supports"))
+        && remaining[8..].starts_with('(')
     {
-        let name = normalize_import_layer_name(&trailing[6..trailing.len() - 1])?;
-        return Some((href, Some(ImportLayer::Named(name))));
+        let function = &remaining[8..];
+        let close = find_matching_css_parenthesis(function)?;
+        let condition = function[1..close].trim();
+        crate::css::supports_condition_result(condition)?;
+        supports = Some(condition.to_string());
+        remaining = trim_import_spacing(&function[close + 1..])?;
+    }
+
+    let media = if remaining.is_empty() {
+        None
+    } else {
+        crate::css::parse_media_query_list(remaining)?;
+        Some(remaining.to_string())
+    };
+
+    Some(ImportPrelude {
+        href,
+        layer,
+        supports,
+        media,
+    })
+}
+
+pub(crate) fn parse_import_rule(input: &str) -> Option<ImportPrelude> {
+    let input = trim_import_spacing(input)?.trim_end();
+    let keyword = input.get(..7)?;
+    if !keyword.eq_ignore_ascii_case("@import") {
+        return None;
+    }
+    let prelude = input[7..].trim().strip_suffix(';')?.trim_end();
+    parse_import_prelude(prelude)
+}
+
+fn trim_import_spacing(mut input: &str) -> Option<&str> {
+    loop {
+        input = input.trim_start_matches(char::is_whitespace);
+        let Some(comment) = input.strip_prefix("/*") else {
+            return Some(input);
+        };
+        let close = comment.find("*/")?;
+        input = &comment[close + 2..];
+    }
+}
+
+fn strip_ascii_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let prefix = input.get(..keyword.len())?;
+    prefix
+        .eq_ignore_ascii_case(keyword)
+        .then(|| &input[keyword.len()..])
+}
+
+fn find_matching_css_parenthesis(input: &str) -> Option<usize> {
+    if !input.starts_with('(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    let mut chars = input.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if comment {
+            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                comment = false;
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '*') {
+            chars.next();
+            comment = true;
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
     }
     None
 }
