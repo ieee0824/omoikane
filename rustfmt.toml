@@ -1,0 +1,6 @@
+# The toolchain version is pinned in rust-toolchain.toml. Keep the root crate
+# on the standard stable layout used by the embedded Boa workspace.
+max_width = 100
+use_small_heuristics = "Default"
+reorder_imports = true
+reorder_modules = true
