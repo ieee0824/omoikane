@@ -204,28 +204,55 @@ impl StylesheetLoader {
         blocked: &mut Vec<String>,
     ) {
         if depth < MAX_IMPORT_DEPTH {
-            for href in css::extract_import_hrefs(&resource.text) {
-                if let Some(import) = self.fetch(
-                    &href,
-                    resource.url.as_ref().or(document_base),
-                    document_base,
-                    policy,
-                    blocked,
-                ) {
-                    let key = import.url.as_ref().map_or(href, ToString::to_string);
-                    if active.insert(key.clone()) {
-                        self.expand(
-                            import,
-                            document_base,
-                            policy,
-                            depth + 1,
-                            active,
-                            output,
-                            blocked,
-                        );
-                        active.remove(&key);
+            let directives = css::extract_import_directives(&resource.text);
+            if !directives.is_empty() {
+                let chars: Vec<char> = resource.text.chars().collect();
+                let mut cursor = 0usize;
+                for directive in directives {
+                    let preceding: String = chars[cursor..directive.start].iter().collect();
+                    if !preceding.trim().is_empty() {
+                        output.push(css::resolve_stylesheet_asset_urls(
+                            preceding,
+                            resource.url.as_ref(),
+                        ));
                     }
+                    cursor = directive.end;
+
+                    let mut imported = Vec::new();
+                    if let Some(import) = self.fetch(
+                        &directive.href,
+                        resource.url.as_ref().or(document_base),
+                        document_base,
+                        policy,
+                        blocked,
+                    ) {
+                        let key = import
+                            .url
+                            .as_ref()
+                            .map_or_else(|| directive.href.clone(), ToString::to_string);
+                        if active.insert(key.clone()) {
+                            self.expand(
+                                import,
+                                document_base,
+                                policy,
+                                depth + 1,
+                                active,
+                                &mut imported,
+                                blocked,
+                            );
+                            active.remove(&key);
+                        }
+                    }
+                    css::append_imported_stylesheets(output, imported, directive.layer);
                 }
+                let trailing: String = chars[cursor..].iter().collect();
+                if !trailing.trim().is_empty() {
+                    output.push(css::resolve_stylesheet_asset_urls(
+                        trailing,
+                        resource.url.as_ref(),
+                    ));
+                }
+                return;
             }
         }
         output.push(css::resolve_stylesheet_asset_urls(

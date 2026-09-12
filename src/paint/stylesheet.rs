@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::css::{Stylesheet, parse_stylesheet, extract_font_face_rules};
+use crate::css::{Stylesheet, extract_font_face_rules, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::Font;
 use crate::http::url::resolve_url;
@@ -160,37 +160,80 @@ pub(crate) fn collect_stylesheet_with_imports(
 ) -> Result<(), PaintError> {
     if depth < MAX_IMPORT_DEPTH {
         let import_base = stylesheet_url.or(document_base);
-        if let Some(base) = import_base {
-            for import_href in extract_import_hrefs(&css) {
-                let Some(import_url) =
-                    resolve_relative_stylesheet_url(base, &import_href, document_base)
-                else {
-                    continue;
-                };
-                let import_url_string = import_url.to_string();
-                if !active_import_urls.insert(import_url_string.clone()) {
-                    continue;
-                }
-                if let Some(import_css) =
-                    fetch_stylesheet_by_url(&import_url, client, document_base)
-                {
-                    collect_stylesheet_with_imports(
-                        import_css,
-                        Some(&import_url),
+        let directives = extract_import_directives(&css);
+        if !directives.is_empty() {
+            let chars: Vec<char> = css.chars().collect();
+            let mut cursor = 0usize;
+            for directive in directives {
+                push_stylesheet_chunk(
+                    &chars[cursor..directive.start],
+                    stylesheet_url,
+                    out,
+                );
+                cursor = directive.end;
+
+                let mut imported = Vec::new();
+                if let Some(base) = import_base
+                    && let Some(import_url) = resolve_relative_stylesheet_url(
+                        base,
+                        &directive.href,
                         document_base,
-                        out,
-                        client,
-                        depth + 1,
-                        active_import_urls,
-                    )?;
+                    )
+                {
+                    let import_url_string = import_url.to_string();
+                    if active_import_urls.insert(import_url_string.clone()) {
+                        if let Some(import_css) =
+                            fetch_stylesheet_by_url(&import_url, client, document_base)
+                        {
+                            collect_stylesheet_with_imports(
+                                import_css,
+                                Some(&import_url),
+                                document_base,
+                                &mut imported,
+                                client,
+                                depth + 1,
+                                active_import_urls,
+                            )?;
+                        }
+                        active_import_urls.remove(&import_url_string);
+                    }
                 }
-                active_import_urls.remove(&import_url_string);
+                append_imported_stylesheets(out, imported, directive.layer);
             }
+            push_stylesheet_chunk(&chars[cursor..], stylesheet_url, out);
+            return Ok(());
         }
     }
 
     out.push(resolve_stylesheet_asset_urls(css, stylesheet_url));
     Ok(())
+}
+
+fn push_stylesheet_chunk(
+    chars: &[char],
+    stylesheet_url: Option<&crate::http::Url>,
+    out: &mut Vec<String>,
+) {
+    let css: String = chars.iter().collect();
+    if !css.trim().is_empty() {
+        out.push(resolve_stylesheet_asset_urls(css, stylesheet_url));
+    }
+}
+
+pub(crate) fn append_imported_stylesheets(
+    out: &mut Vec<String>,
+    imported: Vec<String>,
+    layer: Option<ImportLayer>,
+) {
+    match layer {
+        None => out.extend(imported),
+        Some(ImportLayer::Anonymous) => {
+            out.push(format!("@layer {{\n{}\n}}", imported.join("\n")));
+        }
+        Some(ImportLayer::Named(name)) => {
+            out.push(format!("@layer {name} {{\n{}\n}}", imported.join("\n")));
+        }
+    }
 }
 
 /// Resolve relative `url()` references against the stylesheet URL, rather than
@@ -264,28 +307,27 @@ fn find_url_closing_parenthesis(input: &str) -> Option<usize> {
     None
 }
 
-pub(crate) fn extract_import_hrefs(css: &str) -> Vec<String> {
-    let Ok(stylesheet) = parse_stylesheet(css) else {
-        return extract_import_hrefs_forgiving(css);
-    };
-
-    let mut hrefs = Vec::new();
-    for rule in stylesheet.rules {
-        if let crate::css::Rule::At(at_rule) = rule
-            && at_rule.name.eq_ignore_ascii_case("import")
-                && let Some(href) = parse_import_href(&at_rule.prelude) {
-                    hrefs.push(href);
-                }
-    }
-    hrefs
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ImportLayer {
+    Anonymous,
+    Named(String),
 }
 
-pub(crate) fn extract_import_hrefs_forgiving(css: &str) -> Vec<String> {
-    let mut hrefs = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportDirective {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) href: String,
+    pub(crate) layer: Option<ImportLayer>,
+}
+
+pub(crate) fn extract_import_directives(css: &str) -> Vec<ImportDirective> {
+    let mut directives = Vec::new();
     let chars: Vec<char> = css.chars().collect();
     let mut index = 0usize;
     let mut in_string = None::<char>;
     let mut paren_depth = 0usize;
+    let mut curly_depth = 0usize;
 
     while index < chars.len() {
         let ch = chars[index];
@@ -327,10 +369,21 @@ pub(crate) fn extract_import_hrefs_forgiving(css: &str) -> Vec<String> {
                 index += 1;
                 continue;
             }
+            '{' => {
+                curly_depth += 1;
+                index += 1;
+                continue;
+            }
+            '}' => {
+                curly_depth = curly_depth.saturating_sub(1);
+                index += 1;
+                continue;
+            }
             _ => {}
         }
 
-        if paren_depth == 0 && at_import_starts_at(&chars, index) {
+        if paren_depth == 0 && curly_depth == 0 && at_import_starts_at(&chars, index) {
+            let directive_start = index;
             let mut prelude_start = index + 7;
             while prelude_start < chars.len() && chars[prelude_start].is_ascii_whitespace() {
                 prelude_start += 1;
@@ -368,8 +421,13 @@ pub(crate) fn extract_import_hrefs_forgiving(css: &str) -> Vec<String> {
                 }
                 if c == ';' && local_paren_depth == 0 {
                     let prelude: String = chars[prelude_start..cursor].iter().collect();
-                    if let Some(href) = parse_import_href(&prelude) {
-                        hrefs.push(href);
+                    if let Some((href, layer)) = parse_import_prelude(&prelude) {
+                        directives.push(ImportDirective {
+                            start: directive_start,
+                            end: cursor + 1,
+                            href,
+                            layer,
+                        });
                     }
                     cursor += 1;
                     break;
@@ -383,7 +441,7 @@ pub(crate) fn extract_import_hrefs_forgiving(css: &str) -> Vec<String> {
         index += 1;
     }
 
-    hrefs
+    directives
 }
 
 pub(crate) fn at_import_starts_at(chars: &[char], index: usize) -> bool {
@@ -405,36 +463,32 @@ pub(crate) fn at_import_starts_at(chars: &[char], index: usize) -> bool {
     true
 }
 
-pub(crate) fn parse_import_href(prelude: &str) -> Option<String> {
+pub(crate) fn parse_import_prelude(prelude: &str) -> Option<(String, Option<ImportLayer>)> {
     let prelude = prelude.trim();
     if prelude.is_empty() {
         return None;
     }
 
-    if prelude
+    let (href, trailing) = if prelude
         .get(0..4)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("url("))
     {
         let rest = &prelude[4..];
-        let close = rest.find(')')?;
+        let close = find_url_closing_parenthesis(rest)?;
         let content = rest[..close].trim();
-        // Media/supports conditions are out of scope for this phase.
-        // Ignore @import rules with trailing prelude tokens.
-        if !rest[close + 1..].trim().is_empty() {
-            return None;
-        }
-        if let Some(quoted) = unquote_css_token(content) {
-            return Some(quoted);
-        }
-        if content.starts_with('"') || content.starts_with('\'') {
-            return None;
-        }
-        return non_empty_token(content);
-    }
-
-    if prelude.starts_with('"') || prelude.starts_with('\'') {
+        let href = if let Some(quoted) = unquote_css_token(content) {
+            quoted
+        } else {
+            if content.starts_with('"') || content.starts_with('\'') {
+                return None;
+            }
+            non_empty_token(content)?
+        };
+        (href, rest[close + 1..].trim())
+    } else if prelude.starts_with('"') || prelude.starts_with('\'') {
         let quote = prelude.chars().next()?;
         let mut escaped = false;
+        let mut parsed = None;
         for (index, ch) in prelude.char_indices().skip(1) {
             if escaped {
                 escaped = false;
@@ -449,15 +503,41 @@ pub(crate) fn parse_import_href(prelude: &str) -> Option<String> {
                 if value.is_empty() {
                     return None;
                 }
-                if !prelude[index + ch.len_utf8()..].trim().is_empty() {
-                    return None;
-                }
-                return Some(value.to_string());
+                parsed = Some((
+                    value.to_string(),
+                    prelude[index + ch.len_utf8()..].trim(),
+                ));
+                break;
             }
         }
+        parsed?
+    } else {
         return None;
+    };
+
+    if trailing.is_empty() {
+        return Some((href, None));
+    }
+    if trailing.eq_ignore_ascii_case("layer") {
+        return Some((href, Some(ImportLayer::Anonymous)));
+    }
+    if trailing
+        .get(0..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("layer("))
+        && trailing.ends_with(')')
+    {
+        let name = normalize_import_layer_name(&trailing[6..trailing.len() - 1])?;
+        return Some((href, Some(ImportLayer::Named(name))));
     }
     None
+}
+
+fn normalize_import_layer_name(input: &str) -> Option<String> {
+    let names = crate::css::parse_layer_name_list(input)?;
+    match names.as_slice() {
+        [name] => Some(name.join(".")),
+        _ => None,
+    }
 }
 
 pub(crate) fn unquote_css_token(token: &str) -> Option<String> {
@@ -632,6 +712,7 @@ fn salvage_nested_at_rule(input: &str) -> Option<crate::css::Rule> {
         prelude: prelude.trim().to_string(),
         block: Some(nested.rules),
         declarations: Vec::new(),
+        anonymous_layer_id: None,
     }))
 }
 

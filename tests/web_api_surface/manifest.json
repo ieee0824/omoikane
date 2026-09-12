@@ -297,6 +297,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.cascade-layers",
+      "area": "cssom",
+      "description": "Cascade layer order controls computed style and exposes block and statement rules",
+      "setup": "(() => { const target = document.createElement('div'); target.id = 'surface-layered'; document.body.appendChild(target); const style = document.createElement('style'); style.textContent = '@layer base, override; @layer override { div { width: 37px; } } @layer base { #surface-layered { width: 1px; } }'; document.head.appendChild(style); globalThis.__surfaceLayerSheet = style.sheet; })()",
+      "probe": "getComputedStyle(document.getElementById('surface-layered')).width === '37px' && (() => { const statement = __surfaceLayerSheet.cssRules[0]; const block = __surfaceLayerSheet.cssRules[1]; return statement instanceof CSSLayerStatementRule && statement.nameList.length === 2 && statement.nameList[0] === 'base' && statement.nameList[1] === 'override' && Object.isFrozen(statement.nameList) && block instanceof CSSLayerBlockRule && block.name === 'override' && block.cssRules.length === 1; })()",
+      "baseline_supported": false
+    },
+    {
       "id": "css.scope-cascade-rule",
       "area": "cssom",
       "description": "@scope boundaries control cascade and expose CSSScopeRule",

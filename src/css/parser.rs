@@ -166,6 +166,7 @@ struct Parser {
     tokens: Vec<CssToken>,
     index: usize,
     scope_depth: usize,
+    next_anonymous_layer_id: usize,
 }
 
 fn implicit_scope_anchor() -> SelectorPart {
@@ -186,6 +187,7 @@ impl Parser {
             tokens,
             index: 0,
             scope_depth: 0,
+            next_anonymous_layer_id: 0,
         }
     }
 
@@ -224,17 +226,34 @@ impl Parser {
             match token {
                 CssToken::Semicolon if at_top_level => {
                     self.next();
+                    let prelude = render_tokens(&prelude_tokens).trim().to_string();
+                    if name.eq_ignore_ascii_case("layer")
+                        && super::parse_layer_name_list(&prelude).is_none()
+                    {
+                        return Err(CssParseError::InvalidDeclaration);
+                    }
                     return Ok(Rule::At(AtRule {
                         name,
-                        prelude: render_tokens(&prelude_tokens).trim().to_string(),
+                        prelude,
                         block: None,
                         declarations: Vec::new(),
+                        anonymous_layer_id: None,
                     }));
                 }
                 CssToken::CurlyOpen if at_top_level => {
                     self.next();
                     if name.eq_ignore_ascii_case("import") {
                         return Err(CssParseError::InvalidDeclaration);
+                    }
+
+                    if name.eq_ignore_ascii_case("layer") {
+                        let prelude = render_tokens(&prelude_tokens).trim().to_string();
+                        if !prelude.is_empty()
+                            && super::parse_layer_name_list(&prelude)
+                                .is_none_or(|names| names.len() != 1)
+                        {
+                            return Err(CssParseError::InvalidDeclaration);
+                        }
                     }
 
                     if name.eq_ignore_ascii_case("media")
@@ -251,11 +270,22 @@ impl Parser {
                             self.scope_depth -= 1;
                         }
                         let block = block?;
+                        let prelude = render_tokens(&prelude_tokens).trim().to_string();
+                        let anonymous_layer_id = if name.eq_ignore_ascii_case("layer")
+                            && prelude.is_empty()
+                        {
+                            let id = self.next_anonymous_layer_id;
+                            self.next_anonymous_layer_id += 1;
+                            Some(id)
+                        } else {
+                            None
+                        };
                         return Ok(Rule::At(AtRule {
                             name,
-                            prelude: render_tokens(&prelude_tokens).trim().to_string(),
+                            prelude,
                             block: Some(block),
                             declarations: Vec::new(),
+                            anonymous_layer_id,
                         }));
                     }
 
@@ -276,6 +306,7 @@ impl Parser {
                                 value: Value::Keyword(raw_block),
                                 important: false,
                             }],
+                            anonymous_layer_id: None,
                         }));
                     }
 
@@ -293,6 +324,7 @@ impl Parser {
                         prelude: render_tokens(&prelude_tokens).trim().to_string(),
                         block: None,
                         declarations,
+                        anonymous_layer_id: None,
                     }));
                 }
                 _ => {
@@ -316,6 +348,7 @@ impl Parser {
             prelude: render_tokens(&prelude_tokens).trim().to_string(),
             block: None,
             declarations: Vec::new(),
+            anonymous_layer_id: None,
         }))
     }
 

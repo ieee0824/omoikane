@@ -167,9 +167,9 @@ pub(crate) use image::{
 pub(crate) use stylesheet::{
     WebFont, at_import_starts_at, collect_author_stylesheets, collect_stylesheet_with_imports,
     collect_text_contents, extract_author_stylesheets, extract_document_base_url,
-    extract_import_hrefs, extract_import_hrefs_forgiving, fetch_font_face_fonts,
+    fetch_font_face_fonts,
     fetch_relative_stylesheet, fetch_stylesheet_by_url, find_base_elements, matches_screen_media,
-    materialize_local_assets, non_empty_token, normalize_unquoted_urls, parse_import_href,
+    materialize_local_assets, non_empty_token, normalize_unquoted_urls,
     parse_stylesheet_forgiving, resolve_relative_stylesheet_url, rewrite_local_asset_attribute,
     salvage_style_rule, same_origin, split_declarations_forgiving, unquote_css_token,
 };

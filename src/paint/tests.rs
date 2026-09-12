@@ -3866,6 +3866,93 @@ fn extract_stylesheets_expands_import_rules_in_source_order() {
 }
 
 #[test]
+fn extract_stylesheets_preserves_named_import_layer_order() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default();
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header.trim().is_empty() {
+                    break;
+                }
+            }
+            let css = match path {
+                "/main.css" => {
+                    "@layer base, overrides; @import 'imported.css' layer(overrides); \
+                     @layer base { #target { color: red; } }"
+                }
+                "/imported.css" => "div { color: green; }",
+                _ => "",
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: {}\r\n\r\n{}",
+                css.len(),
+                css
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let document = TreeBuilder::parse(&format!(
+        "<link rel='stylesheet' href='http://127.0.0.1:{port}/main.css'>\
+         <div id='target'></div>"
+    ))
+    .document();
+    let base_url = format!("http://127.0.0.1:{port}/index.html")
+        .parse::<crate::http::Url>()
+        .unwrap();
+    let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+
+    assert_eq!(stylesheets.len(), 3);
+    assert!(stylesheets[0].contains("@layer base, overrides"));
+    assert!(stylesheets[1].contains("@layer overrides"));
+    assert!(stylesheets[1].contains("color: green"));
+
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    let mut resolver = StyleResolver::new();
+    for stylesheet in stylesheets {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+    }
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&crate::css::ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn import_prelude_accepts_anonymous_and_named_layers() {
+    use crate::paint::stylesheet::{ImportLayer, parse_import_prelude};
+
+    assert_eq!(
+        parse_import_prelude("url(theme.css) layer"),
+        Some(("theme.css".to_string(), Some(ImportLayer::Anonymous)))
+    );
+    assert_eq!(
+        parse_import_prelude("'theme.css' layer(framework.components)"),
+        Some((
+            "theme.css".to_string(),
+            Some(ImportLayer::Named("framework.components".to_string()))
+        ))
+    );
+}
+
+#[test]
 fn extract_stylesheets_limits_recursive_import_depth() {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
