@@ -7541,6 +7541,381 @@
     }
   }
 
+  const VALIDATED_INPUT_TYPES = new Set([
+    "checkbox", "color", "date", "datetime-local", "email", "file", "month",
+    "number", "password", "radio", "range", "search", "submit", "tel", "text",
+    "time", "url", "week",
+  ]);
+  const REQUIRED_INPUT_TYPES = new Set([
+    "checkbox", "date", "datetime-local", "email", "file", "month", "number",
+    "password", "radio", "search", "tel", "text", "time", "url", "week",
+  ]);
+  const PATTERN_INPUT_TYPES = new Set([
+    "email", "password", "search", "tel", "text", "url",
+  ]);
+  const LENGTH_INPUT_TYPES = new Set([
+    "email", "password", "search", "tel", "text", "url",
+  ]);
+  const RANGE_INPUT_TYPES = new Set([
+    "date", "datetime-local", "month", "number", "range", "time", "week",
+  ]);
+  const BARRED_INPUT_TYPES = new Set(["button", "hidden", "image", "reset"]);
+  const KNOWN_INPUT_TYPES = new Set([...VALIDATED_INPUT_TYPES, ...BARRED_INPUT_TYPES]);
+  const DAY_MILLISECONDS = 86_400_000;
+  const WEEK_MILLISECONDS = 7 * DAY_MILLISECONDS;
+
+  function validNumber(value) {
+    const source = String(value);
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(source)) return null;
+    const number = Number(source);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function validDateMilliseconds(value) {
+    const match = /^(\d{4,})-(\d{2})-(\d{2})$/.exec(String(value));
+    if (!match) return null;
+    const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+    if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const date = new Date(0);
+    date.setUTCFullYear(year, month - 1, day);
+    date.setUTCHours(0, 0, 0, 0);
+    const result = date.getTime();
+    return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 &&
+      date.getUTCDate() === day ? result : null;
+  }
+
+  function validMonthNumber(value) {
+    const match = /^(\d{4,})-(\d{2})$/.exec(String(value));
+    if (!match) return null;
+    const year = Number(match[1]), month = Number(match[2]);
+    return year >= 1 && month >= 1 && month <= 12 ? (year - 1970) * 12 + month - 1 : null;
+  }
+
+  function validTimeMilliseconds(value) {
+    const match = /^(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(String(value));
+    if (!match) return null;
+    const hour = Number(match[1]), minute = Number(match[2]), second = Number(match[3] || 0);
+    if (hour > 23 || minute > 59 || second > 59) return null;
+    const fraction = (match[4] || "").padEnd(3, "0");
+    return ((hour * 60 + minute) * 60 + second) * 1000 + Number(fraction || 0);
+  }
+
+  function validLocalDateTimeMilliseconds(value) {
+    const match = /^(\d{4,}-\d{2}-\d{2})[T ](.+)$/.exec(String(value));
+    if (!match) return null;
+    const date = validDateMilliseconds(match[1]);
+    const time = validTimeMilliseconds(match[2]);
+    return date === null || time === null ? null : date + time;
+  }
+
+  function isoWeeksInYear(year) {
+    const januaryFirstDate = new Date(0);
+    januaryFirstDate.setUTCFullYear(year, 0, 1);
+    januaryFirstDate.setUTCHours(0, 0, 0, 0);
+    const januaryFirst = januaryFirstDate.getUTCDay();
+    const leapDate = new Date(0);
+    leapDate.setUTCFullYear(year, 1, 29);
+    leapDate.setUTCHours(0, 0, 0, 0);
+    const leap = leapDate.getUTCMonth() === 1;
+    return januaryFirst === 4 || (januaryFirst === 3 && leap) ? 53 : 52;
+  }
+
+  function validWeekMilliseconds(value) {
+    const match = /^(\d{4,})-W(\d{2})$/.exec(String(value));
+    if (!match) return null;
+    const year = Number(match[1]), week = Number(match[2]);
+    if (year < 1 || week < 1 || week > isoWeeksInYear(year)) return null;
+    const januaryFourthDate = new Date(0);
+    januaryFourthDate.setUTCFullYear(year, 0, 4);
+    januaryFourthDate.setUTCHours(0, 0, 0, 0);
+    const januaryFourth = januaryFourthDate.getTime();
+    const weekday = januaryFourthDate.getUTCDay();
+    const firstMonday = januaryFourth - ((weekday + 6) % 7) * DAY_MILLISECONDS;
+    return firstMonday + (week - 1) * WEEK_MILLISECONDS;
+  }
+
+  function inputValueAsNumber(type, value) {
+    switch (type) {
+      case "number":
+      case "range": return validNumber(value);
+      case "date": return validDateMilliseconds(value);
+      case "month": return validMonthNumber(value);
+      case "week": return validWeekMilliseconds(value);
+      case "time": return validTimeMilliseconds(value);
+      case "datetime-local": return validLocalDateTimeMilliseconds(value);
+      default: return null;
+    }
+  }
+
+  function inputStep(type) {
+    switch (type) {
+      case "date": return { defaultStep: 1, scale: DAY_MILLISECONDS, defaultBase: 0 };
+      case "month": return { defaultStep: 1, scale: 1, defaultBase: 0 };
+      case "week": return { defaultStep: 1, scale: WEEK_MILLISECONDS, defaultBase: -259_200_000 };
+      case "time":
+      case "datetime-local": return { defaultStep: 60, scale: 1000, defaultBase: 0 };
+      default: return { defaultStep: 1, scale: 1, defaultBase: 0 };
+    }
+  }
+
+  function decimalParts(value) {
+    const match = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(String(value));
+    if (!match || (!match[2] && !match[3])) return null;
+    const digits = (match[2] || "") + (match[3] || "");
+    const coefficient = BigInt((match[1] === "-" ? "-" : "") + (digits || "0"));
+    return { coefficient, exponent: Number(match[4] || 0) - (match[3] || "").length };
+  }
+
+  function decimalStepMismatch(value, base, step) {
+    const parts = [decimalParts(value), decimalParts(base), decimalParts(step)];
+    if (parts.some(part => part === null)) return null;
+    const exponent = Math.min(...parts.map(part => part.exponent));
+    const integers = parts.map(part =>
+      part.coefficient * 10n ** BigInt(part.exponent - exponent));
+    return (integers[0] - integers[1]) % integers[2] !== 0n;
+  }
+
+  function inputStepMismatch(control, type, numericValue) {
+    if (numericValue === null || !RANGE_INPUT_TYPES.has(type)) return false;
+    const rawStep = control.getAttribute("step");
+    if (rawStep && rawStep.toLowerCase() === "any") return false;
+    const config = inputStep(type);
+    const parsedStep = rawStep === null || rawStep === "" ? null : validNumber(rawStep);
+    const step = (parsedStep !== null && parsedStep > 0 ? parsedStep : config.defaultStep) * config.scale;
+    const minimum = inputValueAsNumber(type, control.getAttribute("min") || "");
+    const attributeValue = inputValueAsNumber(type, control.getAttribute("value") || "");
+    const base = minimum ?? attributeValue ?? config.defaultBase;
+    if ((type === "number" || type === "range") && parsedStep !== null && parsedStep > 0) {
+      const baseSource = minimum !== null ? control.getAttribute("min") :
+        (attributeValue !== null ? control.getAttribute("value") : "0");
+      const mismatch = decimalStepMismatch(control.value, baseSource, rawStep);
+      if (mismatch !== null) return mismatch;
+    }
+    const quotient = (numericValue - base) / step;
+    const distance = Math.abs(quotient - Math.round(quotient));
+    return distance > 1e-7;
+  }
+
+  function validEmailAddress(value) {
+    return /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/.test(value);
+  }
+
+  function inputTypeMismatch(control, type, value) {
+    if (!value) return false;
+    if (type === "email") {
+      const addresses = control.hasAttribute("multiple") ? value.split(",") : [value];
+      return addresses.some(address => !validEmailAddress(address.trim()));
+    }
+    if (type === "url") {
+      const source = value.trim();
+      if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(source)) return true;
+      try { new URL(source); return false; } catch (_error) { return true; }
+    }
+    return false;
+  }
+
+  function inputPatternMismatch(control, type, value) {
+    if (!value || !PATTERN_INPUT_TYPES.has(type) || !control.hasAttribute("pattern")) return false;
+    const source = control.getAttribute("pattern");
+    try {
+      new RegExp(source, "v");
+      const expression = new RegExp("^(?:" + source + ")$", "v");
+      const values = type === "email" && control.hasAttribute("multiple")
+        ? value.split(",").map(entry => entry.trim()) : [value];
+      return values.some(entry => !expression.test(entry));
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function radioGroupValueMissing(control, radioGroups = null) {
+    const name = control.name;
+    if (!name) return false;
+    if (radioGroups && radioGroups.has(name)) {
+      const state = radioGroups.get(name);
+      return state.required && !state.checked;
+    }
+    const document = control.ownerDocument;
+    const form = control.__owningForm();
+    const inputs = document ? Array.from(document.querySelectorAll("input")) : [];
+    if (!inputs.includes(control)) inputs.push(control);
+    const group = inputs.filter(candidate => candidate.type === "radio" &&
+      candidate.name === name && candidate.__owningForm() === form);
+    return group.some(candidate => candidate.hasAttribute("required")) &&
+      !group.some(candidate => candidate.checked);
+  }
+
+  function controlValueMissing(control, radioGroups = null) {
+    if (!control.hasAttribute("required")) {
+      if (!(control.tagName === "INPUT" && control.type === "radio")) return false;
+    }
+    if (control.tagName === "INPUT") {
+      const type = control.type;
+      if (!REQUIRED_INPUT_TYPES.has(type)) return false;
+      if (type === "checkbox") return !control.checked;
+      if (type === "radio") return radioGroupValueMissing(control, radioGroups);
+      if (type === "file") return !control.files || control.files.length === 0;
+      if (control.__isDisabledControl() || control.readOnly) return false;
+      if (RANGE_INPUT_TYPES.has(type)) return control.value === "" || inputValueAsNumber(type, control.value) === null;
+      return control.value === "";
+    }
+    if (control.tagName === "SELECT") {
+      const selected = control.options.filter(option => option.selected);
+      if (control.multiple || control.size > 1) return selected.length === 0;
+      if (selected.length === 0) return true;
+      const first = control.options[0];
+      return selected[0] === first && first.parentNode === control && first.value === "";
+    }
+    if (control.tagName === "TEXTAREA") {
+      return !control.__isDisabledControl() && !control.readOnly && control.value === "";
+    }
+    return false;
+  }
+
+  function buildRadioGroupStates(controls) {
+    const states = new Map();
+    for (const control of controls) {
+      if (control.tagName !== "INPUT" || control.type !== "radio" || !control.name) continue;
+      let state = states.get(control.name);
+      if (!state) {
+        state = { required: false, checked: false };
+        states.set(control.name, state);
+      }
+      state.required ||= control.hasAttribute("required");
+      state.checked ||= control.checked;
+    }
+    return states;
+  }
+
+  function constraintValidityFlags(control, radioGroups = null) {
+    const type = control.tagName === "INPUT" ? control.type : "";
+    const value = String(control.value ?? "");
+    const numericValue = inputValueAsNumber(type, value);
+    const minimum = inputValueAsNumber(type, control.getAttribute("min") || "");
+    const maximum = inputValueAsNumber(type, control.getAttribute("max") || "");
+    const tracksLength = control.tagName === "TEXTAREA" || LENGTH_INPUT_TYPES.has(type);
+    const minimumLength = tracksLength ? control.minLength : -1;
+    const maximumLength = tracksLength ? control.maxLength : -1;
+    const userEdited = Boolean(control.__lastValueChangeWasUser);
+    const reversedTimeRange = type === "time" && numericValue !== null &&
+      minimum !== null && maximum !== null && minimum > maximum;
+    const outsideReversedTimeRange = reversedTimeRange &&
+      numericValue > maximum && numericValue < minimum;
+    const flags = {
+      valueMissing: controlValueMissing(control, radioGroups),
+      typeMismatch: control.tagName === "INPUT" && inputTypeMismatch(control, type, value),
+      patternMismatch: control.tagName === "INPUT" && inputPatternMismatch(control, type, value),
+      tooLong: userEdited && maximumLength >= 0 && value.length > maximumLength,
+      tooShort: userEdited && value !== "" && minimumLength >= 0 && value.length < minimumLength,
+      rangeUnderflow: reversedTimeRange ? outsideReversedTimeRange :
+        numericValue !== null && minimum !== null && numericValue < minimum,
+      rangeOverflow: reversedTimeRange ? outsideReversedTimeRange :
+        numericValue !== null && maximum !== null && numericValue > maximum,
+      stepMismatch: control.tagName === "INPUT" && inputStepMismatch(control, type, numericValue),
+      badInput: false,
+      customError: String(control.__customValidityMessage || "") !== "",
+    };
+    flags.valid = !Object.values(flags).some(Boolean);
+    return flags;
+  }
+
+  function hasDataListAncestor(control) {
+    let ancestor = control.parentNode;
+    while (ancestor) {
+      if (ancestor.nodeType === 1 && ancestor.tagName === "DATALIST") return true;
+      ancestor = ancestor.parentNode;
+    }
+    return false;
+  }
+
+  function controlWillValidate(control) {
+    if (control.__isDisabledControl() || hasDataListAncestor(control)) return false;
+    if (control.tagName === "INPUT") {
+      return VALIDATED_INPUT_TYPES.has(control.type) && !BARRED_INPUT_TYPES.has(control.type) &&
+        !control.readOnly;
+    }
+    if (control.tagName === "BUTTON") return control.type === "submit";
+    return control.tagName === "SELECT" ||
+      (control.tagName === "TEXTAREA" && !control.readOnly);
+  }
+
+  function constraintValidationMessage(control) {
+    if (!controlWillValidate(control)) return "";
+    const flags = constraintValidityFlags(control);
+    if (flags.valid) return "";
+    if (flags.customError) return String(control.__customValidityMessage);
+    if (flags.valueMissing) return "Please fill out this field.";
+    if (flags.typeMismatch) return "Please enter a value of the correct type.";
+    if (flags.patternMismatch) return "Please match the requested format.";
+    if (flags.tooLong) return "Please shorten this text.";
+    if (flags.tooShort) return "Please lengthen this text.";
+    if (flags.rangeUnderflow) return "The value is below the allowed minimum.";
+    if (flags.rangeOverflow) return "The value is above the allowed maximum.";
+    if (flags.stepMismatch) return "Please enter a valid value.";
+    return "The value is invalid.";
+  }
+
+  function dispatchInvalidEvent(control, report) {
+    if (!controlWillValidate(control) || constraintValidityFlags(control).valid) return true;
+    const unhandled = control.dispatchEvent(new Event("invalid", { cancelable: true }));
+    if (report && unhandled && typeof control.focus === "function") control.focus();
+    return false;
+  }
+
+  const validityStateConstructionToken = {};
+
+  class ValidityState {
+    constructor(control, token) {
+      if (token !== validityStateConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperty(this, "__control", { value: control });
+    }
+    get valueMissing() { return constraintValidityFlags(this.__control).valueMissing; }
+    get typeMismatch() { return constraintValidityFlags(this.__control).typeMismatch; }
+    get patternMismatch() { return constraintValidityFlags(this.__control).patternMismatch; }
+    get tooLong() { return constraintValidityFlags(this.__control).tooLong; }
+    get tooShort() { return constraintValidityFlags(this.__control).tooShort; }
+    get rangeUnderflow() { return constraintValidityFlags(this.__control).rangeUnderflow; }
+    get rangeOverflow() { return constraintValidityFlags(this.__control).rangeOverflow; }
+    get stepMismatch() { return constraintValidityFlags(this.__control).stepMismatch; }
+    get badInput() { return constraintValidityFlags(this.__control).badInput; }
+    get customError() { return constraintValidityFlags(this.__control).customError; }
+    get valid() { return constraintValidityFlags(this.__control).valid; }
+  }
+
+  function installConstraintValidationApi(prototype) {
+    Object.defineProperties(prototype, {
+      validity: {
+        configurable: true,
+        get() {
+          if (!this.__validityState) {
+            this.__validityState = new ValidityState(this, validityStateConstructionToken);
+          }
+          return this.__validityState;
+        },
+      },
+      validationMessage: {
+        configurable: true,
+        get() { return constraintValidationMessage(this); },
+      },
+      willValidate: {
+        configurable: true,
+        get() { return controlWillValidate(this); },
+      },
+      checkValidity: {
+        configurable: true,
+        value() { return dispatchInvalidEvent(this, false); },
+      },
+      reportValidity: {
+        configurable: true,
+        value() { return dispatchInvalidEvent(this, true); },
+      },
+      setCustomValidity: {
+        configurable: true,
+        value(message) { this.__customValidityMessage = String(message); },
+      },
+    });
+  }
+
   class HTMLFormElement extends HTMLElement {
     __controls() {
       const controls = [];
@@ -7571,6 +7946,31 @@
       return ["application/x-www-form-urlencoded", "multipart/form-data", "text/plain"].includes(value) ? value : "application/x-www-form-urlencoded";
     }
     set enctype(value) { this.setAttribute("enctype", String(value)); }
+    get noValidate() { return this.hasAttribute("novalidate"); }
+    set noValidate(value) {
+      if (value) this.setAttribute("novalidate", "");
+      else this.removeAttribute("novalidate");
+    }
+    __invalidControls() {
+      const controls = this.__controls();
+      const radioGroups = buildRadioGroupStates(controls);
+      return controls.filter(control => controlWillValidate(control) &&
+        !constraintValidityFlags(control, radioGroups).valid);
+    }
+    __validate(report) {
+      const invalid = this.__invalidControls();
+      if (invalid.length === 0) return true;
+      let firstUnhandled = null;
+      for (const control of invalid) {
+        if (control.dispatchEvent(new Event("invalid", { cancelable: true })) && !firstUnhandled) {
+          firstUnhandled = control;
+        }
+      }
+      if (report && firstUnhandled && typeof firstUnhandled.focus === "function") firstUnhandled.focus();
+      return false;
+    }
+    checkValidity() { return this.__validate(false); }
+    reportValidity() { return this.__validate(true); }
     __navigate(submitter) {
       const data = collectFormEntries(this, submitter);
       let url = __omoikane_resolve_url(this.action);
@@ -7591,6 +7991,9 @@
       __omoikane_submit_form(url, "POST", body, contentType);
     }
     __submit(submitter) {
+      if (!this.noValidate && !(submitter && submitter.formNoValidate) && !this.__validate(true)) {
+        return;
+      }
       const event = new Event("submit", { bubbles: true, cancelable: true });
       event.submitter = submitter || null;
       if (this.dispatchEvent(event)) this.__navigate(submitter || null);
@@ -7598,9 +8001,9 @@
     submit() { this.__navigate(null); }
     requestSubmit(submitter = null) {
       if (submitter !== null) {
-        if (submitter.__owningForm() !== this) throw new DOMException("Submitter is not owned by this form", "NotFoundError");
         const type = String(submitter.type || "").toLowerCase();
         if (!((submitter.tagName === "INPUT" && ["submit", "image"].includes(type)) || (submitter.tagName === "BUTTON" && type === "submit"))) throw new TypeError("Not a submit button");
+        if (submitter.__owningForm() !== this) throw new DOMException("Submitter is not owned by this form", "NotFoundError");
       }
       this.__submit(submitter);
     }
@@ -7733,6 +8136,7 @@
     });
     if (!control.dispatchEvent(beforeInput)) return false;
     control.value = nextValue;
+    control.__lastValueChangeWasUser = true;
     setTextControlSelection(control, caret, caret, "none");
     control.__textEditChanged = true;
     control.dispatchEvent(new InputEvent("input", {
@@ -7847,7 +8251,7 @@
   class HTMLInputElement extends HTMLElement {
     get type() {
       const t = (this.getAttribute("type") || "").toLowerCase();
-      return t || "text";
+      return KNOWN_INPUT_TYPES.has(t) ? t : "text";
     }
     set type(v) {
       const before = this.type;
@@ -7904,6 +8308,7 @@
         return;
       }
       this.__value = v == null ? "" : String(v);
+      this.__lastValueChangeWasUser = false;
       setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
     get defaultValue() {
@@ -7916,6 +8321,39 @@
     set readOnly(value) {
       if (value) this.setAttribute("readonly", "");
       else this.removeAttribute("readonly");
+    }
+    get required() { return this.hasAttribute("required"); }
+    set required(value) {
+      if (value) this.setAttribute("required", "");
+      else this.removeAttribute("required");
+    }
+    get multiple() { return this.hasAttribute("multiple"); }
+    set multiple(value) {
+      if (value) this.setAttribute("multiple", "");
+      else this.removeAttribute("multiple");
+    }
+    get pattern() { return this.getAttribute("pattern") || ""; }
+    set pattern(value) { this.setAttribute("pattern", String(value)); }
+    get min() { return this.getAttribute("min") || ""; }
+    set min(value) { this.setAttribute("min", String(value)); }
+    get max() { return this.getAttribute("max") || ""; }
+    set max(value) { this.setAttribute("max", String(value)); }
+    get step() { return this.getAttribute("step") || ""; }
+    set step(value) { this.setAttribute("step", String(value)); }
+    get formNoValidate() { return this.hasAttribute("formnovalidate"); }
+    set formNoValidate(value) {
+      if (value) this.setAttribute("formnovalidate", "");
+      else this.removeAttribute("formnovalidate");
+    }
+    get minLength() {
+      const raw = this.getAttribute("minlength");
+      if (raw === null || !/^\d+$/.test(raw)) return -1;
+      return Number(raw);
+    }
+    set minLength(value) {
+      const length = Number(value);
+      if (!Number.isInteger(length) || length < 0) throw new DOMException("Invalid minlength", "IndexSizeError");
+      this.setAttribute("minlength", String(length));
     }
     get maxLength() {
       const raw = this.getAttribute("maxlength");
@@ -7951,6 +8389,7 @@
     }
     set value(value) {
       this.__value = normalizeTextAreaValue(value == null ? "" : value);
+      this.__lastValueChangeWasUser = false;
       setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
     get defaultValue() { return this.textContent || ""; }
@@ -7959,6 +8398,21 @@
     set readOnly(value) {
       if (value) this.setAttribute("readonly", "");
       else this.removeAttribute("readonly");
+    }
+    get required() { return this.hasAttribute("required"); }
+    set required(value) {
+      if (value) this.setAttribute("required", "");
+      else this.removeAttribute("required");
+    }
+    get minLength() {
+      const raw = this.getAttribute("minlength");
+      if (raw === null || !/^\d+$/.test(raw)) return -1;
+      return Number(raw);
+    }
+    set minLength(value) {
+      const length = Number(value);
+      if (!Number.isInteger(length) || length < 0) throw new DOMException("Invalid minlength", "IndexSizeError");
+      this.setAttribute("minlength", String(length));
     }
     get maxLength() {
       const raw = this.getAttribute("maxlength");
@@ -7993,6 +8447,11 @@
     set type(v) {
       this.setAttribute("type", String(v));
     }
+    get formNoValidate() { return this.hasAttribute("formnovalidate"); }
+    set formNoValidate(value) {
+      if (value) this.setAttribute("formnovalidate", "");
+      else this.removeAttribute("formnovalidate");
+    }
   }
 
   class HTMLLabelElement extends HTMLElement {
@@ -8020,9 +8479,43 @@
     get length() {
       return this.options.length;
     }
+    get size() {
+      const raw = this.getAttribute("size");
+      if (raw === null || !/^\d+$/.test(raw) || Number(raw) <= 0) return 0;
+      return Number(raw);
+    }
+    set size(value) {
+      const size = Number(value);
+      if (!Number.isInteger(size) || size < 0) throw new DOMException("Invalid size", "IndexSizeError");
+      this.setAttribute("size", String(size));
+    }
+    get type() { return this.multiple ? "select-multiple" : "select-one"; }
+    get multiple() { return this.hasAttribute("multiple"); }
+    set multiple(value) {
+      if (value) this.setAttribute("multiple", "");
+      else this.removeAttribute("multiple");
+    }
+    get required() { return this.hasAttribute("required"); }
+    set required(value) {
+      if (value) this.setAttribute("required", "");
+      else this.removeAttribute("required");
+    }
+    get value() {
+      const index = this.selectedIndex;
+      return index < 0 ? "" : String(this.options[index].value);
+    }
+    set value(value) {
+      const expected = String(value);
+      let matched = false;
+      this.options.forEach(option => {
+        const selected = !matched && String(option.value) === expected;
+        option.selected = selected;
+        matched ||= selected;
+      });
+    }
     get selectedIndex() {
       const options = this.options;
-      for (let i = options.length - 1; i >= 0; i -= 1) {
+      for (let i = 0; i < options.length; i += 1) {
         if (options[i].selected) return i;
       }
       return -1;
@@ -8046,6 +8539,37 @@
       if (option) this.removeChild(option);
     }
   }
+
+  class HTMLFieldSetElement extends HTMLElement {
+    get disabled() { return this.hasAttribute("disabled"); }
+    set disabled(value) {
+      if (value) this.setAttribute("disabled", "");
+      else this.removeAttribute("disabled");
+    }
+  }
+
+  class HTMLOutputElement extends HTMLElement {}
+
+  function Option(text = "", value = undefined, defaultSelected = false, selected = false) {
+    const option = document.createElement("option");
+    option.text = String(text);
+    if (value !== undefined) option.value = String(value);
+    option.defaultSelected = Boolean(defaultSelected);
+    option.selected = Boolean(selected);
+    return option;
+  }
+
+  installConstraintValidationApi(HTMLInputElement.prototype);
+  installConstraintValidationApi(HTMLTextAreaElement.prototype);
+  installConstraintValidationApi(HTMLButtonElement.prototype);
+  installConstraintValidationApi(HTMLSelectElement.prototype);
+  installConstraintValidationApi(HTMLFieldSetElement.prototype);
+  installConstraintValidationApi(HTMLOutputElement.prototype);
+  installConstraintValidationApi(HTMLObjectElement.prototype);
+  Object.defineProperty(ValidityState.prototype, Symbol.toStringTag, {
+    configurable: true,
+    value: "ValidityState",
+  });
 
   class HTMLOptionElement extends HTMLElement {
     get defaultSelected() {
@@ -10099,7 +10623,7 @@
     HTMLInputElement.prototype, HTMLButtonElement.prototype,
     HTMLSelectElement.prototype, HTMLOptionElement.prototype, HTMLTextAreaElement.prototype,
   ], ["disabled"]);
-  distributePrototypeMembers(Node.prototype, [HTMLSelectElement.prototype, HTMLButtonElement.prototype], ["value"]);
+  distributePrototypeMembers(Node.prototype, [HTMLButtonElement.prototype], ["value"]);
   // DocumentType.name is the declared doctype name, unrelated to form-control
   // name reflection. Copy it before the form interfaces consume and remove the
   // shared implementation descriptor from Node.prototype.
@@ -10156,6 +10680,7 @@
     td: HTMLTableCellElement,
     th: HTMLTableCellElement,
     form: HTMLFormElement,
+    fieldset: HTMLFieldSetElement,
     input: HTMLInputElement,
     textarea: HTMLTextAreaElement,
     button: HTMLButtonElement,
@@ -10163,6 +10688,7 @@
     meta: HTMLMetaElement,
     select: HTMLSelectElement,
     option: HTMLOptionElement,
+    output: HTMLOutputElement,
     iframe: HTMLIFrameElement,
     object: HTMLObjectElement,
     audio: HTMLAudioElement,
@@ -10623,6 +11149,7 @@
   globalThis.ShadowRoot = ShadowRoot;
   globalThis.DocumentType = DocumentType;
   globalThis.DOMException = DOMException;
+  globalThis.ValidityState = ValidityState;
   const INTEGER_TYPED_ARRAY_TAGS = new Set([
     "[object Int8Array]", "[object Uint8Array]", "[object Uint8ClampedArray]",
     "[object Int16Array]", "[object Uint16Array]", "[object Int32Array]",
@@ -11031,6 +11558,7 @@
   globalThis.HTMLTableRowElement = HTMLTableRowElement;
   globalThis.HTMLTableCellElement = HTMLTableCellElement;
   globalThis.HTMLFormElement = HTMLFormElement;
+  globalThis.HTMLFieldSetElement = HTMLFieldSetElement;
   globalThis.HTMLInputElement = HTMLInputElement;
   globalThis.HTMLTextAreaElement = HTMLTextAreaElement;
   globalThis.HTMLButtonElement = HTMLButtonElement;
@@ -11038,6 +11566,8 @@
   globalThis.HTMLMetaElement = HTMLMetaElement;
   globalThis.HTMLSelectElement = HTMLSelectElement;
   globalThis.HTMLOptionElement = HTMLOptionElement;
+  globalThis.HTMLOutputElement = HTMLOutputElement;
+  globalThis.Option = Option;
   globalThis.HTMLImageElement = HTMLImageElement;
   globalThis.HTMLCanvasElement = HTMLCanvasElement;
   globalThis.CanvasRenderingContext2D = CanvasRenderingContext2D;

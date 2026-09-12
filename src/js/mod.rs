@@ -19985,6 +19985,191 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn constraint_validation_exposes_live_flags_for_form_controls() {
+        let mut runtime = runtime_from_html(
+            r#"<form id="form">
+                 <input id="email" type="email" required pattern=".+@example\.com">
+                 <input id="number" type="number" min="5" max="10" step="2" value="4">
+                 <input id="check" type="checkbox" required>
+                 <select id="select" required><option value="">Choose</option><option value="ok">OK</option></select>
+                 <textarea id="text" required></textarea>
+                 <fieldset id="group" disabled><input id="barred" required></fieldset>
+               </form>"#,
+        );
+
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                      const email = document.getElementById('email');
+                      const number = document.getElementById('number');
+                      const check = document.getElementById('check');
+                      const select = document.getElementById('select');
+                      const text = document.getElementById('text');
+                      const group = document.getElementById('group');
+                      const barred = document.getElementById('barred');
+                      const live = email.validity;
+                      let illegalConstructor = false;
+                      try { new ValidityState(email); } catch (error) { illegalConstructor = error instanceof TypeError; }
+                      if (!(live instanceof ValidityState) || live !== email.validity ||
+                          !live.valueMissing || live.valid || email.validationMessage === '' ||
+                          !illegalConstructor || !(group instanceof HTMLFieldSetElement) ||
+                          group.willValidate || barred.willValidate) return false;
+                      email.value = 'wrong';
+                      if (live.valueMissing || !live.typeMismatch || !live.patternMismatch) return false;
+                      email.value = 'person@example.com';
+                      if (!live.valid || !email.checkValidity()) return false;
+                      number.value = '4';
+                      if (!number.validity.rangeUnderflow || !number.validity.stepMismatch) return false;
+                      number.value = '11';
+                      if (!number.validity.rangeOverflow || number.validity.stepMismatch) return false;
+                      number.value = '9';
+                      if (!number.validity.valid) return false;
+                      if (!check.validity.valueMissing) return false;
+                      check.checked = true;
+                      if (!check.validity.valid || !select.validity.valueMissing || !text.validity.valueMissing) return false;
+                      select.value = 'ok';
+                      text.value = 'written';
+                      if (!select.validity.valid || !text.validity.valid) return false;
+                      email.setCustomValidity('custom failure');
+                      if (!live.customError || live.valid || email.validationMessage !== 'custom failure') return false;
+                      email.disabled = true;
+                      return !email.willValidate && live.customError && email.validationMessage === '' &&
+                        email.checkValidity() && document.getElementById('form').checkValidity();
+                    })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn interactive_form_validation_blocks_submission_and_honors_bypass_flags() {
+        let mut runtime = runtime_from_html(
+            r#"<form id="form" action="/validated">
+                 <input id="first" name="first" required>
+                 <input id="second" name="second" required>
+                 <button id="send" name="via" value="button">Send</button>
+               </form>"#,
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                      const form = document.getElementById('form');
+                      const first = document.getElementById('first');
+                      const second = document.getElementById('second');
+                      const send = document.getElementById('send');
+                      const invalid = [];
+                      let submits = 0;
+                      first.addEventListener('invalid', event => {
+                        invalid.push([event.target.id, event.bubbles, event.cancelable]);
+                        event.preventDefault();
+                      });
+                      second.addEventListener('invalid', event => {
+                        invalid.push([event.target.id, event.bubbles, event.cancelable]);
+                      });
+                      form.addEventListener('submit', () => { submits++; });
+                      form.requestSubmit(send);
+                      if (submits !== 0 || invalid.length !== 2 || invalid[0].join(':') !== 'first:false:true' ||
+                          invalid[1].join(':') !== 'second:false:true') return false;
+                      if (form.reportValidity() || document.activeElement !== second) return false;
+                      form.noValidate = true;
+                      form.requestSubmit(send);
+                      return submits === 1;
+                    })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.take_navigation_requests().len(), 1);
+
+        let mut bypass = runtime_from_html(
+            r#"<form id="form" action="/bypass">
+                 <input required>
+                 <button id="send" formnovalidate>Send</button>
+                 <input id="input-submit" type="submit" formnovalidate>
+               </form>"#,
+        );
+        bypass
+            .eval("document.getElementById('form').requestSubmit(document.getElementById('send'))")
+            .unwrap();
+        bypass.run_until_idle().unwrap();
+        assert_eq!(bypass.take_navigation_requests().len(), 1);
+        bypass
+            .eval("document.getElementById('form').requestSubmit(document.getElementById('input-submit'))")
+            .unwrap();
+        bypass.run_until_idle().unwrap();
+        assert_eq!(bypass.take_navigation_requests().len(), 1);
+
+        let mut direct = runtime_from_html(
+            r#"<form id="form" action="/direct"><input required></form>"#,
+        );
+        direct
+            .eval("document.getElementById('form').submit()")
+            .unwrap();
+        direct.run_until_idle().unwrap();
+        assert_eq!(direct.take_navigation_requests().len(), 1);
+    }
+
+    #[test]
+    fn length_validity_only_tracks_user_edited_values() {
+        let mut runtime = runtime_from_html(
+            r#"<input id="text" minlength="4" maxlength="8">"#,
+        );
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                      const input = document.getElementById('text');
+                      input.value = 'abc';
+                      if (input.validity.tooShort || input.validity.tooLong) return false;
+                      input.value = '';
+                      input.focus();
+                      __omoikane_dispatch_keyboard_input('keydown', { key: 'a' });
+                      if (!input.validity.tooShort || input.validity.tooLong) return false;
+                      input.maxLength = 0;
+                      return input.validity.tooShort && input.validity.tooLong;
+                    })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn barred_controls_preserve_type_specific_intrinsic_validity() {
+        let mut runtime = runtime_from_html(
+            r#"<input id="text" required disabled>
+               <input id="check" type="checkbox" required disabled>
+               <select id="select" required disabled><option value="">Choose</option></select>
+               <textarea id="area" required readonly></textarea>"#,
+        );
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const text = document.getElementById('text');
+                  const check = document.getElementById('check');
+                  const select = document.getElementById('select');
+                  const area = document.getElementById('area');
+                  return !text.validity.valueMissing && text.validity.valid &&
+                    check.validity.valueMissing && !check.validity.valid &&
+                    select.validity.valueMissing && !select.validity.valid &&
+                    !area.validity.valueMissing && area.validity.valid &&
+                    [text, check, select, area].every(control =>
+                      !control.willValidate && control.validationMessage === '' && control.checkValidity());
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
     fn multipart_form_data_is_used_by_request_and_xhr() {
         let mut runtime = JsRuntime::new().unwrap();
         assert!(runtime.eval(r#"(() => { const data = new FormData(); data.append("a", "one"); data.append("a", "two"); const encoded = data.__multipart("fixed-boundary"); const request = new Request("/upload", { method: "POST", body: data }); const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload"); xhr.send(data); return encoded.body === "--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\none\r\n--fixed-boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ntwo\r\n--fixed-boundary--\r\n" && request.headers.get("content-type").startsWith("multipart/form-data; boundary=") && request.body instanceof ReadableStream && request.__body.text.includes('name="a"') && xhr._headers["content-type"].startsWith("multipart/form-data; boundary="); })()"#).unwrap().as_boolean().unwrap());
