@@ -176,6 +176,7 @@ pub(crate) fn render_glyph_cache_stats() -> (usize, usize) {
 pub(crate) fn paint_text_with_registry(
     canvas: &mut Canvas,
     layout: &LayoutBox,
+    resolver: &mut crate::css::StyleResolver,
     style: &ComputedStyle,
     clip: Option<Rect>,
     _viewport: Rect,
@@ -355,6 +356,25 @@ pub(crate) fn paint_text_with_registry(
                             decoration_line,
                             decoration_color,
                             clip,
+                        );
+                    }
+                }
+                InlineFragmentContent::AtomicInline(_) => {
+                    if let Some(child) = layout
+                        .children
+                        .iter()
+                        .find(|child| child.node == fragment.node)
+                    {
+                        super::paint_box_internal(
+                            canvas,
+                            child,
+                            resolver,
+                            clip,
+                            _viewport,
+                            true,
+                            fonts,
+                            web_fonts,
+                            offset,
                         );
                     }
                 }

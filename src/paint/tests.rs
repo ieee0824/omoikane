@@ -9112,6 +9112,7 @@ fn form_control_label_uses_web_font_variant() {
     paint_text_with_registry(
         &mut with_global,
         &layout,
+        &mut resolver,
         &control_style,
         None,
         viewport,
@@ -9123,6 +9124,7 @@ fn form_control_label_uses_web_font_variant() {
     paint_text_with_registry(
         &mut with_registry,
         &layout,
+        &mut resolver,
         &control_style,
         None,
         viewport,
@@ -9198,6 +9200,7 @@ fn focused_text_control_paints_selection_and_caret() {
     paint_text_with_registry(
         &mut selected,
         &layout(fragment("AB", 0, 1)),
+        &mut resolver,
         &control_style,
         None,
         viewport,
@@ -9211,6 +9214,7 @@ fn focused_text_control_paints_selection_and_caret() {
     paint_text_with_registry(
         &mut caret,
         &layout(fragment("", 0, 0)),
+        &mut resolver,
         &control_style,
         None,
         viewport,

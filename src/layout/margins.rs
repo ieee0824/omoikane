@@ -228,7 +228,11 @@ pub(super) fn layout_children(
             &mut cursor_y,
             x,
             width,
+            containing_height,
+            viewport,
+            positioned_ancestor,
             &mut lines,
+            &mut children,
         );
         if lines[previous_lines..]
             .iter()
@@ -359,7 +363,11 @@ pub(super) fn layout_children(
         &mut cursor_y,
         x,
         width,
+        containing_height,
+        viewport,
+        positioned_ancestor,
         &mut lines,
+        &mut children,
     );
     if lines[previous_lines..]
         .iter()

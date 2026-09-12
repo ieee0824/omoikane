@@ -20,7 +20,17 @@ fn lines(
         align,
         line_height(style),
         super::super::direction_is_rtl(style),
+        0.0,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: 0.0,
+        },
+        None,
+        false,
     )
+    .lines
 }
 
 pub(super) fn append(
