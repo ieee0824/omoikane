@@ -73,6 +73,31 @@ Full-image differences are descriptive measurements, not a pass threshold.
 Multiline border slicing, arbitrary bidi/vertical-writing combinations and
 all CSS inline formatting behavior are not established by these thirteen cases.
 
+## #677 raster scale follow-up
+
+The checked-in `anonymized-font-file.after.png` retains the pre-#677 output.
+Omoikane had passed the CSS em size directly to `ab_glyph`, whose pixel scale
+uses `ascent - descent` rather than `unitsPerEm`. Shaping and layout already
+used `font-size / unitsPerEm`, so glyph outlines were rendered at a smaller,
+inconsistent scale. The #677 fix converts CSS pixels to the `ab_glyph` scale
+and uses the selected face's ascent and descent plus half-leading for the text
+baseline.
+
+With the same 800x600, DPR 1 input, Firefox's dark-glyph bounds are 19px high
+at y=6 within every 28px line. The fixed Omoikane output is 18px high at y=7,
+improved from 17px at y=10. Changed pixels fell from 8,439 (1.758%) to 7,332
+(1.528%), and ImageMagick normalized MAE fell from 0.00699089 to 0.00354003.
+Omoikane's two captures were identical. Block geometry remained exact; the
+largest inline geometry delta remained 0.037325px because Firefox quantizes
+glyph advances to 1/60px. The remaining one-pixel ink and coverage differences
+come from the separate `ab_glyph` and Firefox rasterizers and are not used as a
+pass tolerance.
+
+Firefox also omits the fixed font's A-space kerning from the preserved trailing
+spaces in `A  `, while Rustybuzz applies it. CSS `font-kerning: auto` permits
+the user agent to choose whether to apply kerning, so #677 records this result
+without adding a Firefox-specific shaping exception.
+
 ## Regression commands
 
 ```sh

@@ -170,6 +170,42 @@ fn inline_box_width_preserves_font_advances_and_records_firefox_rounding() {
 }
 
 #[test]
+fn text_baseline_uses_the_selected_face_metrics_and_half_leading() {
+    fn find_text_line(layout: &LayoutBox) -> Option<(&LineBox, &InlineFragment)> {
+        layout
+            .lines
+            .iter()
+            .find_map(|line| {
+                line.fragments
+                    .iter()
+                    .find(|fragment| {
+                        matches!(
+                            &fragment.content,
+                            InlineFragmentContent::Text(text) if text == "A"
+                        )
+                    })
+                    .map(|fragment| (line, fragment))
+            })
+            .or_else(|| layout.children.iter().find_map(find_text_line))
+    }
+
+    let (layout, _) = render("<p>A</p>", "");
+    let (line, fragment) = find_text_line(&layout).expect("line containing fixed-font text");
+    let font = crate::font::Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/acid2/LiberationSans-Regular.ttf").to_vec(),
+    )
+    .unwrap();
+    let metrics = font.layout_metrics(20.0);
+    let expected =
+        line.rect.y + (line.rect.height - metrics.ascent - metrics.descent) / 2.0 + metrics.ascent;
+
+    assert!((fragment.metrics.ascent - metrics.ascent).abs() < 0.0001);
+    assert!((fragment.metrics.descent - metrics.descent).abs() < 0.0001);
+    assert!((line.baseline - expected).abs() < 0.0001);
+    assert!((fragment.rect.y + fragment.metrics.ascent - line.baseline).abs() < 0.0001);
+}
+
+#[test]
 fn trailing_preserved_newline_does_not_expose_a_marker_only_client_rect() {
     let (layout, _) = render("<p><span id='s' style='white-space:pre'>A\n</span></p>", "");
     let regions = rects(&layout, "s");
