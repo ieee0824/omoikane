@@ -826,6 +826,25 @@ impl Builder {
 
     fn handle_in_cell(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
+            Token::StartTag {
+                name,
+                attributes,
+                self_closing,
+            } if name == "td" || name == "th" => {
+                // A sibling cell implicitly closes the current cell, then is
+                // processed again with the row as the current node.
+                self.pop_matching("td");
+                self.pop_matching("th");
+                self.reset_insertion_mode();
+                self.process_token(
+                    Token::StartTag {
+                        name,
+                        attributes,
+                        self_closing,
+                    },
+                    errors,
+                );
+            }
             Token::EndTag { name } if name == "td" || name == "th" => {
                 self.pop_matching(&name);
                 self.reset_insertion_mode();
@@ -1952,6 +1971,20 @@ mod tests {
         let row = tbody.child_nodes().into_iter().next().unwrap();
         assert_eq!(row.tag_name().as_deref(), Some("tr"));
         assert_eq!(row.child_nodes()[0].tag_name().as_deref(), Some("td"));
+
+        let tbody_context = NodeHandle::element("tbody");
+        let tbody_fragment =
+            TreeBuilder::parse_fragment("<tr><td>body</td></tr>", &tbody_context).fragment();
+        assert_eq!(tbody_fragment.child_nodes()[0].tag_name().as_deref(), Some("tr"));
+
+        let row_context = NodeHandle::element("tr");
+        let row_fragment =
+            TreeBuilder::parse_fragment("<td>one<td>two", &row_context).fragment();
+        assert_eq!(row_fragment.child_nodes().len(), 2);
+        assert!(row_fragment
+            .child_nodes()
+            .iter()
+            .all(|cell| cell.tag_name().as_deref() == Some("td")));
 
         let select = NodeHandle::element("select");
         let select_fragment =
