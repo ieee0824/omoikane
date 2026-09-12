@@ -178,6 +178,8 @@ enum State {
     ScriptDataDoubleEscapedDashDash,
     ScriptDataDoubleEscapedLessThanSign,
     ScriptDataDoubleEscapeEnd,
+    // PLAINTEXT state (§13.2.5.5): every remaining code point is text.
+    PlainText,
 }
 
 /// A small HTML tokenizer.
@@ -213,6 +215,22 @@ impl<'a> Tokenizer<'a> {
     /// Tokenizes the full input and also returns recoverable parse errors.
     pub fn tokenize_with_errors(&self) -> (Vec<Token>, Vec<HtmlParseError>) {
         let mut tokenizer = IncrementalTokenizer::new();
+        tokenizer.push_input(self.input);
+        tokenizer.drain(true, false)
+    }
+
+    /// Tokenizes a fragment using the content model selected by its HTML
+    /// context element.
+    pub(crate) fn tokenize_fragment_with_errors(
+        &self,
+        context_name: &str,
+    ) -> (Vec<Token>, Vec<HtmlParseError>) {
+        let mut tokenizer = IncrementalTokenizer::new();
+        let context_name = context_name.to_ascii_lowercase();
+        tokenizer.state = raw_next_state(&context_name, false);
+        if tokenizer.state != State::Data {
+            tokenizer.last_start_tag_name = context_name;
+        }
         tokenizer.push_input(self.input);
         tokenizer.drain(true, false)
     }
@@ -333,6 +351,7 @@ impl IncrementalTokenizer {
                     },
                     _ => text_buffer.push(ch),
                 },
+                State::PlainText => text_buffer.push(ch),
                 State::TagOpen => match ch {
                     '/' => {
                         current_end_tag_name.clear();
@@ -1548,7 +1567,8 @@ impl IncrementalTokenizer {
             | State::ScriptDataDoubleEscapedDash
             | State::ScriptDataDoubleEscapedDashDash
             | State::ScriptDataDoubleEscapedLessThanSign
-            | State::ScriptDataDoubleEscapeEnd => {}
+            | State::ScriptDataDoubleEscapeEnd
+            | State::PlainText => {}
         }
 
         tokens.push(Token::Eof);
@@ -1730,8 +1750,9 @@ fn raw_next_state(tag_name: &str, self_closing: bool) -> State {
     }
     match tag_name {
         "script" => State::ScriptData,
-        "style" | "xmp" | "noembed" | "noframes" => State::RawText,
+        "style" | "xmp" | "noembed" | "noframes" | "noscript" => State::RawText,
         "title" | "textarea" => State::RcData,
+        "plaintext" => State::PlainText,
         _ => State::Data,
     }
 }

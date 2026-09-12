@@ -96,6 +96,14 @@
       "baseline_supported": true
     },
     {
+      "id": "dom.range-contextual-fragment",
+      "area": "dom",
+      "description": "Range parses a detached fragment in its start context",
+      "setup": "globalThis.__contextRange = document.createRange(); __contextRange.selectNodeContents(document.body); globalThis.__contextFragment = __contextRange.createContextualFragment('<p>context</p>')",
+      "probe": "__contextFragment.nodeType === 11 && __contextFragment.firstChild.localName === 'p' && __contextFragment.firstChild.ownerDocument === document && __contextFragment.parentNode === null",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.mutation-observer-callback",
       "area": "dom",
       "description": "MutationObserver delivers attribute records at a microtask checkpoint",

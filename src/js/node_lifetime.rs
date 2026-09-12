@@ -375,6 +375,8 @@ impl HostState {
             self.node_lifetimes.owners.remove(&id);
             self.nodes.remove(&id);
             self.adopted_stylesheets.remove(&id);
+            self.runnable_inserted_scripts.remove(&id);
+            self.started_inserted_scripts.remove(&id);
         }
     }
 }

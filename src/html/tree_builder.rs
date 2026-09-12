@@ -21,6 +21,7 @@ pub enum InsertionMode {
     InTableBody,
     InRow,
     InCell,
+    InSelect,
     AfterBody,
     AfterAfterBody,
 }
@@ -30,6 +31,25 @@ pub enum InsertionMode {
 pub struct ParseResult {
     document: NodeHandle,
     errors: Vec<HtmlParseError>,
+}
+
+/// Result of parsing markup relative to an existing context element.
+#[derive(Debug, Clone)]
+pub struct FragmentParseResult {
+    fragment: NodeHandle,
+    errors: Vec<HtmlParseError>,
+}
+
+impl FragmentParseResult {
+    /// Returns the detached fragment containing the parsed nodes.
+    pub fn fragment(&self) -> NodeHandle {
+        self.fragment.clone()
+    }
+
+    /// Returns recoverable parse errors collected during fragment parsing.
+    pub fn errors(&self) -> &[HtmlParseError] {
+        &self.errors
+    }
 }
 
 impl ParseResult {
@@ -58,6 +78,53 @@ impl TreeBuilder {
             document: builder.document,
             errors,
         }
+    }
+
+    /// Parses HTML relative to `context` and returns only the resulting nodes.
+    pub fn parse_fragment(input: &str, context: &NodeHandle) -> FragmentParseResult {
+        let context_name = context
+            .local_name()
+            .or_else(|| context.tag_name())
+            .unwrap_or_else(|| "body".to_string());
+        let html_context = context
+            .namespace_uri()
+            .as_deref()
+            .is_none_or(|value| value == HTML_NAMESPACE);
+        let (tokens, mut errors) = if html_context {
+            Tokenizer::new(input).tokenize_fragment_with_errors(&context_name)
+        } else {
+            Tokenizer::new(input).tokenize_with_errors()
+        };
+        let (mut builder, container) = Builder::new_fragment(context);
+        builder.process_tokens(tokens, &mut errors);
+        // Flatten the artificial context element at its position in the
+        // synthetic root. Foster-parented nodes can precede it, and a token
+        // matching the context's end tag can make later nodes its siblings.
+        let root = container.parent_node();
+        let source = root.map_or_else(
+            || container.template_content().unwrap_or(container.clone()).child_nodes(),
+            |root| {
+                let mut nodes = Vec::new();
+                for child in root.child_nodes() {
+                    if child == container {
+                        nodes.extend(
+                            container
+                                .template_content()
+                                .unwrap_or(container.clone())
+                                .child_nodes(),
+                        );
+                    } else {
+                        nodes.push(child);
+                    }
+                }
+                nodes
+            },
+        );
+        let fragment = NodeHandle::document_fragment();
+        for child in source {
+            fragment.append_child(child);
+        }
+        FragmentParseResult { fragment, errors }
     }
 }
 
@@ -146,6 +213,7 @@ struct Builder {
     mode: InsertionMode,
     write_boundary: Option<(NodeHandle, Option<NodeHandle>)>,
     created_nodes: Option<std::cell::RefCell<Vec<NodeHandle>>>,
+    fragment: bool,
 }
 
 impl Builder {
@@ -158,7 +226,46 @@ impl Builder {
             mode: InsertionMode::Initial,
             write_boundary: None,
             created_nodes: None,
+            fragment: false,
         }
+    }
+
+    fn new_fragment(context: &NodeHandle) -> (Self, NodeHandle) {
+        let mut builder = Self::new();
+        builder.fragment = true;
+        let html = NodeHandle::element("html");
+        builder.document.append_child(html.clone());
+
+        let context_name = context
+            .local_name()
+            .or_else(|| context.tag_name())
+            .unwrap_or_else(|| "body".to_string());
+        let namespace = context.namespace_uri();
+        let html_context = namespace.as_deref().is_none_or(|value| value == HTML_NAMESPACE);
+        let effective_name = if html_context && context_name.eq_ignore_ascii_case("html") {
+            "body".to_string()
+        } else {
+            context_name
+        };
+        let container = match namespace {
+            Some(namespace) if namespace == HTML_NAMESPACE => {
+                NodeHandle::html_element_ns(&effective_name, namespace)
+            }
+            Some(namespace) => NodeHandle::xml_element(&effective_name, Some(namespace)),
+            None => NodeHandle::element(&effective_name),
+        };
+        if let Some(attributes) = context.attributes() {
+            for (name, value) in attributes {
+                container.set_attribute(&name, &value);
+            }
+        }
+        html.append_child(container.clone());
+        builder.open_elements = vec![html, container.clone()];
+        builder.mode = fragment_insertion_mode(&effective_name);
+        if effective_name.eq_ignore_ascii_case("template") {
+            builder.template_insertion_modes.push(InsertionMode::InBody);
+        }
+        (builder, container)
     }
 
     fn process_tokens(&mut self, tokens: Vec<Token>, errors: &mut Vec<HtmlParseError>) {
@@ -168,6 +275,9 @@ impl Builder {
     }
 
     fn process_token(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
+        if self.process_foreign_token(&token, errors) {
+            return;
+        }
         match self.mode {
             InsertionMode::Initial => self.handle_initial(token, errors),
             InsertionMode::BeforeHtml => self.handle_before_html(token, errors),
@@ -179,6 +289,7 @@ impl Builder {
             InsertionMode::InTableBody => self.handle_in_table_body(token, errors),
             InsertionMode::InRow => self.handle_in_row(token, errors),
             InsertionMode::InCell => self.handle_in_cell(token, errors),
+            InsertionMode::InSelect => self.handle_in_select(token, errors),
             InsertionMode::AfterBody => self.handle_after_body(token, errors),
             InsertionMode::AfterAfterBody => self.handle_after_after_body(token, errors),
         }
@@ -345,11 +456,29 @@ impl Builder {
                     }
                     "head" => {}
                     "body" => {
-                        if let Some(body) = self.find_open_element("body") {
-                            self.merge_missing_attributes(&body, &attributes);
+                        if !self.fragment {
+                            if let Some(body) = self.find_open_element("body") {
+                                self.merge_missing_attributes(&body, &attributes);
+                            } else {
+                                let body = self.insert_element_with_attributes("body", &attributes);
+                                self.open_elements.push(body);
+                            }
+                        }
+                    }
+                    "svg" | "math" => {
+                        let namespace = if name == "svg" {
+                            SVG_NAMESPACE
                         } else {
-                            let body = self.insert_element_with_attributes("body", &attributes);
-                            self.open_elements.push(body);
+                            MATHML_NAMESPACE
+                        };
+                        let element = self.insert_foreign_element(
+                            &self.insertion_parent(),
+                            &name,
+                            &attributes,
+                            namespace,
+                        );
+                        if !self_closing {
+                            self.open_elements.push(element);
                         }
                     }
                     "table" => {
@@ -697,6 +826,25 @@ impl Builder {
 
     fn handle_in_cell(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
+            Token::StartTag {
+                name,
+                attributes,
+                self_closing,
+            } if name == "td" || name == "th" => {
+                // A sibling cell implicitly closes the current cell, then is
+                // processed again with the row as the current node.
+                self.pop_matching("td");
+                self.pop_matching("th");
+                self.reset_insertion_mode();
+                self.process_token(
+                    Token::StartTag {
+                        name,
+                        attributes,
+                        self_closing,
+                    },
+                    errors,
+                );
+            }
             Token::EndTag { name } if name == "td" || name == "th" => {
                 self.pop_matching(&name);
                 self.reset_insertion_mode();
@@ -712,6 +860,163 @@ impl Builder {
                 self.reset_insertion_mode();
             }
         }
+    }
+
+    fn handle_in_select(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
+        match token {
+            Token::Character(data) => {
+                if !data.is_empty() {
+                    self.insert_text(&data);
+                }
+            }
+            Token::Comment(data) => {
+                self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
+            }
+            Token::StartTag {
+                name,
+                attributes,
+                self_closing,
+            } if name == "option" => {
+                if self.current_node().tag_name().as_deref() == Some("option") {
+                    self.open_elements.pop();
+                }
+                let option = self.insert_element_with_attributes("option", &attributes);
+                if !self_closing {
+                    self.open_elements.push(option);
+                }
+            }
+            Token::StartTag {
+                name,
+                attributes,
+                self_closing,
+            } if name == "optgroup" => {
+                if self.current_node().tag_name().as_deref() == Some("option") {
+                    self.open_elements.pop();
+                }
+                if self.current_node().tag_name().as_deref() == Some("optgroup") {
+                    self.open_elements.pop();
+                }
+                let group = self.insert_element_with_attributes("optgroup", &attributes);
+                if !self_closing {
+                    self.open_elements.push(group);
+                }
+            }
+            Token::StartTag { name, .. } if name == "select" => {}
+            token
+                if matches!(&token, Token::StartTag { name, .. } if name == "script" || name == "template") =>
+            {
+                self.handle_in_head(token, errors)
+            }
+            Token::EndTag { name } if name == "option" => {
+                if self.current_node().tag_name().as_deref() == Some("option") {
+                    self.open_elements.pop();
+                }
+            }
+            Token::EndTag { name } if name == "optgroup" => {
+                if self.current_node().tag_name().as_deref() == Some("option") {
+                    self.open_elements.pop();
+                }
+                if self.current_node().tag_name().as_deref() == Some("optgroup") {
+                    self.open_elements.pop();
+                }
+            }
+            Token::EndTag { name } if name == "select" => {}
+            Token::Doctype(_) => {}
+            Token::Eof => self.mode = InsertionMode::AfterAfterBody,
+            _ => {}
+        }
+    }
+
+    fn process_foreign_token(
+        &mut self,
+        token: &Token,
+        errors: &mut Vec<HtmlParseError>,
+    ) -> bool {
+        let current = self.current_node();
+        let Some(namespace) = current.namespace_uri() else {
+            return false;
+        };
+        if namespace == HTML_NAMESPACE {
+            return false;
+        }
+
+        if let Token::StartTag { name, .. } = token {
+            if foreign_allows_html_start(&current, name) {
+                return false;
+            }
+            if is_foreign_breakout_tag(name) {
+                let minimum_depth = if self.fragment { 2 } else { 1 };
+                while self.open_elements.len() > minimum_depth
+                    && self
+                        .current_node()
+                        .namespace_uri()
+                        .is_some_and(|value| value != HTML_NAMESPACE)
+                {
+                    self.open_elements.pop();
+                }
+                self.mode = InsertionMode::InBody;
+                self.handle_in_body(token.clone(), errors);
+                return true;
+            }
+        }
+
+        match token {
+            Token::Character(data) => {
+                if !data.is_empty() {
+                    self.insert_text(data);
+                }
+            }
+            Token::Comment(data) => {
+                self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
+            }
+            Token::Doctype(_) => {}
+            Token::StartTag {
+                name,
+                attributes,
+                self_closing,
+            } => {
+                let element = self.insert_foreign_element(
+                    &self.insertion_parent(),
+                    name,
+                    attributes,
+                    &namespace,
+                );
+                if !self_closing {
+                    self.open_elements.push(element);
+                }
+            }
+            Token::EndTag { name } => {
+                if let Some(index) = self.open_elements.iter().rposition(|element| {
+                    element
+                        .tag_name()
+                        .is_some_and(|tag| tag.eq_ignore_ascii_case(name))
+                }) {
+                    self.open_elements.truncate(index);
+                }
+            }
+            Token::Eof => self.mode = InsertionMode::AfterAfterBody,
+        }
+        true
+    }
+
+    fn insert_foreign_element(
+        &self,
+        parent: &NodeHandle,
+        name: &str,
+        attributes: &[super::Attribute],
+        namespace: &str,
+    ) -> NodeHandle {
+        let adjusted_name = if namespace == SVG_NAMESPACE {
+            adjust_svg_tag_name(name)
+        } else {
+            name
+        };
+        let element = NodeHandle::xml_element(adjusted_name, Some(namespace.to_string()));
+        for attribute in attributes {
+            element.set_attribute(attribute.name(), attribute.value());
+        }
+        self.append_node(parent, element.clone());
+        element
     }
 
     fn handle_after_body(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
@@ -1022,6 +1327,7 @@ impl Builder {
                 Some("tbody" | "thead" | "tfoot") => Some(InsertionMode::InTableBody),
                 Some("colgroup") => Some(InsertionMode::InColumnGroup),
                 Some("table") => Some(InsertionMode::InTable),
+                Some("select" | "optgroup" | "option") => Some(InsertionMode::InSelect),
                 Some("body") => Some(InsertionMode::InBody),
                 Some("head") => Some(InsertionMode::InHead),
                 Some("html") => Some(InsertionMode::BeforeHead),
@@ -1045,6 +1351,101 @@ impl Builder {
             }
         }
         InsertionMode::InBody
+    }
+}
+
+const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
+const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
+const MATHML_NAMESPACE: &str = "http://www.w3.org/1998/Math/MathML";
+
+fn fragment_insertion_mode(context_name: &str) -> InsertionMode {
+    match context_name.to_ascii_lowercase().as_str() {
+        "head" => InsertionMode::InHead,
+        "table" => InsertionMode::InTable,
+        "tbody" | "thead" | "tfoot" => InsertionMode::InTableBody,
+        "colgroup" => InsertionMode::InColumnGroup,
+        "tr" => InsertionMode::InRow,
+        "td" | "th" => InsertionMode::InCell,
+        "select" | "optgroup" | "option" => InsertionMode::InSelect,
+        _ => InsertionMode::InBody,
+    }
+}
+
+fn foreign_allows_html_start(current: &NodeHandle, token_name: &str) -> bool {
+    let local_name = current.local_name().unwrap_or_default();
+    match current.namespace_uri().as_deref() {
+        Some(SVG_NAMESPACE) => matches!(
+            local_name.to_ascii_lowercase().as_str(),
+            "foreignobject" | "desc" | "title"
+        ),
+        Some(MATHML_NAMESPACE) => {
+            let math_text_integration = matches!(
+                local_name.to_ascii_lowercase().as_str(),
+                "mi" | "mo" | "mn" | "ms" | "mtext"
+            ) && !matches!(token_name, "mglyph" | "malignmark");
+            let annotation_html = local_name.eq_ignore_ascii_case("annotation-xml")
+                && current.get_attribute("encoding").is_some_and(|encoding| {
+                    encoding.eq_ignore_ascii_case("text/html")
+                        || encoding.eq_ignore_ascii_case("application/xhtml+xml")
+                });
+            math_text_integration || annotation_html
+        }
+        _ => false,
+    }
+}
+
+fn is_foreign_breakout_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "b" | "big" | "blockquote" | "body" | "br" | "center" | "code" | "dd"
+            | "div" | "dl" | "dt" | "em" | "embed" | "h1" | "h2" | "h3" | "h4"
+            | "h5" | "h6" | "head" | "hr" | "i" | "img" | "li" | "listing"
+            | "menu" | "meta" | "nobr" | "ol" | "p" | "pre" | "ruby" | "s"
+            | "small" | "span" | "strong" | "strike" | "sub" | "sup" | "table"
+            | "tt" | "u" | "ul" | "var"
+    )
+}
+
+fn adjust_svg_tag_name(name: &str) -> &str {
+    match name {
+        "altglyph" => "altGlyph",
+        "altglyphdef" => "altGlyphDef",
+        "altglyphitem" => "altGlyphItem",
+        "animatecolor" => "animateColor",
+        "animatemotion" => "animateMotion",
+        "animatetransform" => "animateTransform",
+        "clippath" => "clipPath",
+        "feblend" => "feBlend",
+        "fecolormatrix" => "feColorMatrix",
+        "fecomponenttransfer" => "feComponentTransfer",
+        "fecomposite" => "feComposite",
+        "feconvolvematrix" => "feConvolveMatrix",
+        "fediffuselighting" => "feDiffuseLighting",
+        "fedisplacementmap" => "feDisplacementMap",
+        "fedistantlight" => "feDistantLight",
+        "fedropshadow" => "feDropShadow",
+        "feflood" => "feFlood",
+        "fefunca" => "feFuncA",
+        "fefuncb" => "feFuncB",
+        "fefuncg" => "feFuncG",
+        "fefuncr" => "feFuncR",
+        "fegaussianblur" => "feGaussianBlur",
+        "feimage" => "feImage",
+        "femerge" => "feMerge",
+        "femergenode" => "feMergeNode",
+        "femorphology" => "feMorphology",
+        "feoffset" => "feOffset",
+        "fepointlight" => "fePointLight",
+        "fespecularlighting" => "feSpecularLighting",
+        "fespotlight" => "feSpotLight",
+        "fetile" => "feTile",
+        "feturbulence" => "feTurbulence",
+        "foreignobject" => "foreignObject",
+        "glyphref" => "glyphRef",
+        "lineargradient" => "linearGradient",
+        "radialgradient" => "radialGradient",
+        "textpath" => "textPath",
+        _ => name,
     }
 }
 
@@ -1558,6 +1959,96 @@ mod tests {
         assert!(result.document().query_selector("div").is_none());
         assert_eq!(div.child_nodes()[0].data(), Some("inside".to_string()));
         assert_eq!(p.child_nodes()[0].data(), Some("after".to_string()));
+    }
+
+    #[test]
+    fn fragment_parsing_uses_table_and_select_contexts() {
+        let table = NodeHandle::element("table");
+        let table_fragment =
+            TreeBuilder::parse_fragment("<tr><td>cell</td></tr>", &table).fragment();
+        let tbody = table_fragment.child_nodes().into_iter().next().unwrap();
+        assert_eq!(tbody.tag_name().as_deref(), Some("tbody"));
+        let row = tbody.child_nodes().into_iter().next().unwrap();
+        assert_eq!(row.tag_name().as_deref(), Some("tr"));
+        assert_eq!(row.child_nodes()[0].tag_name().as_deref(), Some("td"));
+
+        let tbody_context = NodeHandle::element("tbody");
+        let tbody_fragment =
+            TreeBuilder::parse_fragment("<tr><td>body</td></tr>", &tbody_context).fragment();
+        assert_eq!(tbody_fragment.child_nodes()[0].tag_name().as_deref(), Some("tr"));
+
+        let row_context = NodeHandle::element("tr");
+        let row_fragment =
+            TreeBuilder::parse_fragment("<td>one<td>two", &row_context).fragment();
+        assert_eq!(row_fragment.child_nodes().len(), 2);
+        assert!(row_fragment
+            .child_nodes()
+            .iter()
+            .all(|cell| cell.tag_name().as_deref() == Some("td")));
+
+        let select = NodeHandle::element("select");
+        let select_fragment =
+            TreeBuilder::parse_fragment("<option>one<option>two<div>ignored", &select).fragment();
+        let options = select_fragment.child_nodes();
+        assert_eq!(options.len(), 2);
+        assert!(options
+            .iter()
+            .all(|option| option.tag_name().as_deref() == Some("option")));
+    }
+
+    #[test]
+    fn fragment_parsing_preserves_foreign_namespaces_and_html_integration() {
+        let svg = NodeHandle::xml_element("svg", Some(SVG_NAMESPACE.to_string()));
+        let fragment = TreeBuilder::parse_fragment(
+            "<circle><title>x</title></circle><foreignObject><div>html</div></foreignObject>",
+            &svg,
+        )
+        .fragment();
+        let children = fragment.child_nodes();
+        assert_eq!(children[0].namespace_uri().as_deref(), Some(SVG_NAMESPACE));
+        assert_eq!(children[1].tag_name().as_deref(), Some("foreignObject"));
+        assert_eq!(children[1].namespace_uri().as_deref(), Some(SVG_NAMESPACE));
+        assert_eq!(children[1].child_nodes()[0].namespace_uri(), None);
+
+        let math = NodeHandle::xml_element("math", Some(MATHML_NAMESPACE.to_string()));
+        let fragment = TreeBuilder::parse_fragment("<mi><span>html</span></mi>", &math).fragment();
+        let mi = &fragment.child_nodes()[0];
+        assert_eq!(mi.namespace_uri().as_deref(), Some(MATHML_NAMESPACE));
+        assert_eq!(mi.child_nodes()[0].namespace_uri(), None);
+    }
+
+    #[test]
+    fn fragment_parsing_places_template_nodes_in_the_returned_fragment() {
+        let template = NodeHandle::element("template");
+        let fragment =
+            TreeBuilder::parse_fragment("text<!--marker--><span>inside</span>", &template)
+                .fragment();
+        let children = fragment.child_nodes();
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[0].data().as_deref(), Some("text"));
+        assert_eq!(children[1].node_type(), crate::dom::NodeType::Comment);
+        assert_eq!(children[2].tag_name().as_deref(), Some("span"));
+    }
+
+    #[test]
+    fn fragment_tokenizer_starts_in_the_context_content_model() {
+        let textarea = NodeHandle::element("textarea");
+        let fragment = TreeBuilder::parse_fragment(
+            "a<b>&amp;</textarea><i>end</i>",
+            &textarea,
+        )
+        .fragment();
+        let children = fragment.child_nodes();
+        assert_eq!(children[0].data().as_deref(), Some("a<b>&"));
+        assert_eq!(children[1].tag_name().as_deref(), Some("i"));
+
+        let script = NodeHandle::element("script");
+        let fragment = TreeBuilder::parse_fragment("if (a < b) c();", &script).fragment();
+        assert_eq!(fragment.child_nodes()[0].data().as_deref(), Some("if (a < b) c();"));
+
+        let plaintext = NodeHandle::element("plaintext");
+        let fragment = TreeBuilder::parse_fragment("<b>&amp;</b>", &plaintext).fragment();
+        assert_eq!(fragment.child_nodes()[0].data().as_deref(), Some("<b>&amp;</b>"));
     }
 
     #[test]
