@@ -50,6 +50,23 @@ git_wpt sparse-checkout add \
   "/css/css-font-loading/font-face-reject.html" \
   "/css/css-font-loading/resources/Rochester.otf" \
   "/css/css-font-loading/resources/GenR102.woff2"
+git_wpt sparse-checkout add \
+  "/html/semantics/forms/constraints/support/validator.js" \
+  "/html/semantics/forms/constraints/form-validation-checkValidity.html" \
+  "/html/semantics/forms/constraints/form-validation-reportValidity.html" \
+  "/html/semantics/forms/constraints/form-validation-validate.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-customError.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-patternMismatch.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-rangeOverflow.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-rangeUnderflow.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-stepMismatch.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-tooLong.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-tooShort.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-typeMismatch.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-valid.html" \
+  "/html/semantics/forms/constraints/form-validation-validity-valueMissing.html" \
+  "/html/semantics/forms/constraints/form-validation-willValidate.html" \
+  "/html/semantics/forms/constraints/radio-group-valueMissing.html"
 git_wpt sparse-checkout add "/css/css-transforms/transform-getBoundingClientRect-001.html"
 git_wpt sparse-checkout add \
   "/css/support/parsing-testcommon.js" \

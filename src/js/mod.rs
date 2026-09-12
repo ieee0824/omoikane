@@ -19898,10 +19898,19 @@ b</textarea></form>"#);
         assert_eq!(runtime.take_navigation_requests().len(), 1);
 
         let mut bypass = runtime_from_html(
-            r#"<form id="form" action="/bypass"><input required><button id="send" formnovalidate>Send</button></form>"#,
+            r#"<form id="form" action="/bypass">
+                 <input required>
+                 <button id="send" formnovalidate>Send</button>
+                 <input id="input-submit" type="submit" formnovalidate>
+               </form>"#,
         );
         bypass
             .eval("document.getElementById('form').requestSubmit(document.getElementById('send'))")
+            .unwrap();
+        bypass.run_until_idle().unwrap();
+        assert_eq!(bypass.take_navigation_requests().len(), 1);
+        bypass
+            .eval("document.getElementById('form').requestSubmit(document.getElementById('input-submit'))")
             .unwrap();
         bypass.run_until_idle().unwrap();
         assert_eq!(bypass.take_navigation_requests().len(), 1);
@@ -19940,6 +19949,34 @@ b</textarea></form>"#);
                 .as_boolean()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn barred_controls_preserve_type_specific_intrinsic_validity() {
+        let mut runtime = runtime_from_html(
+            r#"<input id="text" required disabled>
+               <input id="check" type="checkbox" required disabled>
+               <select id="select" required disabled><option value="">Choose</option></select>
+               <textarea id="area" required readonly></textarea>"#,
+        );
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                  const text = document.getElementById('text');
+                  const check = document.getElementById('check');
+                  const select = document.getElementById('select');
+                  const area = document.getElementById('area');
+                  return !text.validity.valueMissing && text.validity.valid &&
+                    check.validity.valueMissing && !check.validity.valid &&
+                    select.validity.valueMissing && !select.validity.valid &&
+                    !area.validity.valueMissing && area.validity.valid &&
+                    [text, check, select, area].every(control =>
+                      !control.willValidate && control.validationMessage === '' && control.checkValidity());
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

@@ -7581,6 +7581,23 @@
     }
   }
 
+  function decimalParts(value) {
+    const match = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(String(value));
+    if (!match || (!match[2] && !match[3])) return null;
+    const digits = (match[2] || "") + (match[3] || "");
+    const coefficient = BigInt((match[1] === "-" ? "-" : "") + (digits || "0"));
+    return { coefficient, exponent: Number(match[4] || 0) - (match[3] || "").length };
+  }
+
+  function decimalStepMismatch(value, base, step) {
+    const parts = [decimalParts(value), decimalParts(base), decimalParts(step)];
+    if (parts.some(part => part === null)) return null;
+    const exponent = Math.min(...parts.map(part => part.exponent));
+    const integers = parts.map(part =>
+      part.coefficient * 10n ** BigInt(part.exponent - exponent));
+    return (integers[0] - integers[1]) % integers[2] !== 0n;
+  }
+
   function inputStepMismatch(control, type, numericValue) {
     if (numericValue === null || !RANGE_INPUT_TYPES.has(type)) return false;
     const rawStep = control.getAttribute("step");
@@ -7591,9 +7608,15 @@
     const minimum = inputValueAsNumber(type, control.getAttribute("min") || "");
     const attributeValue = inputValueAsNumber(type, control.getAttribute("value") || "");
     const base = minimum ?? attributeValue ?? config.defaultBase;
+    if ((type === "number" || type === "range") && parsedStep !== null && parsedStep > 0) {
+      const baseSource = minimum !== null ? control.getAttribute("min") :
+        (attributeValue !== null ? control.getAttribute("value") : "0");
+      const mismatch = decimalStepMismatch(control.value, baseSource, rawStep);
+      if (mismatch !== null) return mismatch;
+    }
     const quotient = (numericValue - base) / step;
     const distance = Math.abs(quotient - Math.round(quotient));
-    return distance > 1e-7 * Math.max(1, Math.abs(quotient));
+    return distance > 1e-7;
   }
 
   function validEmailAddress(value) {
@@ -7616,8 +7639,13 @@
 
   function inputPatternMismatch(control, type, value) {
     if (!value || !PATTERN_INPUT_TYPES.has(type) || !control.hasAttribute("pattern")) return false;
+    const source = control.getAttribute("pattern");
     try {
-      return !new RegExp("^(?:" + control.getAttribute("pattern") + ")$", "u").test(value);
+      new RegExp(source, "v");
+      const expression = new RegExp("^(?:" + source + ")$", "v");
+      const values = type === "email" && control.hasAttribute("multiple")
+        ? value.split(",").map(entry => entry.trim()) : [value];
+      return values.some(entry => !expression.test(entry));
     } catch (_error) {
       return false;
     }
@@ -7632,7 +7660,8 @@
     }
     const document = control.ownerDocument;
     const form = control.__owningForm();
-    const inputs = document ? Array.from(document.querySelectorAll("input")) : [control];
+    const inputs = document ? Array.from(document.querySelectorAll("input")) : [];
+    if (!inputs.includes(control)) inputs.push(control);
     const group = inputs.filter(candidate => candidate.type === "radio" &&
       candidate.name === name && candidate.__owningForm() === form);
     return group.some(candidate => candidate.hasAttribute("required")) &&
@@ -7649,6 +7678,7 @@
       if (type === "checkbox") return !control.checked;
       if (type === "radio") return radioGroupValueMissing(control, radioGroups);
       if (type === "file") return !control.files || control.files.length === 0;
+      if (control.__isDisabledControl() || control.readOnly) return false;
       if (RANGE_INPUT_TYPES.has(type)) return control.value === "" || inputValueAsNumber(type, control.value) === null;
       return control.value === "";
     }
@@ -7659,7 +7689,9 @@
       const first = control.options[0];
       return selected[0] === first && first.parentNode === control && first.value === "";
     }
-    if (control.tagName === "TEXTAREA") return control.value === "";
+    if (control.tagName === "TEXTAREA") {
+      return !control.__isDisabledControl() && !control.readOnly && control.value === "";
+    }
     return false;
   }
 
@@ -7688,14 +7720,20 @@
     const minimumLength = tracksLength ? control.minLength : -1;
     const maximumLength = tracksLength ? control.maxLength : -1;
     const userEdited = Boolean(control.__lastValueChangeWasUser);
+    const reversedTimeRange = type === "time" && numericValue !== null &&
+      minimum !== null && maximum !== null && minimum > maximum;
+    const outsideReversedTimeRange = reversedTimeRange &&
+      numericValue > maximum && numericValue < minimum;
     const flags = {
       valueMissing: controlValueMissing(control, radioGroups),
       typeMismatch: control.tagName === "INPUT" && inputTypeMismatch(control, type, value),
       patternMismatch: control.tagName === "INPUT" && inputPatternMismatch(control, type, value),
       tooLong: userEdited && maximumLength >= 0 && value.length > maximumLength,
       tooShort: userEdited && value !== "" && minimumLength >= 0 && value.length < minimumLength,
-      rangeUnderflow: numericValue !== null && minimum !== null && numericValue < minimum,
-      rangeOverflow: numericValue !== null && maximum !== null && numericValue > maximum,
+      rangeUnderflow: reversedTimeRange ? outsideReversedTimeRange :
+        numericValue !== null && minimum !== null && numericValue < minimum,
+      rangeOverflow: reversedTimeRange ? outsideReversedTimeRange :
+        numericValue !== null && maximum !== null && numericValue > maximum,
       stepMismatch: control.tagName === "INPUT" && inputStepMismatch(control, type, numericValue),
       badInput: false,
       customError: String(control.__customValidityMessage || "") !== "",
@@ -8371,7 +8409,7 @@
     }
     set size(value) {
       const size = Number(value);
-      if (!Number.isInteger(size) || size <= 0) throw new DOMException("Invalid size", "IndexSizeError");
+      if (!Number.isInteger(size) || size < 0) throw new DOMException("Invalid size", "IndexSizeError");
       this.setAttribute("size", String(size));
     }
     get type() { return this.multiple ? "select-multiple" : "select-one"; }

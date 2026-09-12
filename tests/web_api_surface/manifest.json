@@ -204,6 +204,14 @@
       "baseline_supported": true
     },
     {
+      "id": "html.constraint-validation",
+      "area": "html",
+      "description": "Form controls expose live validity state and forms aggregate invalid controls",
+      "setup": "globalThis.__validationForm = document.createElement('form'); globalThis.__validationInput = document.createElement('input'); __validationInput.required = true; __validationForm.appendChild(__validationInput); document.body.appendChild(__validationForm); globalThis.__invalidEvents = 0; __validationInput.addEventListener('invalid', () => { __invalidEvents++; }); globalThis.__invalidFormResult = __validationForm.checkValidity()",
+      "probe": "typeof ValidityState === 'function' && __validationInput.validity instanceof ValidityState && __validationInput.validity === __validationInput.validity && __invalidFormResult === false && __invalidEvents === 1 && __validationInput.validity.valueMissing && !__validationInput.validity.valid && __validationInput.validationMessage !== '' && (() => { __validationInput.value = 'ok'; if (!__validationForm.checkValidity()) return false; __validationInput.setCustomValidity('surface custom error'); return __validationInput.validity.customError && __validationInput.validationMessage === 'surface custom error'; })()",
+      "baseline_supported": false
+    },
+    {
       "id": "html.table-cell-interface",
       "area": "html",
       "description": "Table cells expose the HTMLTableCellElement interface and span/reflection semantics",
