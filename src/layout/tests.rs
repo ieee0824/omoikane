@@ -3910,6 +3910,134 @@ fn flex_column_uses_height_as_main_axis_for_justify_content_and_gap() {
 }
 
 #[test]
+fn flex_column_main_auto_margin_absorbs_space_before_justify_content() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let first = NodeHandle::element("section");
+    let second = NodeHandle::element("section");
+
+    second.set_attribute("class", "auto");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first);
+    container.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; flex-direction: column; width: 100px; height: 100px; justify-content: center; } \
+             section { height: 20px; flex-shrink: 0; } \
+             .auto { margin-top: auto; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let container_box = &layout.children[0];
+    assert_eq!(container_box.children[0].dimensions.content.y, 0.0);
+    assert_eq!(container_box.children[1].dimensions.content.y, 80.0);
+}
+
+#[test]
+fn flex_row_splits_space_across_multiple_main_auto_margins() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let first = NodeHandle::element("section");
+    let second = NodeHandle::element("section");
+
+    first.set_attribute("class", "leading");
+    second.set_attribute("class", "both");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first);
+    container.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 160px; } \
+             section { width: 20px; height: 10px; flex-shrink: 0; } \
+             .leading { margin-left: auto; } \
+             .both { margin-left: auto; margin-right: auto; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 160.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let container_box = &layout.children[0];
+    assert_eq!(container_box.children[0].dimensions.content.x, 40.0);
+    assert_eq!(container_box.children[1].dimensions.content.x, 100.0);
+}
+
+#[test]
+fn flex_main_auto_margin_is_zero_when_items_overflow() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let first = NodeHandle::element("section");
+    let second = NodeHandle::element("section");
+
+    second.set_attribute("class", "auto");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first);
+    container.append_child(second);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { display: flex; width: 30px; justify-content: flex-end; } \
+             section { width: 20px; height: 10px; flex-shrink: 0; } \
+             .auto { margin-left: auto; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 30.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let container_box = &layout.children[0];
+    assert_eq!(container_box.children[0].dimensions.content.x, 0.0);
+    assert_eq!(container_box.children[1].dimensions.content.x, 20.0);
+}
+
+#[test]
 fn flex_column_distributes_min_height_to_growing_child() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

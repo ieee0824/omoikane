@@ -19,6 +19,8 @@ struct FlexItemSpec {
     text_nodes: Vec<NodeHandle>,
     base_main_size: f32,
     min_main_size: f32,
+    main_start_auto: bool,
+    main_end_auto: bool,
     explicit_cross_size: Option<f32>,
     flex_grow: f32,
     flex_shrink: f32,
@@ -106,11 +108,15 @@ pub(super) fn layout_flex_container(
                 .unwrap_or_else(|| super::minimum_content_width(&child, resolver)),
             FlexDirection::Column => explicit_length(&child_style, "min-height").unwrap_or(0.0),
         };
+        let (main_start_auto, main_end_auto) =
+            main_axis_auto_margins(&child_style, direction);
         items.push(FlexItemSpec {
             node: child,
             text_nodes: Vec::new(),
             base_main_size,
             min_main_size,
+            main_start_auto,
+            main_end_auto,
             explicit_cross_size: explicit_cross_size(&child_style, direction),
             flex_grow: flex_grow(&child_style),
             flex_shrink: flex_shrink(&child_style),
@@ -332,16 +338,33 @@ pub(super) fn layout_flex_container(
             }
         }
 
-        let total_main_size: f32 = laid_out
-            .iter()
-            .map(|item| match direction {
-                FlexDirection::Row => item.layout.total_width(),
-                FlexDirection::Column => item.layout.total_height(),
-            })
-            .sum();
+        let (total_main_size, auto_margin_count) = laid_out.iter().fold(
+            (0.0f32, 0usize),
+            |(total_size, auto_margins), item| {
+                let item_size = match direction {
+                    FlexDirection::Row => item.layout.total_width(),
+                    FlexDirection::Column => item.layout.total_height(),
+                };
+                (
+                    total_size + item_size,
+                    auto_margins
+                        + usize::from(item.spec.main_start_auto)
+                        + usize::from(item.spec.main_end_auto),
+                )
+            },
+        );
         let used_main_size = total_main_size + fixed_main_gap;
-        let (line_start, justify_gap) =
-            justify_offsets(justify, available_main_size, used_main_size, laid_out.len());
+        let positive_free_space = (available_main_size - used_main_size).max(0.0);
+        let auto_margin = if auto_margin_count > 0 && positive_free_space > 0.0 {
+            positive_free_space / auto_margin_count as f32
+        } else {
+            0.0
+        };
+        let (line_start, justify_gap) = if auto_margin > 0.0 {
+            (0.0, 0.0)
+        } else {
+            justify_offsets(justify, available_main_size, used_main_size, laid_out.len())
+        };
 
         let mut main_cursor = match direction {
             FlexDirection::Row => x + line_start,
@@ -366,6 +389,10 @@ pub(super) fn layout_flex_container(
             let align_value = item.align_self.unwrap_or(align);
             let cross_offset = align_offset(align_value, line_cross_size, child_cross_size);
 
+            if item.main_start_auto {
+                main_cursor += auto_margin;
+            }
+
             let (outer_x, outer_y) = match direction {
                 FlexDirection::Row => (main_cursor, cross_cursor + cross_offset),
                 FlexDirection::Column => (x + cross_offset, main_cursor),
@@ -373,10 +400,12 @@ pub(super) fn layout_flex_container(
             translate_layout_box_to_outer(&mut child, outer_x, outer_y);
             children.push(child);
 
+            main_cursor += child_main_size;
+            if item.main_end_auto {
+                main_cursor += auto_margin;
+            }
             if index + 1 < laid_out_count {
-                main_cursor += child_main_size + main_gap + justify_gap;
-            } else {
-                main_cursor += child_main_size;
+                main_cursor += main_gap + justify_gap;
             }
         }
 
@@ -470,6 +499,22 @@ fn flex_wrap(style: &ComputedStyle) -> FlexWrap {
             FlexWrap::Wrap
         }
         _ => FlexWrap::NoWrap,
+    }
+}
+
+fn main_axis_auto_margins(
+    style: &ComputedStyle,
+    direction: FlexDirection,
+) -> (bool, bool) {
+    match direction {
+        FlexDirection::Row => (
+            super::is_auto(style.get("margin-left")),
+            super::is_auto(style.get("margin-right")),
+        ),
+        FlexDirection::Column => (
+            super::is_auto(style.get("margin-top")),
+            super::is_auto(style.get("margin-bottom")),
+        ),
     }
 }
 
