@@ -12,6 +12,14 @@ const LONGHANDS: [&str; 7] = [
     "font-family",
 ];
 
+pub(super) fn expand_value(value: Value, important: bool) -> Vec<Declaration> {
+    let rendered = super::style::render_value(&value);
+    let Ok(tokens) = super::tokenize(&rendered) else {
+        return Vec::new();
+    };
+    expand(&tokens, important).unwrap_or_default()
+}
+
 pub(super) fn expand(
     tokens: &[CssToken],
     important: bool,

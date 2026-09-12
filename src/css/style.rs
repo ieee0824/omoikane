@@ -45,6 +45,7 @@ pub enum ComputedValue {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ComputedStyle {
     properties: BTreeMap<String, ComputedValue>,
+    custom_properties: BTreeMap<String, Value>,
 }
 
 impl ComputedStyle {
@@ -915,17 +916,7 @@ impl StyleResolver {
             }
         }
 
-        candidates.sort_by(|left, right| {
-            cascade_rank(left)
-                .cmp(&cascade_rank(right))
-                .then(encapsulation_rank(left).cmp(&encapsulation_rank(right)))
-                .then(left.inline.cmp(&right.inline))
-                .then_with(|| compare_layer_priority(left, right))
-                .then(right.prefixed_alias.cmp(&left.prefixed_alias))
-                .then(left.specificity.cmp(&right.specificity))
-                .then_with(|| compare_scope_proximity(left, right))
-                .then(left.source_order.cmp(&right.source_order))
-        });
+        candidates.sort_by(compare_candidate_priority);
 
         let mut custom_candidates = candidates
             .iter()
@@ -933,10 +924,31 @@ impl StyleResolver {
             .cloned()
             .collect();
         remove_reverted_candidates(&mut custom_candidates, None);
-        let mut custom_properties = inherited_custom_properties(parent_style);
+        let inherited_custom_properties = inherited_custom_properties(parent_style);
+        let mut custom_properties = inherited_custom_properties.clone();
         for candidate in custom_candidates {
-            custom_properties.insert(candidate.name, candidate.value);
+            match &candidate.value {
+                Value::Keyword(keyword)
+                    if keyword.eq_ignore_ascii_case("inherit")
+                        || keyword.eq_ignore_ascii_case("unset") =>
+                {
+                    if let Some(inherited) = inherited_custom_properties.get(&candidate.name) {
+                        custom_properties.insert(candidate.name, inherited.clone());
+                    } else {
+                        custom_properties.remove(&candidate.name);
+                    }
+                }
+                Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("initial") => {
+                    custom_properties.remove(&candidate.name);
+                }
+                _ => {
+                    custom_properties.insert(candidate.name, candidate.value);
+                }
+            }
         }
+        let custom_properties = resolve_custom_property_values(&custom_properties);
+        candidates = expand_pending_shorthand_candidates(candidates, &custom_properties);
+        candidates.sort_by(compare_candidate_priority);
         remove_reverted_candidates(&mut candidates, Some(&custom_properties));
 
         let mut properties: BTreeMap<String, ComputedValue> = BTreeMap::new();
@@ -1088,7 +1100,10 @@ impl StyleResolver {
                 .sample(node.identity(), &mut properties);
         }
 
-        ComputedStyle { properties }
+        ComputedStyle {
+            properties,
+            custom_properties,
+        }
     }
 
     /// Applies a deterministic animation snapshot. Completed forwards/both
@@ -3594,6 +3609,71 @@ fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
     (importance, origin)
 }
 
+fn compare_candidate_priority(left: &Candidate, right: &Candidate) -> std::cmp::Ordering {
+    cascade_rank(left)
+        .cmp(&cascade_rank(right))
+        .then(encapsulation_rank(left).cmp(&encapsulation_rank(right)))
+        .then(left.inline.cmp(&right.inline))
+        .then_with(|| compare_layer_priority(left, right))
+        .then(right.prefixed_alias.cmp(&left.prefixed_alias))
+        .then(left.specificity.cmp(&right.specificity))
+        .then_with(|| compare_scope_proximity(left, right))
+        .then(left.source_order.cmp(&right.source_order))
+}
+
+fn expand_pending_shorthand_candidates(
+    candidates: Vec<Candidate>,
+    custom_properties: &BTreeMap<String, Value>,
+) -> Vec<Candidate> {
+    let mut expanded_candidates = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if !super::shorthand::is_deferred_var_shorthand(&candidate.name)
+            || !value_contains_var_function(&candidate.value)
+        {
+            expanded_candidates.push(candidate);
+            continue;
+        }
+
+        let resolved = resolve_value_with_custom_properties(&candidate.value, custom_properties);
+        let mut declarations = resolved.map_or_else(Vec::new, |resolved| {
+            if candidate.name == "transition" {
+                super::expand_transition_shorthand(
+                    Value::Keyword(render_value(&resolved)),
+                    candidate.important,
+                )
+            } else {
+                super::shorthand::expand_shorthand(&candidate.name, resolved, candidate.important)
+            }
+        });
+        let invalid = declarations.is_empty()
+            || declarations.len() == 1
+                && declarations[0].name.eq_ignore_ascii_case(&candidate.name);
+        if invalid {
+            // A var()-dependent shorthand has already won the cascade. If its
+            // substituted value is invalid at computed-value time, every
+            // longhand receives unset; the engine must not fall back to an
+            // earlier declaration.
+            declarations = super::shorthand::expand_shorthand(
+                &candidate.name,
+                Value::Keyword("unset".to_string()),
+                candidate.important,
+            );
+        }
+
+        for declaration in declarations {
+            let name = canonical_property_name(&declaration.name).to_string();
+            expanded_candidates.push(Candidate {
+                prefixed_alias: is_prefixed_property_alias(&declaration.name),
+                name,
+                value: declaration.value,
+                important: declaration.important,
+                ..candidate.clone()
+            });
+        }
+    }
+    expanded_candidates
+}
+
 fn compare_layer_priority(left: &Candidate, right: &Candidate) -> std::cmp::Ordering {
     if left.inline || right.inline {
         return std::cmp::Ordering::Equal;
@@ -4378,12 +4458,14 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
     })
 }
 
-fn value_contains_var_function(value: &Value) -> bool {
+pub(super) fn value_contains_var_function(value: &Value) -> bool {
     match value {
         Value::Function { name, arguments } => {
             name.eq_ignore_ascii_case("var") || arguments.iter().any(value_contains_var_function)
         }
-        Value::List(values) => values.iter().any(value_contains_var_function),
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().any(value_contains_var_function)
+        }
         _ => false,
     }
 }
@@ -6257,16 +6339,49 @@ fn computed_value_css_text(value: &ComputedValue) -> String {
 }
 
 fn resolve_initial_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
-    properties.retain(|_, value| {
-        !matches!(
-            value,
-            ComputedValue::Keyword(keyword)
-                if matches!(
-                    keyword.to_ascii_lowercase().as_str(),
-                    "initial" | "unset" | "revert" | "revert-layer"
-                )
-        )
-    });
+    let initial_names: Vec<String> = properties
+        .iter()
+        .filter_map(|(name, value)| {
+            matches!(
+                value,
+                ComputedValue::Keyword(keyword)
+                    if matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "initial" | "unset" | "revert" | "revert-layer"
+                    )
+            )
+            .then(|| name.clone())
+        })
+        .collect();
+    for name in initial_names {
+        if is_margin_or_padding_longhand(&name) {
+            properties.insert(name, ComputedValue::Px(0.0));
+        } else {
+            properties.remove(&name);
+        }
+    }
+}
+
+fn is_margin_or_padding_longhand(name: &str) -> bool {
+    matches!(
+        name,
+        "margin-top"
+            | "margin-right"
+            | "margin-bottom"
+            | "margin-left"
+            | "margin-inline-start"
+            | "margin-inline-end"
+            | "margin-block-start"
+            | "margin-block-end"
+            | "padding-top"
+            | "padding-right"
+            | "padding-bottom"
+            | "padding-left"
+            | "padding-inline-start"
+            | "padding-inline-end"
+            | "padding-block-start"
+            | "padding-block-end"
+    )
 }
 
 /// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.
@@ -6740,7 +6855,7 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
     p
 }
 
-fn render_value(value: &Value) -> String {
+pub(super) fn render_value(value: &Value) -> String {
     match value {
         Value::Keyword(value) => value.clone(),
         Value::Length(number, unit) => format!("{number}{unit}"),
@@ -6830,31 +6945,19 @@ fn render_font_family_value(values: &[Value]) -> String {
 }
 
 fn inherited_custom_properties(parent_style: Option<&ComputedStyle>) -> BTreeMap<String, Value> {
-    let mut custom_properties = BTreeMap::new();
-    let Some(parent_style) = parent_style else {
-        return custom_properties;
-    };
-    for (name, value) in parent_style.properties() {
-        if !name.starts_with("--") {
-            continue;
-        }
-        custom_properties.insert(name.clone(), computed_to_value(value));
-    }
-    custom_properties
+    parent_style
+        .map(|style| style.custom_properties.clone())
+        .unwrap_or_default()
 }
 
-fn computed_to_value(value: &ComputedValue) -> Value {
-    match value {
-        ComputedValue::Keyword(value) => Value::Keyword(value.clone()),
-        ComputedValue::Px(value) => Value::Length(*value, "px".to_string()),
-        ComputedValue::Percentage(value) => Value::Percentage(*value),
-        ComputedValue::Color(value) => Value::Color(value.clone()),
-        ComputedValue::String(value) => Value::String(value.clone()),
-        ComputedValue::Number(value) => Value::Number(*value),
-        ComputedValue::CalcPxPercent(px, pct) => {
-            Value::Keyword(format!("calc({}px + {}%)", px, pct))
-        }
-    }
+fn resolve_custom_property_values(specified: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    specified
+        .iter()
+        .filter_map(|(name, value)| {
+            resolve_value_with_custom_properties(value, specified)
+                .map(|resolved| (name.clone(), resolved))
+        })
+        .collect()
 }
 
 /// Converts a `ComputedValue` back into a `Value` for re-processing (e.g., var() resolution).
@@ -6912,14 +7015,36 @@ fn resolve_value_with_custom_properties_inner(
         Value::List(values) => {
             let mut resolved_values = Vec::with_capacity(values.len());
             for item in values {
-                resolved_values.push(resolve_value_with_custom_properties_inner(
+                let resolved = resolve_value_with_custom_properties_inner(
                     item,
                     custom_properties,
                     stack,
                     depth + 1,
-                )?);
+                )?;
+                if let Value::List(values) = resolved {
+                    resolved_values.extend(values);
+                } else {
+                    resolved_values.push(resolved);
+                }
             }
             Some(Value::List(resolved_values))
+        }
+        Value::CommaList(values) => {
+            let mut resolved_values = Vec::with_capacity(values.len());
+            for item in values {
+                let resolved = resolve_value_with_custom_properties_inner(
+                    item,
+                    custom_properties,
+                    stack,
+                    depth + 1,
+                )?;
+                if let Value::CommaList(values) = resolved {
+                    resolved_values.extend(values);
+                } else {
+                    resolved_values.push(resolved);
+                }
+            }
+            Some(Value::CommaList(resolved_values))
         }
         _ => Some(value.clone()),
     }

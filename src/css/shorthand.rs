@@ -3,10 +3,20 @@
 use super::{Declaration, Value};
 
 pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    // A shorthand containing var() is a pending-substitution value. Its
+    // grammar can only be checked after the element's custom properties have
+    // won the cascade, so keep the shorthand intact until style resolution.
+    if is_deferred_var_shorthand(name) && super::style::value_contains_var_function(&value) {
+        return vec![Declaration {
+            name: name.to_string(),
+            value,
+            important,
+        }];
+    }
     if name == "all" {
         return expand_all(value, important);
     }
-    if let Some(declarations) = expand_revert_layer_shorthand(name, &value, important) {
+    if let Some(declarations) = expand_css_wide_shorthand(name, &value, important) {
         return declarations;
     }
     match name {
@@ -36,6 +46,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "flex-flow" => expand_flex_flow_shorthand(value, important),
         "animation" => expand_animation_shorthand(value, important),
         "transition" => super::expand_transition_shorthand(value, important),
+        "font" => super::font_shorthand::expand_value(value, important),
         "outline" => expand_outline_shorthand(value, important),
         "grid-column" | "grid-row" => expand_grid_axis_shorthand(name, value, important),
         "grid-area" => expand_grid_area_shorthand(value, important),
@@ -59,6 +70,50 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
     }
 }
 
+pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
+    matches!(
+        name,
+        "all"
+            | "margin"
+            | "padding"
+            | "margin-inline"
+            | "margin-block"
+            | "padding-inline"
+            | "padding-block"
+            | "border-width"
+            | "border-style"
+            | "border-color"
+            | "border"
+            | "border-top"
+            | "border-right"
+            | "border-bottom"
+            | "border-left"
+            | "background"
+            | "background-position"
+            | "mask"
+            | "-webkit-mask"
+            | "mask-position"
+            | "-webkit-mask-position"
+            | "overflow"
+            | "flex"
+            | "text-decoration"
+            | "border-radius"
+            | "list-style"
+            | "flex-flow"
+            | "animation"
+            | "transition"
+            | "font"
+            | "outline"
+            | "grid-column"
+            | "grid-row"
+            | "grid-area"
+            | "grid-template"
+            | "place-items"
+            | "place-self"
+            | "place-content"
+    )
+}
+
 fn expand_all(value: Value, important: bool) -> Vec<Declaration> {
     let Value::Keyword(keyword) = &value else {
         return Vec::new();
@@ -79,7 +134,7 @@ fn expand_all(value: Value, important: bool) -> Vec<Declaration> {
         .collect()
 }
 
-fn expand_revert_layer_shorthand(
+fn expand_css_wide_shorthand(
     name: &str,
     value: &Value,
     important: bool,
@@ -87,7 +142,11 @@ fn expand_revert_layer_shorthand(
     let Value::Keyword(keyword) = value else {
         return None;
     };
-    if !keyword.eq_ignore_ascii_case("revert-layer") {
+    let keyword = keyword.to_ascii_lowercase();
+    if !matches!(
+        keyword.as_str(),
+        "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+    ) {
         return None;
     }
 
@@ -209,6 +268,27 @@ fn expand_revert_layer_shorthand(
         .into_iter()
         .map(str::to_string)
         .collect(),
+        "transition" => [
+            "transition-property",
+            "transition-duration",
+            "transition-timing-function",
+            "transition-delay",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "font" => [
+            "font-style",
+            "font-variant",
+            "font-weight",
+            "font-stretch",
+            "font-size",
+            "line-height",
+            "font-family",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
         "outline" => ["outline-style", "outline-width", "outline-color"]
             .into_iter()
             .map(str::to_string)
@@ -254,7 +334,7 @@ fn expand_revert_layer_shorthand(
             .into_iter()
             .map(|name| Declaration {
                 name,
-                value: Value::Keyword("revert-layer".to_string()),
+                value: Value::Keyword(keyword.clone()),
                 important,
             })
             .collect(),

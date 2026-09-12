@@ -23539,6 +23539,35 @@ b</textarea></form>"#,
     }
 
     #[test]
+    fn style_assignment_moves_replaced_declaration_to_the_end() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div.clone());
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval(
+                r#"
+            const el = document.querySelector("div");
+            el.style.cssText = "border-left: 5px solid black; border-width: 1px";
+            el.style.borderLeft = "3px dotted red";
+        "#,
+            )
+            .unwrap();
+
+        let style_attr = div
+            .attributes()
+            .unwrap()
+            .get("style")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            style_attr, "border-width: 1px; border-left: 3px dotted red;",
+            "a replaced declaration must be appended after declarations that previously followed it"
+        );
+    }
+
+    #[test]
     fn style_remove_property_returns_last_wins_and_removes_all_duplicates() {
         // With duplicate declarations, removeProperty must return the last-wins
         // value (not the first) and remove every occurrence.

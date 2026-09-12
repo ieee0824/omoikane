@@ -43,6 +43,7 @@
     { "path": "css/css-cascade/layer-import.html" },
     { "path": "css/css-cascade/parsing/layer-import-parsing.html" },
     { "path": "css/css-cascade/parsing/supports-import-parsing.html" },
+    { "path": "css/css-variables/variable-substitution-shorthands.html" },
     { "path": "css/cssom/CSSContainerRule.tentative.html" },
     { "path": "css/css-font-loading/fontfaceset-has.html" },
     { "path": "css/css-font-loading/fontfaceset-clear-css-connected.html" },

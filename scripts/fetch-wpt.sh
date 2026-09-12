@@ -45,6 +45,7 @@ git_wpt sparse-checkout add \
   "/css/css-cascade/layer-import.html" \
   "/css/css-cascade/parsing/layer-import-parsing.html" \
   "/css/css-cascade/parsing/supports-import-parsing.html"
+git_wpt sparse-checkout add "/css/css-variables/variable-substitution-shorthands.html"
 git_wpt sparse-checkout add "/css/cssom/CSSContainerRule.tentative.html"
 git_wpt sparse-checkout add \
   "/css/css-font-loading/fontfaceset-has.html" \
