@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::dom::NodeHandle;
+use crate::dom::{Node, NodeHandle};
 
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
@@ -26,6 +26,70 @@ pub fn parse(bytes: &[u8]) -> Result<NodeHandle, XmlParseError> {
         return Err(XmlParseError::new("invalid XML character"));
     }
     Parser::new(input).parse_document()
+}
+
+/// Parses an XML fragment with the namespace bindings visible from `context`.
+pub fn parse_fragment(bytes: &[u8], context: &NodeHandle) -> Result<NodeHandle, XmlParseError> {
+    let input = std::str::from_utf8(bytes)
+        .map_err(|_| XmlParseError::new("XML input is not valid UTF-8"))?;
+    let mut ancestors = Vec::new();
+    let mut current = Some(context.clone());
+    while let Some(node) = current {
+        current = node.parent_node();
+        ancestors.push(node);
+    }
+    ancestors.reverse();
+
+    let mut namespaces = HashMap::new();
+    for node in ancestors {
+        for (name, _, _, value) in node.attribute_records().unwrap_or_default() {
+            if name == "xmlns" {
+                namespaces.insert(String::new(), value);
+            } else if let Some(prefix) = name.strip_prefix("xmlns:") {
+                namespaces.insert(prefix.to_string(), value);
+            }
+        }
+    }
+    if let Some(namespace) = context.namespace_uri() {
+        namespaces
+            .entry(context.prefix().unwrap_or_default())
+            .or_insert(namespace);
+    }
+
+    let mut wrapper = String::from("<omoikane-fragment-root");
+    let mut declarations: Vec<_> = namespaces.into_iter().collect();
+    declarations.sort_by(|left, right| left.0.cmp(&right.0));
+    for (prefix, namespace) in declarations {
+        wrapper.push_str(if prefix.is_empty() { " xmlns=\"" } else { " xmlns:" });
+        if !prefix.is_empty() {
+            wrapper.push_str(&prefix);
+            wrapper.push_str("=\"");
+        }
+        wrapper.push_str(&escape_xml_attribute(&namespace));
+        wrapper.push('"');
+    }
+    wrapper.push('>');
+    wrapper.push_str(input);
+    wrapper.push_str("</omoikane-fragment-root>");
+
+    let document = parse(wrapper.as_bytes())?;
+    let root = document
+        .child_nodes()
+        .into_iter()
+        .find(|node| node.node_type() == crate::dom::NodeType::Element)
+        .ok_or_else(|| XmlParseError::new("missing XML fragment wrapper"))?;
+    let fragment = NodeHandle::document_fragment();
+    for child in root.child_nodes() {
+        fragment.append_child(child);
+    }
+    Ok(fragment)
+}
+
+fn escape_xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
 }
 
 struct OpenElement {
@@ -272,6 +336,18 @@ mod tests {
         assert!(parse(br#"<r><?x?></r>"#).is_ok());
     }
     #[test] fn rejects_mismatched_tags_unquoted_attributes_and_unknown_entities() { for xml in ["<a></b>", "<a x=y/>", "<a>&bogus;</a>"] { assert!(parse(xml.as_bytes()).is_err(), "expected error for {xml}"); } }
+    #[test]
+    fn parses_contextual_fragments_with_in_scope_namespaces() {
+        let context = NodeHandle::xml_element("root", Some("urn:default".to_string()));
+        context.set_attribute("xmlns:p", "urn:prefixed");
+        let fragment = parse_fragment(b"text<child/><p:item/>", &context).unwrap();
+        let children = fragment.child_nodes();
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[0].data().as_deref(), Some("text"));
+        assert_eq!(children[1].namespace_uri().as_deref(), Some("urn:default"));
+        assert_eq!(children[2].namespace_uri().as_deref(), Some("urn:prefixed"));
+        assert!(parse_fragment(b"<child>", &context).is_err());
+    }
     #[test] fn rejects_invalid_utf8_and_non_utf8_declaration() { assert!(parse(b"<r>\xff</r>").is_err()); assert!(parse(br#"<?xml version='1.0' encoding='ISO-8859-1'?><r/>"#).is_err()); }
     #[test] fn rejects_xhtml_crossed_tags_as_whole_document_error() { assert!(parse(br#"<html><p><strong/>x</strong></p></html>"#).is_err()); }
     #[test] fn rejects_invalid_reserved_namespace_prefix_bindings() {

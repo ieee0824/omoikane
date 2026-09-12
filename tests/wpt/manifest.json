@@ -43,6 +43,7 @@
     { "path": "css/css-font-loading/fontfaceset-update-after-stylesheet-change.html" },
     { "path": "css/css-font-loading/fontfacesetloadevent-constructor.html" },
     { "path": "css/css-font-loading/font-face-reject.html" },
+    { "path": "domparsing/createContextualFragment.html" },
     { "path": "css/css-transforms/transform-getBoundingClientRect-001.html" },
     { "path": "css/css-transitions/parsing/transition-property-valid.html" },
     { "path": "css/css-transitions/parsing/transition-property-invalid.html" },
