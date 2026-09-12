@@ -514,8 +514,6 @@ impl Canvas {
         let y0 = area.y.floor().max(0.0) as i32;
         let y1 = (area.y + area.height).ceil().min(self.height as f32) as i32;
 
-        let rx = area.x;
-        let ry = area.y;
         let rw = area.width;
         let rh = area.height;
 
@@ -530,35 +528,38 @@ impl Canvas {
         let rgba = [color.r, color.g, color.b, color.a];
         for py in y0..y1 {
             let fy = py as f32 + 0.5;
-            if fy < ry || fy > ry + rh {
-                continue;
-            }
             if let Some(ca) = clip_area
                 && (fy < ca.y || fy >= ca.y + ca.height)
             {
                 continue;
             }
 
-            let mut left = rx;
-            let mut right = rx + rw;
-            if fy < ry + tl {
-                let dy = fy - (ry + tl);
-                left = left.max(rx + tl - (tl * tl - dy * dy).max(0.0).sqrt());
+            let mut spans = [None; ROUNDED_RECT_COVERAGE_SAMPLES];
+            let mut min_left = f32::INFINITY;
+            let mut max_left = f32::NEG_INFINITY;
+            let mut min_right = f32::INFINITY;
+            let mut max_right = f32::NEG_INFINITY;
+            for (sample, span) in spans.iter_mut().enumerate() {
+                let sample_y = py as f32
+                    + (sample as f32 + 0.5) / ROUNDED_RECT_COVERAGE_SAMPLES as f32;
+                *span = rounded_rect_horizontal_span(
+                    area,
+                    (tl, tr, br, bl),
+                    sample_y,
+                );
+                if let Some((left, right)) = *span {
+                    min_left = min_left.min(left);
+                    max_left = max_left.max(left);
+                    min_right = min_right.min(right);
+                    max_right = max_right.max(right);
+                }
             }
-            if fy < ry + tr {
-                let dy = fy - (ry + tr);
-                right = right.min(rx + rw - tr + (tr * tr - dy * dy).max(0.0).sqrt());
+            if !min_left.is_finite() {
+                continue;
             }
-            if fy > ry + rh - bl {
-                let dy = fy - (ry + rh - bl);
-                left = left.max(rx + bl - (bl * bl - dy * dy).max(0.0).sqrt());
-            }
-            if fy > ry + rh - br {
-                let dy = fy - (ry + rh - br);
-                right = right.min(rx + rw - br + (br * br - dy * dy).max(0.0).sqrt());
-            }
-            let mut span_start = ((left - 0.5).ceil() as i32).clamp(0, canvas_right);
-            let mut span_end = (((right - 0.5).floor() as i32) + 1).clamp(0, canvas_right);
+
+            let mut span_start = (min_left.floor() as i32).clamp(0, canvas_right);
+            let mut span_end = (max_right.ceil() as i32).clamp(0, canvas_right);
             if let Some(ca) = clip_area {
                 span_start = span_start.max((ca.x - 0.5).ceil() as i32);
                 span_end = span_end.min((ca.x + ca.width - 0.5).ceil() as i32);
@@ -566,15 +567,56 @@ impl Canvas {
             if span_start >= span_end || py < 0 || py >= self.height as i32 {
                 continue;
             }
-            let start = py as usize * stride + span_start as usize * 4;
-            let end = py as usize * stride + span_end as usize * 4;
-            if color.a == 255 {
-                for pixel in self.pixels[start..end].chunks_exact_mut(4) {
-                    pixel.copy_from_slice(&rgba);
+
+            let (full_start, full_end) = if spans.iter().all(Option::is_some) {
+                (
+                    (max_left.ceil() as i32).clamp(span_start, span_end),
+                    (min_right.floor() as i32).clamp(span_start, span_end),
+                )
+            } else {
+                (span_end, span_start)
+            };
+            if full_start < full_end {
+                for px in span_start..full_start {
+                    let coverage = rounded_rect_span_coverage(&spans, px);
+                    let index = py as usize * stride + px as usize * 4;
+                    blend_pixel_with_coverage(
+                        &mut self.pixels[index..index + 4],
+                        color,
+                        coverage,
+                    );
+                }
+
+                let start = py as usize * stride + full_start as usize * 4;
+                let end = py as usize * stride + full_end as usize * 4;
+                if color.a == 255 {
+                    for pixel in self.pixels[start..end].chunks_exact_mut(4) {
+                        pixel.copy_from_slice(&rgba);
+                    }
+                } else {
+                    for pixel in self.pixels[start..end].chunks_exact_mut(4) {
+                        blend_pixel(pixel, color);
+                    }
+                }
+
+                for px in full_end..span_end {
+                    let coverage = rounded_rect_span_coverage(&spans, px);
+                    let index = py as usize * stride + px as usize * 4;
+                    blend_pixel_with_coverage(
+                        &mut self.pixels[index..index + 4],
+                        color,
+                        coverage,
+                    );
                 }
             } else {
-                for pixel in self.pixels[start..end].chunks_exact_mut(4) {
-                    blend_pixel(pixel, color);
+                for px in span_start..span_end {
+                    let coverage = rounded_rect_span_coverage(&spans, px);
+                    let index = py as usize * stride + px as usize * 4;
+                    blend_pixel_with_coverage(
+                        &mut self.pixels[index..index + 4],
+                        color,
+                        coverage,
+                    );
                 }
             }
         }
@@ -721,38 +763,29 @@ impl Canvas {
                     continue;
                 }
 
-                // outer の内側かつ inner の外側
-                if !point_in_rounded_rect(
-                    fx,
-                    fy,
-                    outer.x,
-                    outer.y,
-                    outer.width,
-                    outer.height,
-                    outer_tl,
-                    outer_tr,
-                    outer_br,
-                    outer_bl,
-                ) {
-                    continue;
-                }
-                if point_in_rounded_rect(
-                    fx,
-                    fy,
-                    inner.x,
-                    inner.y,
-                    inner.width,
-                    inner.height,
-                    inner_tl,
-                    inner_tr,
-                    inner_br,
-                    inner_bl,
-                ) {
+                let outer_coverage = rounded_rect_pixel_coverage(
+                    px,
+                    py,
+                    outer,
+                    (outer_tl, outer_tr, outer_br, outer_bl),
+                );
+                let inner_coverage = rounded_rect_pixel_coverage(
+                    px,
+                    py,
+                    inner,
+                    (inner_tl, inner_tr, inner_br, inner_bl),
+                );
+                let coverage = (outer_coverage - inner_coverage).clamp(0.0, 1.0);
+                if coverage <= 0.0 {
                     continue;
                 }
 
                 let index = ((py as u32 * self.width + px as u32) * 4) as usize;
-                blend_pixel(&mut self.pixels[index..index + 4], color);
+                blend_pixel_with_coverage(
+                    &mut self.pixels[index..index + 4],
+                    color,
+                    coverage,
+                );
             }
         }
     }
@@ -3409,18 +3442,13 @@ fn paint_background_image_rounded(
     let (tl, tr, br, bl) = radii;
     for y in y0..y1 {
         for x in x0..x1 {
-            if !point_in_rounded_rect(
-                x as f32 + 0.5,
-                y as f32 + 0.5,
-                area.x,
-                area.y,
-                area.width,
-                area.height,
-                tl,
-                tr,
-                br,
-                bl,
-            ) {
+            let coverage = rounded_rect_pixel_coverage(
+                x as i32,
+                y as i32,
+                area,
+                (tl, tr, br, bl),
+            );
+            if coverage <= 0.0 {
                 continue;
             }
             let source_x = x - x0;
@@ -3433,9 +3461,10 @@ fn paint_background_image_rounded(
                 b: layer.pixels[source_index + 2],
                 a: layer.pixels[source_index + 3],
             };
-            blend_pixel(
+            blend_pixel_with_coverage(
                 &mut canvas.pixels[destination_index..destination_index + 4],
                 color,
+                coverage,
             );
         }
     }
@@ -4888,6 +4917,108 @@ fn normalize_rect(rect: Rect) -> Option<Rect> {
     }
 }
 
+const ROUNDED_RECT_COVERAGE_SAMPLES: usize = 8;
+
+#[inline]
+fn rounded_rect_span_coverage(
+    spans: &[Option<(f32, f32)>; ROUNDED_RECT_COVERAGE_SAMPLES],
+    px: i32,
+) -> f32 {
+    spans
+        .iter()
+        .flatten()
+        .map(|&(left, right)| {
+            (right.min(px as f32 + 1.0) - left.max(px as f32)).clamp(0.0, 1.0)
+        })
+        .sum::<f32>()
+        / ROUNDED_RECT_COVERAGE_SAMPLES as f32
+}
+
+fn rounded_rect_horizontal_span(
+    rect: Rect,
+    radii: (f32, f32, f32, f32),
+    y: f32,
+) -> Option<(f32, f32)> {
+    if rect.width <= 0.0
+        || rect.height <= 0.0
+        || y < rect.y
+        || y >= rect.y + rect.height
+    {
+        return None;
+    }
+
+    let (tl, tr, br, bl) = radii;
+    let mut left = rect.x;
+    let mut right = rect.x + rect.width;
+    if y < rect.y + tl {
+        let dy = y - (rect.y + tl);
+        left = left.max(rect.x + tl - (tl * tl - dy * dy).max(0.0).sqrt());
+    }
+    if y < rect.y + tr {
+        let dy = y - (rect.y + tr);
+        right = right.min(
+            rect.x + rect.width - tr + (tr * tr - dy * dy).max(0.0).sqrt(),
+        );
+    }
+    if y > rect.y + rect.height - bl {
+        let dy = y - (rect.y + rect.height - bl);
+        left = left.max(rect.x + bl - (bl * bl - dy * dy).max(0.0).sqrt());
+    }
+    if y > rect.y + rect.height - br {
+        let dy = y - (rect.y + rect.height - br);
+        right = right.min(
+            rect.x + rect.width - br + (br * br - dy * dy).max(0.0).sqrt(),
+        );
+    }
+
+    (right > left).then_some((left, right))
+}
+
+pub(super) fn rounded_rect_pixel_coverage(
+    px: i32,
+    py: i32,
+    rect: Rect,
+    radii: (f32, f32, f32, f32),
+) -> f32 {
+    let pixel_left = px as f32;
+    let pixel_top = py as f32;
+    let pixel_right = pixel_left + 1.0;
+    let pixel_bottom = pixel_top + 1.0;
+    if pixel_right <= rect.x
+        || pixel_left >= rect.x + rect.width
+        || pixel_bottom <= rect.y
+        || pixel_top >= rect.y + rect.height
+    {
+        return 0.0;
+    }
+    if [
+        (pixel_left, pixel_top),
+        (pixel_right, pixel_top),
+        (pixel_left, pixel_bottom),
+        (pixel_right, pixel_bottom),
+    ]
+    .into_iter()
+    .all(|(x, y)| {
+        point_in_rounded_rect(
+            x, y, rect.x, rect.y, rect.width, rect.height, radii.0, radii.1, radii.2,
+            radii.3,
+        )
+    })
+    {
+        return 1.0;
+    }
+
+    let mut coverage = 0.0;
+    for sample in 0..ROUNDED_RECT_COVERAGE_SAMPLES {
+        let y = py as f32 + (sample as f32 + 0.5) / ROUNDED_RECT_COVERAGE_SAMPLES as f32;
+        if let Some((left, right)) = rounded_rect_horizontal_span(rect, radii, y) {
+            coverage +=
+                (right.min(px as f32 + 1.0) - left.max(px as f32)).clamp(0.0, 1.0);
+        }
+    }
+    coverage / ROUNDED_RECT_COVERAGE_SAMPLES as f32
+}
+
 /// 点 (px, py) が角丸矩形の内側にあるか判定する。
 /// 矩形の左上 (rx, ry)、サイズ (rw, rh)、各コーナー半径 (tl, tr, br, bl)。
 #[allow(clippy::too_many_arguments)]
@@ -5102,6 +5233,13 @@ fn blend_pixel(pixel: &mut [u8], color: Color) {
     pixel[1] = blend_channel(color.g, pixel[1]);
     pixel[2] = blend_channel(color.b, pixel[2]);
     pixel[3] = out_a as u8;
+}
+
+fn blend_pixel_with_coverage(pixel: &mut [u8], mut color: Color, coverage: f32) {
+    color.a = (color.a as f32 * coverage.clamp(0.0, 1.0)).round() as u8;
+    if color.a > 0 {
+        blend_pixel(pixel, color);
+    }
 }
 
 fn write_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
@@ -5701,6 +5839,7 @@ fn paint_prepared_background_image(
 impl Canvas {
     /// alpha チャンネルへ複数回のbox blurを適用し、作業バッファを再利用する。
     /// カーネルは常に`2r+1`ピクセル幅で、端では実効カーネルサイズを調整する。
+    #[cfg(test)]
     pub(crate) fn box_blur_alpha_passes(&mut self, radius: u32, passes: usize) {
         if radius == 0 || passes == 0 {
             return;
@@ -5772,6 +5911,141 @@ impl Canvas {
 
         for (i, &a) in alphas.iter().enumerate() {
             self.pixels[i * 4 + 3] = a;
+        }
+    }
+
+    /// Applies box blur passes with independent radii to the alpha channel.
+    /// Samples outside the canvas are transparent and still count toward the
+    /// kernel width, which is required for a finite shadow mask to fade out.
+    pub(crate) fn box_blur_alpha_radii_zero_padded(&mut self, radii: &[u32]) {
+        if radii.iter().all(|&radius| radius == 0) {
+            return;
+        }
+        let w = self.width as usize;
+        let h = self.height as usize;
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        let mut alphas: Vec<u8> = self.pixels.iter().skip(3).step_by(4).copied().collect();
+        let mut blurred = vec![0u8; w * h];
+        let mut column_sums = vec![0u32; w];
+
+        for &radius in radii {
+            if radius == 0 {
+                continue;
+            }
+            let r = radius as usize;
+            let kernel_width = r.saturating_mul(2).saturating_add(1);
+            let divisor = kernel_width.min(u32::MAX as usize) as u32;
+
+            for y in 0..h {
+                let row_start = y * w;
+                let mut sum: u32 = 0;
+                let init_right = r.min(w.saturating_sub(1));
+                for x in 0..=init_right {
+                    sum += alphas[row_start + x] as u32;
+                }
+                for x in 0..w {
+                    blurred[row_start + x] = (sum / divisor) as u8;
+                    if x.saturating_add(r).saturating_add(1) < w {
+                        sum += alphas[row_start + x + r + 1] as u32;
+                    }
+                    if x >= r {
+                        sum = sum.saturating_sub(alphas[row_start + x - r] as u32);
+                    }
+                }
+            }
+
+            let init_bottom = r.min(h.saturating_sub(1));
+            column_sums.fill(0);
+            for y in 0..=init_bottom {
+                let row = &blurred[y * w..(y + 1) * w];
+                for (sum, &alpha) in column_sums.iter_mut().zip(row) {
+                    *sum += alpha as u32;
+                }
+            }
+            for y in 0..h {
+                let output = &mut alphas[y * w..(y + 1) * w];
+                for (alpha, &sum) in output.iter_mut().zip(&column_sums) {
+                    *alpha = (sum / divisor) as u8;
+                }
+                if y.saturating_add(r).saturating_add(1) < h {
+                    let entering = &blurred[(y + r + 1) * w..(y + r + 2) * w];
+                    for (sum, &alpha) in column_sums.iter_mut().zip(entering) {
+                        *sum += alpha as u32;
+                    }
+                }
+                if y >= r {
+                    let leaving = &blurred[(y - r) * w..(y - r + 1) * w];
+                    for (sum, &alpha) in column_sums.iter_mut().zip(leaving) {
+                        *sum = sum.saturating_sub(alpha as u32);
+                    }
+                }
+            }
+        }
+
+        for (i, &alpha) in alphas.iter().enumerate() {
+            self.pixels[i * 4 + 3] = alpha;
+        }
+    }
+
+    /// Applies a separable Gaussian blur to alpha with transparent samples
+    /// outside the canvas. Callers limit this to a six-pixel kernel radius;
+    /// larger shadows use the linear-time box approximation above.
+    pub(crate) fn gaussian_blur_alpha_zero_padded(&mut self, sigma: f32) {
+        if sigma <= 0.0 || !sigma.is_finite() {
+            return;
+        }
+        let width = self.width as usize;
+        let height = self.height as usize;
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let radius = (sigma * 3.0).ceil() as usize;
+        let mut kernel = Vec::with_capacity(radius * 2 + 1);
+        let denominator = 2.0 * sigma * sigma;
+        for offset in -(radius as isize)..=radius as isize {
+            kernel.push((-(offset * offset) as f32 / denominator).exp());
+        }
+        let weight_sum = kernel.iter().sum::<f32>();
+        for weight in &mut kernel {
+            *weight /= weight_sum;
+        }
+
+        let alphas = self
+            .pixels
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .map(|&alpha| alpha as f32)
+            .collect::<Vec<_>>();
+        let mut horizontal = vec![0.0f32; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let mut alpha = 0.0;
+                for (kernel_index, &weight) in kernel.iter().enumerate() {
+                    let source_x = x as isize + kernel_index as isize - radius as isize;
+                    if (0..width as isize).contains(&source_x) {
+                        alpha += alphas[y * width + source_x as usize] * weight;
+                    }
+                }
+                horizontal[y * width + x] = alpha;
+            }
+        }
+
+        for y in 0..height {
+            for x in 0..width {
+                let mut alpha = 0.0;
+                for (kernel_index, &weight) in kernel.iter().enumerate() {
+                    let source_y = y as isize + kernel_index as isize - radius as isize;
+                    if (0..height as isize).contains(&source_y) {
+                        alpha += horizontal[source_y as usize * width + x] * weight;
+                    }
+                }
+                self.pixels[(y * width + x) * 4 + 3] = alpha.round().clamp(0.0, 255.0) as u8;
+            }
         }
     }
 

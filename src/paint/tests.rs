@@ -5875,7 +5875,34 @@ fn fill_rounded_rect_clips_corners() {
 }
 
 #[test]
-fn rounded_rect_scanlines_match_per_pixel_reference() {
+fn fill_rounded_rect_antialiases_boundary_pixels() {
+    let mut canvas = Canvas::new(20, 20);
+    canvas.fill_rounded_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+        Color::rgb(255, 0, 0),
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        None,
+    );
+
+    let boundary = canvas.pixel(2, 2).unwrap();
+    assert!(
+        boundary.a > 0 && boundary.a < 255,
+        "a pixel crossed by the rounded boundary must have partial coverage; got {boundary:?}"
+    );
+    assert_eq!(canvas.pixel(0, 0).unwrap().a, 0);
+    assert_eq!(canvas.pixel(8, 0).unwrap().a, 255);
+}
+
+#[test]
+fn rounded_rect_scanlines_match_high_resolution_coverage_reference() {
     let cases = [
         (
             Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
@@ -5900,13 +5927,13 @@ fn rounded_rect_scanlines_match_per_pixel_reference() {
             rect, color, radii[0], radii[1], radii[2], radii[3], clip,
         );
 
-        let mut expected = Canvas::new(24, 20);
         let tl = radii[0].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
         let tr = radii[1].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
         let br = radii[2].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
         let bl = radii[3].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
-        for y in 0..expected.height() {
-            for x in 0..expected.width() {
+        const REFERENCE_SAMPLES: u32 = 64;
+        for y in 0..actual.height() {
+            for x in 0..actual.width() {
                 let fx = x as f32 + 0.5;
                 let fy = y as f32 + 0.5;
                 let in_clip = clip.is_none_or(|clip| {
@@ -5915,17 +5942,43 @@ fn rounded_rect_scanlines_match_per_pixel_reference() {
                         && fy >= clip.y
                         && fy < clip.y + clip.height
                 });
-                if in_clip
-                    && point_in_rounded_rect(
-                        fx, fy, rect.x, rect.y, rect.width, rect.height, tl, tr, br, bl,
-                    )
-                {
-                    let index = ((y * expected.width() + x) * 4) as usize;
-                    blend_pixel(&mut expected.pixels[index..index + 4], color);
+                let mut covered = 0u32;
+                if in_clip {
+                    for sample_y in 0..REFERENCE_SAMPLES {
+                        for sample_x in 0..REFERENCE_SAMPLES {
+                            let sample_x = x as f32
+                                + (sample_x as f32 + 0.5) / REFERENCE_SAMPLES as f32;
+                            let sample_y = y as f32
+                                + (sample_y as f32 + 0.5) / REFERENCE_SAMPLES as f32;
+                            if point_in_rounded_rect(
+                                sample_x,
+                                sample_y,
+                                rect.x,
+                                rect.y,
+                                rect.width,
+                                rect.height,
+                                tl,
+                                tr,
+                                br,
+                                bl,
+                            ) {
+                                covered += 1;
+                            }
+                        }
+                    }
                 }
+                let expected_alpha = (color.a as f32 * covered as f32
+                    / (REFERENCE_SAMPLES * REFERENCE_SAMPLES) as f32)
+                    .round() as u8;
+                let actual_pixel = actual.pixel(x, y).unwrap();
+                assert!(
+                    (i16::from(actual_pixel.a) - i16::from(expected_alpha)).abs() <= 4,
+                    "rect={rect:?}, clip={clip:?}, pixel=({x},{y}), \
+                     actual alpha={}, reference alpha={expected_alpha}",
+                    actual_pixel.a
+                );
             }
         }
-        assert_eq!(actual.pixels(), expected.pixels(), "rect={rect:?}, clip={clip:?}");
     }
 }
 
@@ -6066,7 +6119,11 @@ fn uniform_pill_border_paints_rounded_corner_arc() {
         30.0,
     );
 
-    assert_eq!(canvas.pixel(2, 4), Some(Color::rgb(255, 0, 0)));
+    let arc = canvas.pixel(2, 4).unwrap();
+    assert!(
+        arc.r == 255 && arc.g == 0 && arc.b == 0 && arc.a > 0 && arc.a < 255,
+        "the pill border arc must use partial pixel coverage; got {arc:?}"
+    );
     assert_eq!(canvas.pixel(21, 11), Some(Color::rgba(0, 0, 0, 0)));
 }
 
@@ -6441,6 +6498,109 @@ fn box_shadow_with_blur_renders_blurred_shadow() {
     assert!(
         has_shadow,
         "box-shadow with blur should render some pixels in shadow area"
+    );
+}
+
+#[test]
+fn box_shadow_blurs_the_full_box_before_knocking_out_the_inside() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "html, body { margin: 0; background: white; } \
+               div { width: 20px; height: 20px; background: white; \
+                     box-shadow: 8px 0 8px 0 rgba(0, 0, 0, 0.4); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 50.0,
+        height: 30.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    let just_outside = canvas.pixel(20, 10).unwrap();
+    assert!(
+        (150..=180).contains(&just_outside.r),
+        "the shifted opaque mask must remain nearly full-strength immediately outside the box; \
+         got {just_outside:?}"
+    );
+    let at_shadow_edge = canvas.pixel(28, 10).unwrap();
+    assert!(
+        (195..=215).contains(&at_shadow_edge.r),
+        "an 8px CSS blur has sigma 4px and about half coverage at the mask edge; \
+         got {at_shadow_edge:?}"
+    );
+}
+
+#[test]
+fn small_box_shadow_blur_uses_a_compact_integer_kernel() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "html, body { margin: 0; background: white; } \
+               div { width: 20px; height: 20px; background: white; \
+                     box-shadow: 4px 0 1px rgba(0, 0, 0, 0.4); }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 35.0,
+        height: 25.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    let last_inside = canvas.pixel(23, 10).unwrap();
+    assert!(
+        (150..=160).contains(&last_inside.r),
+        "a 1px blur must retain nearly full strength at the last mask pixel; got {last_inside:?}"
+    );
+    let first_outside = canvas.pixel(24, 10).unwrap();
+    assert!(
+        first_outside.r >= 250,
+        "a 1px blur must not spread beyond its compact integer kernel; got {first_outside:?}"
+    );
+}
+
+#[test]
+fn rounded_blurred_shadow_is_knocked_out_only_inside_the_rounded_border_edge() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+
+    let css = "body { margin: 0; } \
+               div { margin: 10px; width: 20px; height: 20px; background: transparent; \
+                     border-radius: 8px; box-shadow: 0 0 8px 4px black; }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 40.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(
+        canvas.pixel(20, 20).unwrap().a,
+        0,
+        "outer shadow must be clipped from the element interior"
+    );
+    assert!(
+        canvas.pixel(10, 10).unwrap().a > 0,
+        "outer shadow must remain visible outside the rounded corner"
     );
 }
 
@@ -7848,7 +8008,11 @@ fn generated_box_background_layers_apply_origin_clip_and_radius() {
     assert_eq!(canvas.pixel(0, 6).unwrap().a, 0);
     assert_eq!(canvas.pixel(2, 6), Some(Color::rgb(0, 0, 255)));
     assert_eq!(canvas.pixel(4, 6), Some(Color::rgb(255, 0, 0)));
-    assert_eq!(canvas.pixel(2, 2).unwrap().a, 0, "padding clip must keep its rounded corner");
+    let rounded_corner = canvas.pixel(2, 2).unwrap();
+    assert!(
+        rounded_corner.a > 0 && rounded_corner.a < 255,
+        "padding clip must antialias its rounded corner; got {rounded_corner:?}"
+    );
 }
 
 #[test]
