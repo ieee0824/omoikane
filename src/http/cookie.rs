@@ -211,9 +211,10 @@ impl Cookie {
 
         // Path matching
         if let Some(cookie_path) = &self.path
-            && !path_matches(url.path(), cookie_path) {
-                return false;
-            }
+            && !path_matches(url.path(), cookie_path)
+        {
+            return false;
+        }
 
         // Secure flag: only send over HTTPS
         if self.secure && url.scheme() != "https" {
@@ -275,9 +276,10 @@ impl CookieJar {
             }
 
             if let Some(domain) = &cookie.domain
-                && !domain_matches(&origin_domain, domain) {
-                    return; // Reject: server can't set cookie for unrelated domain
-                }
+                && !domain_matches(&origin_domain, domain)
+            {
+                return; // Reject: server can't set cookie for unrelated domain
+            }
 
             if cookie.path.is_none() {
                 cookie.path = Some(default_path(origin_url.path()));

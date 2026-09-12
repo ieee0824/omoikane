@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::css::{
-    AffineTransform, ContainerContext, ComputedStyle, ComputedValue, PseudoElement, StyleResolver,
+    AffineTransform, ComputedStyle, ComputedValue, ContainerContext, PseudoElement, StyleResolver,
     TransformReferenceBox, parse_perspective_with_origin, parse_transform_with_origin,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -28,29 +28,26 @@ mod table;
 use flex::{is_flex_container, layout_flex_container};
 use grid::{is_grid_container, layout_grid_container};
 use inline::{
-    InlineSegmentContent,
-    font_metrics, generated_inline_segments,
-    layout_inline_nodes, layout_vertical_inline_nodes, line_height, measure_text_width, normalize_text,
-    resolve_image_rendered_size,
-    text_align, vertical_align, white_space,
+    InlineSegmentContent, font_metrics, generated_inline_segments, layout_inline_nodes,
+    layout_vertical_inline_nodes, line_height, measure_text_width, normalize_text,
+    resolve_image_rendered_size, text_align, vertical_align, white_space,
 };
 use table::{
-    collect_table_entries, is_table_container_element, layout_table_container,
-    table_border_spacing,
+    collect_table_entries, is_table_container_element, layout_table_container, table_border_spacing,
 };
 
-pub(crate) use inline::{canonical_image_asset_reference, decode_or_fetch_image_asset};
 pub(crate) use inline::element_inline_image;
+pub(crate) use inline::{canonical_image_asset_reference, decode_or_fetch_image_asset};
 
 // Re-exports used by tests
 #[cfg(test)]
 pub(crate) use crate::paint::{DataUri, parse_data_uri};
 #[cfg(test)]
-pub(crate) use inline::split_words_preserving_spaces_cjk;
-#[cfg(test)]
 pub(crate) use inline::split_chars;
 #[cfg(test)]
 pub(crate) use inline::split_words_no_cjk_break;
+#[cfg(test)]
+pub(crate) use inline::split_words_preserving_spaces_cjk;
 
 // Thread-local cache for fetched images and fonts to avoid redundant loads
 thread_local! {
@@ -154,21 +151,92 @@ fn unsupported_html_config() -> &'static UnsupportedHtmlConfig {
 fn is_supported_html_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "html" | "head" | "body" | "div" | "span" | "section" | "article"
-            | "aside" | "main" | "nav" | "header" | "footer"
-            | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-            | "br" | "strong" | "em" | "b" | "i" | "u" | "s" | "a" | "pre" | "code"
-            | "ul" | "ol" | "li"
-            | "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th"
-            | "img" | "object" | "svg" | "form" | "input"
-            | "button" | "textarea" | "select" | "option" | "iframe" | "label"
-            | "style" | "link" | "meta" | "title" | "script" | "noscript"
-            | "font" | "blockquote" | "hr" | "address"
-            | "dl" | "dt" | "dd" | "figure" | "figcaption"
-            | "sup" | "sub" | "small" | "mark" | "abbr" | "cite" | "q"
-            | "center" | "nobr" | "wbr"
-            | "details" | "summary" | "dialog" | "time" | "progress" | "meter"
-            | "video" | "audio" | "canvas" | "source" | "picture"
+        "html"
+            | "head"
+            | "body"
+            | "div"
+            | "span"
+            | "section"
+            | "article"
+            | "aside"
+            | "main"
+            | "nav"
+            | "header"
+            | "footer"
+            | "p"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "br"
+            | "strong"
+            | "em"
+            | "b"
+            | "i"
+            | "u"
+            | "s"
+            | "a"
+            | "pre"
+            | "code"
+            | "ul"
+            | "ol"
+            | "li"
+            | "table"
+            | "thead"
+            | "tbody"
+            | "tfoot"
+            | "tr"
+            | "td"
+            | "th"
+            | "img"
+            | "object"
+            | "svg"
+            | "form"
+            | "input"
+            | "button"
+            | "textarea"
+            | "select"
+            | "option"
+            | "iframe"
+            | "label"
+            | "style"
+            | "link"
+            | "meta"
+            | "title"
+            | "script"
+            | "noscript"
+            | "font"
+            | "blockquote"
+            | "hr"
+            | "address"
+            | "dl"
+            | "dt"
+            | "dd"
+            | "figure"
+            | "figcaption"
+            | "sup"
+            | "sub"
+            | "small"
+            | "mark"
+            | "abbr"
+            | "cite"
+            | "q"
+            | "center"
+            | "nobr"
+            | "wbr"
+            | "details"
+            | "summary"
+            | "dialog"
+            | "time"
+            | "progress"
+            | "meter"
+            | "video"
+            | "audio"
+            | "canvas"
+            | "source"
+            | "picture"
     )
 }
 
@@ -454,9 +522,8 @@ impl FragmentStyle {
             }
         };
 
-        let normalize_lower = |key: &str| -> Option<String> {
-            extract_str(key).map(|s| s.to_ascii_lowercase())
-        };
+        let normalize_lower =
+            |key: &str| -> Option<String> { extract_str(key).map(|s| s.to_ascii_lowercase()) };
 
         // Extract the first font-family name from the CSS value.
         // The value may be quoted (e.g. `"My Font"`) or unquoted (e.g. `sans-serif`).
@@ -637,10 +704,16 @@ fn writing_mode(style: &ComputedStyle) -> WritingMode {
     match style.get("writing-mode") {
         Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
             if value.eq_ignore_ascii_case("vertical-rl")
-                || value.eq_ignore_ascii_case("sideways-rl") => WritingMode::VerticalRl,
+                || value.eq_ignore_ascii_case("sideways-rl") =>
+        {
+            WritingMode::VerticalRl
+        }
         Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
             if value.eq_ignore_ascii_case("vertical-lr")
-                || value.eq_ignore_ascii_case("sideways-lr") => WritingMode::VerticalLr,
+                || value.eq_ignore_ascii_case("sideways-lr") =>
+        {
+            WritingMode::VerticalLr
+        }
         _ => WritingMode::HorizontalTb,
     }
 }
@@ -824,15 +897,10 @@ impl LayoutBox {
         let (stored_x, stored_y) = self.node.scroll_offset();
         let content = self.dimensions.content;
         let padding = self.dimensions.padding;
-        let max_x =
-            (overflow_size.0 - (content.width + padding.left + padding.right)).max(0.0);
-        let max_y =
-            (overflow_size.1 - (content.height + padding.top + padding.bottom)).max(0.0);
+        let max_x = (overflow_size.0 - (content.width + padding.left + padding.right)).max(0.0);
+        let max_y = (overflow_size.1 - (content.height + padding.top + padding.bottom)).max(0.0);
         PaintScrollGeometry {
-            offset: (
-                stored_x.clamp(0.0, max_x),
-                stored_y.clamp(0.0, max_y),
-            ),
+            offset: (stored_x.clamp(0.0, max_x), stored_y.clamp(0.0, max_y)),
             overflow_size,
         }
     }
@@ -863,7 +931,8 @@ fn expand_scrollable_overflow_axes(
             *max_right = max_right.max(content.x + content.width + padding.right + border.right);
         }
         if include_y {
-            *max_bottom = max_bottom.max(content.y + content.height + padding.bottom + border.bottom);
+            *max_bottom =
+                max_bottom.max(content.y + content.height + padding.bottom + border.bottom);
         }
         let include_child_x = include_x && !child.overflow.clips_x();
         let include_child_y = include_y && !child.overflow.clips_y();
@@ -996,7 +1065,10 @@ fn populate_layout_transforms(
     layout.needs_scroll_translation = matches!(
         style.get("position"),
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("sticky")
-    ) || layout.children.iter().any(|child| child.needs_scroll_translation);
+    ) || layout
+        .children
+        .iter()
+        .any(|child| child.needs_scroll_translation);
 }
 
 fn computed_keyword<'a>(style: &'a ComputedStyle, property: &str) -> Option<&'a str> {
@@ -1155,10 +1227,11 @@ fn layout_document(
             height: containing_block.height,
         };
         if let Some(style) = &child_style
-            && is_out_of_flow_positioned(style) {
-                positioned_children.push((child, style.clone(), child_containing));
-                continue;
-            }
+            && is_out_of_flow_positioned(style)
+        {
+            positioned_children.push((child, style.clone(), child_containing));
+            continue;
+        }
 
         if let Some(layout_child) = layout_node(
             &child,
@@ -1175,11 +1248,11 @@ fn layout_document(
 
     let dimensions = BoxDimensions {
         content: Rect {
-        x: containing_block.x,
-        y: containing_block.y,
-        width: containing_block.width,
-        height: cursor_y - containing_block.y,
-    },
+            x: containing_block.x,
+            y: containing_block.y,
+            width: containing_block.width,
+            height: cursor_y - containing_block.y,
+        },
         ..BoxDimensions::default()
     };
 
@@ -1287,20 +1360,36 @@ fn apply_clear(
     match clear_side(child_style) {
         ClearSide::Left => {
             *cursor_y = clear_cursor_y_for_side(
-                *cursor_y, child_margin_top, collapse_delta, float_regions, FloatSide::Left,
+                *cursor_y,
+                child_margin_top,
+                collapse_delta,
+                float_regions,
+                FloatSide::Left,
             );
         }
         ClearSide::Right => {
             *cursor_y = clear_cursor_y_for_side(
-                *cursor_y, child_margin_top, collapse_delta, float_regions, FloatSide::Right,
+                *cursor_y,
+                child_margin_top,
+                collapse_delta,
+                float_regions,
+                FloatSide::Right,
             );
         }
         ClearSide::Both => {
             *cursor_y = clear_cursor_y_for_side(
-                *cursor_y, child_margin_top, collapse_delta, float_regions, FloatSide::Left,
+                *cursor_y,
+                child_margin_top,
+                collapse_delta,
+                float_regions,
+                FloatSide::Left,
             );
             *cursor_y = clear_cursor_y_for_side(
-                *cursor_y, child_margin_top, collapse_delta, float_regions, FloatSide::Right,
+                *cursor_y,
+                child_margin_top,
+                collapse_delta,
+                float_regions,
+                FloatSide::Right,
             );
         }
         ClearSide::None => {}
@@ -1340,7 +1429,11 @@ fn layout_float_child(
             height: 0.0,
         };
         if let Some(mut layout_child) = layout_node(
-            child, resolver, float_containing, viewport, positioned_ancestor,
+            child,
+            resolver,
+            float_containing,
+            viewport,
+            positioned_ancestor,
         ) {
             // Float placement uses the margin box. In particular, a negative
             // margin can make a specified-width float fit beside an earlier
@@ -1390,7 +1483,11 @@ fn child_containing_rect(
 ) -> Rect {
     let has_explicit_width = explicit_length(child_style, "width").is_some();
     Rect {
-        x: if has_explicit_width { x } else { x + offsets.left },
+        x: if has_explicit_width {
+            x
+        } else {
+            x + offsets.left
+        },
         y: child_y,
         width: if has_explicit_width {
             width
@@ -1473,10 +1570,11 @@ fn layout_element_with_cell(
 
     let config = unsupported_html_config();
     if (config.logging_enabled || config.sqlite_path.is_some())
-        && let Some(tag) = node.tag_name() {
-            let parent_tag = node.parent_node().and_then(|p| p.tag_name());
-            log_unsupported_html_tag(&tag, parent_tag.as_deref());
-        }
+        && let Some(tag) = node.tag_name()
+    {
+        let parent_tag = node.parent_node().and_then(|p| p.tag_name());
+        log_unsupported_html_tag(&tag, parent_tag.as_deref());
+    }
 
     let padding = edge_sizes(&style, "padding");
     let border = table_cell.unwrap_or_else(|| edge_sizes(&style, "border"));
@@ -1513,12 +1611,14 @@ fn layout_element_with_cell(
     // paint their image payload. Previously only inline formatting collected
     // image fragments, so `display: block` SVGs (a common Tailwind reset) had
     // a box but rendered none of their graphics.
-    let is_positioned_img = node.tag_name().as_deref() == Some("img")
-        && is_out_of_flow_positioned(&style);
-    if !is_positioned_img && matches!(
-        node.tag_name().as_deref(),
-        Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
-    ) {
+    let is_positioned_img =
+        node.tag_name().as_deref() == Some("img") && is_out_of_flow_positioned(&style);
+    if !is_positioned_img
+        && matches!(
+            node.tag_name().as_deref(),
+            Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
+        )
+    {
         let mut lines = layout_inline_nodes(
             std::slice::from_ref(node),
             resolver,
@@ -1543,8 +1643,7 @@ fn layout_element_with_cell(
             lines.clear();
         }
         if !lines.is_empty() {
-            let percentage_width =
-                matches!(style.get("width"), Some(ComputedValue::Percentage(_)));
+            let percentage_width = matches!(style.get("width"), Some(ComputedValue::Percentage(_)));
             for line in &mut lines {
                 for fragment in &mut line.fragments {
                     if matches!(fragment.content, InlineFragmentContent::Image(_, _))
@@ -1687,12 +1786,26 @@ fn layout_element_with_cell(
         if is_shrink_to_fit {
             width = shrink_to_fit_width(node, resolver, containing_block.width);
             redistribute_auto_margins_for_table(
-                &style, width, &padding, &border, &mut margin, containing_block.width,
+                &style,
+                width,
+                &padding,
+                &border,
+                &mut margin,
+                containing_block.width,
             );
         }
         let x = containing_block.x + margin.left + border.left + padding.left;
         return layout_table_container(
-            node, resolver, style, margin, padding, border, x, y, width, viewport,
+            node,
+            resolver,
+            style,
+            margin,
+            padding,
+            border,
+            x,
+            y,
+            width,
+            viewport,
             is_shrink_to_fit,
             used_height,
         );
@@ -1716,8 +1829,18 @@ fn layout_element_with_cell(
     }
     if is_grid_container(&style) {
         return layout_grid_container(
-            node, resolver, style, margin, padding, border, x, y, width,
-            containing_block.height, viewport, subgrid,
+            node,
+            resolver,
+            style,
+            margin,
+            padding,
+            border,
+            x,
+            y,
+            width,
+            containing_block.height,
+            viewport,
+            subgrid,
             used_height,
         );
     }
@@ -1731,8 +1854,18 @@ fn layout_element_with_cell(
         margin_info,
         child_shifts,
     } = layout_block_children(
-        node, resolver, &style, padding, border, margin,
-        x, y, width, containing_block.height, viewport, positioned_ancestor,
+        node,
+        resolver,
+        &style,
+        padding,
+        border,
+        margin,
+        x,
+        y,
+        width,
+        containing_block.height,
+        viewport,
+        positioned_ancestor,
         used_height,
     );
 
@@ -1778,8 +1911,15 @@ fn layout_element_with_cell(
     });
 
     let dimensions = BoxDimensions {
-        content: Rect { x, y, width, height: content_height },
-        padding, border, margin,
+        content: Rect {
+            x,
+            y,
+            width,
+            height: content_height,
+        },
+        padding,
+        border,
+        margin,
     };
 
     // Resolve positioned children using the final dimensions (content_height is
@@ -1979,7 +2119,12 @@ fn layout_vertical_block_children(
 
         let next_pos_ancestor = if establishes_positioned_containing_block(style) {
             Some(BoxDimensions {
-                content: Rect { x, y, width, height: 0.0 },
+                content: Rect {
+                    x,
+                    y,
+                    width,
+                    height: 0.0,
+                },
                 padding,
                 border,
                 margin,
@@ -2097,10 +2242,7 @@ fn flush_pending_vertical_inline_nodes(
     {
         *inline_bottom = (*inline_bottom).max(last_line);
     }
-    let used_width = inline_lines
-        .iter()
-        .map(|line| line.rect.width)
-        .sum::<f32>();
+    let used_width = inline_lines.iter().map(|line| line.rect.width).sum::<f32>();
     if vertical_rl {
         *cursor_x = (*cursor_x - used_width).max(x);
     } else {
@@ -2131,7 +2273,13 @@ fn resolve_content_height(
         (cursor_y - y).max(0.0)
     };
     let height = resolved_length(style, "height", containing_height)
-        .map(|h| if border_box { (h - pb_vertical).max(0.0) } else { h })
+        .map(|h| {
+            if border_box {
+                (h - pb_vertical).max(0.0)
+            } else {
+                h
+            }
+        })
         .unwrap_or(auto_height);
     clamp_content_height(style, height, containing_height, padding, border)
 }
@@ -2149,11 +2297,19 @@ fn clamp_content_height(
     let (min_h, max_h) =
         normalized_min_max_lengths(style, "min-height", "max-height", containing_height);
     if let Some(min_h) = min_h {
-        let content_min = if border_box { (min_h - pb_vertical).max(0.0) } else { min_h };
+        let content_min = if border_box {
+            (min_h - pb_vertical).max(0.0)
+        } else {
+            min_h
+        };
         height = height.max(content_min);
     }
     if let Some(max_h) = max_h {
-        let content_max = if border_box { (max_h - pb_vertical).max(0.0) } else { max_h };
+        let content_max = if border_box {
+            (max_h - pb_vertical).max(0.0)
+        } else {
+            max_h
+        };
         height = height.min(content_max);
     }
     height
@@ -2212,14 +2368,19 @@ fn compute_width(
     // `specified_width` is the value given to the `width` property.
     // For border-box, that value already includes padding + border, so we
     // convert it to a content-box width immediately.
-    let specified_width = resolved_length(style, "width", containing_width)
-        .map(|w| border_box_adjust_length(style, w, padding.left + border.left, padding.right + border.right));
+    let specified_width = resolved_length(style, "width", containing_width).map(|w| {
+        border_box_adjust_length(
+            style,
+            w,
+            padding.left + border.left,
+            padding.right + border.right,
+        )
+    });
     let margin_left_auto = margin_start_is_auto(style);
     let margin_right_auto = margin_end_is_auto(style);
 
     let mut width = if let Some(width) = specified_width {
-        let remaining =
-            (containing_width - width - pb_horizontal).max(0.0);
+        let remaining = (containing_width - width - pb_horizontal).max(0.0);
 
         match (margin_left_auto, margin_right_auto) {
             (true, true) => {
@@ -2271,8 +2432,7 @@ fn compute_width(
     }
 
     if margin_left_auto || margin_right_auto {
-        let remaining =
-            (containing_width - width - pb_horizontal).max(0.0);
+        let remaining = (containing_width - width - pb_horizontal).max(0.0);
         match (margin_left_auto, margin_right_auto) {
             (true, true) => {
                 margin.left = remaining / 2.0;
@@ -2490,8 +2650,7 @@ fn margin_start_is_auto(style: &ComputedStyle) -> bool {
     if is_vertical_writing(style) {
         is_auto(style.get("margin-left")) || is_auto(style.get("margin-block-start"))
     } else {
-        is_auto(style.get("margin-left"))
-            || is_auto(style.get("margin-inline-start"))
+        is_auto(style.get("margin-left")) || is_auto(style.get("margin-inline-start"))
     }
 }
 
@@ -2527,8 +2686,12 @@ fn is_out_of_flow_positioned(style: &ComputedStyle) -> bool {
 fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
     matches!(
         position_scheme(style),
-        PositionScheme::Relative | PositionScheme::Sticky | PositionScheme::Absolute | PositionScheme::Fixed
-    ) || has_containment(style, "layout") || has_containment(style, "paint")
+        PositionScheme::Relative
+            | PositionScheme::Sticky
+            | PositionScheme::Absolute
+            | PositionScheme::Fixed
+    ) || has_containment(style, "layout")
+        || has_containment(style, "paint")
 }
 
 fn position_scheme(style: &ComputedStyle) -> PositionScheme {
@@ -2711,7 +2874,8 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
             // For images, use rendered size.
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);
-                let (rendered_width, _) = resolve_image_rendered_size(&image_node, &image, &image_style);
+                let (rendered_width, _) =
+                    resolve_image_rendered_size(&image_node, &image, &image_style);
                 let img_padding = edge_sizes(&image_style, "padding");
                 let img_border = edge_sizes(&image_style, "border");
                 return rendered_width + img_padding.horizontal() + img_border.horizontal();
@@ -3069,10 +3233,26 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
                 .map(|tag| {
                     matches!(
                         tag.as_str(),
-                        "span" | "a" | "em" | "strong" | "b" | "i" | "img" | "object" | "svg"
-                            | "input" | "button" | "textarea" | "select"
-                            | "time" | "progress" | "meter"
-                            | "video" | "audio" | "canvas" | "picture"
+                        "span"
+                            | "a"
+                            | "em"
+                            | "strong"
+                            | "b"
+                            | "i"
+                            | "img"
+                            | "object"
+                            | "svg"
+                            | "input"
+                            | "button"
+                            | "textarea"
+                            | "select"
+                            | "time"
+                            | "progress"
+                            | "meter"
+                            | "video"
+                            | "audio"
+                            | "canvas"
+                            | "picture"
                     )
                 })
                 .unwrap_or(false)
@@ -3086,9 +3266,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
 fn is_non_rendered_html_element(node: &NodeHandle) -> bool {
     matches!(
         node.tag_name().as_deref(),
-        Some(
-            "head" | "title" | "meta" | "style" | "script" | "link" | "noscript" | "source"
-        )
+        Some("head" | "title" | "meta" | "style" | "script" | "link" | "noscript" | "source")
     )
 }
 
@@ -3244,7 +3422,13 @@ fn build_list_marker(
         (content_x, content_y)
     };
 
-    Some(ListMarker { text, font_size, outside, x, y })
+    Some(ListMarker {
+        text,
+        font_size,
+        outside,
+        x,
+        y,
+    })
 }
 
 /// Returns the 1-based ordinal position of `node` among its `li` siblings.
@@ -3260,9 +3444,9 @@ fn list_item_ordinal(node: &NodeHandle) -> usize {
                 .as_deref()
                 .map(|t| t.eq_ignore_ascii_case("li"))
                 .unwrap_or(false)
-            {
-                count += 1;
-            }
+        {
+            count += 1;
+        }
         if sibling.identity() == node.identity() {
             break;
         }
@@ -3285,9 +3469,18 @@ fn to_roman_inner(mut n: usize) -> String {
         return "0".to_string();
     }
     const VALUES: &[(usize, &str)] = &[
-        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
-        (100, "C"),  (90, "XC"),  (50, "L"),  (40, "XL"),
-        (10, "X"),   (9, "IX"),   (5, "V"),   (4, "IV"),
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
         (1, "I"),
     ];
     let mut result = String::new();
@@ -3317,7 +3510,10 @@ fn to_alpha_inner(mut n: usize) -> String {
     let mut result = String::new();
     while n > 0 {
         n -= 1;
-        result.insert(0, char::from_u32(b'A' as u32 + (n % 26) as u32).unwrap_or('A'));
+        result.insert(
+            0,
+            char::from_u32(b'A' as u32 + (n % 26) as u32).unwrap_or('A'),
+        );
         n /= 26;
     }
     result

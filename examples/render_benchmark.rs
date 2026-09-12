@@ -192,7 +192,9 @@ fn report_mode(samples: &[Sample], outputs: &[Vec<u8>]) -> Result<ModeReport, St
 }
 
 fn statistics(durations: impl Iterator<Item = Duration>) -> Statistics {
-    let mut values: Vec<f64> = durations.map(|duration| duration.as_secs_f64() * 1000.0).collect();
+    let mut values: Vec<f64> = durations
+        .map(|duration| duration.as_secs_f64() * 1000.0)
+        .collect();
     values.sort_by(f64::total_cmp);
     let mean = values.iter().sum::<f64>() / values.len() as f64;
     let median = if values.len().is_multiple_of(2) {
@@ -239,7 +241,11 @@ impl Options {
                 _ => return Err(format!("unknown argument: {arg}\n{}", usage())),
             }
         }
-        Ok(Self { fixture, iterations, warmup })
+        Ok(Self {
+            fixture,
+            iterations,
+            warmup,
+        })
     }
 }
 

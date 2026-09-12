@@ -113,11 +113,13 @@ fn nested_interpreter_and_jit_frames_resolve_exact_live_values() {
         resolved[1].safepoint.stack_map.live_values(),
         &[ValueLocation::StackSlot(8), ValueLocation::FrameRegister(3),]
     );
-    assert!(!resolved[0]
-        .safepoint
-        .stack_map
-        .live_values()
-        .contains(&ValueLocation::FrameRegister(1)));
+    assert!(
+        !resolved[0]
+            .safepoint
+            .stack_map
+            .live_values()
+            .contains(&ValueLocation::FrameRegister(1))
+    );
 
     assert!(
         table.lookup(0x1009).is_none(),

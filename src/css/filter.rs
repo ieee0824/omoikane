@@ -36,7 +36,11 @@ pub(crate) fn parse_filter_list(input: &str) -> Option<Vec<FilterFunction>> {
         rest = rest.trim_start();
         let open = rest.find('(')?;
         let name = rest[..open].trim().to_ascii_lowercase();
-        if name.is_empty() || name.chars().any(|ch| !(ch.is_ascii_alphabetic() || ch == '-')) {
+        if name.is_empty()
+            || name
+                .chars()
+                .any(|ch| !(ch.is_ascii_alphabetic() || ch == '-'))
+        {
             return None;
         }
         let close = matching_paren(rest, open)?;
@@ -65,7 +69,13 @@ pub(crate) fn normalize_filter_list(input: &str) -> Option<String> {
     if functions.is_empty() {
         return Some("none".into());
     }
-    Some(functions.iter().map(format_function).collect::<Vec<_>>().join(" "))
+    Some(
+        functions
+            .iter()
+            .map(format_function)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 pub(crate) fn interpolate_filter_lists(start: &str, end: &str, progress: f32) -> Option<String> {
@@ -84,28 +94,62 @@ pub(crate) fn interpolate_filter_lists(start: &str, end: &str, progress: f32) ->
         .iter()
         .zip(&end)
         .map(|(start, end)| match (start, end) {
-            (FilterFunction::Blur(a), FilterFunction::Blur(b)) => Some(FilterFunction::Blur(mix(*a, *b))),
-            (FilterFunction::Brightness(a), FilterFunction::Brightness(b)) => Some(FilterFunction::Brightness(mix(*a, *b))),
-            (FilterFunction::Contrast(a), FilterFunction::Contrast(b)) => Some(FilterFunction::Contrast(mix(*a, *b))),
+            (FilterFunction::Blur(a), FilterFunction::Blur(b)) => {
+                Some(FilterFunction::Blur(mix(*a, *b)))
+            }
+            (FilterFunction::Brightness(a), FilterFunction::Brightness(b)) => {
+                Some(FilterFunction::Brightness(mix(*a, *b)))
+            }
+            (FilterFunction::Contrast(a), FilterFunction::Contrast(b)) => {
+                Some(FilterFunction::Contrast(mix(*a, *b)))
+            }
             (
-                FilterFunction::DropShadow { offset_x: ax, offset_y: ay, blur: ab, color: ac },
-                FilterFunction::DropShadow { offset_x: bx, offset_y: by, blur: bb, color: bc },
+                FilterFunction::DropShadow {
+                    offset_x: ax,
+                    offset_y: ay,
+                    blur: ab,
+                    color: ac,
+                },
+                FilterFunction::DropShadow {
+                    offset_x: bx,
+                    offset_y: by,
+                    blur: bb,
+                    color: bc,
+                },
             ) => Some(FilterFunction::DropShadow {
                 offset_x: mix(*ax, *bx),
                 offset_y: mix(*ay, *by),
                 blur: mix(*ab, *bb),
                 color: interpolate_color(*ac, *bc, progress),
             }),
-            (FilterFunction::Grayscale(a), FilterFunction::Grayscale(b)) => Some(FilterFunction::Grayscale(mix(*a, *b))),
-            (FilterFunction::HueRotate(a), FilterFunction::HueRotate(b)) => Some(FilterFunction::HueRotate(mix(*a, *b))),
-            (FilterFunction::Invert(a), FilterFunction::Invert(b)) => Some(FilterFunction::Invert(mix(*a, *b))),
-            (FilterFunction::Opacity(a), FilterFunction::Opacity(b)) => Some(FilterFunction::Opacity(mix(*a, *b))),
-            (FilterFunction::Saturate(a), FilterFunction::Saturate(b)) => Some(FilterFunction::Saturate(mix(*a, *b))),
-            (FilterFunction::Sepia(a), FilterFunction::Sepia(b)) => Some(FilterFunction::Sepia(mix(*a, *b))),
+            (FilterFunction::Grayscale(a), FilterFunction::Grayscale(b)) => {
+                Some(FilterFunction::Grayscale(mix(*a, *b)))
+            }
+            (FilterFunction::HueRotate(a), FilterFunction::HueRotate(b)) => {
+                Some(FilterFunction::HueRotate(mix(*a, *b)))
+            }
+            (FilterFunction::Invert(a), FilterFunction::Invert(b)) => {
+                Some(FilterFunction::Invert(mix(*a, *b)))
+            }
+            (FilterFunction::Opacity(a), FilterFunction::Opacity(b)) => {
+                Some(FilterFunction::Opacity(mix(*a, *b)))
+            }
+            (FilterFunction::Saturate(a), FilterFunction::Saturate(b)) => {
+                Some(FilterFunction::Saturate(mix(*a, *b)))
+            }
+            (FilterFunction::Sepia(a), FilterFunction::Sepia(b)) => {
+                Some(FilterFunction::Sepia(mix(*a, *b)))
+            }
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
-    Some(functions.iter().map(format_function).collect::<Vec<_>>().join(" "))
+    Some(
+        functions
+            .iter()
+            .map(format_function)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 fn interpolate_color(start: Color, end: Color, progress: f32) -> Color {
@@ -115,7 +159,11 @@ fn interpolate_color(start: Color, end: Color, progress: f32) -> Color {
     let channel = |start: u8, end: u8| {
         let premultiplied = start as f32 * start_alpha
             + (end as f32 * end_alpha - start as f32 * start_alpha) * progress;
-        if alpha <= f32::EPSILON { 0 } else { (premultiplied / alpha).round() as u8 }
+        if alpha <= f32::EPSILON {
+            0
+        } else {
+            (premultiplied / alpha).round() as u8
+        }
     };
     Color::rgba(
         channel(start.r, end.r),
@@ -247,21 +295,39 @@ fn split_whitespace_components(input: &str) -> Option<Vec<&str>> {
     let mut start = None;
     for (index, ch) in input.char_indices() {
         match ch {
-            '(' => { depth += 1; start.get_or_insert(index); }
-            ')' => { depth = depth.checked_sub(1)?; start.get_or_insert(index); }
-            _ if ch.is_whitespace() && depth == 0 => {
-                if let Some(begin) = start.take() { result.push(input[begin..index].trim()); }
+            '(' => {
+                depth += 1;
+                start.get_or_insert(index);
             }
-            _ => { start.get_or_insert(index); }
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                start.get_or_insert(index);
+            }
+            _ if ch.is_whitespace() && depth == 0 => {
+                if let Some(begin) = start.take() {
+                    result.push(input[begin..index].trim());
+                }
+            }
+            _ => {
+                start.get_or_insert(index);
+            }
         }
     }
-    if depth != 0 { return None; }
-    if let Some(begin) = start { result.push(input[begin..].trim()); }
+    if depth != 0 {
+        return None;
+    }
+    if let Some(begin) = start {
+        result.push(input[begin..].trim());
+    }
     Some(result)
 }
 
 fn format_number(value: f32) -> String {
-    if value == 0.0 { "0".into() } else { value.to_string() }
+    if value == 0.0 {
+        "0".into()
+    } else {
+        value.to_string()
+    }
 }
 
 fn format_function(function: &FilterFunction) -> String {
@@ -269,10 +335,20 @@ fn format_function(function: &FilterFunction) -> String {
         FilterFunction::Blur(value) => format!("blur({}px)", format_number(*value)),
         FilterFunction::Brightness(value) => format!("brightness({})", format_number(*value)),
         FilterFunction::Contrast(value) => format!("contrast({})", format_number(*value)),
-        FilterFunction::DropShadow { offset_x, offset_y, blur, color } => format!(
+        FilterFunction::DropShadow {
+            offset_x,
+            offset_y,
+            blur,
+            color,
+        } => format!(
             "drop-shadow({}px {}px {}px rgba({}, {}, {}, {}))",
-            format_number(*offset_x), format_number(*offset_y), format_number(*blur),
-            color.r, color.g, color.b, format_number(color.a as f32 / 255.0)
+            format_number(*offset_x),
+            format_number(*offset_y),
+            format_number(*blur),
+            color.r,
+            color.g,
+            color.b,
+            format_number(color.a as f32 / 255.0)
         ),
         FilterFunction::Grayscale(value) => format!("grayscale({})", format_number(*value)),
         FilterFunction::HueRotate(value) => format!("hue-rotate({}deg)", format_number(*value)),
@@ -293,7 +369,10 @@ mod tests {
             normalize_filter_list("brightness(150%) hue-rotate(.5turn) blur(2px)"),
             Some("brightness(1.5) hue-rotate(180deg) blur(2px)".into())
         );
-        assert_eq!(normalize_filter_list("grayscale(200%)"), Some("grayscale(1)".into()));
+        assert_eq!(
+            normalize_filter_list("grayscale(200%)"),
+            Some("grayscale(1)".into())
+        );
         assert_eq!(normalize_filter_list("none"), Some("none".into()));
         assert_eq!(
             normalize_filter_list("drop-shadow(2px 3px 4px #ff0000)"),
@@ -303,7 +382,14 @@ mod tests {
 
     #[test]
     fn rejects_invalid_filter_lists() {
-        for value in ["", "blur(-1px)", "brightness(-1)", "unknown(1)", "none blur(1px)", "blur(1em)"] {
+        for value in [
+            "",
+            "blur(-1px)",
+            "brightness(-1)",
+            "unknown(1)",
+            "none blur(1px)",
+            "blur(1em)",
+        ] {
             assert_eq!(normalize_filter_list(value), None, "{value}");
         }
     }

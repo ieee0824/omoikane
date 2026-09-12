@@ -5,8 +5,8 @@ use crate::css::{Origin, StyleResolver, parse_stylesheet};
 use crate::dom::NodeHandle;
 use crate::html::TreeBuilder;
 use crate::layout::{
-    BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, LineBox, Rect, VerticalAlign,
-    TextControlPaintState, layout_tree,
+    BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, LineBox, Rect,
+    TextControlPaintState, VerticalAlign, layout_tree,
 };
 use crate::paint::*;
 
@@ -242,7 +242,16 @@ fn html_canvas_script_is_painted_as_replaced_image_fixture() {
       context.fillStyle='#0000ff'; context.fillRect(2,0,2,3);
       </script></body></html>"#;
     let document = TreeBuilder::parse(html).document();
-    let canvas = render_document(&document, Rect { x:0.0, y:0.0, width:10.0, height:10.0 }).unwrap();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        },
+    )
+    .unwrap();
     assert_eq!(count_pixels(&canvas, Color::rgb(255, 0, 0)), 6);
     assert_eq!(count_pixels(&canvas, Color::rgb(0, 0, 255)), 6);
 }
@@ -363,7 +372,12 @@ fn paint_containment_clips_overflow_visible_descendants() {
         .child { width: 20px; height: 20px; background-color: red; }";
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
-    let viewport = Rect { x: 0.0, y: 0.0, width: 30.0, height: 30.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 30.0,
+        height: 30.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let mut paint_resolver = StyleResolver::new();
     paint_resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
@@ -384,7 +398,12 @@ fn paint_containment_skips_before_pseudo_outside_ancestor_clip() {
     let document = TreeBuilder::parse(html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 30.0, height: 20.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 30.0,
+            height: 20.0,
+        },
     )
     .unwrap();
 
@@ -1194,10 +1213,7 @@ fn transform_can_move_an_offscreen_source_box_into_the_viewport() {
 
 #[test]
 fn transition_transform_midpoint_reaches_paint_coordinates() {
-    let document = TreeBuilder::parse(
-        r#"<html><body><div></div></body></html>"#,
-    )
-    .document();
+    let document = TreeBuilder::parse(r#"<html><body><div></div></body></html>"#).document();
     let target = document.query_selector("div").unwrap();
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
@@ -1735,15 +1751,19 @@ fn shrinking_images_averages_the_covered_source_pixels() {
         2,
         2,
         vec![
-            255, 0, 0, 255, 0, 255, 0, 255,
-            0, 0, 255, 255, 255, 255, 255, 255,
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ],
     )
     .unwrap();
     let mut canvas = Canvas::new(1, 1);
     canvas.draw_image_scaled_clipped(
         &image,
-        Rect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
         None,
     );
 
@@ -1752,16 +1772,16 @@ fn shrinking_images_averages_the_covered_source_pixels() {
 
 #[test]
 fn shrinking_images_weights_fractionally_covered_source_pixels() {
-    let image = Image::new(
-        3,
-        1,
-        vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255],
-    )
-    .unwrap();
+    let image = Image::new(3, 1, vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]).unwrap();
     let mut canvas = Canvas::new(2, 1);
     canvas.draw_image_scaled_clipped(
         &image,
-        Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        },
         None,
     );
 
@@ -1775,7 +1795,12 @@ fn shrinking_images_averages_in_premultiplied_alpha_space() {
     let mut canvas = Canvas::new(1, 1);
     canvas.draw_image_scaled_clipped(
         &image,
-        Rect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
         None,
     );
 
@@ -1788,7 +1813,12 @@ fn expanding_images_keeps_nearest_neighbor_sampling() {
     let mut canvas = Canvas::new(4, 1);
     canvas.draw_image_scaled_clipped(
         &image,
-        Rect { x: 0.0, y: 0.0, width: 4.0, height: 1.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 1.0,
+        },
         None,
     );
 
@@ -1805,7 +1835,12 @@ fn one_to_one_image_drawing_is_bit_exact() {
     let mut canvas = Canvas::new(2, 1);
     canvas.draw_image_scaled_clipped(
         &image,
-        Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        },
         None,
     );
 
@@ -1815,7 +1850,12 @@ fn one_to_one_image_drawing_is_bit_exact() {
 #[test]
 fn scaled_image_opacity_modulates_alpha_and_treats_non_finite_as_default() {
     let image = Image::new(1, 1, vec![10, 20, 30, 200]).unwrap();
-    let destination = Rect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 };
+    let destination = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    };
 
     let mut translucent = Canvas::new(1, 1);
     translucent.draw_image_scaled_clipped_with_opacity(&image, destination, None, 0.5);
@@ -2768,7 +2808,12 @@ fn scrolled_snapshot_moves_flow_content_but_keeps_fixed_pixels() {
         .fixed { position: fixed; left: 5px; top: 5px; width: 10px; height: 10px; background: blue; }
     </style></head><body><div class="flow"></div><div class="fixed"></div></body></html>"#;
     let document = TreeBuilder::parse(html).document();
-    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
     let canvas = render_document_snapshot_with_url(&document, viewport, None, (0.0, 50.0))
         .expect("scrolled snapshot should render");
 
@@ -3880,10 +3925,7 @@ fn extract_stylesheets_preserves_named_import_layer_order() {
             let mut reader = BufReader::new(&stream);
             let mut request_line = String::new();
             reader.read_line(&mut request_line).unwrap();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default();
+            let path = request_line.split_whitespace().nth(1).unwrap_or_default();
             loop {
                 let mut header = String::new();
                 reader.read_line(&mut header).unwrap();
@@ -5734,11 +5776,9 @@ fn text_overflow_fixture_paints_markers_at_inline_ends() {
                     continue;
                 };
                 let saturated = if red {
-                    pixel.r > pixel.g.saturating_add(40)
-                        && pixel.r > pixel.b.saturating_add(40)
+                    pixel.r > pixel.g.saturating_add(40) && pixel.r > pixel.b.saturating_add(40)
                 } else {
-                    pixel.b > pixel.r.saturating_add(40)
-                        && pixel.b > pixel.g.saturating_add(40)
+                    pixel.b > pixel.r.saturating_add(40) && pixel.b > pixel.g.saturating_add(40)
                 };
                 if !saturated {
                     continue;
@@ -5762,13 +5802,9 @@ fn text_overflow_fixture_paints_markers_at_inline_ends() {
     let large = find_layout_box_by_id(&layout, "large").unwrap();
 
     let ltr_red = ink_bounds(ltr.dimensions.content, true).expect("LTR ellipsis must be painted");
-    assert!(
-        ltr_red.0 as f32 > ltr.dimensions.content.x + ltr.dimensions.content.width / 2.0
-    );
+    assert!(ltr_red.0 as f32 > ltr.dimensions.content.x + ltr.dimensions.content.width / 2.0);
     let rtl_red = ink_bounds(rtl.dimensions.content, true).expect("RTL ellipsis must be painted");
-    assert!(
-        (rtl_red.2 as f32) < rtl.dimensions.content.x + rtl.dimensions.content.width / 2.0
-    );
+    assert!((rtl_red.2 as f32) < rtl.dimensions.content.x + rtl.dimensions.content.width / 2.0);
     assert!(ink_bounds(visible.dimensions.content, true).is_none());
     assert!(ink_bounds(clip.dimensions.content, true).is_none());
 
@@ -5905,32 +5941,62 @@ fn fill_rounded_rect_antialiases_boundary_pixels() {
 fn rounded_rect_scanlines_match_high_resolution_coverage_reference() {
     let cases = [
         (
-            Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
             [5.0, 5.0, 5.0, 5.0],
             None,
         ),
         (
-            Rect { x: 1.25, y: 2.75, width: 17.5, height: 13.25 },
+            Rect {
+                x: 1.25,
+                y: 2.75,
+                width: 17.5,
+                height: 13.25,
+            },
             [7.0, 2.0, 5.0, 3.0],
             None,
         ),
         (
-            Rect { x: 1.25, y: 2.75, width: 17.5, height: 13.25 },
+            Rect {
+                x: 1.25,
+                y: 2.75,
+                width: 17.5,
+                height: 13.25,
+            },
             [7.0, 2.0, 5.0, 3.0],
-            Some(Rect { x: 3.4, y: 4.2, width: 11.3, height: 8.1 }),
+            Some(Rect {
+                x: 3.4,
+                y: 4.2,
+                width: 11.3,
+                height: 8.1,
+            }),
         ),
     ];
     for (rect, radii, clip) in cases {
         let color = Color::rgba(31, 97, 211, 173);
         let mut actual = Canvas::new(24, 20);
-        actual.fill_rounded_rect(
-            rect, color, radii[0], radii[1], radii[2], radii[3], clip,
-        );
+        actual.fill_rounded_rect(rect, color, radii[0], radii[1], radii[2], radii[3], clip);
 
-        let tl = radii[0].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
-        let tr = radii[1].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
-        let br = radii[2].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
-        let bl = radii[3].min(rect.width / 2.0).min(rect.height / 2.0).max(0.0);
+        let tl = radii[0]
+            .min(rect.width / 2.0)
+            .min(rect.height / 2.0)
+            .max(0.0);
+        let tr = radii[1]
+            .min(rect.width / 2.0)
+            .min(rect.height / 2.0)
+            .max(0.0);
+        let br = radii[2]
+            .min(rect.width / 2.0)
+            .min(rect.height / 2.0)
+            .max(0.0);
+        let bl = radii[3]
+            .min(rect.width / 2.0)
+            .min(rect.height / 2.0)
+            .max(0.0);
         const REFERENCE_SAMPLES: u32 = 64;
         for y in 0..actual.height() {
             for x in 0..actual.width() {
@@ -5946,10 +6012,10 @@ fn rounded_rect_scanlines_match_high_resolution_coverage_reference() {
                 if in_clip {
                     for sample_y in 0..REFERENCE_SAMPLES {
                         for sample_x in 0..REFERENCE_SAMPLES {
-                            let sample_x = x as f32
-                                + (sample_x as f32 + 0.5) / REFERENCE_SAMPLES as f32;
-                            let sample_y = y as f32
-                                + (sample_y as f32 + 0.5) / REFERENCE_SAMPLES as f32;
+                            let sample_x =
+                                x as f32 + (sample_x as f32 + 0.5) / REFERENCE_SAMPLES as f32;
+                            let sample_y =
+                                y as f32 + (sample_y as f32 + 0.5) / REFERENCE_SAMPLES as f32;
                             if point_in_rounded_rect(
                                 sample_x,
                                 sample_y,
@@ -6034,7 +6100,11 @@ fn rounded_box_without_paintable_background_image_skips_surface_allocation() {
 
         paint_clip_path_document(&css, "<div></div>", 64.0, 64.0);
 
-        assert_eq!(take_background_image_surface_pixels(), 0, "{background_image:?}");
+        assert_eq!(
+            take_background_image_surface_pixels(),
+            0,
+            "{background_image:?}"
+        );
     }
 }
 
@@ -6103,9 +6173,9 @@ fn rounded_background_surface_uses_small_box_area_not_viewport_area() {
         96.0,
     );
     assert_eq!(take_background_image_surface_pixels(), 80);
-    assert!((0..96).any(|y| {
-        (7..17).any(|x| canvas.pixel(x, y) == Some(Color::rgb(255, 0, 0)))
-    }));
+    assert!(
+        (0..96).any(|y| { (7..17).any(|x| canvas.pixel(x, y) == Some(Color::rgb(255, 0, 0))) })
+    );
     assert_eq!(canvas.pixel(0, 0).unwrap().a, 0);
 }
 
@@ -6618,7 +6688,12 @@ fn filter_brightness_applies_to_the_element_subtree() {
                background-color: #4080c0; filter: brightness(0.5); }";
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
-    let viewport = Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 40.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -6635,9 +6710,16 @@ fn filter_blur_preserves_color_at_transparent_edges() {
     let css = "body { margin: 0; } div { width: 10px; height: 10px; background-color: red; filter: blur(1px); }";
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
-    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
-    let pixel = paint_layout(&layout, &mut resolver, viewport).pixel(10, 5).unwrap();
+    let pixel = paint_layout(&layout, &mut resolver, viewport)
+        .pixel(10, 5)
+        .unwrap();
 
     assert_eq!((pixel.r, pixel.g, pixel.b), (255, 0, 0));
     assert!(pixel.a > 0 && pixel.a < 255);
@@ -6651,15 +6733,27 @@ fn filter_functions_apply_in_declared_order() {
         let div = NodeHandle::element("div");
         document.append_child(body.clone());
         body.append_child(div);
-        let css = format!("body {{ margin: 0; }} div {{ width: 10px; height: 10px; background-color: #4080c0; filter: {filter}; }}");
+        let css = format!(
+            "body {{ margin: 0; }} div {{ width: 10px; height: 10px; background-color: #4080c0; filter: {filter}; }}"
+        );
         let mut resolver = StyleResolver::new();
         resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
-        let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        };
         let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
-        paint_layout(&layout, &mut resolver, viewport).pixel(5, 5).unwrap()
+        paint_layout(&layout, &mut resolver, viewport)
+            .pixel(5, 5)
+            .unwrap()
     }
 
-    assert_ne!(render("brightness(0.5) invert(1)"), render("invert(1) brightness(0.5)"));
+    assert_ne!(
+        render("brightness(0.5) invert(1)"),
+        render("invert(1) brightness(0.5)")
+    );
 }
 
 #[test]
@@ -6673,7 +6767,12 @@ fn backdrop_filter_changes_only_the_pixels_behind_the_element() {
                div { width: 10px; height: 10px; backdrop-filter: brightness(0.5); }";
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
-    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -6700,12 +6799,16 @@ fn render_backdrop(css: &str, viewport_size: f32) -> (Canvas, u64) {
     body.append_child(b.clone());
     b.append_child(c);
 
-    let css = format!(
-        "body {{ margin: 0; width: {viewport_size}px; height: {viewport_size}px; }} {css}"
-    );
+    let css =
+        format!("body {{ margin: 0; width: {viewport_size}px; height: {viewport_size}px; }} {css}");
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
-    let viewport = Rect { x: 0.0, y: 0.0, width: viewport_size, height: viewport_size };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: viewport_size,
+        height: viewport_size,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
 
     super::take_backdrop_surface_pixels();
@@ -6923,7 +7026,10 @@ fn filter_source_padding_mirrors_the_output_padding() {
 
     // 病的な長さでも saturate して overflow しない。
     let huge = parse_filter_list("blur(99999999999999999999999px)").unwrap();
-    assert_eq!(super::filter_source_padding(&huge), (usize::MAX, usize::MAX, usize::MAX, usize::MAX));
+    assert_eq!(
+        super::filter_source_padding(&huge),
+        (usize::MAX, usize::MAX, usize::MAX, usize::MAX)
+    );
 }
 
 #[test]
@@ -6970,7 +7076,12 @@ fn drop_shadow_uses_the_element_alpha_and_paints_behind_it() {
                filter: drop-shadow(5px 0 0 #0000ff); }";
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
-    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -7472,9 +7583,14 @@ fn vertical_placeholder_respects_inline_direction_and_column_geometry() {
     let first_rtl = (0..70)
         .find(|&y| (0..60).any(|x| rtl.pixel(x, y).is_some_and(|p| p.a > 0)))
         .expect("vertical RTL text should paint");
-    assert!(first_ltr < first_rtl, "RTL inline paint should start from the opposite edge");
     assert!(
-        (0..70).any(|y| y > first_ltr + 10 && (0..60).any(|x| ltr.pixel(x, y).is_some_and(|p| p.a > 0))),
+        first_ltr < first_rtl,
+        "RTL inline paint should start from the opposite edge"
+    );
+    assert!(
+        (0..70).any(
+            |y| y > first_ltr + 10 && (0..60).any(|x| ltr.pixel(x, y).is_some_and(|p| p.a > 0))
+        ),
         "vertical text should advance along the physical y axis"
     );
 }
@@ -7802,7 +7918,12 @@ fn render_gradient_box(background: &str, width: u32, height: u32) -> Canvas {
     );
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
-    let viewport = Rect { x: 0.0, y: 0.0, width: width as f32, height: height as f32 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: width as f32,
+        height: height as f32,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     paint_layout(&layout, &mut resolver, viewport)
 }
@@ -8002,7 +8123,12 @@ fn generated_box_background_layers_apply_origin_clip_and_radius() {
     let document = TreeBuilder::parse(html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 16.0, height: 16.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 16.0,
+            height: 16.0,
+        },
     )
     .unwrap();
     assert_eq!(canvas.pixel(0, 6).unwrap().a, 0);
@@ -8038,11 +8164,21 @@ fn inline_image_fragment_background_layers_apply_origin_and_clip() {
     let mut canvas = Canvas::new(12, 12);
     text::paint_inline_image_fragment(
         &mut canvas,
-        Rect { x: 0.0, y: 0.0, width: 12.0, height: 12.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 12.0,
+            height: 12.0,
+        },
         &transparent,
         &style,
         None,
-        Rect { x: 0.0, y: 0.0, width: 12.0, height: 12.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 12.0,
+            height: 12.0,
+        },
     );
     assert_eq!(canvas.pixel(0, 6).unwrap().a, 0);
     assert_eq!(canvas.pixel(2, 6), Some(Color::rgb(0, 0, 255)));
@@ -8165,9 +8301,7 @@ fn degenerate_radial_gradients_follow_css_images_rules() {
         9,
         9,
     );
-    assert!((0..9).all(|x| {
-        repeating_zero_height.pixel(x, 4) == Some(Color::rgb(128, 0, 128))
-    }));
+    assert!((0..9).all(|x| { repeating_zero_height.pixel(x, 4) == Some(Color::rgb(128, 0, 128)) }));
 }
 
 #[test]
@@ -8178,7 +8312,10 @@ fn gradient_transparent_interpolation_is_premultiplied() {
         41,
     );
     let middle = canvas.pixel(30, 20).unwrap();
-    assert!(middle.b > 200 && middle.r < 20 && middle.a > 100 && middle.a < 160, "{middle:?}");
+    assert!(
+        middle.b > 200 && middle.r < 20 && middle.a > 100 && middle.a < 160,
+        "{middle:?}"
+    );
 }
 
 #[test]
@@ -8199,11 +8336,7 @@ fn background_clip_applies_the_same_box_to_color_and_gradient() {
         let common = format!(
             "box-sizing: border-box; border: 2px solid transparent; padding: 2px; background-clip: {clip};"
         );
-        let color = render_gradient_box(
-            &format!("{common} background-color: red;"),
-            12,
-            12,
-        );
+        let color = render_gradient_box(&format!("{common} background-color: red;"), 12, 12);
         let gradient = render_gradient_box(
             &format!("{common} background-image: radial-gradient(circle, red, blue);"),
             12,
@@ -8250,15 +8383,9 @@ fn rounded_padding_and_content_background_clips_reduce_the_corner_radii() {
             "box-sizing: border-box; border: 2px solid transparent; padding: 2px; \
              border-radius: 8px; background-clip: {clip};"
         );
-        let color = render_gradient_box(
-            &format!("{common} background-color: red;"),
-            20,
-            20,
-        );
+        let color = render_gradient_box(&format!("{common} background-color: red;"), 20, 20);
         let gradient = render_gradient_box(
-            &format!(
-                "{common} background-image: linear-gradient(red, red);"
-            ),
+            &format!("{common} background-image: linear-gradient(red, red);"),
             20,
             20,
         );
@@ -8287,9 +8414,16 @@ fn malformed_gradients_do_not_paint_or_panic() {
         "conic-gradient(from nope, red, blue)",
         "repeating-conic-gradient(red)",
     ] {
-        assert!(parse_gradient(value).is_none(), "accepted malformed {value}");
+        assert!(
+            parse_gradient(value).is_none(),
+            "accepted malformed {value}"
+        );
         let canvas = render_gradient_box(&format!("background-image: {value};"), 4, 4);
-        assert_eq!(canvas.pixel(2, 2).unwrap().a, 0, "painted malformed {value}");
+        assert_eq!(
+            canvas.pixel(2, 2).unwrap().a,
+            0,
+            "painted malformed {value}"
+        );
     }
 }
 
@@ -8393,16 +8527,7 @@ fn composite_alpha_scale_matches_prescaled_source() {
     let mut prescaled_source = source.clone();
     prescaled_source.multiply_alpha(scale);
     let mut expected = Canvas::new(5, 4);
-    expected.composite_canvas_clipped(
-        &prescaled_source,
-        1,
-        1,
-        20,
-        40,
-        60,
-        1.0,
-        None,
-    );
+    expected.composite_canvas_clipped(&prescaled_source, 1, 1, 20, 40, 60, 1.0, None);
 
     let mut actual = Canvas::new(5, 4);
     actual.composite_canvas_clipped(&source, 1, 1, 20, 40, 60, scale, None);
@@ -8481,7 +8606,12 @@ fn local_effect_surface_keeps_overflow_visible_descendant() {
         )
         .unwrap(),
     );
-    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let parent_border_box = border_box_rect(find_layout_box_by_class(&layout, "effect").unwrap());
     let parent_right = parent_border_box.x + parent_border_box.width;
@@ -8518,7 +8648,12 @@ fn local_effect_surface_clips_negative_coordinates_to_canvas() {
         )
         .unwrap(),
     );
-    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
     let effect_surface_pixels = super::take_effect_surface_pixels();
@@ -8547,7 +8682,12 @@ fn local_effect_surface_keeps_nested_filter_padding() {
         )
         .unwrap(),
     );
-    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let outer_border_box = border_box_rect(find_layout_box_by_class(&layout, "outer").unwrap());
     let inner_border_box = border_box_rect(find_layout_box_by_class(&layout, "inner").unwrap());
@@ -8558,14 +8698,15 @@ fn local_effect_surface_keeps_nested_filter_padding() {
 
     // A blue pixel strictly beyond both measured source border boxes can only
     // come from the nested 12px drop shadow, not either element background.
-    let has_shadow_outside_sources = canvas
-        .pixels
-        .chunks_exact(4)
-        .enumerate()
-        .any(|(index, pixel)| {
-            let x = index % canvas.width() as usize;
-            x as f32 + 0.5 >= source_right && pixel[2] > pixel[0] && pixel[3] > 0
-        });
+    let has_shadow_outside_sources =
+        canvas
+            .pixels
+            .chunks_exact(4)
+            .enumerate()
+            .any(|(index, pixel)| {
+                let x = index % canvas.width() as usize;
+                x as f32 + 0.5 >= source_right && pixel[2] > pixel[0] && pixel[3] > 0
+            });
     assert!(has_shadow_outside_sources, "nested shadow was cropped");
     assert!(effect_surface_pixels < 2_000);
 }
@@ -9082,7 +9223,12 @@ div { width: 4px; height: 2px; background: red; box-shadow: 15px 0 0 blue;
     let document = TreeBuilder::parse(html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 24.0, height: 2.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 2.0,
+        },
     )
     .unwrap();
 
@@ -9160,14 +9306,21 @@ div { width: 4px; height: 1px; background: red;
     let document = TreeBuilder::parse(html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 4.0, height: 1.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 1.0,
+        },
     )
     .unwrap();
     // Sampling at the pixel center gives the first gradient sample a small
     // interpolation step toward transparent; it remains substantially opaque.
-    assert!(canvas
-        .pixel(0, 0)
-        .is_some_and(|color| color.r == 255 && color.g == 0 && color.b == 0 && color.a > 200));
+    assert!(
+        canvas
+            .pixel(0, 0)
+            .is_some_and(|color| color.r == 255 && color.g == 0 && color.b == 0 && color.a > 200)
+    );
     assert!(canvas.pixel(2, 0).is_some_and(|color| color.a < 200));
     assert_eq!(canvas.pixel(3, 0).unwrap().a, 0);
 }
@@ -9184,7 +9337,12 @@ div { width: 2px; height: 1px; background: blue;
     let document = TreeBuilder::parse(html).document();
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        },
     )
     .unwrap();
     // The second opaque layer is added to the first luminance layer, so both
@@ -9285,21 +9443,27 @@ fn form_control_text_measure_matches_painter_advance_model() {
         "measured {measured} must equal painter cursor advance {expected}"
     );
     assert_eq!(
-        measure_form_control_text_width("a\u{301}\u{fe0f}\u{200d}b", font_size, &font_refs, letter_spacing),
+        measure_form_control_text_width(
+            "a\u{301}\u{fe0f}\u{200d}b",
+            font_size,
+            &font_refs,
+            letter_spacing
+        ),
         measure_form_control_text_width("ab", font_size, &font_refs, letter_spacing),
     );
 }
 
 #[test]
 fn opentype_shaped_paint_uses_the_layout_advance_model() {
-    use crate::font::{
-        ShapingDirection, grapheme_spacing_boundaries, load_default_text_fonts,
-    };
     use super::text::paint_shaped_horizontal_text;
+    use crate::font::{ShapingDirection, grapheme_spacing_boundaries, load_default_text_fonts};
 
     let fonts = load_default_text_fonts();
     let text = "لا";
-    let Some(font) = fonts.iter().find(|font| text.chars().all(|ch| font.has_glyph(ch))) else {
+    let Some(font) = fonts
+        .iter()
+        .find(|font| text.chars().all(|ch| font.has_glyph(ch)))
+    else {
         eprintln!("Skipping shaped paint test: no Arabic font available");
         return;
     };
@@ -9308,7 +9472,10 @@ fn opentype_shaped_paint_uses_the_layout_advance_model() {
     let shaped = font
         .shape_text(text, font_size, ShapingDirection::RightToLeft)
         .unwrap();
-    let expected = shaped.iter().map(|glyph| glyph.x_advance.abs()).sum::<f32>()
+    let expected = shaped
+        .iter()
+        .map(|glyph| glyph.x_advance.abs())
+        .sum::<f32>()
         + grapheme_spacing_boundaries(text) as f32 * letter_spacing;
 
     let mut canvas = Canvas::new(120, 50);
@@ -9319,7 +9486,12 @@ fn opentype_shaped_paint_uses_the_layout_advance_model() {
     };
     let painted_advance = paint_shaped_horizontal_text(
         &mut canvas,
-        Rect { x: 0.0, y: 0.0, width: 120.0, height: 50.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 50.0,
+        },
         text,
         font_size,
         35.0,
@@ -9336,8 +9508,8 @@ fn opentype_shaped_paint_uses_the_layout_advance_model() {
 
 #[test]
 fn shaped_paint_does_not_space_after_non_advancing_leading_cluster() {
-    use crate::font::{ShapingDirection, load_default_text_fonts};
     use super::text::paint_shaped_horizontal_text;
+    use crate::font::{ShapingDirection, load_default_text_fonts};
 
     let fonts = load_default_text_fonts();
     let text = "\u{301}A";
@@ -9346,17 +9518,27 @@ fn shaped_paint_does_not_space_after_non_advancing_leading_cluster() {
             .shape_text(text, 32.0, ShapingDirection::LeftToRight)
             .ok()?;
         (shaped.iter().all(|glyph| glyph.glyph_id != 0)
-            && shaped.windows(2).any(|pair| pair[0].cluster != pair[1].cluster))
+            && shaped
+                .windows(2)
+                .any(|pair| pair[0].cluster != pair[1].cluster))
         .then_some((font, shaped))
     }) else {
         eprintln!("Skipping leading-mark spacing test: no suitable font available");
         return;
     };
-    let expected = shaped.iter().map(|glyph| glyph.x_advance.abs()).sum::<f32>();
+    let expected = shaped
+        .iter()
+        .map(|glyph| glyph.x_advance.abs())
+        .sum::<f32>();
     let mut canvas = Canvas::new(120, 50);
     let painted_advance = paint_shaped_horizontal_text(
         &mut canvas,
-        Rect { x: 0.0, y: 0.0, width: 120.0, height: 50.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 50.0,
+        },
         text,
         32.0,
         35.0,
@@ -9507,7 +9689,12 @@ fn focused_text_control_paints_selection_and_caret() {
     let input = NodeHandle::element("input");
     let mut resolver = StyleResolver::new();
     let control_style = resolver.computed_style(&input);
-    let viewport = Rect { x: 0.0, y: 0.0, width: 80.0, height: 24.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 80.0,
+        height: 24.0,
+    };
     let fragment = |value: &str, start, end| InlineFragment {
         node: input.clone(),
         content: InlineFragmentContent::FormControl(
@@ -9526,7 +9713,10 @@ fn focused_text_control_paints_selection_and_caret() {
     };
     let layout = |fragment| LayoutBox {
         node: input.clone(),
-        dimensions: BoxDimensions { content: viewport, ..BoxDimensions::default() },
+        dimensions: BoxDimensions {
+            content: viewport,
+            ..BoxDimensions::default()
+        },
         visibility: crate::layout::Visibility::Visible,
         overflow: crate::layout::Overflow::Visible,
         z_index: 0,
@@ -9555,7 +9745,12 @@ fn focused_text_control_paints_selection_and_caret() {
         None,
         PaintOffset::default(),
     );
-    assert!(selected.pixels().chunks_exact(4).any(|pixel| pixel[2] > pixel[0]));
+    assert!(
+        selected
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[2] > pixel[0])
+    );
 
     let mut caret = Canvas::new(80, 24);
     paint_text_with_registry(
@@ -9569,7 +9764,12 @@ fn focused_text_control_paints_selection_and_caret() {
         None,
         PaintOffset::default(),
     );
-    assert!(caret.pixels().chunks_exact(4).any(|pixel| pixel == [0, 0, 0, 255]));
+    assert!(
+        caret
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel == [0, 0, 0, 255])
+    );
 }
 
 #[test]
@@ -9617,7 +9817,10 @@ fn render_glyph_cache_hits_and_separates_font_identity_and_size() {
 
     let (hits, misses) = super::text::render_glyph_cache_stats();
     assert_eq!(hits, 1, "only the identical font/character/size may hit");
-    assert_eq!(misses, 3, "font identity and size must use distinct entries");
+    assert_eq!(
+        misses, 3,
+        "font identity and size must use distinct entries"
+    );
 }
 
 #[test]
@@ -9634,7 +9837,10 @@ fn nested_render_glyph_cache_reuses_outer_entries_and_remains_active() {
     });
 
     let (hits, misses) = super::text::render_glyph_cache_stats();
-    assert_eq!(hits, 2, "nested and post-nested lookups must hit the outer entry");
+    assert_eq!(
+        hits, 2,
+        "nested and post-nested lookups must hit the outer entry"
+    );
     assert_eq!(misses, 1, "the outermost lookup must be the only miss");
 }
 
@@ -9660,7 +9866,12 @@ fn render_with_scroll(
             .unwrap_or_else(|| panic!("no element matched {selector}"))
             .set_scroll_offset(*x, *y);
     }
-    let viewport = Rect { x: 0.0, y: 0.0, width: viewport_size, height: viewport_size };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: viewport_size,
+        height: viewport_size,
+    };
     let mut layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     super::apply_scroll_offsets(&mut layout, &mut resolver, viewport, window_scroll);
     paint_layout(&layout, &mut resolver, viewport)
@@ -9757,7 +9968,12 @@ fn local_background_handles_nonzero_viewport_origin_without_stale_scroll_geometr
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
-    let viewport = Rect { x: 2.0, y: 1.0, width: 10.0, height: 8.0 };
+    let viewport = Rect {
+        x: 2.0,
+        y: 1.0,
+        width: 10.0,
+        height: 8.0,
+    };
     let cached = layout_tree(&document, &mut resolver, viewport).unwrap();
     let scroller = document.query_selector("#sc").unwrap();
 
@@ -9843,7 +10059,11 @@ fn element_scroll_left_moves_content_horizontally() {
 
     let unscrolled = render_with_scroll(html, 40.0, &[], (0.0, 0.0));
     assert_eq!(unscrolled.pixel(5, 5).unwrap().a, 0);
-    assert_eq!(unscrolled.pixel(25, 5).unwrap().a, 0, "content outside the container is clipped");
+    assert_eq!(
+        unscrolled.pixel(25, 5).unwrap().a,
+        0,
+        "content outside the container is clipped"
+    );
 
     let scrolled = render_with_scroll(html, 40.0, &[("#sc", 20.0, 0.0)], (0.0, 0.0));
     assert_eq!(scrolled.pixel(5, 5), green);
@@ -9866,10 +10086,18 @@ fn absolute_descendant_uses_its_containing_blocks_scroll_and_clip_chain() {
     let red = Some(Color::rgba(255, 0, 0, 255));
 
     let unscrolled = render_with_scroll(html, 70.0, &[], (0.0, 0.0));
-    assert_eq!(unscrolled.pixel(35, 10), red, "target must escape inner clip");
+    assert_eq!(
+        unscrolled.pixel(35, 10),
+        red,
+        "target must escape inner clip"
+    );
 
     let inner = render_with_scroll(html, 70.0, &[("#inner", 10.0, 0.0)], (0.0, 0.0));
-    assert_eq!(inner.pixel(35, 10), red, "inner scroll must not move target");
+    assert_eq!(
+        inner.pixel(35, 10),
+        red,
+        "inner scroll must not move target"
+    );
     assert_eq!(inner.pixel(25, 10).unwrap().a, 0);
 
     let both = render_with_scroll(
@@ -9878,7 +10106,11 @@ fn absolute_descendant_uses_its_containing_blocks_scroll_and_clip_chain() {
         &[("#outer", 10.0, 0.0), ("#inner", 10.0, 0.0)],
         (0.0, 0.0),
     );
-    assert_eq!(both.pixel(25, 10), red, "containing block scroll must move target");
+    assert_eq!(
+        both.pixel(25, 10),
+        red,
+        "containing block scroll must move target"
+    );
     assert_eq!(both.pixel(35, 10).unwrap().a, 0);
 }
 
@@ -9887,12 +10119,7 @@ fn element_scroll_is_clamped_to_the_scrollable_extent_when_painting() {
     // A stored offset past the extent paints the extent, so a shrunk document
     // cannot scroll its content out of view.
     let green = Some(Color::rgba(0, 255, 0, 255));
-    let clamped = render_with_scroll(
-        STRIPED_SCROLLER,
-        40.0,
-        &[("#sc", 500.0, 500.0)],
-        (0.0, 0.0),
-    );
+    let clamped = render_with_scroll(STRIPED_SCROLLER, 40.0, &[("#sc", 500.0, 500.0)], (0.0, 0.0));
     assert_eq!(clamped.pixel(5, 5), green);
     assert_eq!(clamped.pixel(5, 19), green);
 }
@@ -10072,12 +10299,7 @@ fn collapsed_intro_margin_covers_fixed_bars_without_moving_them() {
 #[test]
 fn window_and_element_scroll_offsets_combine_when_painting() {
     let green = Some(Color::rgba(0, 255, 0, 255));
-    let canvas = render_with_scroll(
-        STRIPED_SCROLLER,
-        40.0,
-        &[("#sc", 0.0, 20.0)],
-        (0.0, 10.0),
-    );
+    let canvas = render_with_scroll(STRIPED_SCROLLER, 40.0, &[("#sc", 0.0, 20.0)], (0.0, 10.0));
     // The container itself moves up with the Window scroll, so its content ends
     // up spanning y = -10..10 with the second stripe visible.
     assert_eq!(canvas.pixel(5, 0), green);
@@ -10194,7 +10416,12 @@ fn apply_scroll_offsets_moves_content_but_not_the_scroll_container_box() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
-    let viewport = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
     let scroller = document.query_selector("#sc").unwrap();
     let child = document.query_selector("#child").unwrap();
 
@@ -10262,7 +10489,12 @@ fn scripted_element_scroll_reaches_the_rendered_document() {
 
     let canvas = render_document(
         &document,
-        Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 40.0,
+        },
     )
     .expect("render should succeed");
 
@@ -10293,9 +10525,22 @@ fn render_object_fit(declarations: &str, box_size: (f32, f32)) -> (Canvas, Rect)
     ];
     for (index, color) in columns.iter().enumerate() {
         let x = index as f32;
-        source.fill_rect(Rect { x, y: 0.0, width: 1.0, height: 1.0 }, *color);
         source.fill_rect(
-            Rect { x, y: 1.0, width: 1.0, height: 1.0 },
+            Rect {
+                x,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            *color,
+        );
+        source.fill_rect(
+            Rect {
+                x,
+                y: 1.0,
+                width: 1.0,
+                height: 1.0,
+            },
             Color::rgb(color.r / 2, color.g / 2, color.b / 2),
         );
     }
@@ -10309,7 +10554,12 @@ fn render_object_fit(declarations: &str, box_size: (f32, f32)) -> (Canvas, Rect)
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
-    let viewport = Rect { x: 0.0, y: 0.0, width: 140.0, height: 140.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 140.0,
+        height: 140.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let content_box = image_fragment_rect(&layout).expect("the img must produce an image fragment");
     (paint_layout(&layout, &mut resolver, viewport), content_box)
@@ -10320,7 +10570,10 @@ fn render_object_fit(declarations: &str, box_size: (f32, f32)) -> (Canvas, Rect)
 fn image_fragment_rect(layout: &crate::layout::LayoutBox) -> Option<Rect> {
     for line in &layout.lines {
         for fragment in &line.fragments {
-            if matches!(fragment.content, crate::layout::InlineFragmentContent::Image(..)) {
+            if matches!(
+                fragment.content,
+                crate::layout::InlineFragmentContent::Image(..)
+            ) {
                 return Some(fragment.rect);
             }
         }
@@ -10366,9 +10619,7 @@ fn painted_bounds(canvas: &Canvas) -> Option<(u32, u32, u32, u32)> {
             });
         }
     }
-    bounds.map(|(min_x, min_y, max_x, max_y)| {
-        (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
-    })
+    bounds.map(|(min_x, min_y, max_x, max_y)| (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
 }
 
 /// Samples the colour at the centre of each of the four source columns as they
@@ -10388,7 +10639,10 @@ fn painted_columns(canvas: &Canvas, bounds: (u32, u32, u32, u32)) -> Vec<(u8, u8
 #[test]
 fn object_fit_fill_stretches_to_the_content_box() {
     let (canvas, content_box) = render_object_fit("object-fit: fill", (100.0, 100.0));
-    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 0, 100, 100)));
+    assert_eq!(
+        painted_bounds_in_box(&canvas, content_box),
+        Some((0, 0, 100, 100))
+    );
     assert_eq!(
         painted_columns(&canvas, (0, 0, 100, 100)),
         vec![(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
@@ -10399,7 +10653,10 @@ fn object_fit_fill_stretches_to_the_content_box() {
 fn object_fit_contain_letterboxes_and_leaves_the_rest_transparent() {
     let (canvas, content_box) = render_object_fit("object-fit: contain", (100.0, 100.0));
     // scale = min(100/4, 100/2) = 25 -> 100x50, centred vertically.
-    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 25, 100, 50)));
+    assert_eq!(
+        painted_bounds_in_box(&canvas, content_box),
+        Some((0, 25, 100, 50))
+    );
     assert_eq!(
         painted_columns(&canvas, (0, 25, 100, 50)),
         vec![(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
@@ -10413,7 +10670,10 @@ fn object_fit_contain_letterboxes_and_leaves_the_rest_transparent() {
 fn object_fit_cover_fills_the_box_and_crops_the_overflow() {
     let (canvas, content_box) = render_object_fit("object-fit: cover", (100.0, 100.0));
     // scale = max(100/4, 100/2) = 50 -> 200x100 centred, cropped to the box.
-    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 0, 100, 100)));
+    assert_eq!(
+        painted_bounds_in_box(&canvas, content_box),
+        Some((0, 0, 100, 100))
+    );
     // Only the middle half of the source survives: green and blue, not red or
     // yellow.
     assert_eq!(
@@ -10428,7 +10688,10 @@ fn object_fit_cover_fills_the_box_and_crops_the_overflow() {
 fn object_fit_none_paints_the_intrinsic_size_centred() {
     let (canvas, content_box) = render_object_fit("object-fit: none", (100.0, 100.0));
     // Intrinsic 4x2 centred: (100-4)/2 = 48, (100-2)/2 = 49.
-    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((48, 49, 4, 2)));
+    assert_eq!(
+        painted_bounds_in_box(&canvas, content_box),
+        Some((48, 49, 4, 2))
+    );
     assert_eq!(canvas.pixel(48, 49), Some(Color::rgba(255, 0, 0, 255)));
     assert_eq!(canvas.pixel(51, 49), Some(Color::rgba(255, 255, 0, 255)));
     assert_eq!(canvas.pixel(48, 50), Some(Color::rgba(127, 0, 0, 255)));
@@ -10439,7 +10702,10 @@ fn object_fit_none_paints_the_intrinsic_size_centred() {
 fn object_fit_scale_down_picks_the_smaller_of_none_and_contain() {
     // The image fits, so `scale-down` behaves like `none`.
     let (large, large_box) = render_object_fit("object-fit: scale-down", (100.0, 100.0));
-    assert_eq!(painted_bounds_in_box(&large, large_box), Some((48, 49, 4, 2)));
+    assert_eq!(
+        painted_bounds_in_box(&large, large_box),
+        Some((48, 49, 4, 2))
+    );
 
     // It does not fit, so `scale-down` behaves like `contain`:
     // scale = min(2/4, 1/2) = 0.5 -> 2x1.
@@ -10453,12 +10719,19 @@ fn object_fit_scale_down_picks_the_smaller_of_none_and_contain() {
 
 #[test]
 fn object_position_places_a_contained_object_inside_the_box() {
-    let (top_left, top_left_box) =
-        render_object_fit("object-fit: contain; object-position: left top", (100.0, 100.0));
-    assert_eq!(painted_bounds_in_box(&top_left, top_left_box), Some((0, 0, 100, 50)));
+    let (top_left, top_left_box) = render_object_fit(
+        "object-fit: contain; object-position: left top",
+        (100.0, 100.0),
+    );
+    assert_eq!(
+        painted_bounds_in_box(&top_left, top_left_box),
+        Some((0, 0, 100, 50))
+    );
 
-    let (bottom_right, bottom_right_box) =
-        render_object_fit("object-fit: contain; object-position: right bottom", (100.0, 100.0));
+    let (bottom_right, bottom_right_box) = render_object_fit(
+        "object-fit: contain; object-position: right bottom",
+        (100.0, 100.0),
+    );
     assert_eq!(
         painted_bounds_in_box(&bottom_right, bottom_right_box),
         Some((0, 50, 100, 50))
@@ -10477,14 +10750,22 @@ fn object_position_places_an_intrinsic_object_by_percentage_and_length() {
         "a 73.5px offset must land on row 73 or 74, got {y}"
     );
 
-    let (length, length_box) =
-        render_object_fit("object-fit: none; object-position: 10px 20px", (100.0, 100.0));
-    assert_eq!(painted_bounds_in_box(&length, length_box), Some((10, 20, 4, 2)));
+    let (length, length_box) = render_object_fit(
+        "object-fit: none; object-position: 10px 20px",
+        (100.0, 100.0),
+    );
+    assert_eq!(
+        painted_bounds_in_box(&length, length_box),
+        Some((10, 20, 4, 2))
+    );
 
     // A single component centres the other axis.
     let (single, single_box) =
         render_object_fit("object-fit: none; object-position: left", (100.0, 100.0));
-    assert_eq!(painted_bounds_in_box(&single, single_box), Some((0, 49, 4, 2)));
+    assert_eq!(
+        painted_bounds_in_box(&single, single_box),
+        Some((0, 49, 4, 2))
+    );
 }
 
 #[test]
@@ -10498,8 +10779,10 @@ fn object_position_chooses_which_side_cover_crops() {
         "cover anchored left must show the first half of the source"
     );
 
-    let (right, _) =
-        render_object_fit("object-fit: cover; object-position: 100% 50%", (100.0, 100.0));
+    let (right, _) = render_object_fit(
+        "object-fit: cover; object-position: 100% 50%",
+        (100.0, 100.0),
+    );
     assert_eq!(
         painted_columns(&right, (0, 0, 100, 100)),
         vec![(0, 0, 255), (0, 0, 255), (255, 255, 0), (255, 255, 0)],
@@ -10512,7 +10795,15 @@ fn object_fit_applies_to_a_positioned_replaced_box() {
     // The positioned path paints through paint_replaced_image_box rather than an
     // inline fragment, and must apply the same sizing.
     let mut source = Canvas::new(4, 2);
-    source.fill_rect(Rect { x: 0.0, y: 0.0, width: 4.0, height: 2.0 }, Color::rgb(255, 0, 0));
+    source.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 2.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
     let encoded = base64::engine::general_purpose::STANDARD.encode(source.encode_png());
     let html = format!(
         r#"<html><head><style>body {{ margin: 0; }} img {{ position: absolute; left: 0; top: 0; width: 100px; height: 100px; object-fit: contain; }}</style></head><body><img src="data:image/png;base64,{encoded}"></body></html>"#
@@ -10522,7 +10813,12 @@ fn object_fit_applies_to_a_positioned_replaced_box() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
-    let viewport = Rect { x: 0.0, y: 0.0, width: 140.0, height: 140.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 140.0,
+        height: 140.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -10532,7 +10828,15 @@ fn object_fit_applies_to_a_positioned_replaced_box() {
 #[test]
 fn tiny_absolute_image_is_painted_only_at_its_positioned_location() {
     let mut source = Canvas::new(2, 1);
-    source.fill_rect(Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 }, Color::rgb(255, 0, 0));
+    source.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
     let encoded = base64::engine::general_purpose::STANDARD.encode(source.encode_png());
     let html = format!(
         r#"<html><head><style>body {{ margin: 0; }} img {{ position: absolute; left: 0; top: 0; width: 2px; height: 1px; }}</style></head><body><img src="data:image/png;base64,{encoded}"></body></html>"#
@@ -10542,7 +10846,12 @@ fn tiny_absolute_image_is_painted_only_at_its_positioned_location() {
     for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
         resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
     }
-    let viewport = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+    };
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 
@@ -10554,7 +10863,10 @@ fn default_object_fit_keeps_stretching_replaced_content() {
     // No declaration at all must paint exactly like the pre-object-fit engine:
     // the image stretched across the whole content box.
     let (canvas, content_box) = render_object_fit("", (100.0, 100.0));
-    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 0, 100, 100)));
+    assert_eq!(
+        painted_bounds_in_box(&canvas, content_box),
+        Some((0, 0, 100, 100))
+    );
     assert_eq!(
         painted_columns(&canvas, (0, 0, 100, 100)),
         vec![(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
@@ -10568,5 +10880,8 @@ fn object_fit_applies_to_a_block_level_replaced_box() {
     let (canvas, content_box) =
         render_object_fit("display: block; object-fit: contain", (100.0, 100.0));
 
-    assert_eq!(painted_bounds_in_box(&canvas, content_box), Some((0, 25, 100, 50)));
+    assert_eq!(
+        painted_bounds_in_box(&canvas, content_box),
+        Some((0, 25, 100, 50))
+    );
 }

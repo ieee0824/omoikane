@@ -110,7 +110,15 @@ fn run() -> Result<(), String> {
             )
         })
     } else {
-        run_screenshot(browser, &url_c, url, &output_path, dump_html.as_ref(), width, height)
+        run_screenshot(
+            browser,
+            &url_c,
+            url,
+            &output_path,
+            dump_html.as_ref(),
+            width,
+            height,
+        )
     };
 
     // SAFETY: `browser` was allocated by `omoikane_init`.
@@ -163,14 +171,17 @@ fn run_screenshot(
     }
     fs::write(output_path, png).map_err(|error| format!("failed to write output PNG: {error}"))?;
 
-    println!("{}", format_success_message(
-        output_path,
-        width,
-        height,
-        url_display,
-        navigate_elapsed,
-        render_elapsed,
-    ));
+    println!(
+        "{}",
+        format_success_message(
+            output_path,
+            width,
+            height,
+            url_display,
+            navigate_elapsed,
+            render_elapsed,
+        )
+    );
     let timings = take_last_render_timings();
     println!("{}", format_render_phase_message(&timings));
     println!("{}", format_javascript_phase_message(&timings));
@@ -181,11 +192,15 @@ fn format_render_phase_message(timings: &RenderTimings) -> String {
     let milliseconds = |duration: Duration| duration.as_secs_f64() * 1_000.0;
     format!(
         "render phases: stylesheets={:.1}ms fonts={:.1}ms javascript={:.1}ms timers={:.1}ms animation-frames={:.1}ms style-refresh={:.1}ms layout={:.1}ms paint={:.1}ms png-encode={:.1}ms",
-        milliseconds(timings.stylesheets), milliseconds(timings.fonts),
-        milliseconds(timings.javascript), milliseconds(timings.timers),
+        milliseconds(timings.stylesheets),
+        milliseconds(timings.fonts),
+        milliseconds(timings.javascript),
+        milliseconds(timings.timers),
         milliseconds(timings.animation_frames),
-        milliseconds(timings.style_refresh), milliseconds(timings.layout),
-        milliseconds(timings.paint), milliseconds(timings.png_encode),
+        milliseconds(timings.style_refresh),
+        milliseconds(timings.layout),
+        milliseconds(timings.paint),
+        milliseconds(timings.png_encode),
     )
 }
 

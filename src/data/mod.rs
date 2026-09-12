@@ -149,7 +149,11 @@ mod tests {
     fn re_registering_a_url_replaces_its_entry() {
         clear_blob_urls();
         register_blob_url("blob:null/x".to_string(), vec![1], "text/plain".to_string());
-        register_blob_url("blob:null/x".to_string(), vec![2, 3], "text/csv".to_string());
+        register_blob_url(
+            "blob:null/x".to_string(),
+            vec![2, 3],
+            "text/csv".to_string(),
+        );
 
         let entry = lookup_blob_url("blob:null/x").expect("entry");
         assert_eq!(entry.bytes.as_slice(), &[2, 3]);

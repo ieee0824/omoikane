@@ -102,7 +102,12 @@ impl TreeBuilder {
         // matching the context's end tag can make later nodes its siblings.
         let root = container.parent_node();
         let source = root.map_or_else(
-            || container.template_content().unwrap_or(container.clone()).child_nodes(),
+            || {
+                container
+                    .template_content()
+                    .unwrap_or(container.clone())
+                    .child_nodes()
+            },
             |root| {
                 let mut nodes = Vec::new();
                 for child in root.child_nodes() {
@@ -241,7 +246,9 @@ impl Builder {
             .or_else(|| context.tag_name())
             .unwrap_or_else(|| "body".to_string());
         let namespace = context.namespace_uri();
-        let html_context = namespace.as_deref().is_none_or(|value| value == HTML_NAMESPACE);
+        let html_context = namespace
+            .as_deref()
+            .is_none_or(|value| value == HTML_NAMESPACE);
         let effective_name = if html_context && context_name.eq_ignore_ascii_case("html") {
             "body".to_string()
         } else {
@@ -902,9 +909,7 @@ impl Builder {
                 }
             }
             Token::StartTag { name, .. } if name == "select" => {}
-            token
-                if matches!(&token, Token::StartTag { name, .. } if name == "script" || name == "template") =>
-            {
+            token if matches!(&token, Token::StartTag { name, .. } if name == "script" || name == "template") => {
                 self.handle_in_head(token, errors)
             }
             Token::EndTag { name } if name == "option" => {
@@ -927,11 +932,7 @@ impl Builder {
         }
     }
 
-    fn process_foreign_token(
-        &mut self,
-        token: &Token,
-        errors: &mut Vec<HtmlParseError>,
-    ) -> bool {
+    fn process_foreign_token(&mut self, token: &Token, errors: &mut Vec<HtmlParseError>) -> bool {
         let current = self.current_node();
         let Some(namespace) = current.namespace_uri() else {
             return false;
@@ -1397,12 +1398,49 @@ fn foreign_allows_html_start(current: &NodeHandle, token_name: &str) -> bool {
 fn is_foreign_breakout_tag(name: &str) -> bool {
     matches!(
         name,
-        "b" | "big" | "blockquote" | "body" | "br" | "center" | "code" | "dd"
-            | "div" | "dl" | "dt" | "em" | "embed" | "h1" | "h2" | "h3" | "h4"
-            | "h5" | "h6" | "head" | "hr" | "i" | "img" | "li" | "listing"
-            | "menu" | "meta" | "nobr" | "ol" | "p" | "pre" | "ruby" | "s"
-            | "small" | "span" | "strong" | "strike" | "sub" | "sup" | "table"
-            | "tt" | "u" | "ul" | "var"
+        "b" | "big"
+            | "blockquote"
+            | "body"
+            | "br"
+            | "center"
+            | "code"
+            | "dd"
+            | "div"
+            | "dl"
+            | "dt"
+            | "em"
+            | "embed"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "head"
+            | "hr"
+            | "i"
+            | "img"
+            | "li"
+            | "listing"
+            | "menu"
+            | "meta"
+            | "nobr"
+            | "ol"
+            | "p"
+            | "pre"
+            | "ruby"
+            | "s"
+            | "small"
+            | "span"
+            | "strong"
+            | "strike"
+            | "sub"
+            | "sup"
+            | "table"
+            | "tt"
+            | "u"
+            | "ul"
+            | "var"
     )
 }
 
@@ -1583,10 +1621,7 @@ mod tests {
         let head = result.document().query_selector("head").unwrap();
         let attrs = head.attributes().unwrap_or_default();
         assert_eq!(attrs.get("id").map(String::as_str), Some("head"));
-        assert_eq!(
-            attrs.get("data-kind").map(String::as_str),
-            Some("primary")
-        );
+        assert_eq!(attrs.get("data-kind").map(String::as_str), Some("primary"));
     }
 
     #[test]
@@ -1975,25 +2010,31 @@ mod tests {
         let tbody_context = NodeHandle::element("tbody");
         let tbody_fragment =
             TreeBuilder::parse_fragment("<tr><td>body</td></tr>", &tbody_context).fragment();
-        assert_eq!(tbody_fragment.child_nodes()[0].tag_name().as_deref(), Some("tr"));
+        assert_eq!(
+            tbody_fragment.child_nodes()[0].tag_name().as_deref(),
+            Some("tr")
+        );
 
         let row_context = NodeHandle::element("tr");
-        let row_fragment =
-            TreeBuilder::parse_fragment("<td>one<td>two", &row_context).fragment();
+        let row_fragment = TreeBuilder::parse_fragment("<td>one<td>two", &row_context).fragment();
         assert_eq!(row_fragment.child_nodes().len(), 2);
-        assert!(row_fragment
-            .child_nodes()
-            .iter()
-            .all(|cell| cell.tag_name().as_deref() == Some("td")));
+        assert!(
+            row_fragment
+                .child_nodes()
+                .iter()
+                .all(|cell| cell.tag_name().as_deref() == Some("td"))
+        );
 
         let select = NodeHandle::element("select");
         let select_fragment =
             TreeBuilder::parse_fragment("<option>one<option>two<div>ignored", &select).fragment();
         let options = select_fragment.child_nodes();
         assert_eq!(options.len(), 2);
-        assert!(options
-            .iter()
-            .all(|option| option.tag_name().as_deref() == Some("option")));
+        assert!(
+            options
+                .iter()
+                .all(|option| option.tag_name().as_deref() == Some("option"))
+        );
     }
 
     #[test]
@@ -2033,22 +2074,25 @@ mod tests {
     #[test]
     fn fragment_tokenizer_starts_in_the_context_content_model() {
         let textarea = NodeHandle::element("textarea");
-        let fragment = TreeBuilder::parse_fragment(
-            "a<b>&amp;</textarea><i>end</i>",
-            &textarea,
-        )
-        .fragment();
+        let fragment =
+            TreeBuilder::parse_fragment("a<b>&amp;</textarea><i>end</i>", &textarea).fragment();
         let children = fragment.child_nodes();
         assert_eq!(children[0].data().as_deref(), Some("a<b>&"));
         assert_eq!(children[1].tag_name().as_deref(), Some("i"));
 
         let script = NodeHandle::element("script");
         let fragment = TreeBuilder::parse_fragment("if (a < b) c();", &script).fragment();
-        assert_eq!(fragment.child_nodes()[0].data().as_deref(), Some("if (a < b) c();"));
+        assert_eq!(
+            fragment.child_nodes()[0].data().as_deref(),
+            Some("if (a < b) c();")
+        );
 
         let plaintext = NodeHandle::element("plaintext");
         let fragment = TreeBuilder::parse_fragment("<b>&amp;</b>", &plaintext).fragment();
-        assert_eq!(fragment.child_nodes()[0].data().as_deref(), Some("<b>&amp;</b>"));
+        assert_eq!(
+            fragment.child_nodes()[0].data().as_deref(),
+            Some("<b>&amp;</b>")
+        );
     }
 
     #[test]

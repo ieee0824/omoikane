@@ -271,15 +271,14 @@ impl Parser {
                         }
                         let block = block?;
                         let prelude = render_tokens(&prelude_tokens).trim().to_string();
-                        let anonymous_layer_id = if name.eq_ignore_ascii_case("layer")
-                            && prelude.is_empty()
-                        {
-                            let id = self.next_anonymous_layer_id;
-                            self.next_anonymous_layer_id += 1;
-                            Some(id)
-                        } else {
-                            None
-                        };
+                        let anonymous_layer_id =
+                            if name.eq_ignore_ascii_case("layer") && prelude.is_empty() {
+                                let id = self.next_anonymous_layer_id;
+                                self.next_anonymous_layer_id += 1;
+                                Some(id)
+                            } else {
+                                None
+                            };
                         return Ok(Rule::At(AtRule {
                             name,
                             prelude,

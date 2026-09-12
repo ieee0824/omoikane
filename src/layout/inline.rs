@@ -17,12 +17,11 @@ use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
-    BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, InlineFragmentContent,
-    LayoutBox, LineBox, Rect, TextControlPaintState, TextOverflowPaint, VerticalAlign,
-    border_box_adjust_length, edge_sizes, explicit_length, is_border_box, is_display_none,
-    is_non_rendered_html_element,
-    HTTP_CLIENT, IMAGE_ANIMATION_CACHE, IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE,
-    LAYOUT_FONTS,
+    BoxDimensions, FontMetrics, FragmentStyle, HTTP_CLIENT, IMAGE_ANIMATION_CACHE,
+    IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE, InlineFragment, InlineFragmentContent,
+    LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState, TextOverflowPaint,
+    VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length, is_border_box,
+    is_display_none, is_non_rendered_html_element,
 };
 
 mod boxes;
@@ -122,10 +121,20 @@ pub(super) fn layout_inline_nodes(
     );
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
     if let Some(style) = text_overflow_style {
-        apply_text_overflow(&mut lines, nodes, start_x, available_width, direction_rtl, style);
+        apply_text_overflow(
+            &mut lines,
+            nodes,
+            start_x,
+            available_width,
+            direction_rtl,
+            style,
+        );
     }
     position_atomic_boxes(&lines, &mut atomic_boxes);
-    InlineLayoutResult { lines, atomic_boxes }
+    InlineLayoutResult {
+        lines,
+        atomic_boxes,
+    }
 }
 
 /// Lays out an inline formatting context whose inline axis is vertical.
@@ -235,8 +244,7 @@ pub(super) fn layout_vertical_inline_nodes(
                         x: column_x + cross_offset,
                         y: if direction_rtl {
                             start_y
-                                + (available_height - inline_offset - fragment.rect.width)
-                                    .max(0.0)
+                                + (available_height - inline_offset - fragment.rect.width).max(0.0)
                         } else {
                             start_y + inline_offset
                         },
@@ -263,7 +271,10 @@ pub(super) fn layout_vertical_inline_nodes(
         })
         .collect::<Vec<_>>();
     position_atomic_boxes(&lines, &mut atomic_boxes);
-    InlineLayoutResult { lines, atomic_boxes }
+    InlineLayoutResult {
+        lines,
+        atomic_boxes,
+    }
 }
 
 fn apply_text_overflow(
@@ -320,23 +331,25 @@ fn apply_text_overflow(
         if direction_rtl {
             candidates.reverse();
         }
-        let first_unit_width = candidates.iter().find_map(|fragment| match &fragment.content {
-            InlineFragmentContent::Text(text) => {
-                let odd_level = fragment
-                    .style
-                    .resolved_bidi_level
-                    .map_or(direction_rtl, |level| level % 2 == 1);
-                let keep_prefix = direction_rtl == odd_level;
-                let mut graphemes = text.graphemes(true);
-                let grapheme = if keep_prefix {
-                    graphemes.next()
-                } else {
-                    graphemes.next_back()
-                }?;
-                Some(measure_text_width(grapheme, fragment.metrics))
-            },
-            _ => Some(fragment.rect.width.max(0.0)),
-        });
+        let first_unit_width = candidates
+            .iter()
+            .find_map(|fragment| match &fragment.content {
+                InlineFragmentContent::Text(text) => {
+                    let odd_level = fragment
+                        .style
+                        .resolved_bidi_level
+                        .map_or(direction_rtl, |level| level % 2 == 1);
+                    let keep_prefix = direction_rtl == odd_level;
+                    let mut graphemes = text.graphemes(true);
+                    let grapheme = if keep_prefix {
+                        graphemes.next()
+                    } else {
+                        graphemes.next_back()
+                    }?;
+                    Some(measure_text_width(grapheme, fragment.metrics))
+                }
+                _ => Some(fragment.rect.width.max(0.0)),
+            });
         // The inline-start unit must be clipped rather than removed to make
         // room for an ellipsis. Leaving the original fragments in place lets
         // the container's overflow clip expose the fitting part of that unit.
@@ -411,7 +424,9 @@ fn apply_text_overflow(
         visible.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
         decorations.extend(visible);
         decorations.push(marker);
-        line.text_overflow = Some(TextOverflowPaint { fragments: decorations });
+        line.text_overflow = Some(TextOverflowPaint {
+            fragments: decorations,
+        });
     }
 }
 
@@ -424,7 +439,10 @@ fn text_fitting_graphemes(
     if max_width <= 0.0 {
         return None;
     }
-    let mut boundaries = text.grapheme_indices(true).map(|(index, _)| index).collect::<Vec<_>>();
+    let mut boundaries = text
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
     boundaries.push(text.len());
     let grapheme_count = boundaries.len().saturating_sub(1);
     let mut low = 0;
@@ -503,10 +521,8 @@ fn coalesce_adjacent_text_segments(segments: &mut Vec<InlineSegment>) {
             && previous.word_break == segment.word_break
             && previous.overflow_wrap == segment.overflow_wrap
             && previous.white_space_mode == segment.white_space_mode
-            && let (
-                InlineSegmentContent::Text(previous_text),
-                InlineSegmentContent::Text(text),
-            ) = (&mut previous.content, &segment.content)
+            && let (InlineSegmentContent::Text(previous_text), InlineSegmentContent::Text(text)) =
+                (&mut previous.content, &segment.content)
         {
             previous_text.push_str(text);
             continue;
@@ -539,17 +555,27 @@ pub(super) enum OverflowWrap {
 
 pub(super) fn word_break(style: &ComputedStyle) -> WordBreak {
     match style.get("word-break") {
-        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-all") => WordBreak::BreakAll,
-        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("keep-all") => WordBreak::KeepAll,
-        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-word") => WordBreak::BreakWord,
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-all") => {
+            WordBreak::BreakAll
+        }
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("keep-all") => {
+            WordBreak::KeepAll
+        }
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-word") => {
+            WordBreak::BreakWord
+        }
         _ => WordBreak::Normal,
     }
 }
 
 pub(super) fn overflow_wrap(style: &ComputedStyle) -> OverflowWrap {
     match style.get("overflow-wrap") {
-        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-word") => OverflowWrap::BreakWord,
-        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("anywhere") => OverflowWrap::Anywhere,
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("break-word") => {
+            OverflowWrap::BreakWord
+        }
+        Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("anywhere") => {
+            OverflowWrap::Anywhere
+        }
         _ => OverflowWrap::Normal,
     }
 }
@@ -580,7 +606,13 @@ pub(super) enum InlineSegmentContent {
     AtomicInline(f32, f32, f32),
     Image(Image, ComputedStyle, f32, f32),
     GeneratedBox(ComputedStyle),
-    FormControl(ComputedStyle, String, Option<TextControlPaintState>, f32, f32),
+    FormControl(
+        ComputedStyle,
+        String,
+        Option<TextControlPaintState>,
+        f32,
+        f32,
+    ),
     IconFormControl(ComputedStyle, Image, f32, f32, f32, f32),
 }
 
@@ -588,11 +620,7 @@ pub(super) enum InlineSegmentContent {
 
 /// Creates a text `InlineSegment` from a node, text content, and resolved style.
 /// Returns `None` when the normalized + transformed text is empty.
-fn make_text_segment(
-    node: NodeHandle,
-    text: &str,
-    style: &ComputedStyle,
-) -> Option<InlineSegment> {
+fn make_text_segment(node: NodeHandle, text: &str, style: &ComputedStyle) -> Option<InlineSegment> {
     let text = normalize_text(text, white_space(style));
     let text = apply_text_transform_layout(&text, style);
     if text.is_empty() {
@@ -678,36 +706,50 @@ fn collect_element_inline_segments(
         _ => {}
     }
 
-    out.extend(generated_inline_segments(node, resolver, PseudoElement::Before));
+    out.extend(generated_inline_segments(
+        node,
+        resolver,
+        PseudoElement::Before,
+    ));
 
     if let Some((image_node, image)) = element_inline_image_with_style(node, &style) {
         collect_image_segment(&image_node, &image, resolver, out);
-        out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+        out.extend(generated_inline_segments(
+            node,
+            resolver,
+            PseudoElement::After,
+        ));
         return;
     }
 
     if node.tag_name().as_deref() == Some("img")
-        && let Some(alt_text) = image_alt_fallback_text(node, &style) {
-            out.push(InlineSegment {
-                node: node.clone(),
-                content: InlineSegmentContent::Text(alt_text),
-                metrics: font_metrics(&style),
-                line_height: line_height(&style),
-                vertical_align: vertical_align(&style),
-                style: FragmentStyle::from_computed(&style),
-                word_break: word_break(&style),
-                overflow_wrap: overflow_wrap(&style),
-                white_space_mode: white_space(&style),
-            });
-            out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
-            return;
-        }
+        && let Some(alt_text) = image_alt_fallback_text(node, &style)
+    {
+        out.push(InlineSegment {
+            node: node.clone(),
+            content: InlineSegmentContent::Text(alt_text),
+            metrics: font_metrics(&style),
+            line_height: line_height(&style),
+            vertical_align: vertical_align(&style),
+            style: FragmentStyle::from_computed(&style),
+            word_break: word_break(&style),
+            overflow_wrap: overflow_wrap(&style),
+            white_space_mode: white_space(&style),
+        });
+        out.extend(generated_inline_segments(
+            node,
+            resolver,
+            PseudoElement::After,
+        ));
+        return;
+    }
 
     if context.allow_atomic_boxes
         && matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("inline-block"))
     {
         let available_width = context.available_width.max(0.0);
-        let containing_width = if super::resolved_length(&style, "width", available_width).is_some() {
+        let containing_width = if super::resolved_length(&style, "width", available_width).is_some()
+        {
             available_width
         } else {
             super::shrink_to_fit_layout_width(node, resolver, available_width)
@@ -772,17 +814,17 @@ fn collect_element_inline_segments(
             _ => {}
         }
     }
-    out.extend(generated_inline_segments(node, resolver, PseudoElement::After));
+    out.extend(generated_inline_segments(
+        node,
+        resolver,
+        PseudoElement::After,
+    ));
     if inline_box {
         boxes::edge(node, &style, false, out);
     }
 }
 
-fn collect_input_segment(
-    node: &NodeHandle,
-    style: &ComputedStyle,
-    out: &mut Vec<InlineSegment>,
-) {
+fn collect_input_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Vec<InlineSegment>) {
     let attributes = node.attributes().unwrap_or_default();
     let input_type = attributes
         .get("type")
@@ -818,7 +860,15 @@ fn collect_input_segment(
     let content_height =
         explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
 
-    push_form_control_segment(node, style, value, content_width, content_height, metrics, out);
+    push_form_control_segment(
+        node,
+        style,
+        value,
+        content_width,
+        content_height,
+        metrics,
+        out,
+    );
 }
 
 /// Collects a `<button>` as a single inline `FormControl` fragment.
@@ -838,8 +888,8 @@ fn collect_button_segment(
 ) {
     let metrics = font_metrics(style);
     let label = normalize_inline_whitespace(&collect_rendered_text(node, resolver));
-    let content_width = explicit_length(style, "width")
-        .unwrap_or_else(|| measure_text_width(&label, metrics));
+    let content_width =
+        explicit_length(style, "width").unwrap_or_else(|| measure_text_width(&label, metrics));
     let content_height =
         explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
 
@@ -851,11 +901,17 @@ fn collect_button_segment(
             resolve_image_rendered_size(&image_node, &image, &image_style);
         let padding = edge_sizes(style, "padding");
         let border = edge_sizes(style, "border");
-        let total_height = content_height + padding.top + padding.bottom + border.top + border.bottom;
+        let total_height =
+            content_height + padding.top + padding.bottom + border.top + border.bottom;
         out.push(InlineSegment {
             node: node.clone(),
             content: InlineSegmentContent::IconFormControl(
-                style.clone(), image, content_width, content_height, icon_width, icon_height,
+                style.clone(),
+                image,
+                content_width,
+                content_height,
+                icon_width,
+                icon_height,
             ),
             metrics,
             line_height: line_height(style).max(total_height),
@@ -868,7 +924,15 @@ fn collect_button_segment(
         return;
     }
 
-    push_form_control_segment(node, style, label, content_width, content_height, metrics, out);
+    push_form_control_segment(
+        node,
+        style,
+        label,
+        content_width,
+        content_height,
+        metrics,
+        out,
+    );
 }
 
 fn find_descendant_inline_image(
@@ -909,9 +973,12 @@ fn collect_textarea_segment(
 ) {
     let attributes = node.attributes().unwrap_or_default();
     let metrics = font_metrics(style);
-    let value = node.text_control_state().map(|state| state.value).unwrap_or_else(|| {
-        strip_textarea_leading_newline(&collect_rendered_text(node, resolver)).to_string()
-    });
+    let value = node
+        .text_control_state()
+        .map(|state| state.value)
+        .unwrap_or_else(|| {
+            strip_textarea_leading_newline(&collect_rendered_text(node, resolver)).to_string()
+        });
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
         let cols = attributes
             .get("cols")
@@ -929,7 +996,15 @@ fn collect_textarea_segment(
         line_height(style) * rows as f32
     });
 
-    push_form_control_segment(node, style, value, content_width, content_height, metrics, out);
+    push_form_control_segment(
+        node,
+        style,
+        value,
+        content_width,
+        content_height,
+        metrics,
+        out,
+    );
 }
 
 /// Collects a `<select>` as a single inline `FormControl` fragment.
@@ -970,7 +1045,15 @@ fn collect_select_segment(
     let content_height =
         explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
 
-    push_form_control_segment(node, style, label, content_width, content_height, metrics, out);
+    push_form_control_segment(
+        node,
+        style,
+        label,
+        content_width,
+        content_height,
+        metrics,
+        out,
+    );
 }
 
 fn collect_media_placeholder_segment(
@@ -1024,13 +1107,14 @@ fn push_form_control_segment(
 ) {
     let padding = edge_sizes(style, "padding");
     let border = edge_sizes(style, "border");
-    let total_height =
-        content_height + padding.top + padding.bottom + border.top + border.bottom;
-    let editing = node.text_control_state().map(|state| TextControlPaintState {
-        selection_start: state.selection_start,
-        selection_end: state.selection_end,
-        focused: state.focused,
-    });
+    let total_height = content_height + padding.top + padding.bottom + border.top + border.bottom;
+    let editing = node
+        .text_control_state()
+        .map(|state| TextControlPaintState {
+            selection_start: state.selection_start,
+            selection_end: state.selection_end,
+            focused: state.focused,
+        });
 
     out.push(InlineSegment {
         node: node.clone(),
@@ -1151,9 +1235,8 @@ fn collect_image_segment(
         word_break: word_break(&image_style),
         overflow_wrap: overflow_wrap(&image_style),
         white_space_mode: white_space(&image_style),
-        line_height: line_height(&image_style).max(
-            rendered_height + padding.top + padding.bottom + border.top + border.bottom,
-        ),
+        line_height: line_height(&image_style)
+            .max(rendered_height + padding.top + padding.bottom + border.top + border.bottom),
         vertical_align: vertical_align(&image_style),
         style: FragmentStyle::from_computed(&image_style),
     });
@@ -1305,12 +1388,14 @@ fn element_inline_image_with_current_color(
         }
         "object" => {
             if let Some(data) = attributes.get("data")
-                && let Some(image) = decode_or_fetch_image(data) {
-                    return Some((node.clone(), image));
-                }
+                && let Some(image) = decode_or_fetch_image(data)
+            {
+                return Some((node.clone(), image));
+            }
 
             for child in node.layout_child_nodes() {
-                if let Some(image) = element_inline_image_with_current_color(&child, current_color) {
+                if let Some(image) = element_inline_image_with_current_color(&child, current_color)
+                {
                     return Some(image);
                 }
             }
@@ -1556,11 +1641,9 @@ pub(crate) fn canonical_image_asset_reference(url_like: &str) -> Option<String> 
 }
 
 fn resolve_image_url(url_like: &str) -> Option<String> {
-    let is_http = url_like
-        .split_once("://")
-        .is_some_and(|(scheme, _)| {
-            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-        });
+    let is_http = url_like.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    });
     if is_http {
         return url_like.parse::<Url>().ok().and_then(normalize_image_url);
     }
@@ -1569,7 +1652,9 @@ fn resolve_image_url(url_like: &str) -> Option<String> {
     }
     IMAGE_BASE_URL.with(|cell| {
         let base = cell.borrow().clone()?;
-        resolve_url(&base, url_like).ok().and_then(normalize_image_url)
+        resolve_url(&base, url_like)
+            .ok()
+            .and_then(normalize_image_url)
     })
 }
 
@@ -1671,8 +1756,8 @@ pub(super) fn resolve_image_rendered_size(
 ) -> (f32, f32) {
     let intrinsic_w = image.width() as f32;
     let intrinsic_h = image.height() as f32;
-    let intrinsic_ratio = (intrinsic_w > 0.0 && intrinsic_h > 0.0)
-        .then(|| intrinsic_w / intrinsic_h);
+    let intrinsic_ratio =
+        (intrinsic_w > 0.0 && intrinsic_h > 0.0).then(|| intrinsic_w / intrinsic_h);
     let ratio = preferred_aspect_ratio(style, intrinsic_ratio);
     let padding = edge_sizes(style, "padding");
     let border = edge_sizes(style, "border");
@@ -1687,10 +1772,20 @@ pub(super) fn resolve_image_rendered_size(
         0.0
     };
     let to_content_width = |value| {
-        border_box_adjust_length(style, value, padding.left + border.left, padding.right + border.right)
+        border_box_adjust_length(
+            style,
+            value,
+            padding.left + border.left,
+            padding.right + border.right,
+        )
     };
     let to_content_height = |value| {
-        border_box_adjust_length(style, value, padding.top + border.top, padding.bottom + border.bottom)
+        border_box_adjust_length(
+            style,
+            value,
+            padding.top + border.top,
+            padding.bottom + border.bottom,
+        )
     };
     let specified_width = explicit_length(style, "width")
         .or_else(|| html_image_dimension_attribute(node, "width"))
@@ -1699,13 +1794,15 @@ pub(super) fn resolve_image_rendered_size(
         .or_else(|| html_image_dimension_attribute(node, "height"))
         .map(to_content_height);
 
-    let from_height = |height: f32| ratio.map_or(intrinsic_w, |ratio| {
-        if ratio.uses_box_sizing {
-            to_content_width((height + vertical_decoration) * ratio.value)
-        } else {
-            (height * ratio.value).max(0.0)
-        }
-    });
+    let from_height = |height: f32| {
+        ratio.map_or(intrinsic_w, |ratio| {
+            if ratio.uses_box_sizing {
+                to_content_width((height + vertical_decoration) * ratio.value)
+            } else {
+                (height * ratio.value).max(0.0)
+            }
+        })
+    };
     let from_width = |width: f32| {
         ratio
             .filter(|ratio| ratio.value > 0.0)
@@ -1732,33 +1829,37 @@ pub(super) fn resolve_image_rendered_size(
     let width_is_derived = specified_width.is_none();
     let height_is_derived = specified_height.is_none();
     if let Some(max_width) = explicit_length(style, "max-width").map(to_content_width)
-        && width > max_width {
-            if height_is_derived {
-                height = from_width(max_width);
-            }
-            width = max_width;
+        && width > max_width
+    {
+        if height_is_derived {
+            height = from_width(max_width);
         }
+        width = max_width;
+    }
     if let Some(max_height) = explicit_length(style, "max-height").map(to_content_height)
-        && height > max_height {
-            if width_is_derived {
-                width = from_height(max_height);
-            }
-            height = max_height;
+        && height > max_height
+    {
+        if width_is_derived {
+            width = from_height(max_height);
         }
+        height = max_height;
+    }
     if let Some(min_width) = explicit_length(style, "min-width").map(to_content_width)
-        && width < min_width {
-            if height_is_derived {
-                height = from_width(min_width);
-            }
-            width = min_width;
+        && width < min_width
+    {
+        if height_is_derived {
+            height = from_width(min_width);
         }
+        width = min_width;
+    }
     if let Some(min_height) = explicit_length(style, "min-height").map(to_content_height)
-        && height < min_height {
-            if width_is_derived {
-                width = from_height(min_height);
-            }
-            height = min_height;
+        && height < min_height
+    {
+        if width_is_derived {
+            width = from_height(min_height);
         }
+        height = min_height;
+    }
 
     (width, height)
 }
@@ -1827,15 +1928,13 @@ impl WhiteSpaceMode {
 
 pub(super) fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
     match style.get("white-space") {
-        Some(ComputedValue::Keyword(keyword)) => {
-            match keyword.to_ascii_lowercase().as_str() {
-                "pre" => WhiteSpaceMode::Pre,
-                "nowrap" => WhiteSpaceMode::Nowrap,
-                "pre-wrap" => WhiteSpaceMode::PreWrap,
-                "pre-line" => WhiteSpaceMode::PreLine,
-                _ => WhiteSpaceMode::Normal,
-            }
-        }
+        Some(ComputedValue::Keyword(keyword)) => match keyword.to_ascii_lowercase().as_str() {
+            "pre" => WhiteSpaceMode::Pre,
+            "nowrap" => WhiteSpaceMode::Nowrap,
+            "pre-wrap" => WhiteSpaceMode::PreWrap,
+            "pre-line" => WhiteSpaceMode::PreLine,
+            _ => WhiteSpaceMode::Normal,
+        },
         _ => WhiteSpaceMode::Normal,
     }
 }
@@ -2088,8 +2187,10 @@ fn needs_character_break(
     available_width: f32,
 ) -> bool {
     allows_wrapping
-        && (matches!(overflow_wrap, OverflowWrap::BreakWord | OverflowWrap::Anywhere)
-            || word_break == WordBreak::BreakWord)
+        && (matches!(
+            overflow_wrap,
+            OverflowWrap::BreakWord | OverflowWrap::Anywhere
+        ) || word_break == WordBreak::BreakWord)
         && cursor_x == start_x
         && exceeds_available_inline_width(fragment_width, available_width)
         && available_width > 0.0
@@ -2118,10 +2219,7 @@ fn break_text_by_characters(
     for ch_str in split_chars(text) {
         let ch_width = measure_text_width(&ch_str, segment.metrics);
         if cursor.x > cursor.start_x
-            && exceeds_available_inline_width(
-                cursor.x + ch_width - cursor.start_x,
-                available_width,
-            )
+            && exceeds_available_inline_width(cursor.x + ch_width - cursor.start_x, available_width)
         {
             cursor.wrap_line(lines, fragments, 0.0, available_width, align);
         }
@@ -2187,7 +2285,11 @@ fn layout_inline_segments(
                         align,
                     );
                 }
-                InlinePiece::Fragment { content, width, height } => {
+                InlinePiece::Fragment {
+                    content,
+                    width,
+                    height,
+                } => {
                     let collapsible_whitespace = segment.white_space_mode.collapses_whitespace()
                         && matches!(&content, InlineFragmentContent::Text(text) if text
                             .chars()
@@ -2233,20 +2335,20 @@ fn layout_inline_segments(
                         start_x,
                         width,
                         available_width,
-                    )
-                        && let InlineFragmentContent::Text(text) = content {
-                            break_text_by_characters(
-                                &text,
-                                segment,
-                                height,
-                                &mut cursor,
-                                &mut lines,
-                                &mut current_fragments,
-                                available_width,
-                                align,
-                            );
-                            continue;
-                        }
+                    ) && let InlineFragmentContent::Text(text) = content
+                    {
+                        break_text_by_characters(
+                            &text,
+                            segment,
+                            height,
+                            &mut cursor,
+                            &mut lines,
+                            &mut current_fragments,
+                            available_width,
+                            align,
+                        );
+                        continue;
+                    }
 
                     current_fragments.push(InlineFragment {
                         node: segment.node.clone(),
@@ -2262,8 +2364,7 @@ fn layout_inline_segments(
                         style: segment.style.clone(),
                     });
                     cursor.x += width;
-                    cursor.line_height =
-                        cursor.line_height.max(segment.line_height.max(height));
+                    cursor.line_height = cursor.line_height.max(segment.line_height.max(height));
                 }
             }
         }
@@ -2306,15 +2407,13 @@ enum InlinePiece {
 
 fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     match &segment.content {
-        InlineSegmentContent::Text(text) => {
-            split_text_segment(
-                text,
-                segment.metrics,
-                segment.line_height,
-                segment.word_break,
-                segment.white_space_mode,
-            )
-        }
+        InlineSegmentContent::Text(text) => split_text_segment(
+            text,
+            segment.metrics,
+            segment.line_height,
+            segment.word_break,
+            segment.white_space_mode,
+        ),
         InlineSegmentContent::InlineEdge(style, start) => {
             let padding = edge_sizes(style, "padding");
             let border = edge_sizes(style, "border");
@@ -2328,11 +2427,13 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
                 height: 0.0,
             }]
         }
-        InlineSegmentContent::AtomicInline(width, height, baseline) => vec![InlinePiece::Fragment {
-            content: InlineFragmentContent::AtomicInline(*baseline),
-            width: *width,
-            height: *height,
-        }],
+        InlineSegmentContent::AtomicInline(width, height, baseline) => {
+            vec![InlinePiece::Fragment {
+                content: InlineFragmentContent::AtomicInline(*baseline),
+                width: *width,
+                height: *height,
+            }]
+        }
         InlineSegmentContent::Image(image, style, rendered_width, rendered_height) => {
             let padding = edge_sizes(style, "padding");
             let border = edge_sizes(style, "border");
@@ -2367,7 +2468,10 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
             let border = edge_sizes(style, "border");
             vec![InlinePiece::Fragment {
                 content: InlineFragmentContent::IconFormControl(
-                    style.clone(), image.clone(), *icon_width, *icon_height,
+                    style.clone(),
+                    image.clone(),
+                    *icon_width,
+                    *icon_height,
                 ),
                 width: *content_width + padding.left + padding.right + border.left + border.right,
                 height: *content_height + padding.top + padding.bottom + border.top + border.bottom,
@@ -2713,11 +2817,11 @@ fn push_line(
             VerticalAlign::Baseline => {
                 let ascent = fragment_ascent(fragment);
                 y + baseline - ascent
-            },
+            }
             VerticalAlign::Length(shift) => {
                 let ascent = fragment_ascent(fragment);
                 y + baseline - ascent - shift
-            },
+            }
             VerticalAlign::Top => y,
             VerticalAlign::Middle => y + (height - fragment.rect.height) / 2.0,
             VerticalAlign::Bottom => y + height - fragment.rect.height,
@@ -2748,27 +2852,28 @@ fn resolve_line_bidi_geometry(
     if fragments.is_empty() {
         return;
     }
-    let needs_bidi = direction_rtl || fragments.iter().any(|fragment| {
-        let explicit_mode = !matches!(
-            fragment.style.unicode_bidi.as_deref(),
-            None | Some("normal")
-        );
-        explicit_mode
-            || fragment.text().is_some_and(|text| {
-                text.chars().any(|ch| {
-                    matches!(
-                        bidi_class(ch),
-                        BidiClass::R
-                            | BidiClass::AL
-                            | BidiClass::AN
-                            | BidiClass::RLE
-                            | BidiClass::RLI
-                            | BidiClass::RLO
-                            | BidiClass::FSI
-                    )
+    let needs_bidi = direction_rtl
+        || fragments.iter().any(|fragment| {
+            let explicit_mode = !matches!(
+                fragment.style.unicode_bidi.as_deref(),
+                None | Some("normal")
+            );
+            explicit_mode
+                || fragment.text().is_some_and(|text| {
+                    text.chars().any(|ch| {
+                        matches!(
+                            bidi_class(ch),
+                            BidiClass::R
+                                | BidiClass::AL
+                                | BidiClass::AN
+                                | BidiClass::RLE
+                                | BidiClass::RLI
+                                | BidiClass::RLO
+                                | BidiClass::FSI
+                        )
+                    })
                 })
-            })
-    });
+        });
     if !needs_bidi {
         return;
     }
@@ -2788,10 +2893,18 @@ fn resolve_line_bidi_geometry(
         let end = bidi_source.len();
         bidi_source.push_str(suffix);
         content_offsets.push(start..end);
-        ordering_offsets.push(if prefix.is_empty() { start } else { fragment_start });
+        ordering_offsets.push(if prefix.is_empty() {
+            start
+        } else {
+            fragment_start
+        });
     }
 
-    let paragraph_level = if direction_rtl { Level::rtl() } else { Level::ltr() };
+    let paragraph_level = if direction_rtl {
+        Level::rtl()
+    } else {
+        Level::ltr()
+    };
     let bidi = BidiInfo::new(&bidi_source, Some(paragraph_level));
     let Some(paragraph) = bidi.paragraphs.first() else {
         return;
@@ -2799,7 +2912,12 @@ fn resolve_line_bidi_geometry(
     let (resolved_levels, _) = bidi.visual_runs(paragraph, paragraph.range.clone());
     let fragment_levels: Vec<Level> = ordering_offsets
         .iter()
-        .map(|offset| resolved_levels.get(*offset).copied().unwrap_or(paragraph_level))
+        .map(|offset| {
+            resolved_levels
+                .get(*offset)
+                .copied()
+                .unwrap_or(paragraph_level)
+        })
         .collect();
     let homogeneous_levels: Vec<Option<Level>> = content_offsets
         .iter()
@@ -2829,9 +2947,14 @@ fn bidi_controls(style: &FragmentStyle) -> (&'static str, &'static str) {
         Some("embed") => (if rtl { "\u{202b}" } else { "\u{202a}" }, "\u{202c}"),
         Some("bidi-override") => (if rtl { "\u{202e}" } else { "\u{202d}" }, "\u{202c}"),
         Some("isolate") => (if rtl { "\u{2067}" } else { "\u{2066}" }, "\u{2069}"),
-        Some("isolate-override") => {
-            (if rtl { "\u{2067}\u{202e}" } else { "\u{2066}\u{202d}" }, "\u{202c}\u{2069}")
-        },
+        Some("isolate-override") => (
+            if rtl {
+                "\u{2067}\u{202e}"
+            } else {
+                "\u{2066}\u{202d}"
+            },
+            "\u{202c}\u{2069}",
+        ),
         Some("plaintext") => ("\u{2068}", "\u{2069}"),
         _ => ("", ""),
     }
@@ -2875,7 +2998,10 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
         }
 
         // Fallback to approximation when no font is available
-        let char_count = text.chars().filter(|ch| !is_zero_advance_character(*ch)).count();
+        let char_count = text
+            .chars()
+            .filter(|ch| !is_zero_advance_character(*ch))
+            .count();
         let base = char_count as f32 * metrics.average_advance;
         let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
         base + spacing
@@ -2892,9 +3018,10 @@ fn measure_text_width_with_fallback(
     primary: Option<&Font>,
     fonts: &[Arc<Font>],
 ) -> f32 {
-    let direction = if text.chars().any(|ch| {
-        matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN)
-    }) {
+    let direction = if text
+        .chars()
+        .any(|ch| matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN))
+    {
         ShapingDirection::RightToLeft
     } else {
         ShapingDirection::LeftToRight
@@ -2952,13 +3079,15 @@ fn select_layout_run_font<'a>(
     text: &str,
 ) -> Option<&'a Font> {
     let supports_run = |font: &Font| {
-        text.chars().all(|ch| {
-            ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch)
-        })
+        text.chars()
+            .all(|ch| ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch))
     };
-    primary
-        .filter(|font| supports_run(font))
-        .or_else(|| fonts.iter().map(Arc::as_ref).find(|font| supports_run(font)))
+    primary.filter(|font| supports_run(font)).or_else(|| {
+        fonts
+            .iter()
+            .map(Arc::as_ref)
+            .find(|font| supports_run(font))
+    })
 }
 
 fn select_layout_font<'a>(

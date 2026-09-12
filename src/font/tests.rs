@@ -5,7 +5,13 @@ use super::*;
 #[test]
 fn shaping_controls_have_zero_advance_policy() {
     for ch in [
-        '\u{0301}', '\u{1ab0}', '\u{20dd}', '\u{fe0f}', '\u{200c}', '\u{200d}', '\u{e0100}',
+        '\u{0301}',
+        '\u{1ab0}',
+        '\u{20dd}',
+        '\u{fe0f}',
+        '\u{200c}',
+        '\u{200d}',
+        '\u{e0100}',
     ] {
         assert!(
             is_zero_advance_character(ch),
@@ -40,24 +46,32 @@ fn opentype_shaping_applies_arabic_context_and_ligatures() {
         return;
     }
 
-    let isolated = font.shape_text("ب", 32.0, ShapingDirection::RightToLeft).unwrap();
-    let contextual = font.shape_text("بب", 32.0, ShapingDirection::RightToLeft).unwrap();
+    let isolated = font
+        .shape_text("ب", 32.0, ShapingDirection::RightToLeft)
+        .unwrap();
+    let contextual = font
+        .shape_text("بب", 32.0, ShapingDirection::RightToLeft)
+        .unwrap();
     assert_eq!(isolated.len(), 1);
     assert_eq!(contextual.len(), 2);
     assert!(
-        contextual.iter().any(|glyph| glyph.glyph_id != isolated[0].glyph_id),
+        contextual
+            .iter()
+            .any(|glyph| glyph.glyph_id != isolated[0].glyph_id),
         "Arabic joining must select contextual glyph forms"
     );
 
-    let lam_alef = font.shape_text("لا", 32.0, ShapingDirection::RightToLeft).unwrap();
+    let lam_alef = font
+        .shape_text("لا", 32.0, ShapingDirection::RightToLeft)
+        .unwrap();
     assert!(lam_alef.len() < 2, "lam-alef should shape into a ligature");
     assert!(lam_alef.iter().all(|glyph| glyph.x_advance >= 0.0));
 }
 
 #[test]
 fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
-    let primary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/acid3/font.ttf");
+    let primary_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acid3/font.ttf");
     let Ok(primary) = Font::load_from_file(&primary_path) else {
         eprintln!("Skipping cluster fallback test: fixture font unavailable");
         return;
@@ -82,17 +96,13 @@ fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
         .into_iter()
         .flat_map(|base| ['\u{301}', '\u{308}', '\u{327}'].map(|mark| format!("{base}{mark}")))
         .find(|cluster| {
-            !cluster_supported_by_font(
-                &primary,
-                cluster,
-                24.0,
-                ShapingDirection::LeftToRight,
-            ) && cluster_supported_by_font(
-                &fallback,
-                cluster,
-                24.0,
-                ShapingDirection::LeftToRight,
-            )
+            !cluster_supported_by_font(&primary, cluster, 24.0, ShapingDirection::LeftToRight)
+                && cluster_supported_by_font(
+                    &fallback,
+                    cluster,
+                    24.0,
+                    ShapingDirection::LeftToRight,
+                )
         });
     let Some(fallback_cluster) = fallback_cluster else {
         eprintln!("Skipping cluster fallback test: no deterministic fallback cluster available");
@@ -134,8 +144,8 @@ fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
 
 #[test]
 fn fallback_shaping_keeps_primary_supported_text_in_one_run() {
-    let primary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/acid3/font.ttf");
+    let primary_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acid3/font.ttf");
     let Ok(primary) = Font::load_from_file(&primary_path) else {
         eprintln!("Skipping primary shaping test: fixture font unavailable");
         return;
@@ -149,13 +159,8 @@ fn fallback_shaping_keeps_primary_supported_text_in_one_run() {
         return;
     };
 
-    let runs = shape_text_with_fallback(
-        &[&primary],
-        text,
-        24.0,
-        ShapingDirection::LeftToRight,
-    )
-    .unwrap();
+    let runs =
+        shape_text_with_fallback(&[&primary], text, 24.0, ShapingDirection::LeftToRight).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].font_index, 0);
     assert_eq!(runs[0].text_range, 0..text.len());
@@ -163,8 +168,8 @@ fn fallback_shaping_keeps_primary_supported_text_in_one_run() {
 
 #[test]
 fn fallback_runs_never_split_variation_or_zwj_graphemes() {
-    let primary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/acid3/font.ttf");
+    let primary_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acid3/font.ttf");
     let Ok(primary) = Font::load_from_file(&primary_path) else {
         eprintln!("Skipping cluster boundary test: fixture font unavailable");
         return;
@@ -178,13 +183,8 @@ fn fallback_runs_never_split_variation_or_zwj_graphemes() {
     let font_refs = fonts.iter().collect::<Vec<_>>();
 
     for text in ["A\u{fe0f}B", "👩‍💻A"] {
-        let runs = shape_text_with_fallback(
-            &font_refs,
-            text,
-            24.0,
-            ShapingDirection::LeftToRight,
-        )
-        .unwrap();
+        let runs = shape_text_with_fallback(&font_refs, text, 24.0, ShapingDirection::LeftToRight)
+            .unwrap();
         let mut boundaries = text
             .grapheme_indices(true)
             .map(|(start, _)| start)
@@ -192,7 +192,10 @@ fn fallback_runs_never_split_variation_or_zwj_graphemes() {
         boundaries.push(text.len());
         assert_eq!(runs.first().map(|run| run.text_range.start), Some(0));
         assert_eq!(runs.last().map(|run| run.text_range.end), Some(text.len()));
-        assert!(runs.windows(2).all(|pair| pair[0].text_range.end == pair[1].text_range.start));
+        assert!(
+            runs.windows(2)
+                .all(|pair| pair[0].text_range.end == pair[1].text_range.start)
+        );
         assert!(runs.iter().all(|run| {
             boundaries.contains(&run.text_range.start)
                 && boundaries.contains(&run.text_range.end)
@@ -917,11 +920,7 @@ fn decode_woff2_minimal_valid_structure() {
 
     // decode_woff2 should succeed and produce a valid sfnt-shaped buffer.
     let sfnt = decode_woff2(&woff2);
-    assert!(
-        sfnt.is_ok(),
-        "decode_woff2 failed: {}",
-        sfnt.err().unwrap()
-    );
+    assert!(sfnt.is_ok(), "decode_woff2 failed: {}", sfnt.err().unwrap());
 
     let sfnt = sfnt.unwrap();
     // sfnt header: 4 (flavor) + 2 (numTables) + 2 + 2 + 2 = 12 bytes
@@ -1046,11 +1045,15 @@ fn web_font_registry_selects_with_case_insensitive_family_key() {
     let mut registry = WebFontRegistry::new();
     registry.push("TwitterChirp", FontWeight(700), FontStyle::Italic, font);
 
-    assert!(registry.select_best_by_key(
-        FontFamilyKey::new("twitterchirp"),
-        FontWeight(700),
-        FontStyle::Italic,
-    ).is_some());
+    assert!(
+        registry
+            .select_best_by_key(
+                FontFamilyKey::new("twitterchirp"),
+                FontWeight(700),
+                FontStyle::Italic,
+            )
+            .is_some()
+    );
 }
 
 #[test]
@@ -1077,10 +1080,7 @@ fn font_family_key_folds_unicode_case_and_trims() {
         FontFamilyKey::new("ГАРНИТУРА"),
         FontFamilyKey::new("гарнитура"),
     );
-    assert_ne!(
-        FontFamilyKey::new("ГАРНИТУРА"),
-        FontFamilyKey::new("шрифт"),
-    );
+    assert_ne!(FontFamilyKey::new("ГАРНИТУРА"), FontFamilyKey::new("шрифт"),);
 }
 
 #[test]
@@ -1098,7 +1098,12 @@ fn web_font_registry_bold_selects_700_when_available() {
     };
 
     let mut registry = WebFontRegistry::new();
-    registry.push("TestFamily", FontWeight(400), FontStyle::Normal, font_regular);
+    registry.push(
+        "TestFamily",
+        FontWeight(400),
+        FontStyle::Normal,
+        font_regular,
+    );
     registry.push("TestFamily", FontWeight(700), FontStyle::Normal, font_bold);
 
     // Requesting bold (700) should prefer the 700 variant
@@ -1126,8 +1131,18 @@ fn web_font_registry_italic_selects_italic_over_normal() {
     };
 
     let mut registry = WebFontRegistry::new();
-    registry.push("TestFamily", FontWeight(400), FontStyle::Normal, font_regular);
-    registry.push("TestFamily", FontWeight(400), FontStyle::Italic, font_italic);
+    registry.push(
+        "TestFamily",
+        FontWeight(400),
+        FontStyle::Normal,
+        font_regular,
+    );
+    registry.push(
+        "TestFamily",
+        FontWeight(400),
+        FontStyle::Italic,
+        font_italic,
+    );
 
     // Requesting italic should return a font
     assert!(
@@ -1148,7 +1163,12 @@ fn web_font_registry_fallback_when_no_italic() {
     };
 
     let mut registry = WebFontRegistry::new();
-    registry.push("TestFamily", FontWeight(400), FontStyle::Normal, font_regular);
+    registry.push(
+        "TestFamily",
+        FontWeight(400),
+        FontStyle::Normal,
+        font_regular,
+    );
 
     // Requesting italic when only normal is available → should still return a font (best match)
     assert!(
@@ -1191,12 +1211,7 @@ fn font_cache_register_web_font_with_variant() {
         )
         .unwrap();
     cache
-        .register_web_font_with_variant(
-            "MultiFont",
-            FontWeight(700),
-            FontStyle::Normal,
-            data_bold,
-        )
+        .register_web_font_with_variant("MultiFont", FontWeight(700), FontStyle::Normal, data_bold)
         .unwrap();
 
     assert!(cache.contains("MultiFont"));

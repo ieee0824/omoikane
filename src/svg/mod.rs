@@ -69,7 +69,11 @@ pub(crate) fn render_svg_to_image_with_current_color(
     let tx = -vb_x * sx;
     let ty = -vb_y * sy;
 
-    let resources = SvgResources::collect(svg_node, if vb_w > 0.0 { vb_w } else { width }, if vb_h > 0.0 { vb_h } else { height });
+    let resources = SvgResources::collect(
+        svg_node,
+        if vb_w > 0.0 { vb_w } else { width },
+        if vb_h > 0.0 { vb_h } else { height },
+    );
 
     let initial_paint = SvgPaint {
         fill: Some(SvgPaintValue::Solid(Color::rgb(0, 0, 0))),
@@ -294,12 +298,7 @@ fn hit_test_svg_children(
         if geometry.is_empty() {
             continue;
         }
-        if pointer_events_accepts(
-            &style.pointer_events,
-            &style.paint,
-            style.visible,
-            geometry,
-        ) {
+        if pointer_events_accepts(&style.pointer_events, &style.paint, style.visible, geometry) {
             return Some(child.clone());
         }
     }
@@ -328,10 +327,7 @@ fn hit_test_svg_use(
         return false;
     };
     let target_attrs = target.attributes().unwrap_or_default();
-    let target_tag = target
-        .tag_name()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let target_tag = target.tag_name().unwrap_or_default().to_ascii_lowercase();
     let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0);
     let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0);
     let local_point = (point.0 - x, point.1 - y);
@@ -397,12 +393,7 @@ fn hit_test_svg_use(
         viewbox_origin,
     );
     !geometry.is_empty()
-        && pointer_events_accepts(
-            &style.pointer_events,
-            &style.paint,
-            style.visible,
-            geometry,
-        )
+        && pointer_events_accepts(&style.pointer_events, &style.paint, style.visible, geometry)
 }
 
 fn find_svg_resource(root: &NodeHandle, id: &str) -> Option<NodeHandle> {
@@ -507,13 +498,38 @@ fn svg_hit_geometry(
             if width <= 0.0 || height <= 0.0 {
                 return SvgHitGeometry::default();
             }
-            let fill = point_in_rect(point, Rect { x, y, width, height });
+            let fill = point_in_rect(
+                point,
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            );
             let stroke = stroke_width > 0.0
-                && point_near_rect(point, Rect { x, y, width, height }, stroke_width / 2.0);
+                && point_near_rect(
+                    point,
+                    Rect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                    stroke_width / 2.0,
+                );
             SvgHitGeometry {
                 fill,
                 stroke,
-                bounding_box: point_in_rect(point, Rect { x, y, width, height }),
+                bounding_box: point_in_rect(
+                    point,
+                    Rect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                ),
             }
         }
         "image" => {
@@ -535,9 +551,18 @@ fn svg_hit_geometry(
                 .unwrap_or(0.0)
                 .max(0.0)
                 * scale_y;
-            let bounds = Rect { x, y, width, height };
+            let bounds = Rect {
+                x,
+                y,
+                width,
+                height,
+            };
             let inside = width > 0.0 && height > 0.0 && point_in_rect(point, bounds);
-            SvgHitGeometry { fill: inside, stroke: false, bounding_box: inside }
+            SvgHitGeometry {
+                fill: inside,
+                stroke: false,
+                bounding_box: inside,
+            }
         }
         "circle" => {
             let (cx, cy) = to_viewport(
@@ -588,14 +613,10 @@ fn svg_hit_geometry(
             let inner_rx = (rx - stroke_width / 2.0).max(0.0);
             let inner_ry = (ry - stroke_width / 2.0).max(0.0);
             let outer = stroke_width > 0.0
-                && ((point.0 - cx) / outer_rx).powi(2)
-                    + ((point.1 - cy) / outer_ry).powi(2)
-                    <= 1.0;
+                && ((point.0 - cx) / outer_rx).powi(2) + ((point.1 - cy) / outer_ry).powi(2) <= 1.0;
             let inner = inner_rx > 0.0
                 && inner_ry > 0.0
-                && ((point.0 - cx) / inner_rx).powi(2)
-                    + ((point.1 - cy) / inner_ry).powi(2)
-                    < 1.0;
+                && ((point.0 - cx) / inner_rx).powi(2) + ((point.1 - cy) / inner_ry).powi(2) < 1.0;
             SvgHitGeometry {
                 fill: normalized <= 1.0,
                 stroke: outer && !inner,
@@ -623,7 +644,11 @@ fn svg_hit_geometry(
             let hit = stroke_width > 0.0 && distance <= stroke_width / 2.0;
             let bbox = rect_for_points(&[start, end]);
             let bounding_box = point_in_rect(point, bbox);
-            SvgHitGeometry { fill: false, stroke: hit, bounding_box }
+            SvgHitGeometry {
+                fill: false,
+                stroke: hit,
+                bounding_box,
+            }
         }
         "polyline" | "polygon" => {
             let points = parse_svg_points(attribute_ref(attrs, "points"))
@@ -674,7 +699,11 @@ fn polygon_hit_geometry(
     }
     let fill = closed && point_in_polygon(point, points);
     let bounding_box = point_in_rect(point, rect_for_points(points));
-    SvgHitGeometry { fill, stroke, bounding_box }
+    SvgHitGeometry {
+        fill,
+        stroke,
+        bounding_box,
+    }
 }
 
 fn parse_path_subpaths(value: Option<&String>) -> Vec<(Vec<(f32, f32)>, bool)> {
@@ -737,12 +766,8 @@ fn parse_path_subpaths(value: Option<&String>) -> Vec<(Vec<(f32, f32)>, bool)> {
                     let t = step as f32 / 12.0;
                     let inverse = 1.0 - t;
                     points.push((
-                        inverse.powi(2) * start_point.0
-                            + 2.0 * inverse * t * cpx
-                            + t.powi(2) * x,
-                        inverse.powi(2) * start_point.1
-                            + 2.0 * inverse * t * cpy
-                            + t.powi(2) * y,
+                        inverse.powi(2) * start_point.0 + 2.0 * inverse * t * cpx + t.powi(2) * x,
+                        inverse.powi(2) * start_point.1 + 2.0 * inverse * t * cpy + t.powi(2) * y,
                     ));
                 }
                 current = (x, y);
@@ -819,7 +844,11 @@ fn point_segment_distance(point: (f32, f32), start: (f32, f32), end: (f32, f32))
 fn point_in_polygon(point: (f32, f32), points: &[(f32, f32)]) -> bool {
     let mut inside = false;
     for index in 0..points.len() {
-        let previous = if index == 0 { points.len() - 1 } else { index - 1 };
+        let previous = if index == 0 {
+            points.len() - 1
+        } else {
+            index - 1
+        };
         let (x0, y0) = points[index];
         let (x1, y1) = points[previous];
         let crosses = (y0 > point.1) != (y1 > point.1)
@@ -1082,12 +1111,16 @@ fn fix_gradient_stop_offsets(stops: &mut [SvgGradientStop]) {
         while end < stops.len() && stops[end].offset.is_nan() {
             end += 1;
         }
-        let end_offset = if end < stops.len() { stops[end].offset } else { 1.0 };
+        let end_offset = if end < stops.len() {
+            stops[end].offset
+        } else {
+            1.0
+        };
         let start_offset = stops[start].offset;
         let count = (end - start) as f32;
         for current in index..end {
-            stops[current].offset = start_offset
-                + (end_offset - start_offset) * (current - start) as f32 / count;
+            stops[current].offset =
+                start_offset + (end_offset - start_offset) * (current - start) as f32 / count;
         }
         index = end;
     }
@@ -1119,11 +1152,18 @@ fn parse_svg_gradient(
     let mut stops = node
         .child_nodes()
         .into_iter()
-        .filter(|child| child.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("stop")))
+        .filter(|child| {
+            child
+                .tag_name()
+                .is_some_and(|tag| tag.eq_ignore_ascii_case("stop"))
+        })
         .filter_map(|child| parse_gradient_stop(&child))
         .collect::<Vec<_>>();
     if stops.is_empty() {
-        stops = base.as_ref().map(|gradient| gradient.stops.clone()).unwrap_or_default();
+        stops = base
+            .as_ref()
+            .map(|gradient| gradient.stops.clone())
+            .unwrap_or_default();
     }
     if stops.is_empty() {
         return None;
@@ -1131,20 +1171,29 @@ fn parse_svg_gradient(
     fix_gradient_stop_offsets(&mut stops);
 
     let kind = if tag == "lineargradient" {
-        let (base_x1, base_y1, base_x2, base_y2) = match base.as_ref().map(|gradient| &gradient.kind) {
-            Some(SvgGradientKind::Linear { x1, y1, x2, y2 }) => (*x1, *y1, *x2, *y2),
-            _ => (
-                GradientCoord::Percent(0.0),
-                GradientCoord::Percent(0.0),
-                GradientCoord::Percent(100.0),
-                GradientCoord::Percent(0.0),
-            ),
-        };
+        let (base_x1, base_y1, base_x2, base_y2) =
+            match base.as_ref().map(|gradient| &gradient.kind) {
+                Some(SvgGradientKind::Linear { x1, y1, x2, y2 }) => (*x1, *y1, *x2, *y2),
+                _ => (
+                    GradientCoord::Percent(0.0),
+                    GradientCoord::Percent(0.0),
+                    GradientCoord::Percent(100.0),
+                    GradientCoord::Percent(0.0),
+                ),
+            };
         SvgGradientKind::Linear {
-            x1: attribute_value(attrs, "x1").and_then(|value| parse_gradient_coord(&value)).unwrap_or(base_x1),
-            y1: attribute_value(attrs, "y1").and_then(|value| parse_gradient_coord(&value)).unwrap_or(base_y1),
-            x2: attribute_value(attrs, "x2").and_then(|value| parse_gradient_coord(&value)).unwrap_or(base_x2),
-            y2: attribute_value(attrs, "y2").and_then(|value| parse_gradient_coord(&value)).unwrap_or(base_y2),
+            x1: attribute_value(attrs, "x1")
+                .and_then(|value| parse_gradient_coord(&value))
+                .unwrap_or(base_x1),
+            y1: attribute_value(attrs, "y1")
+                .and_then(|value| parse_gradient_coord(&value))
+                .unwrap_or(base_y1),
+            x2: attribute_value(attrs, "x2")
+                .and_then(|value| parse_gradient_coord(&value))
+                .unwrap_or(base_x2),
+            y2: attribute_value(attrs, "y2")
+                .and_then(|value| parse_gradient_coord(&value))
+                .unwrap_or(base_y2),
         }
     } else {
         let (base_cx, base_cy, base_r) = match base.as_ref().map(|gradient| &gradient.kind) {
@@ -1155,8 +1204,12 @@ fn parse_svg_gradient(
                 GradientCoord::Percent(50.0),
             ),
         };
-        let cx = attribute_value(attrs, "cx").and_then(|value| parse_gradient_coord(&value)).unwrap_or(base_cx);
-        let cy = attribute_value(attrs, "cy").and_then(|value| parse_gradient_coord(&value)).unwrap_or(base_cy);
+        let cx = attribute_value(attrs, "cx")
+            .and_then(|value| parse_gradient_coord(&value))
+            .unwrap_or(base_cx);
+        let cy = attribute_value(attrs, "cy")
+            .and_then(|value| parse_gradient_coord(&value))
+            .unwrap_or(base_cy);
         let fx = attribute_value(attrs, "fx")
             .and_then(|value| parse_gradient_coord(&value))
             .or_else(|| match base.as_ref().map(|gradient| &gradient.kind) {
@@ -1174,13 +1227,20 @@ fn parse_svg_gradient(
         SvgGradientKind::Radial {
             cx,
             cy,
-            r: attribute_value(attrs, "r").and_then(|value| parse_gradient_coord(&value)).unwrap_or(base_r),
+            r: attribute_value(attrs, "r")
+                .and_then(|value| parse_gradient_coord(&value))
+                .unwrap_or(base_r),
             fx,
             fy,
         }
     };
 
-    Some(SvgGradient { units, spread, kind, stops })
+    Some(SvgGradient {
+        units,
+        spread,
+        kind,
+        stops,
+    })
 }
 
 impl SvgGradient {
@@ -1188,12 +1248,44 @@ impl SvgGradient {
         let (value, valid) = match self.kind {
             SvgGradientKind::Linear { x1, y1, x2, y2 } => {
                 let start = (
-                    resolve_gradient_coord(x1, self.units, bbox.x, bbox.width, transform.tx, transform.sx, transform.viewport_width),
-                    resolve_gradient_coord(y1, self.units, bbox.y, bbox.height, transform.ty, transform.sy, transform.viewport_height),
+                    resolve_gradient_coord(
+                        x1,
+                        self.units,
+                        bbox.x,
+                        bbox.width,
+                        transform.tx,
+                        transform.sx,
+                        transform.viewport_width,
+                    ),
+                    resolve_gradient_coord(
+                        y1,
+                        self.units,
+                        bbox.y,
+                        bbox.height,
+                        transform.ty,
+                        transform.sy,
+                        transform.viewport_height,
+                    ),
                 );
                 let end = (
-                    resolve_gradient_coord(x2, self.units, bbox.x, bbox.width, transform.tx, transform.sx, transform.viewport_width),
-                    resolve_gradient_coord(y2, self.units, bbox.y, bbox.height, transform.ty, transform.sy, transform.viewport_height),
+                    resolve_gradient_coord(
+                        x2,
+                        self.units,
+                        bbox.x,
+                        bbox.width,
+                        transform.tx,
+                        transform.sx,
+                        transform.viewport_width,
+                    ),
+                    resolve_gradient_coord(
+                        y2,
+                        self.units,
+                        bbox.y,
+                        bbox.height,
+                        transform.ty,
+                        transform.sy,
+                        transform.viewport_height,
+                    ),
                 );
                 let dx = end.0 - start.0;
                 let dy = end.1 - start.1;
@@ -1201,17 +1293,52 @@ impl SvgGradient {
                 if denominator <= f32::EPSILON {
                     (0.0, false)
                 } else {
-                    (((x - start.0) * dx + (y - start.1) * dy) / denominator, true)
+                    (
+                        ((x - start.0) * dx + (y - start.1) * dy) / denominator,
+                        true,
+                    )
                 }
             }
             SvgGradientKind::Radial { cx, cy, r, fx, fy } => {
                 let center = (
-                    resolve_gradient_coord(cx, self.units, bbox.x, bbox.width, transform.tx, transform.sx, transform.viewport_width),
-                    resolve_gradient_coord(cy, self.units, bbox.y, bbox.height, transform.ty, transform.sy, transform.viewport_height),
+                    resolve_gradient_coord(
+                        cx,
+                        self.units,
+                        bbox.x,
+                        bbox.width,
+                        transform.tx,
+                        transform.sx,
+                        transform.viewport_width,
+                    ),
+                    resolve_gradient_coord(
+                        cy,
+                        self.units,
+                        bbox.y,
+                        bbox.height,
+                        transform.ty,
+                        transform.sy,
+                        transform.viewport_height,
+                    ),
                 );
                 let focal = (
-                    resolve_gradient_coord(fx, self.units, bbox.x, bbox.width, transform.tx, transform.sx, transform.viewport_width),
-                    resolve_gradient_coord(fy, self.units, bbox.y, bbox.height, transform.ty, transform.sy, transform.viewport_height),
+                    resolve_gradient_coord(
+                        fx,
+                        self.units,
+                        bbox.x,
+                        bbox.width,
+                        transform.tx,
+                        transform.sx,
+                        transform.viewport_width,
+                    ),
+                    resolve_gradient_coord(
+                        fy,
+                        self.units,
+                        bbox.y,
+                        bbox.height,
+                        transform.ty,
+                        transform.sy,
+                        transform.viewport_height,
+                    ),
                 );
                 let radius = resolve_gradient_radius(r, self.units, bbox, transform);
                 if radius <= f32::EPSILON {
@@ -1241,7 +1368,11 @@ impl SvgGradient {
             }
         };
         if !valid {
-            return self.stops.last().map(|stop| stop.color).unwrap_or(Color::rgba(0, 0, 0, 0));
+            return self
+                .stops
+                .last()
+                .map(|stop| stop.color)
+                .unwrap_or(Color::rgba(0, 0, 0, 0));
         }
         sample_gradient_stops(&self.stops, apply_spread(value, self.spread))
     }
@@ -1308,7 +1439,9 @@ fn apply_spread(value: f32, spread: SpreadMethod) -> f32 {
 }
 
 fn sample_gradient_stops(stops: &[SvgGradientStop], value: f32) -> Color {
-    let Some(first) = stops.first() else { return Color::rgba(0, 0, 0, 0) };
+    let Some(first) = stops.first() else {
+        return Color::rgba(0, 0, 0, 0);
+    };
     if value <= first.offset {
         return first.color;
     }
@@ -1329,8 +1462,17 @@ fn sample_gradient_stops(stops: &[SvgGradientStop], value: f32) -> Color {
 
 fn interpolate_color(left: Color, right: Color, t: f32) -> Color {
     let alpha = left.a as f32 + (right.a as f32 - left.a as f32) * t;
-    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8;
-    Color::rgba(lerp(left.r, right.r), lerp(left.g, right.g), lerp(left.b, right.b), alpha.round().clamp(0.0, 255.0) as u8)
+    let lerp = |a: u8, b: u8| {
+        (a as f32 + (b as f32 - a as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::rgba(
+        lerp(left.r, right.r),
+        lerp(left.g, right.g),
+        lerp(left.b, right.b),
+        alpha.round().clamp(0.0, 255.0) as u8,
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1360,8 +1502,8 @@ fn resolve_paint(parent: &SvgPaint, attrs: &BTreeMap<String, String>) -> SvgPain
     let stroke_width = property_value(attrs, "stroke-width")
         .and_then(|value| parse_svg_nonnegative(Some(&value)))
         .unwrap_or(parent.stroke_width);
-    let opacity = parent.opacity
-        * parse_opacity(property_value(attrs, "opacity").as_deref()).unwrap_or(1.0);
+    let opacity =
+        parent.opacity * parse_opacity(property_value(attrs, "opacity").as_deref()).unwrap_or(1.0);
     let fill_opacity = parent.fill_opacity
         * parse_opacity(property_value(attrs, "fill-opacity").as_deref()).unwrap_or(1.0);
     let stroke_opacity = parent.stroke_opacity
@@ -1439,7 +1581,9 @@ fn property_value(attrs: &BTreeMap<String, String>, name: &str) -> Option<String
         .map(|(_, value)| value)
     {
         for declaration in style.split(';').rev() {
-            let Some((key, value)) = declaration.split_once(':') else { continue };
+            let Some((key, value)) = declaration.split_once(':') else {
+                continue;
+            };
             if key.trim().eq_ignore_ascii_case(name) {
                 return Some(value.trim().to_string());
             }
@@ -1452,7 +1596,11 @@ fn property_value(attrs: &BTreeMap<String, String>, name: &str) -> Option<String
 }
 
 fn parse_opacity(value: Option<&str>) -> Option<f32> {
-    value?.trim().parse::<f32>().ok().map(|value| value.clamp(0.0, 1.0))
+    value?
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .map(|value| value.clamp(0.0, 1.0))
 }
 
 fn parse_line_cap(value: &str) -> LineCap {
@@ -1472,11 +1620,18 @@ fn parse_line_join(value: &str) -> LineJoin {
 }
 
 fn with_alpha(color: Color, opacity: f32) -> Color {
-    Color::rgba(color.r, color.g, color.b, (color.a as f32 * opacity.clamp(0.0, 1.0)).round() as u8)
+    Color::rgba(
+        color.r,
+        color.g,
+        color.b,
+        (color.a as f32 * opacity.clamp(0.0, 1.0)).round() as u8,
+    )
 }
 
 fn parse_svg_points(value: Option<&String>) -> Vec<(f32, f32)> {
-    let Some(value) = value else { return Vec::new() };
+    let Some(value) = value else {
+        return Vec::new();
+    };
     let values = value
         .replace(',', " ")
         .split_whitespace()
@@ -1504,15 +1659,7 @@ fn render_svg_children(
             continue;
         }
         render_svg_element(
-            &child,
-            canvas,
-            sx,
-            sy,
-            tx,
-            ty,
-            &inherited,
-            resources,
-            visited,
+            &child, canvas, sx, sy, tx, ty, &inherited, resources, visited,
         );
     }
 }
@@ -1562,7 +1709,9 @@ fn render_svg_element(
             else {
                 return;
             };
-            let Some(target) = resources.node(&id) else { return };
+            let Some(target) = resources.node(&id) else {
+                return;
+            };
             if !visited.insert(target.identity()) {
                 return;
             }
@@ -1587,7 +1736,12 @@ fn render_svg_element(
             let rw = parse_svg_size(attribute_ref(&attrs, "width")).unwrap_or(0.0) * sx;
             let rh = parse_svg_size(attribute_ref(&attrs, "height")).unwrap_or(0.0) * sy;
             if rw > 0.0 && rh > 0.0 {
-                let bbox = Rect { x: rx, y: ry, width: rw, height: rh };
+                let bbox = Rect {
+                    x: rx,
+                    y: ry,
+                    width: rw,
+                    height: rh,
+                };
                 if let Some(source) = fill.as_ref() {
                     fill_rect_source(canvas, bbox, source, transform);
                 }
@@ -1595,7 +1749,15 @@ fn render_svg_element(
                 let stroke_color = stroke.as_ref().map(|source| {
                     source_color(source, rx + rw / 2.0, ry + rh / 2.0, bbox, transform)
                 });
-                stroke_polyline(canvas, &points, true, stroke_color, paint.stroke_width * sx.min(sy), paint.line_cap, paint.line_join);
+                stroke_polyline(
+                    canvas,
+                    &points,
+                    true,
+                    stroke_color,
+                    paint.stroke_width * sx.min(sy),
+                    paint.line_cap,
+                    paint.line_join,
+                );
             }
         }
         "circle" => {
@@ -1603,12 +1765,27 @@ fn render_svg_element(
             let cy = parse_svg_coord(attribute_ref(&attrs, "cy")).unwrap_or(0.0) * sy + ty;
             let r = parse_svg_size(attribute_ref(&attrs, "r")).unwrap_or(0.0) * sx.min(sy);
             if r > 0.0 {
-                let bbox = Rect { x: cx - r, y: cy - r, width: r * 2.0, height: r * 2.0 };
+                let bbox = Rect {
+                    x: cx - r,
+                    y: cy - r,
+                    width: r * 2.0,
+                    height: r * 2.0,
+                };
                 if let Some(source) = fill.as_ref() {
                     fill_circle_source(canvas, cx, cy, r, source, transform, bbox);
                 }
-                let stroke_color = stroke.as_ref().map(|source| source_color(source, cx, cy, bbox, transform));
-                stroke_ellipse(canvas, cx, cy, r, r, paint.stroke_width * sx.min(sy), stroke_color);
+                let stroke_color = stroke
+                    .as_ref()
+                    .map(|source| source_color(source, cx, cy, bbox, transform));
+                stroke_ellipse(
+                    canvas,
+                    cx,
+                    cy,
+                    r,
+                    r,
+                    paint.stroke_width * sx.min(sy),
+                    stroke_color,
+                );
             }
         }
         "ellipse" => {
@@ -1617,12 +1794,27 @@ fn render_svg_element(
             let rx = parse_svg_size(attribute_ref(&attrs, "rx")).unwrap_or(0.0) * sx;
             let ry = parse_svg_size(attribute_ref(&attrs, "ry")).unwrap_or(0.0) * sy;
             if rx > 0.0 && ry > 0.0 {
-                let bbox = Rect { x: cx - rx, y: cy - ry, width: rx * 2.0, height: ry * 2.0 };
+                let bbox = Rect {
+                    x: cx - rx,
+                    y: cy - ry,
+                    width: rx * 2.0,
+                    height: ry * 2.0,
+                };
                 if let Some(source) = fill.as_ref() {
                     fill_ellipse_source(canvas, cx, cy, rx, ry, source, transform, bbox);
                 }
-                let stroke_color = stroke.as_ref().map(|source| source_color(source, cx, cy, bbox, transform));
-                stroke_ellipse(canvas, cx, cy, rx, ry, paint.stroke_width * sx.min(sy), stroke_color);
+                let stroke_color = stroke
+                    .as_ref()
+                    .map(|source| source_color(source, cx, cy, bbox, transform));
+                stroke_ellipse(
+                    canvas,
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    paint.stroke_width * sx.min(sy),
+                    stroke_color,
+                );
             }
         }
         "line" => {
@@ -1631,8 +1823,18 @@ fn render_svg_element(
             let x2 = parse_svg_coord(attribute_ref(&attrs, "x2")).unwrap_or(0.0) * sx + tx;
             let y2 = parse_svg_coord(attribute_ref(&attrs, "y2")).unwrap_or(0.0) * sy + ty;
             let bbox = rect_for_points(&[(x1, y1), (x2, y2)]);
-            let stroke_color = stroke.as_ref().map(|source| source_color(source, (x1 + x2) / 2.0, (y1 + y2) / 2.0, bbox, transform));
-            stroke_polyline(canvas, &[(x1, y1), (x2, y2)], false, stroke_color, paint.stroke_width * sx.min(sy), paint.line_cap, paint.line_join);
+            let stroke_color = stroke.as_ref().map(|source| {
+                source_color(source, (x1 + x2) / 2.0, (y1 + y2) / 2.0, bbox, transform)
+            });
+            stroke_polyline(
+                canvas,
+                &[(x1, y1), (x2, y2)],
+                false,
+                stroke_color,
+                paint.stroke_width * sx.min(sy),
+                paint.line_cap,
+                paint.line_join,
+            );
         }
         "polyline" | "polygon" => {
             let points = parse_svg_points(attribute_ref(&attrs, "points"))
@@ -1643,11 +1845,34 @@ fn render_svg_element(
             let bbox = rect_for_points(&points);
             if closed && points.len() >= 3 {
                 if let Some(source) = fill.as_ref() {
-                    fill_compound_source(canvas, std::slice::from_ref(&points), source, FillRule::NonZero, transform, bbox);
+                    fill_compound_source(
+                        canvas,
+                        std::slice::from_ref(&points),
+                        source,
+                        FillRule::NonZero,
+                        transform,
+                        bbox,
+                    );
                 }
             }
-            let stroke_color = stroke.as_ref().map(|source| source_color(source, bbox.x + bbox.width / 2.0, bbox.y + bbox.height / 2.0, bbox, transform));
-            stroke_polyline(canvas, &points, closed, stroke_color, paint.stroke_width * sx.min(sy), paint.line_cap, paint.line_join);
+            let stroke_color = stroke.as_ref().map(|source| {
+                source_color(
+                    source,
+                    bbox.x + bbox.width / 2.0,
+                    bbox.y + bbox.height / 2.0,
+                    bbox,
+                    transform,
+                )
+            });
+            stroke_polyline(
+                canvas,
+                &points,
+                closed,
+                stroke_color,
+                paint.stroke_width * sx.min(sy),
+                paint.line_cap,
+                paint.line_join,
+            );
         }
         "path" => {
             if let Some(d) = attribute_value(&attrs, "d") {
@@ -1655,7 +1880,21 @@ fn render_svg_element(
                     Some(value) if value.eq_ignore_ascii_case("evenodd") => FillRule::EvenOdd,
                     _ => FillRule::NonZero,
                 };
-                render_path(canvas, &d, sx, sy, tx, ty, fill.as_ref(), fill_rule, stroke.as_ref(), paint.stroke_width * sx.min(sy), paint.line_cap, paint.line_join, transform);
+                render_path(
+                    canvas,
+                    &d,
+                    sx,
+                    sy,
+                    tx,
+                    ty,
+                    fill.as_ref(),
+                    fill_rule,
+                    stroke.as_ref(),
+                    paint.stroke_width * sx.min(sy),
+                    paint.line_cap,
+                    paint.line_join,
+                    transform,
+                );
             }
         }
         "image" => {
@@ -1681,7 +1920,12 @@ fn render_svg_element(
             let Some(image) = decode_svg_image_reference(&href) else {
                 return;
             };
-            let viewport = Rect { x, y, width, height };
+            let viewport = Rect {
+                x,
+                y,
+                width,
+                height,
+            };
             let destination = svg_image_destination(
                 viewport,
                 image.width() as f32,
@@ -1719,7 +1963,12 @@ fn svg_image_destination(
         || intrinsic_width <= 0.0
         || intrinsic_height <= 0.0
     {
-        return Rect { x: viewport.x, y: viewport.y, width: 0.0, height: 0.0 };
+        return Rect {
+            x: viewport.x,
+            y: viewport.y,
+            width: 0.0,
+            height: 0.0,
+        };
     }
     let value = preserve_aspect_ratio.unwrap_or("xMidYMid meet");
     let mut tokens = value.split_ascii_whitespace();
@@ -1753,7 +2002,12 @@ fn svg_image_destination(
     } else {
         viewport.y
     };
-    Rect { x, y, width, height }
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 fn attribute_ref<'a>(attrs: &'a BTreeMap<String, String>, name: &str) -> Option<&'a String> {
@@ -1765,13 +2019,35 @@ fn attribute_ref<'a>(attrs: &'a BTreeMap<String, String>, name: &str) -> Option<
 
 fn rect_for_points(points: &[(f32, f32)]) -> Rect {
     if points.is_empty() {
-        return Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+        return Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
     }
-    let min_x = points.iter().map(|point| point.0).fold(f32::INFINITY, f32::min);
-    let min_y = points.iter().map(|point| point.1).fold(f32::INFINITY, f32::min);
-    let max_x = points.iter().map(|point| point.0).fold(f32::NEG_INFINITY, f32::max);
-    let max_y = points.iter().map(|point| point.1).fold(f32::NEG_INFINITY, f32::max);
-    Rect { x: min_x, y: min_y, width: (max_x - min_x).max(0.0), height: (max_y - min_y).max(0.0) }
+    let min_x = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min);
+    let min_y = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_y = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    Rect {
+        x: min_x,
+        y: min_y,
+        width: (max_x - min_x).max(0.0),
+        height: (max_y - min_y).max(0.0),
+    }
 }
 
 fn rect_for_subpaths(subpaths: &[(Vec<(f32, f32)>, bool)]) -> Rect {
@@ -1788,23 +2064,48 @@ fn rect_for_subpaths(subpaths: &[(Vec<(f32, f32)>, bool)]) -> Rect {
         }
     }
     if !min_x.is_finite() {
-        return Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+        return Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
     }
-    Rect { x: min_x, y: min_y, width: (max_x - min_x).max(0.0), height: (max_y - min_y).max(0.0) }
+    Rect {
+        x: min_x,
+        y: min_y,
+        width: (max_x - min_x).max(0.0),
+        height: (max_y - min_y).max(0.0),
+    }
 }
 
-fn fill_rect_source(canvas: &mut Canvas, rect: Rect, source: &PaintSource, transform: SvgTransform) {
+fn fill_rect_source(
+    canvas: &mut Canvas,
+    rect: Rect,
+    source: &PaintSource,
+    transform: SvgTransform,
+) {
     if let PaintSource::Solid(color) = source {
         canvas.fill_rect(rect, *color);
         return;
     }
     let x0 = rect.x.floor().max(0.0) as u32;
     let y0 = rect.y.floor().max(0.0) as u32;
-    let x1 = (rect.x + rect.width).ceil().min(canvas.width() as f32).max(0.0) as u32;
-    let y1 = (rect.y + rect.height).ceil().min(canvas.height() as f32).max(0.0) as u32;
+    let x1 = (rect.x + rect.width)
+        .ceil()
+        .min(canvas.width() as f32)
+        .max(0.0) as u32;
+    let y1 = (rect.y + rect.height)
+        .ceil()
+        .min(canvas.height() as f32)
+        .max(0.0) as u32;
     for y in y0..y1 {
         for x in x0..x1 {
-            canvas.blend_pixel(x, y, source_color(source, x as f32 + 0.5, y as f32 + 0.5, rect, transform));
+            canvas.blend_pixel(
+                x,
+                y,
+                source_color(source, x as f32 + 0.5, y as f32 + 0.5, rect, transform),
+            );
         }
     }
 }
@@ -1872,8 +2173,16 @@ fn fill_compound_source(
     if subpaths.is_empty() {
         return;
     }
-    let min_y = subpaths.iter().flatten().map(|point| point.1).fold(f32::MAX, f32::min);
-    let max_y = subpaths.iter().flatten().map(|point| point.1).fold(f32::MIN, f32::max);
+    let min_y = subpaths
+        .iter()
+        .flatten()
+        .map(|point| point.1)
+        .fold(f32::MAX, f32::min);
+    let max_y = subpaths
+        .iter()
+        .flatten()
+        .map(|point| point.1)
+        .fold(f32::MIN, f32::max);
     let y_start = (min_y.floor() as i32).max(0) as u32;
     let y_end = (max_y.ceil() as u32).min(canvas.height());
     for y in y_start..y_end {
@@ -1891,7 +2200,11 @@ fn fill_compound_source(
                 }
             }
         }
-        intersections.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+        intersections.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let mut winding = 0i32;
         for pair in intersections.windows(2) {
             winding += pair[0].1;
@@ -1903,7 +2216,11 @@ fn fill_compound_source(
                 let x_start = (pair[0].0.floor() as i32).max(0) as u32;
                 let x_end = (pair[1].0.ceil() as u32).min(canvas.width());
                 for x in x_start..x_end {
-                    canvas.blend_pixel(x, y, source_color(source, x as f32 + 0.5, scan_y, bbox, transform));
+                    canvas.blend_pixel(
+                        x,
+                        y,
+                        source_color(source, x as f32 + 0.5, scan_y, bbox, transform),
+                    );
                 }
             }
         }
@@ -1927,7 +2244,15 @@ fn fill_circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, color: Color) {
     }
 }
 
-fn stroke_ellipse(canvas: &mut Canvas, cx: f32, cy: f32, rx: f32, ry: f32, width: f32, color: Option<Color>) {
+fn stroke_ellipse(
+    canvas: &mut Canvas,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    width: f32,
+    color: Option<Color>,
+) {
     let Some(color) = color else { return };
     if width <= 0.0 || color.a == 0 {
         return;
@@ -1945,7 +2270,8 @@ fn stroke_ellipse(canvas: &mut Canvas, cx: f32, cy: f32, rx: f32, ry: f32, width
             let dx = px as f32 + 0.5 - cx;
             let dy = py as f32 + 0.5 - cy;
             let outer = (dx / outer_rx).powi(2) + (dy / outer_ry).powi(2) <= 1.0;
-            let inner = inner_rx > 0.0 && inner_ry > 0.0
+            let inner = inner_rx > 0.0
+                && inner_ry > 0.0
                 && (dx / inner_rx).powi(2) + (dy / inner_ry).powi(2) < 1.0;
             if outer && !inner {
                 canvas.blend_pixel(px, py, color);
@@ -1968,13 +2294,37 @@ fn stroke_polyline(
         return;
     }
     let half = width / 2.0;
-    let segment_count = if closed { points.len() } else { points.len() - 1 };
+    let segment_count = if closed {
+        points.len()
+    } else {
+        points.len() - 1
+    };
     for index in 0..segment_count {
         let start = points[index];
         let end = points[(index + 1) % points.len()];
-        stroke_segment(canvas, start, end, half, color, if closed || index > 0 { LineCap::Butt } else { line_cap }, if closed || index + 1 < segment_count { LineCap::Butt } else { line_cap });
+        stroke_segment(
+            canvas,
+            start,
+            end,
+            half,
+            color,
+            if closed || index > 0 {
+                LineCap::Butt
+            } else {
+                line_cap
+            },
+            if closed || index + 1 < segment_count {
+                LineCap::Butt
+            } else {
+                line_cap
+            },
+        );
     }
-    let join_count = if closed { points.len() } else { points.len().saturating_sub(2) };
+    let join_count = if closed {
+        points.len()
+    } else {
+        points.len().saturating_sub(2)
+    };
     for index in 0..join_count {
         let (previous, point, next) = if closed {
             (
@@ -2027,7 +2377,12 @@ fn stroke_segment(
         (to.0 - nx, to.1 - ny),
         (from.0 - nx, from.1 - ny),
     ];
-    fill_compound_path(canvas, std::slice::from_ref(&polygon), color, FillRule::NonZero);
+    fill_compound_path(
+        canvas,
+        std::slice::from_ref(&polygon),
+        color,
+        FillRule::NonZero,
+    );
     if start_cap == LineCap::Round {
         fill_circle(canvas, start.0, start.1, half, color);
     }
@@ -2044,8 +2399,12 @@ fn stroke_bevel_join(
     half: f32,
     color: Color,
 ) {
-    let Some((d1x, d1y)) = unit_vector(previous, point) else { return };
-    let Some((d2x, d2y)) = unit_vector(point, next) else { return };
+    let Some((d1x, d1y)) = unit_vector(previous, point) else {
+        return;
+    };
+    let Some((d2x, d2y)) = unit_vector(point, next) else {
+        return;
+    };
     let cross = d1x * d2y - d1y * d2x;
     if cross.abs() < 1e-5 {
         return;
@@ -2064,8 +2423,12 @@ fn stroke_miter_join(
     half: f32,
     color: Color,
 ) {
-    let Some((d1x, d1y)) = unit_vector(previous, point) else { return };
-    let Some((d2x, d2y)) = unit_vector(point, next) else { return };
+    let Some((d1x, d1y)) = unit_vector(previous, point) else {
+        return;
+    };
+    let Some((d2x, d2y)) = unit_vector(point, next) else {
+        return;
+    };
     let cross = d1x * d2y - d1y * d2x;
     if cross.abs() < 1e-5 {
         return;
@@ -2242,7 +2605,15 @@ fn render_path(
         )
     });
     for (points, closed) in subpaths {
-        stroke_polyline(canvas, &points, closed, stroke, stroke_width, line_cap, line_join);
+        stroke_polyline(
+            canvas,
+            &points,
+            closed,
+            stroke,
+            stroke_width,
+            line_cap,
+            line_join,
+        );
     }
 }
 
@@ -2880,15 +3251,33 @@ mod tests {
 
     #[test]
     fn svg_image_preserve_aspect_ratio_supports_meet_none_and_slice() {
-        let viewport = Rect { x: 10.0, y: 20.0, width: 100.0, height: 100.0 };
+        let viewport = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 100.0,
+        };
         assert_eq!(
             svg_image_destination(viewport, 200.0, 100.0, None),
-            Rect { x: 10.0, y: 45.0, width: 100.0, height: 50.0 },
+            Rect {
+                x: 10.0,
+                y: 45.0,
+                width: 100.0,
+                height: 50.0
+            },
         );
-        assert_eq!(svg_image_destination(viewport, 200.0, 100.0, Some("none")), viewport);
+        assert_eq!(
+            svg_image_destination(viewport, 200.0, 100.0, Some("none")),
+            viewport
+        );
         assert_eq!(
             svg_image_destination(viewport, 200.0, 100.0, Some("xMaxYMax slice")),
-            Rect { x: -90.0, y: 20.0, width: 200.0, height: 100.0 },
+            Rect {
+                x: -90.0,
+                y: 20.0,
+                width: 200.0,
+                height: 100.0
+            },
         );
     }
 
@@ -2916,11 +3305,10 @@ mod tests {
         let base = "https://example.test/assets/document.svg".parse().unwrap();
         crate::layout::with_image_base_url(Some(base), || {
             let relative = crate::layout::canonical_image_asset_reference("self.svg").unwrap();
-            let absolute =
-                crate::layout::canonical_image_asset_reference(
-                    "HTTPS://EXAMPLE.TEST:443/assets/./self.svg",
-                )
-                .unwrap();
+            let absolute = crate::layout::canonical_image_asset_reference(
+                "HTTPS://EXAMPLE.TEST:443/assets/./self.svg",
+            )
+            .unwrap();
             assert_eq!(relative, absolute);
             assert_eq!(
                 crate::layout::canonical_image_asset_reference("DATA:image/png,bytes"),
@@ -2951,7 +3339,11 @@ mod tests {
         attrs.insert("href".to_string(), "pixel.png".to_string());
         assert_eq!(
             svg_hit_geometry("image", &attrs, (1.0, 0.5), 8.0, 1.0, 1.0, (0.0, 0.0)),
-            SvgHitGeometry { fill: true, stroke: false, bounding_box: true },
+            SvgHitGeometry {
+                fill: true,
+                stroke: false,
+                bounding_box: true
+            },
         );
     }
 
@@ -2976,7 +3368,10 @@ mod tests {
         };
         let filled = pixel(5, 5);
         assert_eq!((filled.r, filled.g, filled.b), (255, 255, 255));
-        assert!(filled.a >= 127 && filled.a <= 128, "opacity should halve alpha: {filled:?}");
+        assert!(
+            filled.a >= 127 && filled.a <= 128,
+            "opacity should halve alpha: {filled:?}"
+        );
         assert!(pixel(15, 2).b > 0, "inherited stroke should be painted");
     }
 
@@ -2999,8 +3394,15 @@ mod tests {
             )
         };
         assert_eq!(pixel(4, 0), Color::rgb(0, 0, 255));
-        assert!(pixel(9, 1).a > 0, "commands after close should start at the subpath origin");
-        assert_eq!(pixel(9, 6).a, 0, "the closed path must not continue from its old endpoint");
+        assert!(
+            pixel(9, 1).a > 0,
+            "commands after close should start at the subpath origin"
+        );
+        assert_eq!(
+            pixel(9, 6).a,
+            0,
+            "the closed path must not continue from its old endpoint"
+        );
     }
 
     #[test]
@@ -3015,13 +3417,18 @@ mod tests {
         // stroke is therefore one display pixel wide on each side (the
         // rasterizer uses min(scale_x, scale_y) for stroke width).
         let outside = svg_hit_geometry("line", &attrs, (5.6, 5.0), 2.0, 2.0, 1.0, (0.0, 0.0));
-        assert!(!outside.stroke, "horizontal viewBox scale must affect stroke distance");
+        assert!(
+            !outside.stroke,
+            "horizontal viewBox scale must affect stroke distance"
+        );
         let inside = svg_hit_geometry("line", &attrs, (5.4, 5.0), 2.0, 2.0, 1.0, (0.0, 0.0));
         assert!(inside.stroke);
 
-        let zero_width =
-            svg_hit_geometry("line", &attrs, (5.0, 5.0), 0.0, 1.0, 1.0, (0.0, 0.0));
-        assert!(!zero_width.stroke, "stroke-width:0 must not create hit geometry");
+        let zero_width = svg_hit_geometry("line", &attrs, (5.0, 5.0), 0.0, 1.0, 1.0, (0.0, 0.0));
+        assert!(
+            !zero_width.stroke,
+            "stroke-width:0 must not create hit geometry"
+        );
 
         let paint = SvgPaint {
             fill: None,
@@ -3077,17 +3484,12 @@ mod tests {
     #[test]
     fn svg_hit_path_does_not_bridge_subpaths_after_close() {
         let mut attrs = BTreeMap::new();
-        attrs.insert(
-            "d".to_string(),
-            "M0 0 L0 10 Z M20 0 L20 10".to_string(),
-        );
-        let geometry =
-            svg_hit_geometry("path", &attrs, (10.0, 0.0), 2.0, 1.0, 1.0, (0.0, 0.0));
+        attrs.insert("d".to_string(), "M0 0 L0 10 Z M20 0 L20 10".to_string());
+        let geometry = svg_hit_geometry("path", &attrs, (10.0, 0.0), 2.0, 1.0, 1.0, (0.0, 0.0));
         assert!(!geometry.stroke);
 
         attrs.insert("d".to_string(), "M0 0 Z".to_string());
-        let geometry =
-            svg_hit_geometry("path", &attrs, (0.0, 0.0), 2.0, 1.0, 1.0, (0.0, 0.0));
+        let geometry = svg_hit_geometry("path", &attrs, (0.0, 0.0), 2.0, 1.0, 1.0, (0.0, 0.0));
         assert!(!geometry.stroke);
     }
 
@@ -3099,15 +3501,7 @@ mod tests {
         attrs.insert("width".to_string(), "5".to_string());
         attrs.insert("height".to_string(), "5".to_string());
 
-        let geometry = svg_hit_geometry(
-            "rect",
-            &attrs,
-            (12.5, 22.5),
-            0.0,
-            2.0,
-            2.0,
-            (10.0, 20.0),
-        );
+        let geometry = svg_hit_geometry("rect", &attrs, (12.5, 22.5), 0.0, 2.0, 2.0, (10.0, 20.0));
         assert!(geometry.fill);
         assert!(geometry.bounding_box);
     }
@@ -3248,8 +3642,14 @@ mod tests {
         let middle = pixel(2, 2);
         let repeated = pixel(3, 2);
         assert!(left.r > 200 && left.b < 60, "left sample: {left:?}");
-        assert!(middle.r > 40 && middle.b > 40, "gradient should interpolate stops: {middle:?}");
-        assert!(repeated.r > 200 && repeated.b < 60, "repeat spread should restart: {repeated:?}");
+        assert!(
+            middle.r > 40 && middle.b > 40,
+            "gradient should interpolate stops: {middle:?}"
+        );
+        assert!(
+            repeated.r > 200 && repeated.b < 60,
+            "repeat spread should restart: {repeated:?}"
+        );
     }
 
     #[test]

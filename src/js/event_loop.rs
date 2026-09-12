@@ -40,9 +40,14 @@ pub(crate) enum Task {
         owner_document_id: Option<usize>,
     },
     /// A geolocation request delivered after the current script task.
-    Geolocation { request_id: u64 },
+    Geolocation {
+        request_id: u64,
+    },
     Navigation(NavigationRequest),
-    PostedMessage { port: JsValue, data: JsValue },
+    PostedMessage {
+        port: JsValue,
+        data: JsValue,
+    },
     /// A message delivered to a page-owned `BroadcastChannel` endpoint.
     ///
     /// The payload stays in the context-independent structured-clone wire
@@ -54,7 +59,10 @@ pub(crate) enum Task {
         origin: String,
     },
     /// A message sent from a page-owned `Worker` to its dedicated worker.
-    WorkerMessage { worker_id: u64, data: String },
+    WorkerMessage {
+        worker_id: u64,
+        data: String,
+    },
     /// A message sent from a dedicated worker back to its owner page.
     WorkerOwnerMessage {
         worker_id: u64,
@@ -69,7 +77,10 @@ pub(crate) enum Task {
     /// A message sent from a page-owned `SharedWorkerPort` to the shared
     /// worker runtime.  The endpoint is identified by a process-local id;
     /// the structured-clone wire is decoded in the target realm.
-    SharedWorkerMessage { connection_id: u64, data: String },
+    SharedWorkerMessage {
+        connection_id: u64,
+        data: String,
+    },
     /// A message sent from a shared worker runtime to a page-owned port.
     SharedWorkerOwnerMessage {
         connection_id: u64,
@@ -176,7 +187,9 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
         }
         Task::WorkerOwnerMessage { owner, .. } => unsafe { owner.trace(tracer) },
         Task::SharedWorkerOwnerMessage { port, .. } => unsafe { port.trace(tracer) },
-        Task::WorkerError { owner: Some(owner), .. } => unsafe { owner.trace(tracer) },
+        Task::WorkerError {
+            owner: Some(owner), ..
+        } => unsafe { owner.trace(tracer) },
         Task::Geolocation { .. }
         | Task::Navigation(_)
         | Task::BroadcastChannelMessage { .. }
@@ -319,7 +332,10 @@ impl EventLoop {
     /// Queues a port and cloned data on the posted message task source.
     /// Both values stay live until their event-loop turn runs.
     pub(crate) fn enqueue_posted_message(&mut self, port: JsValue, data: JsValue) {
-        self.enqueue(TaskSource::PostedMessage, Task::PostedMessage { port, data });
+        self.enqueue(
+            TaskSource::PostedMessage,
+            Task::PostedMessage { port, data },
+        );
     }
 
     /// Queues a message on a target `BroadcastChannel`'s posted-message task
@@ -342,7 +358,10 @@ impl EventLoop {
     }
 
     pub(crate) fn enqueue_worker_message(&mut self, worker_id: u64, data: String) {
-        self.enqueue(TaskSource::PostedMessage, Task::WorkerMessage { worker_id, data });
+        self.enqueue(
+            TaskSource::PostedMessage,
+            Task::WorkerMessage { worker_id, data },
+        );
     }
 
     pub(crate) fn enqueue_worker_owner_message(
@@ -366,7 +385,10 @@ impl EventLoop {
     pub(crate) fn enqueue_shared_worker_message(&mut self, connection_id: u64, data: String) {
         self.enqueue(
             TaskSource::PostedMessage,
-            Task::SharedWorkerMessage { connection_id, data },
+            Task::SharedWorkerMessage {
+                connection_id,
+                data,
+            },
         );
     }
 
@@ -472,20 +494,21 @@ impl EventLoop {
 
     pub(crate) fn has_pending_timers(&self) -> bool {
         !self.timers.is_empty()
-            || self
-                .queues
-                .values()
-                .any(|queue| {
-                    queue
-                        .iter()
-                        .any(|(_, task)| matches!(task, Task::Timer { .. }))
-                })
+            || self.queues.values().any(|queue| {
+                queue
+                    .iter()
+                    .any(|(_, task)| matches!(task, Task::Timer { .. }))
+            })
     }
 
     pub(crate) fn has_pending_geolocation_tasks(&self) -> bool {
         self.queues
             .get(&TaskSource::Geolocation)
-            .is_some_and(|queue| queue.iter().any(|(_, task)| matches!(task, Task::Geolocation { .. })))
+            .is_some_and(|queue| {
+                queue
+                    .iter()
+                    .any(|(_, task)| matches!(task, Task::Geolocation { .. }))
+            })
     }
 
     pub(crate) fn schedule_animation_frame(
@@ -538,7 +561,10 @@ impl EventLoop {
         )
     }
 
-    pub(crate) fn take_animation_frame_callback(&mut self, id: u64) -> Option<AnimationFrameCallback> {
+    pub(crate) fn take_animation_frame_callback(
+        &mut self,
+        id: u64,
+    ) -> Option<AnimationFrameCallback> {
         self.animation_frame_callbacks.remove(&id)
     }
 
@@ -571,9 +597,7 @@ impl EventLoop {
         let cancelled_frame_ids: HashSet<_> = self
             .animation_frame_callbacks
             .iter()
-            .filter_map(|(id, callback)| {
-                (callback.document_id == Some(document_id)).then_some(*id)
-            })
+            .filter_map(|(id, callback)| (callback.document_id == Some(document_id)).then_some(*id))
             .collect();
         self.animation_frame_callbacks
             .retain(|id, _| !cancelled_frame_ids.contains(id));
@@ -758,8 +782,7 @@ mod tests {
         event_loop.enqueue_posted_message(JsValue::from(2), JsValue::undefined());
 
         for expected in [1.0, 2.0] {
-            let Some((source, Task::PostedMessage { port: callback, .. })) =
-                event_loop.pop_task()
+            let Some((source, Task::PostedMessage { port: callback, .. })) = event_loop.pop_task()
             else {
                 panic!("expected a posted message task");
             };

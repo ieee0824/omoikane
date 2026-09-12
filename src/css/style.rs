@@ -330,12 +330,7 @@ fn layer_group_rule_is_active(
             .unwrap_or_default()
             .iter()
             .any(|query| {
-                evaluate_media_query(
-                    query,
-                    viewport_width,
-                    viewport_height,
-                    color_scheme_dark,
-                )
+                evaluate_media_query(query, viewport_width, viewport_height, color_scheme_dark)
             });
     }
     if at_rule.name.eq_ignore_ascii_case("supports") {
@@ -786,11 +781,7 @@ impl StyleResolver {
     /// Resolves one computed property without cloning the complete style map
     /// when the node is already cached.  Hot hit-test paths only need a single
     /// value, such as `pointer-events`.
-    pub fn computed_property(
-        &mut self,
-        node: &NodeHandle,
-        name: &str,
-    ) -> Option<ComputedValue> {
+    pub fn computed_property(&mut self, node: &NodeHandle, name: &str) -> Option<ComputedValue> {
         let key = node.identity();
         if let Some(style) = self.cache.get(&key) {
             return style.get(name).cloned();
@@ -895,7 +886,10 @@ impl StyleResolver {
         {
             let layer_context = LayerContextKey {
                 origin: Origin::Author,
-                scope_root: node.containing_shadow_root().as_ref().map(NodeHandle::identity),
+                scope_root: node
+                    .containing_shadow_root()
+                    .as_ref()
+                    .map(NodeHandle::identity),
             };
             for declaration in super::parse_style_attribute(&inline_style) {
                 candidates.push(Candidate {
@@ -1388,9 +1382,7 @@ fn validate_color_value(value: &Value) -> DeclarationValidation {
         Value::Keyword(color) | Value::Color(color) => {
             crate::paint::color::parse_color(color).is_some()
         }
-        Value::Function { .. } => {
-            crate::paint::color::parse_color(&render_value(value)).is_some()
-        }
+        Value::Function { .. } => crate::paint::color::parse_color(&render_value(value)).is_some(),
         _ => false,
     };
     if valid {
@@ -1553,9 +1545,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return match value {
             Value::Keyword(keyword) => {
                 let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(lower.as_str(), "flat" | "preserve-3d")
-                {
+                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "flat" | "preserve-3d") {
                     DeclarationValidation::Valid(ComputedValue::Keyword(lower))
                 } else {
                     DeclarationValidation::Invalid
@@ -1568,9 +1558,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return match value {
             Value::Keyword(keyword) => {
                 let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(lower.as_str(), "visible" | "hidden")
-                {
+                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "visible" | "hidden") {
                     DeclarationValidation::Valid(ComputedValue::Keyword(lower))
                 } else {
                     DeclarationValidation::Invalid
@@ -1618,9 +1606,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return match value {
             Value::Keyword(keyword) => {
                 let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(lower.as_str(), "auto" | "isolate")
-                {
+                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "auto" | "isolate") {
                     DeclarationValidation::Valid(ComputedValue::Keyword(lower))
                 } else {
                     DeclarationValidation::Invalid
@@ -1743,13 +1729,12 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             {
                 DeclarationValidation::Unvalidated
             }
-            Value::Function {
-                name: function,
-                ..
-            } if matches!(
-                function.to_ascii_lowercase().as_str(),
-                "inset" | "circle" | "ellipse" | "polygon"
-            ) => {
+            Value::Function { name: function, .. }
+                if matches!(
+                    function.to_ascii_lowercase().as_str(),
+                    "inset" | "circle" | "ellipse" | "polygon"
+                ) =>
+            {
                 let rendered = render_value(value);
                 if crate::paint::is_valid_clip_path_value(&rendered) {
                     DeclarationValidation::Unvalidated
@@ -2401,12 +2386,7 @@ impl ElementMatchKeys {
             id: node.get_attribute("id"),
             classes: node
                 .get_attribute("class")
-                .map(|value| {
-                    value
-                        .split_ascii_whitespace()
-                        .map(str::to_string)
-                        .collect()
-                })
+                .map(|value| value.split_ascii_whitespace().map(str::to_string).collect())
                 .unwrap_or_default(),
             tag_name: node.tag_name()?,
         })
@@ -2976,13 +2956,11 @@ fn collect_rule_candidates(
             Rule::At(at_rule) => {
                 if let Some(block) = &at_rule.block {
                     if at_rule.name.eq_ignore_ascii_case("layer") {
-                        let Some(path) =
-                            layer_block_path(
-                                at_rule,
-                                stylesheet_id,
-                                active_layer.map(Vec::as_slice).unwrap_or(&[]),
-                            )
-                        else {
+                        let Some(path) = layer_block_path(
+                            at_rule,
+                            stylesheet_id,
+                            active_layer.map(Vec::as_slice).unwrap_or(&[]),
+                        ) else {
                             *source_order += count_declarations(block);
                             continue;
                         };
@@ -5315,16 +5293,25 @@ fn is_svg_element_for_presentational_hints(node: &NodeHandle) -> bool {
     };
     if !matches!(
         tag.as_str(),
-        "svg" | "g" | "rect" | "circle" | "ellipse" | "line"
-            | "polyline" | "polygon" | "path" | "text" | "tspan" | "textpath" | "use"
+        "svg"
+            | "g"
+            | "rect"
+            | "circle"
+            | "ellipse"
+            | "line"
+            | "polyline"
+            | "polygon"
+            | "path"
+            | "text"
+            | "tspan"
+            | "textpath"
+            | "use"
     ) {
         return false;
     }
     let mut current = Some(node.clone());
     while let Some(candidate) = current {
-        let tag = candidate
-            .tag_name()
-            .map(|name| name.to_ascii_lowercase());
+        let tag = candidate.tag_name().map(|name| name.to_ascii_lowercase());
         if tag.as_deref() == Some("foreignobject") {
             return false;
         }
@@ -6271,7 +6258,10 @@ fn resolve_writing_direction_css_wide_keywords(
                 "writing-mode" => "horizontal-tb",
                 _ => unreachable!("writing-direction property list is fixed"),
             };
-            properties.insert(name.to_string(), ComputedValue::Keyword(initial.to_string()));
+            properties.insert(
+                name.to_string(),
+                ComputedValue::Keyword(initial.to_string()),
+            );
         } else if lower == "unset" {
             if let Some(parent) = parent_style.and_then(|style| style.get(name)) {
                 properties.insert(name.to_string(), parent.clone());

@@ -55,9 +55,8 @@ fn parse_boundary(cursor: &mut TokenCursor<'_>) -> Option<Vec<Selector>> {
             CssToken::ParenClose => {
                 depth -= 1;
                 if depth == 0 {
-                    let selectors = parse_boundary_selectors(
-                        &cursor.tokens[start..cursor.index - 1],
-                    )?;
+                    let selectors =
+                        parse_boundary_selectors(&cursor.tokens[start..cursor.index - 1])?;
                     if selectors.iter().any(selector_has_pseudo_element) {
                         return None;
                     }
@@ -93,7 +92,9 @@ fn parse_boundary_selectors(tokens: &[CssToken]) -> Option<Vec<Selector>> {
 }
 
 fn parse_boundary_branch(tokens: &[CssToken]) -> Option<Selector> {
-    let first = tokens.iter().find(|token| **token != CssToken::Whitespace)?;
+    let first = tokens
+        .iter()
+        .find(|token| **token != CssToken::Whitespace)?;
     let mut text = render_tokens(tokens).trim().to_string();
     if matches!(first, CssToken::Delim('>' | '+' | '~')) {
         text.insert_str(0, ":scope ");
@@ -107,7 +108,10 @@ fn selector_has_pseudo_element(selector: &Selector) -> bool {
         part.simples.iter().any(|simple| match simple {
             SimpleSelector::PseudoElement(_) => true,
             SimpleSelector::PseudoClass(name)
-                if matches!(name.to_ascii_lowercase().as_str(), "before" | "after") => true,
+                if matches!(name.to_ascii_lowercase().as_str(), "before" | "after") =>
+            {
+                true
+            }
             SimpleSelector::Is(selectors)
             | SimpleSelector::Where(selectors)
             | SimpleSelector::Not(selectors) => selectors.iter().any(selector_has_pseudo_element),
@@ -172,7 +176,10 @@ mod tests {
             "(:is(.article, ::before))",
             "()",
         ] {
-            assert!(parse_scope_prelude(invalid).is_none(), "accepted {invalid:?}");
+            assert!(
+                parse_scope_prelude(invalid).is_none(),
+                "accepted {invalid:?}"
+            );
         }
     }
 }

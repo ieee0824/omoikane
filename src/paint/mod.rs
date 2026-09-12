@@ -167,9 +167,8 @@ pub(crate) use image::{
 pub(crate) use stylesheet::{
     WebFont, at_import_starts_at, collect_author_stylesheets, collect_stylesheet_with_imports,
     collect_text_contents, extract_author_stylesheets, extract_document_base_url,
-    fetch_font_face_fonts,
-    fetch_relative_stylesheet, fetch_stylesheet_by_url, find_base_elements, matches_screen_media,
-    materialize_local_assets, non_empty_token, normalize_unquoted_urls,
+    fetch_font_face_fonts, fetch_relative_stylesheet, fetch_stylesheet_by_url, find_base_elements,
+    matches_screen_media, materialize_local_assets, non_empty_token, normalize_unquoted_urls,
     parse_stylesheet_forgiving, resolve_relative_stylesheet_url, rewrite_local_asset_attribute,
     salvage_style_rule, same_origin, split_declarations_forgiving, unquote_css_token,
 };
@@ -177,10 +176,10 @@ pub(crate) use stylesheet::{
 pub(crate) use text::{
     TextDecorationLines, apply_text_transform, inline_fragment_content_rect,
     is_cjk_preferred_character, load_text_fonts, paint_inline_image_fragment, paint_list_marker,
-    paint_text_decoration, paint_text_placeholder,
-    paint_text_placeholder_with_mode, paint_text_with_font, paint_text_with_font_refs,
-    paint_text_with_registry, rasterize_with_fallback, rasterize_with_fallback_refs, text_color,
-    text_decoration_color, text_decoration_line, with_render_glyph_cache,
+    paint_text_decoration, paint_text_placeholder, paint_text_placeholder_with_mode,
+    paint_text_with_font, paint_text_with_font_refs, paint_text_with_registry,
+    rasterize_with_fallback, rasterize_with_fallback_refs, text_color, text_decoration_color,
+    text_decoration_line, with_render_glyph_cache,
 };
 
 #[cfg(test)]
@@ -540,13 +539,9 @@ impl Canvas {
             let mut min_right = f32::INFINITY;
             let mut max_right = f32::NEG_INFINITY;
             for (sample, span) in spans.iter_mut().enumerate() {
-                let sample_y = py as f32
-                    + (sample as f32 + 0.5) / ROUNDED_RECT_COVERAGE_SAMPLES as f32;
-                *span = rounded_rect_horizontal_span(
-                    area,
-                    (tl, tr, br, bl),
-                    sample_y,
-                );
+                let sample_y =
+                    py as f32 + (sample as f32 + 0.5) / ROUNDED_RECT_COVERAGE_SAMPLES as f32;
+                *span = rounded_rect_horizontal_span(area, (tl, tr, br, bl), sample_y);
                 if let Some((left, right)) = *span {
                     min_left = min_left.min(left);
                     max_left = max_left.max(left);
@@ -580,11 +575,7 @@ impl Canvas {
                 for px in span_start..full_start {
                     let coverage = rounded_rect_span_coverage(&spans, px);
                     let index = py as usize * stride + px as usize * 4;
-                    blend_pixel_with_coverage(
-                        &mut self.pixels[index..index + 4],
-                        color,
-                        coverage,
-                    );
+                    blend_pixel_with_coverage(&mut self.pixels[index..index + 4], color, coverage);
                 }
 
                 let start = py as usize * stride + full_start as usize * 4;
@@ -602,21 +593,13 @@ impl Canvas {
                 for px in full_end..span_end {
                     let coverage = rounded_rect_span_coverage(&spans, px);
                     let index = py as usize * stride + px as usize * 4;
-                    blend_pixel_with_coverage(
-                        &mut self.pixels[index..index + 4],
-                        color,
-                        coverage,
-                    );
+                    blend_pixel_with_coverage(&mut self.pixels[index..index + 4], color, coverage);
                 }
             } else {
                 for px in span_start..span_end {
                     let coverage = rounded_rect_span_coverage(&spans, px);
                     let index = py as usize * stride + px as usize * 4;
-                    blend_pixel_with_coverage(
-                        &mut self.pixels[index..index + 4],
-                        color,
-                        coverage,
-                    );
+                    blend_pixel_with_coverage(&mut self.pixels[index..index + 4], color, coverage);
                 }
             }
         }
@@ -781,11 +764,7 @@ impl Canvas {
                 }
 
                 let index = ((py as u32 * self.width + px as u32) * 4) as usize;
-                blend_pixel_with_coverage(
-                    &mut self.pixels[index..index + 4],
-                    color,
-                    coverage,
-                );
+                blend_pixel_with_coverage(&mut self.pixels[index..index + 4], color, coverage);
             }
         }
     }
@@ -3442,12 +3421,7 @@ fn paint_background_image_rounded(
     let (tl, tr, br, bl) = radii;
     for y in y0..y1 {
         for x in x0..x1 {
-            let coverage = rounded_rect_pixel_coverage(
-                x as i32,
-                y as i32,
-                area,
-                (tl, tr, br, bl),
-            );
+            let coverage = rounded_rect_pixel_coverage(x as i32, y as i32, area, (tl, tr, br, bl));
             if coverage <= 0.0 {
                 continue;
             }
@@ -3953,7 +3927,8 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
             let round_at = round_at?;
             let before = parts[..round_at].join(" ");
             let after = parts[round_at + 1..].join(" ");
-            let rect = parse_clip_path_inset_rect_geometry(&format!("inset({before})"), border_box)?;
+            let rect =
+                parse_clip_path_inset_rect_geometry(&format!("inset({before})"), border_box)?;
             let radii = parse_shape_radii(&after, rect)?;
             Some(ClipPathShape::RoundedRect { rect, radii })
         }
@@ -3967,9 +3942,7 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
             let center = shape_position(position_text.trim(), border_box)?;
             let radius_text = radius_text.trim();
             let radius = match radius_text.to_ascii_lowercase().as_str() {
-                keyword @ ("closest-side"
-                | "farthest-side"
-                | "closest-corner"
+                keyword @ ("closest-side" | "farthest-side" | "closest-corner"
                 | "farthest-corner") => {
                     let left = (center.0 - border_box.x).abs();
                     let right = (border_box.x + border_box.width - center.0).abs();
@@ -3990,10 +3963,7 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
                     if keyword.starts_with("closest") {
                         distances.iter().copied().fold(f32::INFINITY, f32::min)
                     } else {
-                        distances
-                            .iter()
-                            .copied()
-                            .fold(f32::NEG_INFINITY, f32::max)
+                        distances.iter().copied().fold(f32::NEG_INFINITY, f32::max)
                     }
                 }
                 _ => shape_length(radius_text, border_box.width.min(border_box.height))?,
@@ -4050,8 +4020,14 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
             if points.len() < 3 || points.len() > MAX_CLIP_PATH_POLYGON_POINTS {
                 return None;
             }
-            let min_x = points.iter().map(|point| point.0).fold(f32::INFINITY, f32::min);
-            let min_y = points.iter().map(|point| point.1).fold(f32::INFINITY, f32::min);
+            let min_x = points
+                .iter()
+                .map(|point| point.0)
+                .fold(f32::INFINITY, f32::min);
+            let min_y = points
+                .iter()
+                .map(|point| point.1)
+                .fold(f32::INFINITY, f32::min);
             let max_x = points
                 .iter()
                 .map(|point| point.0)
@@ -4133,14 +4109,9 @@ fn valid_clip_path_position(value: &str) -> bool {
             {
                 return false;
             }
-            let first_vertical = matches!(
-                first.to_ascii_lowercase().as_str(),
-                "top" | "bottom"
-            );
-            let second_horizontal = matches!(
-                second.to_ascii_lowercase().as_str(),
-                "left" | "right"
-            );
+            let first_vertical = matches!(first.to_ascii_lowercase().as_str(), "top" | "bottom");
+            let second_horizontal =
+                matches!(second.to_ascii_lowercase().as_str(), "left" | "right");
             let (x, y) = if first_vertical || second_horizontal {
                 (*second, *first)
             } else {
@@ -4225,8 +4196,7 @@ fn valid_clip_path_polygon_body(body: &str) -> bool {
     (3..=MAX_CLIP_PATH_POLYGON_POINTS).contains(&components.len())
         && components.iter().all(|component| {
             let point = split_top_level_whitespace(component.trim());
-            point.len() == 2
-                && point.iter().all(|part| valid_clip_path_length(part))
+            point.len() == 2 && point.iter().all(|part| valid_clip_path_length(part))
         })
 }
 
@@ -4927,9 +4897,7 @@ fn rounded_rect_span_coverage(
     spans
         .iter()
         .flatten()
-        .map(|&(left, right)| {
-            (right.min(px as f32 + 1.0) - left.max(px as f32)).clamp(0.0, 1.0)
-        })
+        .map(|&(left, right)| (right.min(px as f32 + 1.0) - left.max(px as f32)).clamp(0.0, 1.0))
         .sum::<f32>()
         / ROUNDED_RECT_COVERAGE_SAMPLES as f32
 }
@@ -4939,11 +4907,7 @@ fn rounded_rect_horizontal_span(
     radii: (f32, f32, f32, f32),
     y: f32,
 ) -> Option<(f32, f32)> {
-    if rect.width <= 0.0
-        || rect.height <= 0.0
-        || y < rect.y
-        || y >= rect.y + rect.height
-    {
+    if rect.width <= 0.0 || rect.height <= 0.0 || y < rect.y || y >= rect.y + rect.height {
         return None;
     }
 
@@ -4956,9 +4920,7 @@ fn rounded_rect_horizontal_span(
     }
     if y < rect.y + tr {
         let dy = y - (rect.y + tr);
-        right = right.min(
-            rect.x + rect.width - tr + (tr * tr - dy * dy).max(0.0).sqrt(),
-        );
+        right = right.min(rect.x + rect.width - tr + (tr * tr - dy * dy).max(0.0).sqrt());
     }
     if y > rect.y + rect.height - bl {
         let dy = y - (rect.y + rect.height - bl);
@@ -4966,9 +4928,7 @@ fn rounded_rect_horizontal_span(
     }
     if y > rect.y + rect.height - br {
         let dy = y - (rect.y + rect.height - br);
-        right = right.min(
-            rect.x + rect.width - br + (br * br - dy * dy).max(0.0).sqrt(),
-        );
+        right = right.min(rect.x + rect.width - br + (br * br - dy * dy).max(0.0).sqrt());
     }
 
     (right > left).then_some((left, right))
@@ -5000,11 +4960,18 @@ pub(super) fn rounded_rect_pixel_coverage(
     .into_iter()
     .all(|(x, y)| {
         point_in_rounded_rect(
-            x, y, rect.x, rect.y, rect.width, rect.height, radii.0, radii.1, radii.2,
+            x,
+            y,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            radii.0,
+            radii.1,
+            radii.2,
             radii.3,
         )
-    })
-    {
+    }) {
         return 1.0;
     }
 
@@ -5012,8 +4979,7 @@ pub(super) fn rounded_rect_pixel_coverage(
     for sample in 0..ROUNDED_RECT_COVERAGE_SAMPLES {
         let y = py as f32 + (sample as f32 + 0.5) / ROUNDED_RECT_COVERAGE_SAMPLES as f32;
         if let Some((left, right)) = rounded_rect_horizontal_span(rect, radii, y) {
-            coverage +=
-                (right.min(px as f32 + 1.0) - left.max(px as f32)).clamp(0.0, 1.0);
+            coverage += (right.min(px as f32 + 1.0) - left.max(px as f32)).clamp(0.0, 1.0);
         }
     }
     coverage / ROUNDED_RECT_COVERAGE_SAMPLES as f32

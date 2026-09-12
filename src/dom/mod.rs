@@ -277,10 +277,7 @@ impl Element {
         }
     }
 
-    pub fn new_xml(
-        qualified_name: impl Into<String>,
-        namespace_uri: Option<String>,
-    ) -> Self {
+    pub fn new_xml(qualified_name: impl Into<String>, namespace_uri: Option<String>) -> Self {
         let tag_name = qualified_name.into();
         let (prefix, local_name) = tag_name
             .split_once(':')
@@ -312,7 +309,9 @@ impl Element {
         // `createElementNS()` preserves its qualified name even for the HTML namespace.
         let mut element = Self::new_xml(qualified_name, Some(namespace_uri.into()));
         element.html = true;
-        element.template_content = element.local_name.eq_ignore_ascii_case("template")
+        element.template_content = element
+            .local_name
+            .eq_ignore_ascii_case("template")
             .then(NodeHandle::document_fragment);
         element
     }
@@ -322,12 +321,22 @@ impl Element {
         &self.tag_name
     }
 
-    pub fn namespace_uri(&self) -> Option<&str> { self.namespace_uri.as_deref() }
-    pub fn prefix(&self) -> Option<&str> { self.prefix.as_deref() }
-    pub fn local_name(&self) -> &str {
-        if self.local_name.is_empty() { &self.tag_name } else { &self.local_name }
+    pub fn namespace_uri(&self) -> Option<&str> {
+        self.namespace_uri.as_deref()
     }
-    pub fn is_html(&self) -> bool { self.html }
+    pub fn prefix(&self) -> Option<&str> {
+        self.prefix.as_deref()
+    }
+    pub fn local_name(&self) -> &str {
+        if self.local_name.is_empty() {
+            &self.tag_name
+        } else {
+            &self.local_name
+        }
+    }
+    pub fn is_html(&self) -> bool {
+        self.html
+    }
 
     /// Returns the element attributes.
     pub fn attributes(&self) -> &BTreeMap<String, String> {
@@ -503,7 +512,9 @@ impl NodeHandle {
 
     /// Creates a processing instruction node.
     pub fn processing_instruction(target: impl Into<String>, data: impl Into<String>) -> Self {
-        Self::new(NodeData::ProcessingInstruction(ProcessingInstruction::new(target, data)))
+        Self::new(NodeData::ProcessingInstruction(ProcessingInstruction::new(
+            target, data,
+        )))
     }
 
     /// Creates a document type node.
@@ -814,15 +825,23 @@ impl NodeHandle {
     /// part of the equality key.
     pub fn attribute_records(&self) -> Option<Vec<(String, Option<String>, String, String)>> {
         match &self.0.borrow().data {
-            NodeData::Element(element) => Some(element.attributes.iter().map(|(name, value)| {
-                let metadata = element.attribute_names.get(name);
-                (
-                    name.clone(),
-                    metadata.and_then(|entry| entry.namespace_uri.clone()),
-                    metadata.map(|entry| entry.local_name.clone()).unwrap_or_else(|| name.clone()),
-                    value.clone(),
-                )
-            }).collect()),
+            NodeData::Element(element) => Some(
+                element
+                    .attributes
+                    .iter()
+                    .map(|(name, value)| {
+                        let metadata = element.attribute_names.get(name);
+                        (
+                            name.clone(),
+                            metadata.and_then(|entry| entry.namespace_uri.clone()),
+                            metadata
+                                .map(|entry| entry.local_name.clone())
+                                .unwrap_or_else(|| name.clone()),
+                            value.clone(),
+                        )
+                    })
+                    .collect(),
+            ),
             _ => None,
         }
     }
@@ -851,7 +870,11 @@ impl NodeHandle {
     pub fn set_attribute(&self, name: impl Into<String>, value: impl Into<String>) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             let name = name.into();
-            let name = if element.html { name.to_ascii_lowercase() } else { name };
+            let name = if element.html {
+                name.to_ascii_lowercase()
+            } else {
+                name
+            };
             if matches!(name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             }
@@ -872,7 +895,6 @@ impl NodeHandle {
         }
     }
 
-
     /// Sets an XML attribute without HTML ASCII case folding.
     pub fn set_xml_attribute(&self, name: impl Into<String>, value: impl Into<String>) {
         let name = name.into();
@@ -892,11 +914,16 @@ impl NodeHandle {
             if matches!(qualified_name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             }
-            element.attributes.insert(qualified_name.clone(), value.into());
-            element.attribute_names.insert(qualified_name, AttributeName {
-                namespace_uri,
-                local_name: local_name.into(),
-            });
+            element
+                .attributes
+                .insert(qualified_name.clone(), value.into());
+            element.attribute_names.insert(
+                qualified_name,
+                AttributeName {
+                    namespace_uri,
+                    local_name: local_name.into(),
+                },
+            );
         }
     }
 
@@ -929,7 +956,11 @@ impl NodeHandle {
     /// Removes an attribute from an element node. No-op for other node kinds.
     pub fn remove_attribute(&self, name: &str) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            let name = if element.html { name.to_ascii_lowercase() } else { name.to_string() };
+            let name = if element.html {
+                name.to_ascii_lowercase()
+            } else {
+                name.to_string()
+            };
             if matches!(name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             }
@@ -1151,8 +1182,12 @@ impl Node for NodeHandle {
     fn node_name(&self) -> String {
         match &self.0.borrow().data {
             NodeData::Document(_) => "#document".to_string(),
-            NodeData::DocumentFragment | NodeData::ShadowRoot(_) => "#document-fragment".to_string(),
-            NodeData::Element(element) if element.is_html() => element.tag_name.to_ascii_uppercase(),
+            NodeData::DocumentFragment | NodeData::ShadowRoot(_) => {
+                "#document-fragment".to_string()
+            }
+            NodeData::Element(element) if element.is_html() => {
+                element.tag_name.to_ascii_uppercase()
+            }
             NodeData::Element(element) => element.tag_name.clone(),
             NodeData::Text(_) => "#text".to_string(),
             NodeData::Comment(_) => "#comment".to_string(),
@@ -1471,9 +1506,7 @@ mod tests {
                 tail.clone(),
             ]
         );
-        parent
-            .insert_before(reference.clone(), &reference)
-            .unwrap();
+        parent.insert_before(reference.clone(), &reference).unwrap();
         assert_eq!(parent.child_nodes(), vec![middle, moved, reference, tail]);
     }
 
@@ -1715,10 +1748,18 @@ mod tests {
         xml.set_attribute("MixedCase", "plain");
         xml.set_xml_attribute_ns("a:item", Some("urn:attribute".to_string()), "item", "value");
         assert_eq!(xml.get_attribute("mixedcase"), None);
-        assert_eq!(xml.attribute_records().unwrap(), vec![
-            ("MixedCase".into(), None, "MixedCase".into(), "plain".into()),
-            ("a:item".into(), Some("urn:attribute".into()), "item".into(), "value".into()),
-        ]);
+        assert_eq!(
+            xml.attribute_records().unwrap(),
+            vec![
+                ("MixedCase".into(), None, "MixedCase".into(), "plain".into()),
+                (
+                    "a:item".into(),
+                    Some("urn:attribute".into()),
+                    "item".into(),
+                    "value".into()
+                ),
+            ]
+        );
         xml.set_attribute("a:item", "updated");
         assert!(xml.attribute_records().unwrap().contains(&(
             "a:item".into(),
@@ -1785,7 +1826,9 @@ mod tests {
         // Both re-parenting and reordering within one parent detach the node
         // first, which drops the scroll offset.
         second_parent.append_child(moved.clone());
-        first_parent.insert_before(reordered.clone(), &sibling).unwrap();
+        first_parent
+            .insert_before(reordered.clone(), &sibling)
+            .unwrap();
 
         assert_eq!(moved.scroll_offset(), (0.0, 0.0));
         assert_eq!(reordered.scroll_offset(), (0.0, 0.0));

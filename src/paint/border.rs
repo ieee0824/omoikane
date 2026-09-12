@@ -790,10 +790,7 @@ pub(crate) fn paint_outer_box_shadow(
         let blur_support = if use_direct_gaussian {
             (sigma * 3.0).ceil() as u32
         } else {
-            blur_radii
-                .iter()
-                .copied()
-                .fold(0u32, u32::saturating_add)
+            blur_radii.iter().copied().fold(0u32, u32::saturating_add)
         };
         let margin = blur_support.saturating_add(1);
         let margin_f = margin as f32;

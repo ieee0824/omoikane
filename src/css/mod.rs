@@ -5,36 +5,36 @@
 
 use std::fmt;
 
-mod matcher;
 mod container;
 mod filter;
+mod matcher;
 mod media;
 mod parser;
-mod shorthand;
 mod scope;
-mod supports;
-mod transition;
-mod transform;
+mod shorthand;
 pub(crate) mod style;
+mod supports;
 mod tokenizer;
+mod transform;
+mod transition;
 
+pub(crate) use container::{ContainerQuery, parse_container_query};
+pub(crate) use filter::{
+    FilterFunction, interpolate_filter_lists, normalize_filter_list, parse_filter_list,
+};
 pub use matcher::{
     PseudoElement, Specificity, matches_selector, matches_selector_with_pseudo,
     selector_pseudo_element, specificity,
 };
 pub(crate) use matcher::{SelectorMatchCache, matches_selector_cached};
 pub use media::{evaluate_media_query, parse_media_query_list};
-pub(crate) use container::{ContainerQuery, parse_container_query};
-pub(crate) use filter::{
-    FilterFunction, interpolate_filter_lists, normalize_filter_list, parse_filter_list,
-};
 pub use parser::{
     extract_font_face_rules, parse_selector_list, parse_style_attribute, parse_stylesheet,
 };
-pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
+pub(crate) use scope::{ScopePrelude, parse_scope_prelude};
 pub(crate) use style::ContainerContext;
 pub(crate) use style::supports_declaration;
-pub(crate) use scope::{ScopePrelude, parse_scope_prelude};
+pub use style::{ComputedStyle, ComputedValue, Origin, StyleResolver, StylesheetInput};
 pub(crate) use supports::supports_condition_matches;
 pub(crate) use transition::{
     computed_transition_longhand, computed_transition_shorthand, expand_transition_shorthand,
@@ -132,12 +132,12 @@ fn is_reserved_layer_name(name: &str) -> bool {
         "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "revert-rule"
     )
 }
+pub use tokenizer::tokenize;
 pub use transform::AffineTransform;
 pub(crate) use transform::{
     TransformReferenceBox, interpolate_transform_lists, parse_perspective_origin,
     parse_perspective_with_origin, parse_transform_list, parse_transform_with_origin,
 };
-pub use tokenizer::tokenize;
 
 mod font_shorthand;
 #[cfg(test)]
@@ -328,9 +328,15 @@ pub enum MediaCondition {
     /// `(prefers-color-scheme: light)`.
     PrefersColorSchemeLight,
     /// `(color)` or `(min/max-color: <integer>)`, in bits per color component.
-    Color { minimum: Option<u32>, maximum: Option<u32> },
+    Color {
+        minimum: Option<u32>,
+        maximum: Option<u32>,
+    },
     /// `(monochrome)` or `(min/max-monochrome: <integer>)`, in bits per pixel.
-    Monochrome { minimum: Option<u32>, maximum: Option<u32> },
+    Monochrome {
+        minimum: Option<u32>,
+        maximum: Option<u32>,
+    },
     /// An unrecognised condition -- never matches.
     Unknown,
 }
@@ -349,7 +355,10 @@ pub enum Value {
     Keyword(String),
     Length(f32, String),
     Color(String),
-    Function { name: String, arguments: Vec<Value> },
+    Function {
+        name: String,
+        arguments: Vec<Value>,
+    },
     List(Vec<Value>),
     /// A top-level comma-separated list. Unlike `List`, separators are
     /// semantically significant (for example, between background layers).
@@ -720,11 +729,31 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "margin-top"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "margin-right"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-width"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-style"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-color"));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "margin-top")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "margin-right")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-width")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-style")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-color")
+        );
     }
 
     #[test]
@@ -797,22 +826,26 @@ mod tests {
             ("border-color", Value::Keyword("red".to_string())),
         ] {
             assert!(rule.declarations.iter().any(|declaration| {
-                declaration.name == name
-                    && declaration.important
-                    && declaration.value == expected
+                declaration.name == name && declaration.important && declaration.value == expected
             }));
         }
     }
 
     #[test]
     fn recognizes_case_and_whitespace_variants_of_important() {
-        for css in ["div { color: red !IMPORTANT; }", "div { color: red ! important; }"] {
+        for css in [
+            "div { color: red !IMPORTANT; }",
+            "div { color: red ! important; }",
+        ] {
             let stylesheet = parse_stylesheet(css).unwrap();
             let Rule::Style(rule) = &stylesheet.rules[0] else {
                 panic!("expected style rule");
             };
             assert_eq!(rule.declarations.len(), 1);
-            assert_eq!(rule.declarations[0].value, Value::Keyword("red".to_string()));
+            assert_eq!(
+                rule.declarations[0].value,
+                Value::Keyword("red".to_string())
+            );
             assert!(rule.declarations[0].important);
         }
     }
@@ -826,8 +859,7 @@ mod tests {
         };
         assert!(rule.declarations.iter().any(|declaration| {
             declaration.name == "background-image"
-                && declaration.value
-                    == Value::Keyword("url(data:image/png;base64,AAA)".to_string())
+                && declaration.value == Value::Keyword("url(data:image/png;base64,AAA)".to_string())
         }));
     }
 
@@ -836,7 +868,10 @@ mod tests {
         let declarations = parse_style_attribute("width: 100px; color: red");
         assert_eq!(declarations.len(), 2);
         assert_eq!(declarations[0].name, "width");
-        assert_eq!(declarations[0].value, Value::Length(100.0, "px".to_string()));
+        assert_eq!(
+            declarations[0].value,
+            Value::Length(100.0, "px".to_string())
+        );
         assert_eq!(declarations[1].name, "color");
         assert_eq!(declarations[1].value, Value::Keyword("red".to_string()));
 
@@ -877,15 +912,12 @@ mod tests {
         assert!(declarations[0].important);
 
         assert!(parse_style_attribute("width: foo(bar !important").is_empty());
-        assert!(
-            parse_style_attribute("width: foo(bar !important; color: red").is_empty()
-        );
+        assert!(parse_style_attribute("width: foo(bar !important; color: red").is_empty());
     }
 
     #[test]
     fn style_attribute_semicolons_inside_brackets_do_not_split_declarations() {
-        let declarations =
-            parse_style_attribute("grid-template-columns: [a;b] 1fr; color: red");
+        let declarations = parse_style_attribute("grid-template-columns: [a;b] 1fr; color: red");
         assert_eq!(declarations.len(), 2);
         assert_eq!(declarations[0].name, "grid-template-columns");
         assert_eq!(declarations[1].name, "color");
@@ -897,8 +929,7 @@ mod tests {
         let declarations = parse_style_attribute("background: url(data:image/png;base64,AAA)");
         assert!(declarations.iter().any(|declaration| {
             declaration.name == "background-image"
-                && declaration.value
-                    == Value::Keyword("url(data:image/png;base64,AAA)".to_string())
+                && declaration.value == Value::Keyword("url(data:image/png;base64,AAA)".to_string())
         }));
 
         let declarations = parse_style_attribute("color: blue !important");
@@ -922,9 +953,21 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "font-size"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "line-height"));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-color")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "font-size")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "line-height")
+        );
     }
 
     #[test]
@@ -936,8 +979,16 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-color")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-image")
+        );
     }
 
     #[test]
@@ -948,8 +999,10 @@ mod tests {
         };
 
         assert!(
-            rule.declarations.iter().any(|decl| decl.name == "background-repeat"
-                && matches!(&decl.value, Value::Keyword(value) if value == "no-repeat"))
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-repeat"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "no-repeat"))
         );
     }
 
@@ -960,14 +1013,22 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-attachment"
-            && matches!(&decl.value, Value::Keyword(value) if value == "fixed")));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-attachment"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "fixed"))
+        );
         assert!(rule.declarations.iter().any(
             |decl| decl.name == "background-position-x"
                 && matches!(&decl.value, Value::Length(value, unit) if *value == 1.0 && unit == "px")
         ));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-position-y"
-            && matches!(&decl.value, Value::Number(value) if *value == 0.0)));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-position-y"
+                    && matches!(&decl.value, Value::Number(value) if *value == 0.0))
+        );
     }
 
     #[test]
@@ -978,11 +1039,23 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-position-x"
-            && matches!(&decl.value, Value::Keyword(value) if value == "right")));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-position-y"
-            && matches!(&decl.value, Value::Number(value) if *value == 0.0)));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-image")
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-position-x"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "right"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-position-y"
+                    && matches!(&decl.value, Value::Number(value) if *value == 0.0))
+        );
     }
 
     #[test]
@@ -992,10 +1065,18 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"
-            && matches!(&decl.value, Value::Keyword(value) if value == "none")));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"
-            && matches!(&decl.value, Value::Keyword(value) if value == "transparent")));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-image"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "none"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-color"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "transparent"))
+        );
     }
 
     #[test]
@@ -1009,10 +1090,18 @@ mod tests {
             |decl| decl.name == "border-top-width"
                 && matches!(&decl.value, Value::Length(value, unit) if *value == 2.0 && unit == "px")
         ));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-style"
-            && matches!(&decl.value, Value::Keyword(value) if value == "solid")));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-color"
-            && matches!(&decl.value, Value::Keyword(value) if value == "yellow")));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-top-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-top-color"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "yellow"))
+        );
     }
 
     /// `border-top: 1px solid red` must NOT emit global `border-style` / `border-color`
@@ -1026,23 +1115,39 @@ mod tests {
 
         // Must NOT contain global border-style or border-color
         assert!(
-            !rule.declarations.iter().any(|decl| decl.name == "border-style"),
+            !rule
+                .declarations
+                .iter()
+                .any(|decl| decl.name == "border-style"),
             "border-top shorthand should NOT emit global 'border-style'"
         );
         assert!(
-            !rule.declarations.iter().any(|decl| decl.name == "border-color"),
+            !rule
+                .declarations
+                .iter()
+                .any(|decl| decl.name == "border-color"),
             "border-top shorthand should NOT emit global 'border-color'"
         );
 
         // Must still contain the side-specific properties
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-style"
-            && matches!(&decl.value, Value::Keyword(v) if v == "solid")));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-color"
-            && matches!(&decl.value, Value::Keyword(v) if v == "red")));
-        assert!(rule.declarations.iter().any(
-            |decl| decl.name == "border-top-width"
-                && matches!(&decl.value, Value::Length(v, unit) if *v == 1.0 && unit == "px")
-        ));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-top-style"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "solid"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-top-color"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "red"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-top-width"
+                    && matches!(&decl.value, Value::Length(v, unit) if *v == 1.0 && unit == "px"))
+        );
     }
 
     #[test]
@@ -1052,14 +1157,30 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-top-style"
-            && matches!(&decl.value, Value::Keyword(value) if value == "none")));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-right-style"
-            && matches!(&decl.value, Value::Keyword(value) if value == "solid")));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-bottom-style"
-            && matches!(&decl.value, Value::Keyword(value) if value == "none")));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "border-left-style"
-            && matches!(&decl.value, Value::Keyword(value) if value == "solid")));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-top-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "none"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-right-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-bottom-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "none"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "border-left-style"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "solid"))
+        );
     }
 
     #[test]
@@ -1069,12 +1190,24 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-type"
-            && matches!(&decl.value, Value::Keyword(v) if v == "disc")));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-position"
-            && matches!(&decl.value, Value::Keyword(v) if v == "inside")));
-        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-image"
-            && matches!(&decl.value, Value::Keyword(v) if v == "none")));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-type"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "disc"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-position"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "inside"))
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-image"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "none"))
+        );
     }
 
     #[test]
@@ -1084,8 +1217,12 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-type"
-            && matches!(&decl.value, Value::Keyword(v) if v == "decimal")));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-type"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "decimal"))
+        );
     }
 
     #[test]
@@ -1095,24 +1232,36 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "list-style-type"
-            && matches!(&decl.value, Value::Keyword(v) if v == "none")));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "list-style-type"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "none"))
+        );
     }
 
     #[test]
     fn expands_linear_gradient_as_background_image() {
         let stylesheet =
-            parse_stylesheet("div { background: linear-gradient(to right, red, blue); }")
-                .unwrap();
+            parse_stylesheet("div { background: linear-gradient(to right, red, blue); }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-image"),
-            "linear-gradient() should expand to background-image; got: {:?}", rule.declarations);
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-color"
-            && matches!(&decl.value, Value::Keyword(value) if value == "transparent")),
-            "background shorthand should reset background-color to transparent");
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-image"),
+            "linear-gradient() should expand to background-image; got: {:?}",
+            rule.declarations
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-color"
+                    && matches!(&decl.value, Value::Keyword(value) if value == "transparent")),
+            "background shorthand should reset background-color to transparent"
+        );
     }
 
     #[test]
@@ -1172,10 +1321,17 @@ mod tests {
         let Rule::Style(rule) = &invalid.rules[0] else {
             panic!("expected style rule");
         };
-        assert!(!rule.declarations.iter().any(|declaration| {
-            declaration.name.starts_with("background-")
-        }));
-        assert!(rule.declarations.iter().any(|declaration| declaration.name == "color"));
+        assert!(
+            !rule
+                .declarations
+                .iter()
+                .any(|declaration| { declaration.name.starts_with("background-") })
+        );
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|declaration| declaration.name == "color")
+        );
     }
 
     #[test]
@@ -1233,9 +1389,14 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-size"
-            && matches!(&decl.value, Value::Keyword(v) if v == "cover")),
-            "background-size: cover should be parsed; got: {:?}", rule.declarations);
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-size"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "cover")),
+            "background-size: cover should be parsed; got: {:?}",
+            rule.declarations
+        );
     }
 
     #[test]
@@ -1245,8 +1406,12 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-size"
-            && matches!(&decl.value, Value::Keyword(v) if v == "contain")));
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-size"
+                    && matches!(&decl.value, Value::Keyword(v) if v == "contain"))
+        );
     }
 
     #[test]
@@ -1256,8 +1421,13 @@ mod tests {
             panic!("expected style rule");
         };
 
-        assert!(rule.declarations.iter().any(|decl| decl.name == "background-size"),
-            "background-size with lengths should be parsed; got: {:?}", rule.declarations);
+        assert!(
+            rule.declarations
+                .iter()
+                .any(|decl| decl.name == "background-size"),
+            "background-size with lengths should be parsed; got: {:?}",
+            rule.declarations
+        );
     }
 
     // -- @media query parsing --
@@ -1290,7 +1460,10 @@ mod tests {
     fn parse_media_query_min_width() {
         let queries = parse_media_query_list("(min-width: 1024px)").unwrap();
         assert_eq!(queries.len(), 1);
-        assert_eq!(queries[0].conditions, vec![MediaCondition::MinWidth(1024.0)]);
+        assert_eq!(
+            queries[0].conditions,
+            vec![MediaCondition::MinWidth(1024.0)]
+        );
     }
 
     #[test]
@@ -1300,20 +1473,32 @@ mod tests {
         assert_eq!(queries[1].conditions, vec![MediaCondition::MinWidth(768.0)]);
 
         let queries = parse_media_query_list("(width <= 1000px), (720px >= height)").unwrap();
-        assert_eq!(queries[0].conditions, vec![MediaCondition::MaxWidth(1000.0)]);
-        assert_eq!(queries[1].conditions, vec![MediaCondition::MaxHeight(720.0)]);
+        assert_eq!(
+            queries[0].conditions,
+            vec![MediaCondition::MaxWidth(1000.0)]
+        );
+        assert_eq!(
+            queries[1].conditions,
+            vec![MediaCondition::MaxHeight(720.0)]
+        );
     }
 
     #[test]
     fn parse_media_query_orientation_portrait() {
         let queries = parse_media_query_list("(orientation: portrait)").unwrap();
-        assert_eq!(queries[0].conditions, vec![MediaCondition::OrientationPortrait]);
+        assert_eq!(
+            queries[0].conditions,
+            vec![MediaCondition::OrientationPortrait]
+        );
     }
 
     #[test]
     fn parse_media_query_orientation_landscape() {
         let queries = parse_media_query_list("(orientation: landscape)").unwrap();
-        assert_eq!(queries[0].conditions, vec![MediaCondition::OrientationLandscape]);
+        assert_eq!(
+            queries[0].conditions,
+            vec![MediaCondition::OrientationLandscape]
+        );
     }
 
     #[test]
@@ -1328,8 +1513,11 @@ mod tests {
     fn parse_media_query_only_screen_strips_modifier() {
         let queries = parse_media_query_list("only screen and (max-width: 768px)").unwrap();
         assert_eq!(queries.len(), 1);
-        assert_eq!(queries[0].media_type.as_deref(), Some("screen"),
-            "media type should be 'screen', not 'only'");
+        assert_eq!(
+            queries[0].media_type.as_deref(),
+            Some("screen"),
+            "media type should be 'screen', not 'only'"
+        );
         assert_eq!(queries[0].conditions, vec![MediaCondition::MaxWidth(768.0)]);
     }
 
@@ -1373,14 +1561,25 @@ mod tests {
 
     #[test]
     fn parse_media_query_color_and_monochrome_features() {
-        let queries = parse_media_query_list(
-            "(color) and (min-color: 1) and (max-monochrome: 0)",
-        ).unwrap();
-        assert_eq!(queries[0].conditions, vec![
-            MediaCondition::Color { minimum: None, maximum: None },
-            MediaCondition::Color { minimum: Some(1), maximum: None },
-            MediaCondition::Monochrome { minimum: None, maximum: Some(0) },
-        ]);
+        let queries =
+            parse_media_query_list("(color) and (min-color: 1) and (max-monochrome: 0)").unwrap();
+        assert_eq!(
+            queries[0].conditions,
+            vec![
+                MediaCondition::Color {
+                    minimum: None,
+                    maximum: None
+                },
+                MediaCondition::Color {
+                    minimum: Some(1),
+                    maximum: None
+                },
+                MediaCondition::Monochrome {
+                    minimum: None,
+                    maximum: Some(0)
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1468,7 +1667,9 @@ mod tests {
     fn evaluate_color_and_monochrome_features() {
         let matches = |query: &str| {
             let queries = parse_media_query_list(query).unwrap();
-            queries.iter().any(|q| evaluate_media_query(q, 0.0, 0.0, false))
+            queries
+                .iter()
+                .any(|q| evaluate_media_query(q, 0.0, 0.0, false))
         };
         assert!(matches("(color)"));
         assert!(matches("(min-color: 1)"));
@@ -1536,10 +1737,9 @@ mod tests {
 
     #[test]
     fn parses_font_face_unquoted_family() {
-        let stylesheet = parse_stylesheet(
-            r#"@font-face { font-family: CustomFont; src: url(custom.otf); }"#,
-        )
-        .unwrap();
+        let stylesheet =
+            parse_stylesheet(r#"@font-face { font-family: CustomFont; src: url(custom.otf); }"#)
+                .unwrap();
 
         let Rule::FontFace(ff) = &stylesheet.rules[0] else {
             panic!("expected FontFace rule");
@@ -1568,10 +1768,7 @@ mod tests {
 
     #[test]
     fn font_face_without_src_falls_back_to_at_rule() {
-        let stylesheet = parse_stylesheet(
-            r#"@font-face { font-family: "NoSrc"; }"#,
-        )
-        .unwrap();
+        let stylesheet = parse_stylesheet(r#"@font-face { font-family: "NoSrc"; }"#).unwrap();
 
         // Without src, it should fall back to a generic AtRule
         assert!(matches!(&stylesheet.rules[0], Rule::At(_)));
@@ -1694,8 +1891,7 @@ mod tests {
     #[test]
     fn parses_multiple_attribute_selectors_on_same_element() {
         let stylesheet =
-            parse_stylesheet(r#"input[type="text"][required] { border: 1px solid red; }"#)
-                .unwrap();
+            parse_stylesheet(r#"input[type="text"][required] { border: 1px solid red; }"#).unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
@@ -1751,10 +1947,7 @@ mod tests {
                     value.starts_with("nth-child("),
                     "expected nth-child(...), got: {value}"
                 );
-                assert!(
-                    value.contains("2n"),
-                    "should contain 2n, got: {value}"
-                );
+                assert!(value.contains("2n"), "should contain 2n, got: {value}");
             }
             _ => panic!("expected PseudoClass, got: {:?}", pseudo),
         }
@@ -1792,7 +1985,10 @@ mod tests {
             ":has(:before)",
             ":has(:AFTER)",
         ] {
-            assert!(parse_selector_list(invalid).is_err(), "accepted {invalid:?}");
+            assert!(
+                parse_selector_list(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
         }
 
         assert!(parse_selector_list(":has(:is(:has(*), script))").is_ok());
@@ -1847,8 +2043,7 @@ mod tests {
 
     #[test]
     fn parses_not_with_attribute_selector() {
-        let stylesheet =
-            parse_stylesheet(r#":not([disabled]) { opacity: 1; }"#).unwrap();
+        let stylesheet = parse_stylesheet(r#":not([disabled]) { opacity: 1; }"#).unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
@@ -1869,8 +2064,7 @@ mod tests {
 
     #[test]
     fn parses_chained_pseudo_classes() {
-        let stylesheet =
-            parse_stylesheet("a:hover:focus { outline: none; }").unwrap();
+        let stylesheet = parse_stylesheet("a:hover:focus { outline: none; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {
             panic!("expected style rule");
         };
