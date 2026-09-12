@@ -8206,6 +8206,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(mark_inserted_script_native),
         ),
         (
+            js_string!("__omoikane_collect_inserted_scripts"),
+            1,
+            NativeFunction::from_copy_closure(collect_inserted_scripts_native),
+        ),
+        (
             js_string!("__omoikane_prepare_inserted_inline_script"),
             1,
             NativeFunction::from_copy_closure(prepare_inserted_inline_script_native),
@@ -13635,7 +13640,11 @@ fn parse_contextual_fragment_native(
     };
     let id = fragment.identity();
     with_host_state(|state| {
-        state.borrow_mut().register_tree(&fragment);
+        let mut state = state.borrow_mut();
+        state.register_tree(&fragment);
+        if !xml {
+            mark_inserted_scripts_in_tree(&mut state, &fragment);
+        }
         Ok(())
     })?;
     Ok(JsValue::from(id as f64))
@@ -13652,16 +13661,60 @@ fn mark_inserted_script_native(
     let id = parse_node_id(args.first(), context)?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        if state.get_node(id).is_some_and(|node| {
-            node.tag_name()
-                .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
-                && node.namespace_uri().as_deref().is_none_or(|namespace| {
-                    namespace == "http://www.w3.org/1999/xhtml"
-                })
-        }) {
+        if state.get_node(id).is_some_and(|node| is_html_script_node(&node)) {
             state.runnable_inserted_scripts.insert(id);
         }
         Ok(JsValue::undefined())
+    })
+}
+
+fn is_html_script_node(node: &NodeHandle) -> bool {
+    node.tag_name()
+        .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+        && node
+            .namespace_uri()
+            .as_deref()
+            .is_none_or(|namespace| namespace == "http://www.w3.org/1999/xhtml")
+}
+
+fn mark_inserted_scripts_in_tree(state: &mut HostState, root: &NodeHandle) {
+    let mut pending = vec![root.clone()];
+    while let Some(node) = pending.pop() {
+        if is_html_script_node(&node) {
+            state.runnable_inserted_scripts.insert(node.identity());
+        }
+        pending.extend(node.child_nodes().into_iter().rev());
+    }
+}
+
+/// Returns only pending script node ids from an inserted subtree. The common
+/// case has no pending scripts and exits without walking or creating wrappers.
+fn collect_inserted_scripts_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let root_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let mut ids = Vec::new();
+        if !state.runnable_inserted_scripts.is_empty()
+            && let Some(root) = state.get_node(root_id)
+        {
+            let mut pending = vec![root];
+            while let Some(node) = pending.pop() {
+                if state
+                    .runnable_inserted_scripts
+                    .contains(&node.identity())
+                {
+                    ids.push(JsValue::from(node.identity() as f64));
+                }
+                pending.extend(node.child_nodes().into_iter().rev());
+            }
+        }
+        Ok(JsValue::from(boa_engine::object::builtins::JsArray::from_iter(
+            ids, context,
+        )))
     })
 }
 
@@ -13690,6 +13743,7 @@ fn prepare_inserted_inline_script_native(
         if !state.node_is_in_active_document(&node) {
             return Ok(JsValue::undefined());
         }
+        state.runnable_inserted_scripts.remove(&id);
         state.started_inserted_scripts.insert(id);
         if !is_inline_classic_script(&node) {
             return Ok(JsValue::null());
@@ -34006,13 +34060,17 @@ b</textarea></form>"#);
           document.body.appendChild(cloneSource.cloneNode(true));
           document.body.appendChild(cloneSource);
           document.body.appendChild(cloneSource.cloneNode(true));
+          globalThis.scriptOrder=[];
+          const ordered=range.createContextualFragment('<div><script>scriptOrder.push(1)</script><script>scriptOrder.push(2)</script></div>');
+          document.body.appendChild(ordered);
           const throwing=document.createElement('script'); throwing.textContent='throw new Error("inserted boom")';
           let insertionThrew=false; try { document.body.appendChild(throwing); } catch (_) { insertionThrew=true; }
           return [before,rangeRuns,rangeCurrent,dynamicRuns,globalThis.inertRuns||0,
-            globalThis.dataRuns===true,cloneRuns,insertionThrew,document.currentScript===null].join('|');
+            globalThis.dataRuns===true,cloneRuns,scriptOrder.join(','),insertionThrew,
+            document.currentScript===null].join('|');
         })()"#,
             ),
-            "0|1|true|1|0|false|2|false|true"
+            "0|1|true|1|0|false|2|1,2|false|true"
         );
         let errors = runtime.take_task_errors();
         assert_eq!(errors.len(), 1, "expected one recorded script error: {errors:?}");

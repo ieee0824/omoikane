@@ -4026,24 +4026,13 @@
     return null;
   }
 
-  function markContextualFragmentScripts(root) {
-    const visit = node => {
-      if (node.nodeType === 1 && node instanceof HTMLElement &&
-          node.localName.toLowerCase() === "script") {
-        __omoikane_mark_inserted_script(node.__id);
-      }
-      for (const child of node.childNodes) visit(child);
-    };
-    visit(root);
-  }
-
   // Script preparation is intentionally separate from parsing. Range and
   // createElement scripts become runnable only after connection; innerHTML and
   // parser-created scripts are never marked and therefore remain inert.
   function executeRunnableInsertedScripts(roots) {
-    const visit = node => {
-      if (node.nodeType === 1 && node instanceof HTMLElement &&
-          node.localName.toLowerCase() === "script") {
+    for (const root of roots) {
+      for (const id of __omoikane_collect_inserted_scripts(root.__id)) {
+        const node = wrapNode(id);
         const source = __omoikane_prepare_inserted_inline_script(node.__id);
         if (typeof source === "string") {
           const doc = node.ownerDocument;
@@ -4060,9 +4049,7 @@
           }
         }
       }
-      for (const child of node.childNodes) visit(child);
-    };
-    for (const root of roots) visit(root);
+    }
   }
 
   class Range {
@@ -4261,7 +4248,6 @@
         !htmlDocument,
       ));
       stampOwnerDoc(fragment, doc);
-      markContextualFragmentScripts(fragment);
       return fragment;
     }
     surroundContents(newParent) {
