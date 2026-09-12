@@ -39,6 +39,9 @@ git_wpt sparse-checkout add \
   "/css/css-cascade/layer-vs-inline-style.html" \
   "/css/css-cascade/layer-rules-cssom.html" \
   "/css/css-cascade/parsing/layer.html" \
+  "/css/css-cascade/parsing/all-valid.html" \
+  "/css/css-cascade/parsing/all-invalid.html" \
+  "/css/css-cascade/all-prop-revert-layer.html" \
   "/css/css-cascade/layer-import.html" \
   "/css/css-cascade/parsing/layer-import-parsing.html" \
   "/css/css-cascade/parsing/supports-import-parsing.html"

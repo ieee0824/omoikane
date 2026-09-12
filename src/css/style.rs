@@ -932,12 +932,12 @@ impl StyleResolver {
             .filter(|candidate| candidate.name.starts_with("--"))
             .cloned()
             .collect();
-        remove_reverted_layer_candidates(&mut custom_candidates, None);
+        remove_reverted_candidates(&mut custom_candidates, None);
         let mut custom_properties = inherited_custom_properties(parent_style);
         for candidate in custom_candidates {
             custom_properties.insert(candidate.name, candidate.value);
         }
-        remove_reverted_layer_candidates(&mut candidates, Some(&custom_properties));
+        remove_reverted_candidates(&mut candidates, Some(&custom_properties));
 
         let mut properties: BTreeMap<String, ComputedValue> = BTreeMap::new();
 
@@ -1069,10 +1069,9 @@ impl StyleResolver {
         apply_ua_defaults(node, &mut properties, pseudo, parent_style);
         apply_presentational_hints(node, &mut properties, pseudo);
         resolve_current_color_on_color_property(&mut properties, parent_style);
-        resolve_explicit_inherit(&mut properties, parent_style);
-        resolve_writing_direction_css_wide_keywords(&mut properties, parent_style);
-        resolve_non_inherited_css_wide_keywords(&mut properties);
+        resolve_inherit_and_unset(&mut properties, parent_style);
         apply_inheritance(&mut properties, parent_style);
+        resolve_initial_css_wide_keywords(&mut properties);
         apply_initial_values(&mut properties);
         normalize_background_layer_lists(&mut properties);
         properties.insert(
@@ -3626,13 +3625,14 @@ impl From<&Candidate> for RevertedLayer {
     }
 }
 
-fn remove_reverted_layer_candidates(
+fn remove_reverted_candidates(
     candidates: &mut Vec<Candidate>,
     custom_properties: Option<&BTreeMap<String, Value>>,
 ) {
     #[derive(Default)]
     struct PropertyRevertState {
-        reverted: HashSet<RevertedLayer>,
+        reverted_layers: HashSet<RevertedLayer>,
+        reverted_origins: HashSet<Origin>,
         winner_found: bool,
     }
 
@@ -3644,12 +3644,18 @@ fn remove_reverted_layer_candidates(
         if state.winner_found {
             continue;
         }
+        let origin = candidate.origin;
+        if state.reverted_origins.contains(&origin) {
+            continue;
+        }
         let layer = RevertedLayer::from(candidate);
-        if state.reverted.contains(&layer) {
+        if state.reverted_layers.contains(&layer) {
             continue;
         }
         if is_revert_layer_value(&candidate.value) {
-            state.reverted.insert(layer);
+            state.reverted_layers.insert(layer);
+        } else if is_revert_value(&candidate.value) {
+            state.reverted_origins.insert(origin);
         } else if candidate_can_win_before_revert(candidate, custom_properties) {
             state.winner_found = true;
         }
@@ -3658,7 +3664,12 @@ fn remove_reverted_layer_candidates(
     candidates.retain(|candidate| {
         !states
             .get(revert_property_group(&candidate.name))
-            .is_some_and(|state| state.reverted.contains(&RevertedLayer::from(candidate)))
+            .is_some_and(|state| {
+                state
+                    .reverted_layers
+                    .contains(&RevertedLayer::from(candidate))
+                    || state.reverted_origins.contains(&candidate.origin)
+            })
     });
 }
 
@@ -3696,6 +3707,10 @@ fn candidate_can_win_before_revert(
 
 fn is_revert_layer_value(value: &Value) -> bool {
     matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("revert-layer"))
+}
+
+fn is_revert_value(value: &Value) -> bool {
+    matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("revert"))
 }
 
 fn compare_scope_proximity(left: &Candidate, right: &Candidate) -> std::cmp::Ordering {
@@ -4079,194 +4094,238 @@ fn truncate_log_value(value: &str, max_len: usize) -> String {
     out
 }
 
+const SUPPORTED_PROPERTIES: &[&str] = &[
+    "align-items",
+    "align-content",
+    "align-self",
+    "animation",
+    "animation-delay",
+    "animation-direction",
+    "animation-duration",
+    "animation-fill-mode",
+    "animation-iteration-count",
+    "animation-name",
+    "animation-play-state",
+    "animation-timing-function",
+    "background-attachment",
+    "background-clip",
+    "background-color",
+    "background-image",
+    "background-origin",
+    "background-position-x",
+    "background-position-y",
+    "background-repeat",
+    "background-size",
+    "backdrop-filter",
+    "backface-visibility",
+    "border-bottom-color",
+    "border-bottom-style",
+    "border-bottom-width",
+    "border-bottom-left-radius",
+    "border-bottom-right-radius",
+    "border-top-left-radius",
+    "border-top-right-radius",
+    "border-collapse",
+    "border-color",
+    "border-left-color",
+    "border-left-style",
+    "border-left-width",
+    "border-right-color",
+    "border-right-style",
+    "border-right-width",
+    "border-spacing",
+    "border-style",
+    "border-width",
+    "border-top-color",
+    "border-top-style",
+    "border-top-width",
+    "bottom",
+    "inset-inline-start",
+    "inset-inline-end",
+    "inset-block-start",
+    "inset-block-end",
+    "box-sizing",
+    "clear",
+    "clip-path",
+    "-webkit-clip-path",
+    "color",
+    "contain",
+    "container-name",
+    "container-type",
+    "content",
+    "cursor",
+    "display",
+    "direction",
+    "flex-basis",
+    "flex-direction",
+    "flex-grow",
+    "flex-shrink",
+    "flex-wrap",
+    "float",
+    "filter",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "gap",
+    "grid-gap",
+    "grid-row-gap",
+    "grid-column-gap",
+    "grid-template-columns",
+    "grid-template-rows",
+    "grid-template-areas",
+    "grid-template",
+    "grid-area",
+    "grid-column",
+    "grid-column-start",
+    "grid-column-end",
+    "grid-row",
+    "grid-row-start",
+    "grid-row-end",
+    "height",
+    "justify-content",
+    "justify-items",
+    "justify-self",
+    "place-content",
+    "place-items",
+    "place-self",
+    "left",
+    "line-height",
+    "margin-bottom",
+    "margin-left",
+    "margin-right",
+    "margin-top",
+    "margin-inline-start",
+    "margin-inline-end",
+    "margin-block-start",
+    "margin-block-end",
+    "max-height",
+    "max-width",
+    "min-height",
+    "min-width",
+    "column-gap",
+    "outline-color",
+    "outline-offset",
+    "outline-style",
+    "outline-width",
+    "overflow",
+    "overflow-x",
+    "overflow-y",
+    "padding-bottom",
+    "padding-left",
+    "padding-right",
+    "padding-top",
+    "padding-inline-start",
+    "padding-inline-end",
+    "padding-block-start",
+    "padding-block-end",
+    "position",
+    "perspective",
+    "perspective-origin",
+    "pointer-events",
+    "right",
+    "row-gap",
+    "mix-blend-mode",
+    "transform",
+    "transform-origin",
+    "transform-style",
+    "transition",
+    "transition-property",
+    "transition-duration",
+    "transition-timing-function",
+    "transition-delay",
+    "text-align",
+    "text-decoration-line",
+    "text-decoration-color",
+    "text-decoration-style",
+    "text-indent",
+    "text-overflow",
+    "text-transform",
+    "unicode-bidi",
+    "letter-spacing",
+    "word-spacing",
+    "top",
+    "vertical-align",
+    "visibility",
+    "white-space",
+    "width",
+    "word-break",
+    "overflow-wrap",
+    "word-wrap",
+    "writing-mode",
+    "z-index",
+    "box-shadow",
+    "opacity",
+    "isolation",
+    "list-style-type",
+    "list-style-position",
+    "aspect-ratio",
+    "list-style-image",
+    "object-fit",
+    "object-position",
+    "mask",
+    "mask-image",
+    "mask-position",
+    "mask-position-x",
+    "mask-position-y",
+    "mask-repeat",
+    "mask-size",
+    "mask-mode",
+    "mask-composite",
+    "-webkit-mask",
+    "-webkit-mask-image",
+    "-webkit-mask-position",
+    "-webkit-mask-position-x",
+    "-webkit-mask-position-y",
+    "-webkit-mask-repeat",
+    "-webkit-mask-size",
+    "-webkit-mask-mode",
+    "-webkit-mask-composite",
+];
+
 pub(super) fn is_supported_property(name: &str) -> bool {
+    SUPPORTED_PROPERTIES.contains(&name)
+}
+
+/// Returns every implemented longhand affected by the CSS `all` shorthand.
+///
+/// The list is derived from the supported-property registry so adding an
+/// implemented longhand automatically makes it participate in `all`. CSS
+/// Cascade excludes `direction`, `unicode-bidi`, aliases, and custom
+/// properties. Custom properties do not appear in the fixed registry.
+pub(super) fn all_longhand_properties() -> impl Iterator<Item = &'static str> {
+    SUPPORTED_PROPERTIES.iter().copied().filter(|name| {
+        !matches!(*name, "direction" | "unicode-bidi")
+            && !is_shorthand_or_legacy_alias(name)
+            && canonical_property_name(name) == *name
+    })
+}
+
+fn is_shorthand_or_legacy_alias(name: &str) -> bool {
     matches!(
         name,
-        "align-items"
-            | "align-content"
-            | "align-self"
-            | "animation"
-            | "animation-delay"
-            | "animation-direction"
-            | "animation-duration"
-            | "animation-fill-mode"
-            | "animation-iteration-count"
-            | "animation-name"
-            | "animation-play-state"
-            | "animation-timing-function"
-            | "background-attachment"
-            | "background-clip"
-            | "background-color"
-            | "background-image"
-            | "background-origin"
-            | "background-position-x"
-            | "background-position-y"
-            | "background-repeat"
-            | "background-size"
-            | "backdrop-filter"
-            | "backface-visibility"
-            | "border-bottom-color"
-            | "border-bottom-style"
-            | "border-bottom-width"
-            | "border-bottom-left-radius"
-            | "border-bottom-right-radius"
-            | "border-top-left-radius"
-            | "border-top-right-radius"
-            | "border-collapse"
+        "animation"
             | "border-color"
-            | "border-left-color"
-            | "border-left-style"
-            | "border-left-width"
-            | "border-right-color"
-            | "border-right-style"
-            | "border-right-width"
-            | "border-spacing"
             | "border-style"
             | "border-width"
-            | "border-top-color"
-            | "border-top-style"
-            | "border-top-width"
-            | "bottom"
-            | "inset-inline-start"
-            | "inset-inline-end"
-            | "inset-block-start"
-            | "inset-block-end"
-            | "box-sizing"
-            | "clear"
-            | "clip-path"
-            | "-webkit-clip-path"
-            | "color"
-            | "contain"
-            | "container-name"
-            | "container-type"
-            | "content"
-            | "cursor"
-            | "display"
-            | "direction"
-            | "flex-basis"
-            | "flex-direction"
-            | "flex-grow"
-            | "flex-shrink"
-            | "flex-wrap"
-            | "float"
-            | "filter"
-            | "font-family"
-            | "font-size"
-            | "font-style"
-            | "font-weight"
             | "gap"
             | "grid-gap"
             | "grid-row-gap"
             | "grid-column-gap"
-            | "grid-template-columns"
-            | "grid-template-rows"
-            | "grid-template-areas"
             | "grid-template"
             | "grid-area"
             | "grid-column"
-            | "grid-column-start"
-            | "grid-column-end"
             | "grid-row"
-            | "grid-row-start"
-            | "grid-row-end"
-            | "height"
-            | "justify-content"
-            | "justify-items"
-            | "justify-self"
+            | "mask"
+            | "mask-position"
+            | "overflow"
             | "place-content"
             | "place-items"
             | "place-self"
-            | "left"
-            | "line-height"
-            | "margin-bottom"
-            | "margin-left"
-            | "margin-right"
-            | "margin-top"
-            | "margin-inline-start"
-            | "margin-inline-end"
-            | "margin-block-start"
-            | "margin-block-end"
-            | "max-height"
-            | "max-width"
-            | "min-height"
-            | "min-width"
-            | "column-gap"
-            | "outline-color"
-            | "outline-offset"
-            | "outline-style"
-            | "outline-width"
-            | "overflow"
-            | "overflow-x"
-            | "overflow-y"
-            | "padding-bottom"
-            | "padding-left"
-            | "padding-right"
-            | "padding-top"
-            | "padding-inline-start"
-            | "padding-inline-end"
-            | "padding-block-start"
-            | "padding-block-end"
-            | "position"
-            | "perspective"
-            | "perspective-origin"
-            | "pointer-events"
-            | "right"
-            | "row-gap"
-            | "mix-blend-mode"
-            | "transform"
-            | "transform-origin"
-            | "transform-style"
             | "transition"
-            | "transition-property"
-            | "transition-duration"
-            | "transition-timing-function"
-            | "transition-delay"
-            | "text-align"
-            | "text-decoration-line"
-            | "text-decoration-color"
-            | "text-decoration-style"
-            | "text-overflow"
-            | "text-transform"
-            | "unicode-bidi"
-            | "letter-spacing"
-            | "word-spacing"
-            | "top"
-            | "vertical-align"
-            | "visibility"
-            | "white-space"
-            | "width"
-            | "word-break"
-            | "overflow-wrap"
             | "word-wrap"
-            | "writing-mode"
-            | "z-index"
-            | "box-shadow"
-            | "opacity"
-            | "isolation"
-            | "list-style-type"
-            | "list-style-position"
-            | "aspect-ratio"
-            | "list-style-image"
-            | "object-fit"
-            | "object-position"
-            | "mask"
-            | "mask-image"
-            | "mask-position"
-            | "mask-position-x"
-            | "mask-position-y"
-            | "mask-repeat"
-            | "mask-size"
-            | "mask-mode"
-            | "mask-composite"
             | "-webkit-mask"
-            | "-webkit-mask-image"
             | "-webkit-mask-position"
-            | "-webkit-mask-position-x"
-            | "-webkit-mask-position-y"
-            | "-webkit-mask-repeat"
-            | "-webkit-mask-size"
-            | "-webkit-mask-mode"
-            | "-webkit-mask-composite"
     )
 }
 
@@ -6197,79 +6256,17 @@ fn computed_value_css_text(value: &ComputedValue) -> String {
     }
 }
 
-fn resolve_non_inherited_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
-    for name in [
-        "aspect-ratio",
-        "background-clip",
-        "background-origin",
-        "contain",
-        "container-name",
-        "container-type",
-        "object-fit",
-        "object-position",
-        "mask-image",
-        "mask-mode",
-        "mask-composite",
-        "position",
-        "perspective",
-        "perspective-origin",
-        "transform",
-        "transform-origin",
-        "transform-style",
-        "backface-visibility",
-        "mix-blend-mode",
-        "isolation",
-        "transition-property",
-        "transition-duration",
-        "transition-timing-function",
-        "transition-delay",
-        "unicode-bidi",
-    ] {
-        let uses_initial_value = matches!(
-            properties.get(name),
-            Some(ComputedValue::Keyword(keyword))
+fn resolve_initial_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
+    properties.retain(|_, value| {
+        !matches!(
+            value,
+            ComputedValue::Keyword(keyword)
                 if matches!(
                     keyword.to_ascii_lowercase().as_str(),
                     "initial" | "unset" | "revert" | "revert-layer"
                 )
-        );
-        if uses_initial_value {
-            properties.remove(name);
-        }
-    }
-}
-
-/// Resolve CSS-wide keywords for inherited writing-direction properties before
-/// the normal inheritance pass. `initial`/`revert` use the property initial
-/// value here (including `revert-layer`), while `unset` follows the inherited
-/// value just like `inherit`.
-fn resolve_writing_direction_css_wide_keywords(
-    properties: &mut BTreeMap<String, ComputedValue>,
-    parent_style: Option<&ComputedStyle>,
-) {
-    for name in ["direction", "writing-mode"] {
-        let Some(ComputedValue::Keyword(keyword)) = properties.get(name) else {
-            continue;
-        };
-        let lower = keyword.to_ascii_lowercase();
-        if matches!(lower.as_str(), "initial" | "revert" | "revert-layer") {
-            let initial = match name {
-                "direction" => "ltr",
-                "writing-mode" => "horizontal-tb",
-                _ => unreachable!("writing-direction property list is fixed"),
-            };
-            properties.insert(
-                name.to_string(),
-                ComputedValue::Keyword(initial.to_string()),
-            );
-        } else if lower == "unset" {
-            if let Some(parent) = parent_style.and_then(|style| style.get(name)) {
-                properties.insert(name.to_string(), parent.clone());
-            } else {
-                properties.remove(name);
-            }
-        }
-    }
+        )
+    });
 }
 
 /// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.
@@ -6321,14 +6318,17 @@ fn resolve_current_color_on_color_property(
     }
 }
 
-fn resolve_explicit_inherit(
+fn resolve_inherit_and_unset(
     properties: &mut BTreeMap<String, ComputedValue>,
     parent_style: Option<&ComputedStyle>,
 ) {
     let inherited_names: Vec<String> = properties
         .iter()
         .filter_map(|(name, value)| match value {
-            ComputedValue::Keyword(keyword) if keyword.eq_ignore_ascii_case("inherit") => {
+            ComputedValue::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("inherit")
+                    || (keyword.eq_ignore_ascii_case("unset") && is_inherited_property(name)) =>
+            {
                 Some(name.clone())
             }
             _ => None,
@@ -6354,38 +6354,7 @@ fn apply_inheritance(
         return;
     };
 
-    // Inherited CSS properties supported by this engine.
-    // Based on CSS 2.1 §6.2 and CSS Text Decoration Module Level 3.
-    // https://developer.mozilla.org/en-US/docs/Web/CSS/Inheritance
-    for inherited_name in [
-        "border-collapse",
-        "border-spacing",
-        "color",
-        "cursor",
-        "direction",
-        "font-family",
-        "font-size",
-        "font-style",
-        "font-weight",
-        "letter-spacing",
-        "line-height",
-        "list-style-image",
-        "list-style-position",
-        "list-style-type",
-        "overflow-wrap",
-        "pointer-events",
-        "text-align",
-        "text-decoration-color",
-        "text-decoration-line",
-        "text-decoration-style",
-        "text-indent",
-        "text-transform",
-        "visibility",
-        "white-space",
-        "writing-mode",
-        "word-break",
-        "word-spacing",
-    ] {
+    for &inherited_name in INHERITED_PROPERTIES {
         if !properties.contains_key(inherited_name)
             && let Some(value) = parent_style.get(inherited_name)
         {
@@ -6399,6 +6368,42 @@ fn apply_inheritance(
             properties.insert(name.clone(), value.clone());
         }
     }
+}
+
+// Inherited CSS properties supported by this engine. Keeping this as shared
+// metadata lets both natural inheritance and `all: unset` use the same rule.
+const INHERITED_PROPERTIES: &[&str] = &[
+    "border-collapse",
+    "border-spacing",
+    "color",
+    "cursor",
+    "direction",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "letter-spacing",
+    "line-height",
+    "list-style-image",
+    "list-style-position",
+    "list-style-type",
+    "overflow-wrap",
+    "pointer-events",
+    "text-align",
+    "text-decoration-color",
+    "text-decoration-line",
+    "text-decoration-style",
+    "text-indent",
+    "text-transform",
+    "visibility",
+    "white-space",
+    "writing-mode",
+    "word-break",
+    "word-spacing",
+];
+
+fn is_inherited_property(name: &str) -> bool {
+    name.starts_with("--") || INHERITED_PROPERTIES.contains(&name)
 }
 
 fn inherited_font_size(

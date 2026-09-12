@@ -931,6 +931,249 @@ fn identifies_supported_property_names() {
 }
 
 #[test]
+fn all_expands_from_the_supported_longhand_registry() {
+    let declarations = parse_style_attribute("all: initial !important");
+    let expected = all_longhand_properties().collect::<Vec<_>>();
+    let actual = declarations
+        .iter()
+        .map(|declaration| declaration.name.as_str())
+        .collect::<Vec<_>>();
+    let unique = actual
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        unique.len(),
+        actual.len(),
+        "`all` must expand each longhand once"
+    );
+    assert!(declarations.iter().all(|declaration| declaration.important));
+    assert!(actual.contains(&"text-indent"));
+    assert!(!actual.contains(&"direction"));
+    assert!(!actual.contains(&"unicode-bidi"));
+    assert!(!actual.iter().any(|name| name.starts_with("--")));
+    assert!(!actual.iter().any(|name| is_shorthand_or_legacy_alias(name)));
+    assert!(
+        actual
+            .iter()
+            .all(|name| canonical_property_name(name) == *name)
+    );
+
+    for property in SUPPORTED_PROPERTIES {
+        assert!(
+            actual.contains(property)
+                || matches!(*property, "direction" | "unicode-bidi")
+                || is_shorthand_or_legacy_alias(property)
+                || canonical_property_name(property) != *property,
+            "supported property `{property}` has no `all` classification"
+        );
+    }
+}
+
+#[test]
+fn all_accepts_only_css_wide_keywords() {
+    for keyword in ["initial", "inherit", "unset", "revert", "revert-layer"] {
+        assert!(supports_declaration("all", keyword), "all: {keyword}");
+    }
+    assert!(!supports_declaration("all", "red"));
+    assert!(parse_style_attribute("all: red").is_empty());
+}
+
+#[test]
+fn all_resolves_initial_inherit_and_unset_per_longhand() {
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    let initial = NodeHandle::element("span");
+    let inherit = NodeHandle::element("span");
+    let unset = NodeHandle::element("span");
+    initial.set_attribute("id", "initial");
+    inherit.set_attribute("id", "inherit");
+    unset.set_attribute("id", "unset");
+    document.append_child(parent.clone());
+    parent.append_child(initial.clone());
+    parent.append_child(inherit.clone());
+    parent.append_child(unset.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { color: blue; font-size: 20px; width: 80px; display: flex; } \
+             span { color: red; font-size: 10px; width: 20px; display: block; \
+                    direction: rtl; unicode-bidi: isolate; --token: child; } \
+             #initial { all: initial; } \
+             #inherit { all: inherit; } \
+             #unset { all: unset; }",
+        )
+        .unwrap(),
+    );
+
+    let initial_style = resolver.computed_style(&initial);
+    assert_eq!(
+        initial_style.get("color"),
+        Some(&ComputedValue::Color("black".to_string()))
+    );
+    assert_eq!(
+        initial_style.get("font-size"),
+        Some(&ComputedValue::Px(16.0))
+    );
+    assert_eq!(initial_style.get("width"), None);
+
+    let inherit_style = resolver.computed_style(&inherit);
+    assert_eq!(
+        inherit_style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+    assert_eq!(
+        inherit_style.get("font-size"),
+        Some(&ComputedValue::Px(20.0))
+    );
+    assert_eq!(inherit_style.get("width"), Some(&ComputedValue::Px(80.0)));
+    assert_eq!(
+        inherit_style.get("display"),
+        Some(&ComputedValue::Keyword("flex".to_string()))
+    );
+
+    let unset_style = resolver.computed_style(&unset);
+    assert_eq!(
+        unset_style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+    assert_eq!(unset_style.get("font-size"), Some(&ComputedValue::Px(20.0)));
+    assert_eq!(unset_style.get("width"), None);
+
+    for style in [&initial_style, &inherit_style, &unset_style] {
+        assert_eq!(
+            style.get("direction"),
+            Some(&ComputedValue::Keyword("rtl".to_string()))
+        );
+        assert_eq!(
+            style.get("unicode-bidi"),
+            Some(&ComputedValue::Keyword("isolate".to_string()))
+        );
+        assert_eq!(
+            style.get("--token"),
+            Some(&ComputedValue::Keyword("child".to_string()))
+        );
+    }
+}
+
+#[test]
+fn custom_property_unset_still_inherits_after_common_keyword_resolution() {
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    document.append_child(parent.clone());
+    parent.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { --theme: parent; } span { --theme: unset; }").unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&child).get("--theme"),
+        Some(&ComputedValue::Keyword("parent".to_string()))
+    );
+}
+
+#[test]
+fn all_revert_rolls_back_the_current_origin() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::UserAgent,
+        parse_stylesheet("div { color: green; width: 33px; }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::User,
+        parse_stylesheet("div { color: blue; width: 44px; }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { color: red; width: 55px; all: revert; }").unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(44.0)));
+}
+
+#[test]
+fn important_all_revert_does_not_expose_normal_declarations_from_the_same_origin() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { background-color: red; width: 55px; all: revert !important; }")
+            .unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("background-color"),
+        Some(&ComputedValue::Color("transparent".to_string()))
+    );
+    assert_eq!(style.get("width"), None);
+}
+
+#[test]
+fn all_revert_layer_handles_shorthand_alias_and_logical_groups() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer base, override; \
+             @layer base { div { margin-left: 11px; overflow-wrap: break-word; color: blue; } } \
+             @layer override { div { margin: 22px; margin-inline-start: 33px; \
+                                     word-wrap: anywhere; color: red; \
+                                     direction: rtl; unicode-bidi: isolate; --token: kept; \
+                                     all: revert-layer; } }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(style.get("margin-left"), Some(&ComputedValue::Px(11.0)));
+    assert_eq!(
+        style.get("overflow-wrap"),
+        Some(&ComputedValue::Keyword("break-word".to_string()))
+    );
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+    assert_eq!(
+        style.get("direction"),
+        Some(&ComputedValue::Keyword("rtl".to_string()))
+    );
+    assert_eq!(
+        style.get("unicode-bidi"),
+        Some(&ComputedValue::Keyword("isolate".to_string()))
+    );
+    assert_eq!(
+        style.get("--token"),
+        Some(&ComputedValue::Keyword("kept".to_string()))
+    );
+}
+
+#[test]
 fn css_supports_uses_parser_and_supported_property_table() {
     assert!(supports_declaration("display", "block"));
     assert!(supports_declaration("margin", "10px 20px"));

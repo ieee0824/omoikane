@@ -254,6 +254,7 @@
     configurable: false,
   });
   const validatesSpecialStyleProperties = new Set([
+    "all",
     "color", "background-color", "border-color",
     "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
     "outline-color", "text-decoration-color",
@@ -12370,6 +12371,7 @@
       getPropertyPriority() { return ""; },
       get length() { return Object.keys(map).length; },
       item(index) { return Object.keys(map)[index] || ""; },
+      [Symbol.iterator]() { return Object.keys(map)[Symbol.iterator](); },
       get cssText() {
         return Object.keys(map).map(k => k + ": " + map[k] + ";").join(" ");
       },

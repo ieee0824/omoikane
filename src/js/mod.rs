@@ -11299,33 +11299,35 @@ fn normalize_style_value_native(
             | "transition-delay"
     ) {
         crate::css::normalize_transition_longhand(&property, &value)
-    } else if matches!(
-        property.as_str(),
-        "color"
-            | "background-color"
-            | "border-color"
-            | "border-top-color"
-            | "border-right-color"
-            | "border-bottom-color"
-            | "border-left-color"
-            | "outline-color"
-            | "text-decoration-color"
-            | "clip-path"
-            | "-webkit-clip-path"
-            | "mask"
-            | "-webkit-mask"
-            | "mask-image"
-            | "-webkit-mask-image"
-            | "mask-mode"
-            | "-webkit-mask-mode"
-            | "mask-composite"
-            | "-webkit-mask-composite"
-            | "transform-style"
-            | "backface-visibility"
-            | "mix-blend-mode"
-            | "isolation"
-            | "text-overflow"
-    ) {
+    } else if property == "all"
+        || matches!(
+            property.as_str(),
+            "color"
+                | "background-color"
+                | "border-color"
+                | "border-top-color"
+                | "border-right-color"
+                | "border-bottom-color"
+                | "border-left-color"
+                | "outline-color"
+                | "text-decoration-color"
+                | "clip-path"
+                | "-webkit-clip-path"
+                | "mask"
+                | "-webkit-mask"
+                | "mask-image"
+                | "-webkit-mask-image"
+                | "mask-mode"
+                | "-webkit-mask-mode"
+                | "mask-composite"
+                | "-webkit-mask-composite"
+                | "transform-style"
+                | "backface-visibility"
+                | "mix-blend-mode"
+                | "isolation"
+                | "text-overflow"
+        )
+    {
         crate::css::supports_declaration(&property, &value).then_some(value)
     } else {
         Some(value)
@@ -23342,6 +23344,63 @@ b</textarea></form>"#,
     }
 
     #[test]
+    fn style_all_accepts_css_wide_keywords_and_rejects_other_values() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"(() => {
+                  const style = document.createElement("div").style;
+                  const accepted = [];
+                  for (const value of ["initial", "inherit", "unset", "revert", "revert-layer"]) {
+                    style.all = value;
+                    accepted.push(style.all);
+                  }
+                  style.all = "auto";
+                  return JSON.stringify({ accepted, afterInvalid: style.all });
+                })()"#,
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            result,
+            r#"{"accepted":["initial","inherit","unset","revert","revert-layer"],"afterInvalid":"revert-layer"}"#
+        );
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(() => { const style = document.createElement("div").style; style.all = "red"; return style.all; })()"#,
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn computed_style_iterates_property_names() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        div.set_attribute("style", "color: red; width: 10px");
+        doc.append_child(div);
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let iterable = runtime
+            .eval(
+                r#"(() => {
+                  const style = getComputedStyle(document.querySelector("div"));
+                  const names = [...style];
+                  return names.length === style.length &&
+                    names.includes("color") && names.includes("width") &&
+                    names.every((name, index) => style.item(index) === name);
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean();
+        assert_eq!(iterable, Some(true));
+    }
+
+    #[test]
     fn style_normalization_host_call_is_limited_to_transition_properties() {
         let mut runtime = JsRuntime::new().unwrap();
         assert_eq!(
@@ -34190,11 +34249,11 @@ b</textarea></form>"#,
     }
 
     #[test]
-    fn get_computed_style_has_trap_tolerates_symbols() {
+    fn get_computed_style_symbol_traps_expose_only_the_iterator() {
         // Regression (integration review): the `has` trap must guard symbols the
         // same way `get` does, so `Symbol.x in getComputedStyle(el)` neither
-        // throws nor is run through the CSS-name mapping. The underlying
-        // declaration has no such symbol key, so membership is false.
+        // throws nor is run through the CSS-name mapping. CSSStyleDeclaration
+        // exposes Symbol.iterator, while unrelated symbols remain absent.
         let html = r#"<html><body><div id="target"></div></body></html>"#;
         let mut runtime = runtime_from_html(html);
 
@@ -34203,8 +34262,15 @@ b</textarea></form>"#,
                 &mut runtime,
                 "Symbol.iterator in getComputedStyle(document.getElementById('target'), '')"
             ),
-            "false",
-            "Symbol.iterator must not be a member and must not throw"
+            "true",
+            "Symbol.iterator must be exposed and must not throw"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "typeof getComputedStyle(document.getElementById('target'), '')[Symbol.iterator]"
+            ),
+            "function"
         );
         assert_eq!(
             eval_str(
