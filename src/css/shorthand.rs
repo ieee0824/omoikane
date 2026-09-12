@@ -3,6 +3,9 @@
 use super::{Declaration, Value};
 
 pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    if name == "all" {
+        return expand_all(value, important);
+    }
     if let Some(declarations) = expand_revert_layer_shorthand(name, &value, important) {
         return declarations;
     }
@@ -54,6 +57,26 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
             important,
         }],
     }
+}
+
+fn expand_all(value: Value, important: bool) -> Vec<Declaration> {
+    let Value::Keyword(keyword) = &value else {
+        return Vec::new();
+    };
+    if !matches!(
+        keyword.to_ascii_lowercase().as_str(),
+        "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+    ) {
+        return Vec::new();
+    }
+
+    super::style::all_longhand_properties()
+        .map(|name| Declaration {
+            name: name.to_string(),
+            value: value.clone(),
+            important,
+        })
+        .collect()
 }
 
 fn expand_revert_layer_shorthand(
