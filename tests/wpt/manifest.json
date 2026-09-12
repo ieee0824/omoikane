@@ -37,9 +37,7 @@
     { "path": "css/css-cascade/parsing/layer.html" },
     { "path": "css/css-cascade/parsing/all-valid.html" },
     { "path": "css/css-cascade/parsing/all-invalid.html" },
-    { "path": "css/css-cascade/all-prop-revert-layer.html", "known_failure": {
-      "status": "FAIL", "reason": "getComputedStyle returns a snapshot instead of a live declaration", "issue": "#734", "expires": "2026-12-31"
-    } },
+    { "path": "css/css-cascade/all-prop-revert-layer.html" },
     { "path": "css/css-cascade/layer-import.html" },
     { "path": "css/css-cascade/parsing/layer-import-parsing.html" },
     { "path": "css/css-cascade/parsing/supports-import-parsing.html" },
