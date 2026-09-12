@@ -43,6 +43,7 @@
     { "path": "css/css-font-loading/fontfaceset-update-after-stylesheet-change.html" },
     { "path": "css/css-font-loading/fontfacesetloadevent-constructor.html" },
     { "path": "css/css-font-loading/font-face-reject.html" },
+    { "path": "domparsing/createContextualFragment.html" },
     { "path": "html/semantics/forms/constraints/form-validation-checkValidity.html" },
     { "path": "html/semantics/forms/constraints/form-validation-reportValidity.html" },
     { "path": "html/semantics/forms/constraints/form-validation-validate.html" },

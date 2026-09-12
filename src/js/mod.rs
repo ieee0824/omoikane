@@ -1085,6 +1085,13 @@ struct HostState {
     written_script_queue: VecDeque<document_write::WrittenScript>,
     /// Parser-inserted scripts must not run again as dynamic resource tasks.
     parser_inserted_scripts: HashSet<usize>,
+    /// Scripts created by script APIs and therefore eligible for preparation
+    /// when their node first becomes connected to an active document.
+    runnable_inserted_scripts: HashSet<usize>,
+    /// Runnable inserted scripts that have already reached the preparation
+    /// step. Node identities keep this stable across wrapper recreation and
+    /// same-document moves.
+    started_inserted_scripts: HashSet<usize>,
     /// Explicit Realm root used when a child writes into the top Document.
     main_realm: Option<Realm>,
     /// Base URL of the top-level document, used to resolve relative resource
@@ -1670,6 +1677,8 @@ impl HostState {
             document_write_depth: 0,
             written_script_queue: VecDeque::new(),
             parser_inserted_scripts: HashSet::new(),
+            runnable_inserted_scripts: HashSet::new(),
+            started_inserted_scripts: HashSet::new(),
             main_realm: None,
             iframe_documents: HashMap::new(),
             next_iframe_generation: 1,
@@ -8187,6 +8196,31 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_inner_html_native),
         ),
         (
+            js_string!("__omoikane_parse_contextual_fragment"),
+            3,
+            NativeFunction::from_copy_closure(parse_contextual_fragment_native),
+        ),
+        (
+            js_string!("__omoikane_mark_inserted_script"),
+            1,
+            NativeFunction::from_copy_closure(mark_inserted_script_native),
+        ),
+        (
+            js_string!("__omoikane_collect_inserted_scripts"),
+            1,
+            NativeFunction::from_copy_closure(collect_inserted_scripts_native),
+        ),
+        (
+            js_string!("__omoikane_prepare_inserted_inline_script"),
+            1,
+            NativeFunction::from_copy_closure(prepare_inserted_inline_script_native),
+        ),
+        (
+            js_string!("__omoikane_record_inserted_script_error"),
+            2,
+            NativeFunction::from_copy_closure(record_inserted_script_error_native),
+        ),
+        (
             js_string!("__omoikane_child_node_ids"),
             1,
             NativeFunction::from_copy_closure(child_node_ids_native),
@@ -13563,12 +13597,8 @@ fn set_inner_html_native(
             }
         }
         if !html.is_empty() {
-            // Parse as fragment: wrap in body context and extract children
-            let parsed =
-                crate::html::TreeBuilder::parse(&format!("<body>{html}</body>")).document();
-            let body = parsed.query_selector("body");
-            let source = body.as_ref().map(|b| b.child_nodes()).unwrap_or_default();
-            for child in source {
+            let parsed = crate::html::TreeBuilder::parse_fragment(&html, &node).fragment();
+            for child in parsed.child_nodes() {
                 target.append_child(child);
             }
         }
@@ -13576,6 +13606,186 @@ fn set_inner_html_native(
         // The node stays attached to its document; invalidate that document's
         // resolver so a `<style>` inside the new markup is picked up.
         state.borrow_mut().mark_style_dirty_for_node(&node);
+        Ok(JsValue::undefined())
+    })
+}
+
+fn parse_contextual_fragment_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let context_id = parse_node_id(args.first(), context)?;
+    let source = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let xml = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_boolean();
+    let context_node = with_host_state(|state| {
+        state.borrow().get_node(context_id).ok_or_else(|| {
+            JsError::from(JsNativeError::error().with_message("context node not found"))
+        })
+    })?;
+    let fragment = if xml {
+        crate::xml::parse_fragment(source.as_bytes(), &context_node).map_err(|error| {
+            JsError::from(JsNativeError::syntax().with_message(error.to_string()))
+        })?
+    } else {
+        crate::html::TreeBuilder::parse_fragment(&source, &context_node).fragment()
+    };
+    let id = fragment.identity();
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        state.register_tree(&fragment);
+        if !xml {
+            mark_inserted_scripts_in_tree(&mut state, &fragment);
+        }
+        Ok(())
+    })?;
+    Ok(JsValue::from(id as f64))
+}
+
+/// Marks an HTML script as created by an API whose insertion may prepare it.
+/// Parser and `innerHTML` paths never call this, which keeps their scripts
+/// inert when later moved.
+fn mark_inserted_script_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if state.get_node(id).is_some_and(|node| is_html_script_node(&node)) {
+            state.runnable_inserted_scripts.insert(id);
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn is_html_script_node(node: &NodeHandle) -> bool {
+    node.tag_name()
+        .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+        && node
+            .namespace_uri()
+            .as_deref()
+            .is_none_or(|namespace| namespace == "http://www.w3.org/1999/xhtml")
+}
+
+fn mark_inserted_scripts_in_tree(state: &mut HostState, root: &NodeHandle) {
+    let mut pending = vec![root.clone()];
+    while let Some(node) = pending.pop() {
+        if is_html_script_node(&node) {
+            state.runnable_inserted_scripts.insert(node.identity());
+        }
+        pending.extend(node.child_nodes().into_iter().rev());
+    }
+}
+
+/// Returns only pending script node ids from an inserted subtree. The common
+/// case has no pending scripts and exits without walking or creating wrappers.
+fn collect_inserted_scripts_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let root_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let mut ids = Vec::new();
+        if !state.runnable_inserted_scripts.is_empty()
+            && let Some(root) = state.get_node(root_id)
+        {
+            let mut pending = vec![root];
+            while let Some(node) = pending.pop() {
+                if state
+                    .runnable_inserted_scripts
+                    .contains(&node.identity())
+                {
+                    ids.push(JsValue::from(node.identity() as f64));
+                }
+                pending.extend(node.child_nodes().into_iter().rev());
+            }
+        }
+        Ok(JsValue::from(boa_engine::object::builtins::JsArray::from_iter(
+            ids, context,
+        )))
+    })
+}
+
+/// Prepares one dynamically inserted inline classic script.
+///
+/// `undefined` means the node has not reached an active document and may be
+/// retried. `null` means preparation completed without classic inline source
+/// (external/non-classic/blocked/already-started). A string is source that the
+/// bootstrap evaluates synchronously in the owning Document's Window.
+fn prepare_inserted_inline_script_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if !state.runnable_inserted_scripts.contains(&id)
+            || state.started_inserted_scripts.contains(&id)
+        {
+            return Ok(JsValue::null());
+        }
+        let Some(node) = state.get_node(id) else {
+            return Ok(JsValue::null());
+        };
+        if !state.node_is_in_active_document(&node) {
+            return Ok(JsValue::undefined());
+        }
+        state.runnable_inserted_scripts.remove(&id);
+        state.started_inserted_scripts.insert(id);
+        if !is_inline_classic_script(&node) {
+            return Ok(JsValue::null());
+        }
+        if !state.sandbox_allows_scripts_for_node(&node) {
+            return Ok(JsValue::null());
+        }
+        if !state
+            .csp_policy_for_node(&node)
+            .allows_inline(ResourceType::Script)
+        {
+            state.record_csp_violation_for_node(&node, ResourceType::Script, "inline");
+            return Ok(JsValue::null());
+        }
+        Ok(JsValue::from(js_string!(collect_text_content(&node))))
+    })
+}
+
+/// Records a page exception from synchronous dynamic inline script execution.
+/// Script failures do not make the surrounding DOM insertion throw.
+fn record_inserted_script_error_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    let message = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if state.task_errors.len() < MAX_TASK_ERRORS {
+            state
+                .task_errors
+                .push(format!("[dynamic inline script {id}] {message}"));
+        } else {
+            state.suppressed_task_errors = state.suppressed_task_errors.saturating_add(1);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -14005,17 +14215,51 @@ fn clone_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         .to_number(context)? as usize;
     let deep = args.get(1).cloned().unwrap_or_default().to_boolean();
     with_host_state(|state| {
-        let clone = {
+        let (node, clone) = {
             let s = state.borrow();
             let node = s.get_node(id).ok_or_else(|| {
                 JsError::from(JsNativeError::error().with_message("node not found"))
             })?;
-            clone_node_impl(&node, deep)
+            let clone = clone_node_impl(&node, deep);
+            (node, clone)
         };
         let clone_id = clone.identity() as f64;
-        state.borrow_mut().register_tree(&clone);
+        let mut state = state.borrow_mut();
+        state.register_tree(&clone);
+        copy_inserted_script_state(&mut state, &node, &clone, deep);
         Ok(JsValue::from(clone_id))
     })
+}
+
+fn copy_inserted_script_state(
+    state: &mut HostState,
+    source: &NodeHandle,
+    target: &NodeHandle,
+    deep: bool,
+) {
+    if state
+        .runnable_inserted_scripts
+        .contains(&source.identity())
+    {
+        state.runnable_inserted_scripts.insert(target.identity());
+        if state
+            .started_inserted_scripts
+            .contains(&source.identity())
+        {
+            state.started_inserted_scripts.insert(target.identity());
+        }
+    }
+    if !deep {
+        return;
+    }
+    if let (Some(source_content), Some(target_content)) =
+        (source.template_content(), target.template_content())
+    {
+        copy_inserted_script_state(state, &source_content, &target_content, true);
+    }
+    for (source_child, target_child) in source.child_nodes().iter().zip(target.child_nodes()) {
+        copy_inserted_script_state(state, source_child, &target_child, true);
+    }
 }
 
 fn remove_attribute_native(
@@ -33757,6 +34001,159 @@ b</textarea></form>"#);
                 r#"(()=>{var r=document.createRange();try{r.setEndBefore(document);return 'none'}catch(e){return e.name+'|'+e.code+'|'+e.INVALID_NODE_TYPE_ERR}})()"#
             ),
             "InvalidNodeTypeError|24|24"
+        );
+    }
+
+    #[test]
+    fn range_contextual_fragment_uses_html_and_foreign_contexts() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse(
+            "<html><body><table id='table'></table><select id='select'></select><template id='template'></template></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{
+          const range=document.createRange(), table=document.getElementById('table');
+          range.selectNodeContents(table);
+          const tableFragment=range.createContextualFragment('<tr><td>cell</td></tr>');
+          const select=document.getElementById('select'); range.selectNodeContents(select);
+          const selectFragment=range.createContextualFragment('<option>one<option>two<div>ignored');
+          const template=document.getElementById('template'); range.selectNodeContents(template);
+          const templateFragment=range.createContextualFragment('<span>inside</span>');
+          const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+          document.body.appendChild(svg); range.selectNodeContents(svg);
+          const svgFragment=range.createContextualFragment('<circle/><foreignObject><div>html</div></foreignObject>');
+          const math=document.createElementNS('http://www.w3.org/1998/Math/MathML','math');
+          document.body.appendChild(math); range.selectNodeContents(math);
+          const mathFragment=range.createContextualFragment('<mi><span>html</span></mi>');
+          return [
+            tableFragment.firstChild.localName,tableFragment.firstChild.firstChild.localName,
+            selectFragment.childNodes.length,selectFragment.firstChild.localName,
+            templateFragment.firstChild.localName,
+            svgFragment.firstChild.namespaceURI,
+            svgFragment.lastChild.localName,svgFragment.lastChild.firstChild.namespaceURI,
+            mathFragment.firstChild.namespaceURI,mathFragment.firstChild.firstChild.namespaceURI,
+            tableFragment.firstChild.ownerDocument===document
+          ].join('|');
+        })()"#,
+            ),
+            "tbody|tr|2|option|span|http://www.w3.org/2000/svg|foreignObject||http://www.w3.org/1998/Math/MathML||true"
+        );
+    }
+
+    #[test]
+    fn range_contextual_fragment_parses_xml_with_in_scope_namespaces() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{
+          const xml=new DOMParser().parseFromString('<root xmlns:p="urn:test"><host/></root>','application/xml');
+          const host=xml.querySelector('host'), range=xml.createRange();
+          range.selectNodeContents(host);
+          const fragment=range.createContextualFragment('<p:item>value</p:item>');
+          let malformed='none';
+          try { range.createContextualFragment('<broken>'); } catch (error) { malformed=error.name; }
+          return [xml.contentType,fragment.firstChild.localName,fragment.firstChild.prefix,
+            fragment.firstChild.namespaceURI,fragment.firstChild.ownerDocument===xml,
+            fragment.parentNode===null,malformed].join('|');
+        })()"#,
+            ),
+            "application/xml|item|p|urn:test|true|true|SyntaxError"
+        );
+    }
+
+    #[test]
+    fn inserted_inline_scripts_run_once_while_inner_html_scripts_stay_inert() {
+        use crate::html::TreeBuilder;
+        let doc = TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{
+          const range=document.createRange(); range.selectNodeContents(document.body);
+          const fragment=range.createContextualFragment('<script>globalThis.rangeRuns=(globalThis.rangeRuns||0)+1;globalThis.rangeCurrent=document.currentScript===document.body.lastChild</script>');
+          const rangeScript=fragment.firstChild;
+          const before=globalThis.rangeRuns||0; document.body.appendChild(fragment);
+          document.body.removeChild(rangeScript); document.body.appendChild(rangeScript);
+          const dynamic=document.createElement('script');
+          dynamic.textContent='globalThis.dynamicRuns=(globalThis.dynamicRuns||0)+1';
+          document.body.appendChild(dynamic); document.body.removeChild(dynamic); document.body.appendChild(dynamic);
+          const inert=document.createElement('div');
+          inert.innerHTML='<script>globalThis.inertRuns=(globalThis.inertRuns||0)+1</script>';
+          document.body.appendChild(inert); document.body.appendChild(inert.firstChild);
+          const data=document.createElement('script'); data.type='application/json';
+          data.textContent='globalThis.dataRuns=true'; document.body.appendChild(data);
+          const cloneSource=document.createElement('script');
+          cloneSource.textContent='globalThis.cloneRuns=(globalThis.cloneRuns||0)+1';
+          document.body.appendChild(cloneSource.cloneNode(true));
+          document.body.appendChild(cloneSource);
+          document.body.appendChild(cloneSource.cloneNode(true));
+          globalThis.scriptOrder=[];
+          const ordered=range.createContextualFragment('<div><script>scriptOrder.push(1)</script><script>scriptOrder.push(2)</script></div>');
+          document.body.appendChild(ordered);
+          const throwing=document.createElement('script'); throwing.textContent='throw new Error("inserted boom")';
+          let insertionThrew=false; try { document.body.appendChild(throwing); } catch (_) { insertionThrew=true; }
+          return [before,rangeRuns,rangeCurrent,dynamicRuns,globalThis.inertRuns||0,
+            globalThis.dataRuns===true,cloneRuns,scriptOrder.join(','),insertionThrew,
+            document.currentScript===null].join('|');
+        })()"#,
+            ),
+            "0|1|true|1|0|false|2|1,2|false|true"
+        );
+        let errors = runtime.take_task_errors();
+        assert_eq!(errors.len(), 1, "expected one recorded script error: {errors:?}");
+        assert!(errors[0].contains("inserted boom"), "unexpected error: {errors:?}");
+
+        let csp_doc = TreeBuilder::parse("<html><body></body></html>").document();
+        let mut csp_runtime = JsRuntime::with_document(csp_doc).unwrap();
+        csp_runtime.install_csp_policy(&["script-src 'none'".to_string()]);
+        assert_eq!(
+            eval_str(
+                &mut csp_runtime,
+                r#"(()=>{const script=document.createElement('script');script.textContent='globalThis.blockedRan=true';document.body.appendChild(script);return globalThis.blockedRan===true})()"#,
+            ),
+            "false"
+        );
+        assert_eq!(csp_runtime.host_state.borrow().csp_violations.len(), 1);
+    }
+
+    #[test]
+    fn inserted_inline_scripts_use_child_realm_and_obey_iframe_sandbox() {
+        let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+        runtime
+            .eval(
+                r#"globalThis.scriptFrame=document.createElement('iframe');
+                   document.body.appendChild(scriptFrame);
+                   globalThis.sandboxFrame=document.createElement('iframe');
+                   sandboxFrame.setAttribute('sandbox','allow-same-origin');
+                   document.body.appendChild(sandboxFrame);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(()=>{
+                  const childScript=scriptFrame.contentDocument.createElement('script');
+                  childScript.textContent="globalThis.childInlineRealm=true;document.documentElement.setAttribute('data-inline-current',String(document.currentScript&&document.currentScript.ownerDocument===document))";
+                  scriptFrame.contentDocument.body.appendChild(childScript);
+                  const blocked=sandboxFrame.contentDocument.createElement('script');
+                  blocked.textContent="document.documentElement.setAttribute('data-sandbox-ran','yes')";
+                  sandboxFrame.contentDocument.body.appendChild(blocked);
+                  return [scriptFrame.contentWindow.childInlineRealm,
+                    scriptFrame.contentDocument.documentElement.getAttribute('data-inline-current'),
+                    typeof globalThis.childInlineRealm,
+                    sandboxFrame.contentDocument.documentElement.getAttribute('data-sandbox-ran')].join('|');
+                })()"#,
+            ),
+            "true|true|undefined|"
         );
     }
 

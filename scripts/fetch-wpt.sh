@@ -50,6 +50,7 @@ git_wpt sparse-checkout add \
   "/css/css-font-loading/font-face-reject.html" \
   "/css/css-font-loading/resources/Rochester.otf" \
   "/css/css-font-loading/resources/GenR102.woff2"
+git_wpt sparse-checkout add "/domparsing/createContextualFragment.html"
 git_wpt sparse-checkout add \
   "/html/semantics/forms/constraints/support/validator.js" \
   "/html/semantics/forms/constraints/form-validation-checkValidity.html" \

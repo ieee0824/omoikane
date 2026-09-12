@@ -1708,6 +1708,7 @@
       }
       refreshSlotAssignments();
       signalFallbackSlotChanges(parent);
+      executeRunnableInsertedScripts(children);
       return newNode;
     }
 
@@ -1728,6 +1729,7 @@
     });
     refreshSlotAssignments();
     signalFallbackSlotChanges(parent);
+    executeRunnableInsertedScripts([newNode]);
     return newNode;
   }
 
@@ -1943,6 +1945,7 @@
         if (children.length) queueMutation(this, "childList", { addedNodes: children, previousSibling });
         refreshSlotAssignments();
         signalFallbackSlotChanges(this);
+        executeRunnableInsertedScripts(children);
         return child;
       }
       this.__ensureNotAncestor(child);
@@ -1957,6 +1960,7 @@
       queueMutation(this, "childList", { addedNodes: [child], previousSibling });
       refreshSlotAssignments();
       signalFallbackSlotChanges(this);
+      executeRunnableInsertedScripts([child]);
       return child;
     }
 
@@ -4023,6 +4027,32 @@
     return null;
   }
 
+  // Script preparation is intentionally separate from parsing. Range and
+  // createElement scripts become runnable only after connection; innerHTML and
+  // parser-created scripts are never marked and therefore remain inert.
+  function executeRunnableInsertedScripts(roots) {
+    for (const root of roots) {
+      for (const id of __omoikane_collect_inserted_scripts(root.__id)) {
+        const node = wrapNode(id);
+        const source = __omoikane_prepare_inserted_inline_script(node.__id);
+        if (typeof source === "string") {
+          const doc = node.ownerDocument;
+          const view = doc && doc.defaultView;
+          if (view) {
+            try {
+              view.__omoikane_set_current_script(node.__id);
+              view.eval(source);
+            } catch (error) {
+              __omoikane_record_inserted_script_error(node.__id, String(error));
+            } finally {
+              view.__omoikane_set_current_script(null);
+            }
+          }
+        }
+      }
+    }
+  }
+
   class Range {
     constructor(doc) {
       this.__doc = doc;
@@ -4195,6 +4225,31 @@
       if (this.collapsed) { this.__endContainer = parent; this.__endOffset = indexOfNode(reference) < 0 ? parent.childNodes.length : indexOfNode(reference); }
       else if (this.__endContainer === parent && this.__endOffset === this.__startOffset) this.__endOffset += count;
       selectionRangeMutated(this);
+    }
+    createContextualFragment(markup) {
+      if (arguments.length === 0) {
+        throw new TypeError("Range.createContextualFragment requires 1 argument");
+      }
+      const doc = this.__doc;
+      const htmlDocument = doc.contentType === "text/html";
+      let context = this.__startContainer;
+      if (!context || context.nodeType !== 1) context = context && context.parentElement;
+      if (!context || (htmlDocument && context instanceof HTMLElement &&
+          context.localName.toLowerCase() === "html")) {
+        context = htmlDocument
+          ? (doc.body || doc.createElement("body"))
+          : (doc.documentElement || null);
+      }
+      if (!context) {
+        throw new DOMException("The range has no context element.", "InvalidStateError");
+      }
+      const fragment = wrapNode(__omoikane_parse_contextual_fragment(
+        context.__id,
+        String(markup),
+        !htmlDocument,
+      ));
+      stampOwnerDoc(fragment, doc);
+      return fragment;
     }
     surroundContents(newParent) {
       if ([9,10,11].includes(newParent.nodeType)) throw new DOMException("Invalid wrapper.", "InvalidNodeTypeError");
@@ -4598,6 +4653,9 @@
         );
       }
       const element = this.__own(wrapNode(__omoikane_create_element(name)));
+      if (element.localName.toLowerCase() === "script") {
+        __omoikane_mark_inserted_script(element.__id);
+      }
       const registry = customElementRegistryByDocument.get(this);
       if (registry) considerCustomElement(registry, element);
       return element;
@@ -4610,6 +4668,9 @@
       const qname = String(qualifiedName);
       const info = validateAndExtractNS(ns, qname);
       const node = this.__own(wrapNode(nativeCreateElementNS(info.namespace, qname)));
+      if (info.namespace === HTML_NAMESPACE && info.localName.toLowerCase() === "script") {
+        __omoikane_mark_inserted_script(node.__id);
+      }
       if (info.namespace === HTML_NAMESPACE) {
         const registry = customElementRegistryByDocument.get(this);
         if (registry) considerCustomElement(registry, node);
@@ -4659,6 +4720,8 @@
           if (qname !== "") validateAndExtractNS(ns, qname);
 
           const doc = wrapNode(__omoikane_create_document());
+          doc.__contentType = "application/xml";
+          doc.__documentURL = "about:blank";
           let root = null;
           if (qname !== "") root = doc.createElementNS(ns, qname);
           if (doctype !== undefined && doctype !== null) doc.appendChild(doctype);
@@ -4895,7 +4958,7 @@
     }
 
     get contentType() {
-      return "text/html";
+      return this.__contentType || "text/html";
     }
 
     // Omoikane's enforced CSP core exposes a stable per-Document snapshot for
@@ -14633,6 +14696,7 @@
       if (parsedId !== null && parsedId !== undefined) {
         const parsed = wrapNode(parsedId);
         parsed.__documentURL = "about:blank";
+        parsed.__contentType = mime;
         return parsed;
       }
       const error = document.implementation.createDocument("", "parsererror", null);
