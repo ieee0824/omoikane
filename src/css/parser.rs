@@ -841,13 +841,15 @@ impl Parser {
         }
 
         let (value_tokens, important) = split_important(&value_tokens);
-        if name == "font" {
+        let contains_var = tokens_contain_var_function(&value_tokens);
+        if name == "font" && !contains_var {
             return super::font_shorthand::expand(&value_tokens, important);
         }
         // Preserve comma-separated mask layer lists. The paint path uses the
         // per-layer values for compositing, positioning, sizing, and repeat
         // behavior instead of silently dropping every layer after the first.
-        let value = if (is_layered_background_property(&name)
+        let value = if (name.starts_with("--")
+            || is_layered_background_property(&name)
             || matches!(
                 name.as_str(),
                 "mask"
@@ -864,16 +866,20 @@ impl Parser {
                     | "-webkit-mask-size"
                     | "mask-repeat"
                     | "-webkit-mask-repeat"
-            ))
+            )
+            || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)
         {
             parse_comma_separated_value(&value_tokens)?
-        } else if name == "transition" || name.starts_with("transition-") {
+        } else if (name == "transition" || name.starts_with("transition-")) && !contains_var {
             // Transition lists need their top-level commas. The generic Value
             // parser intentionally discards commas, so retain the declaration
             // text for the dedicated transition grammar instead.
             Value::Keyword(render_tokens(&value_tokens).trim().to_string())
-        } else if matches!(name.as_str(), "mask" | "-webkit-mask") {
+        } else if matches!(
+            name.as_str(),
+            "mask" | "-webkit-mask" | "font" | "transition"
+        ) {
             // Preserve `/` even when authors omit surrounding whitespace, as
             // in the common `top center/contain` form.
             parse_value_tokens_with_mode(&value_tokens, true)?
@@ -979,6 +985,15 @@ fn has_top_level_comma(tokens: &[CssToken]) -> bool {
         }
         CssToken::Comma => depth == 0,
         _ => false,
+    })
+}
+
+fn tokens_contain_var_function(tokens: &[CssToken]) -> bool {
+    tokens.windows(2).any(|tokens| {
+        matches!(
+            tokens,
+            [CssToken::Ident(name), CssToken::ParenOpen] if name.eq_ignore_ascii_case("var")
+        )
     })
 }
 

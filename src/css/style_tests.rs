@@ -854,6 +854,204 @@ fn inline_custom_properties_resolve_in_inline_values() {
 }
 
 #[test]
+fn keeps_var_dependent_shorthands_pending_until_style_resolution() {
+    for (declaration, expected_name) in [
+        ("margin: var(--box)", "margin"),
+        ("background: linear-gradient(var(--stops))", "background"),
+        ("border: var(--border)", "border"),
+        ("transition: opacity var(--duration)", "transition"),
+        ("font: var(--font)", "font"),
+        ("all: var(--wide)", "all"),
+    ] {
+        let declarations = parse_style_attribute(declaration);
+        assert_eq!(declarations.len(), 1, "{declaration}");
+        assert_eq!(declarations[0].name, expected_name, "{declaration}");
+        assert!(
+            value_contains_var_function(&declarations[0].value),
+            "{declaration}"
+        );
+    }
+
+    let comma_value = parse_style_attribute("--stops: red, blue");
+    assert!(matches!(
+        comma_value.as_slice(),
+        [Declaration {
+            value: Value::CommaList(values),
+            ..
+        }] if values.len() == 2
+    ));
+}
+
+#[test]
+fn expands_var_dependent_box_shorthands_with_original_cascade_priority() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "--margin: 3px 5px 7px 11px; margin: var(--margin); margin-top: 10px; \
+         --padding: 2px 4px; padding: var(--padding)",
+    );
+
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(style.get("margin-top"), Some(&ComputedValue::Px(10.0)));
+    assert_eq!(style.get("margin-right"), Some(&ComputedValue::Px(5.0)));
+    assert_eq!(style.get("margin-bottom"), Some(&ComputedValue::Px(7.0)));
+    assert_eq!(style.get("margin-left"), Some(&ComputedValue::Px(11.0)));
+    assert_eq!(style.get("padding-top"), Some(&ComputedValue::Px(2.0)));
+    assert_eq!(style.get("padding-right"), Some(&ComputedValue::Px(4.0)));
+    assert_eq!(style.get("padding-bottom"), Some(&ComputedValue::Px(2.0)));
+    assert_eq!(style.get("padding-left"), Some(&ComputedValue::Px(4.0)));
+
+    element.set_attribute(
+        "style",
+        "--margin: 8px; margin: var(--margin) !important; margin-top: 10px",
+    );
+    let important = StyleResolver::new().computed_style(&element);
+    for side in ["top", "right", "bottom", "left"] {
+        assert_eq!(
+            important.get(&format!("margin-{side}")),
+            Some(&ComputedValue::Px(8.0)),
+            "important shorthand must win for {side}"
+        );
+    }
+}
+
+#[test]
+fn inherited_custom_property_keeps_the_complete_shorthand_token_stream() {
+    let parent = NodeHandle::element("section");
+    parent.set_attribute("style", "--margin: 3px 5px 7px 11px");
+    let child = NodeHandle::element("div");
+    child.set_attribute("style", "--margin: unset; margin: var(--margin)");
+    parent.append_child(child.clone());
+
+    let reset_child = NodeHandle::element("div");
+    reset_child.set_attribute("style", "--margin: initial; margin: var(--margin, 9px 8px)");
+    parent.append_child(reset_child.clone());
+
+    let style = StyleResolver::new().computed_style(&child);
+    assert_eq!(style.get("margin-top"), Some(&ComputedValue::Px(3.0)));
+    assert_eq!(style.get("margin-right"), Some(&ComputedValue::Px(5.0)));
+    assert_eq!(style.get("margin-bottom"), Some(&ComputedValue::Px(7.0)));
+    assert_eq!(style.get("margin-left"), Some(&ComputedValue::Px(11.0)));
+
+    let reset_style = StyleResolver::new().computed_style(&reset_child);
+    assert_eq!(reset_style.get("margin-top"), Some(&ComputedValue::Px(9.0)));
+    assert_eq!(
+        reset_style.get("margin-right"),
+        Some(&ComputedValue::Px(8.0))
+    );
+    assert_eq!(
+        reset_style.get("margin-bottom"),
+        Some(&ComputedValue::Px(9.0))
+    );
+    assert_eq!(
+        reset_style.get("margin-left"),
+        Some(&ComputedValue::Px(8.0))
+    );
+}
+
+#[test]
+fn inherited_custom_property_is_resolved_in_its_defining_scope() {
+    let parent = NodeHandle::element("section");
+    parent.set_attribute("style", "--base: 13px 17px; --derived: var(--base)");
+    let child = NodeHandle::element("div");
+    child.set_attribute("style", "--base: 9px; padding: var(--derived)");
+    parent.append_child(child.clone());
+
+    let style = StyleResolver::new().computed_style(&child);
+    assert_eq!(style.get("padding-top"), Some(&ComputedValue::Px(13.0)));
+    assert_eq!(style.get("padding-right"), Some(&ComputedValue::Px(17.0)));
+    assert_eq!(style.get("padding-bottom"), Some(&ComputedValue::Px(13.0)));
+    assert_eq!(style.get("padding-left"), Some(&ComputedValue::Px(17.0)));
+}
+
+#[test]
+fn expands_var_dependent_background_and_border_shorthands() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "--background: rgb(0, 128, 0); background: var(--background); \
+         --border: 5px solid rgb(0, 0, 0); --left: 3px dotted red; \
+         border: var(--border); border-left: var(--left)",
+    );
+
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(
+        style.get("background-color"),
+        Some(&ComputedValue::Color("#008000".to_string()))
+    );
+    assert_eq!(style.get("border-top-width"), Some(&ComputedValue::Px(5.0)));
+    assert_eq!(
+        style.get("border-top-style"),
+        Some(&ComputedValue::Keyword("solid".to_string()))
+    );
+    assert_eq!(
+        style.get("border-left-width"),
+        Some(&ComputedValue::Px(3.0))
+    );
+    assert_eq!(
+        style.get("border-left-style"),
+        Some(&ComputedValue::Keyword("dotted".to_string()))
+    );
+    assert_eq!(
+        style.get("border-left-color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
+}
+
+#[test]
+fn invalid_var_shorthand_uses_unset_instead_of_an_earlier_declaration() {
+    for pending in ["var(--missing)", "var(--too-many)"] {
+        let element = NodeHandle::element("div");
+        element.set_attribute(
+            "style",
+            &format!("--too-many: 1px 2px 3px 4px 5px; margin: 77px; margin: {pending}"),
+        );
+        let style = StyleResolver::new().computed_style(&element);
+        for side in ["top", "right", "bottom", "left"] {
+            assert_eq!(
+                style.get(&format!("margin-{side}")),
+                Some(&ComputedValue::Px(0.0)),
+                "invalid pending shorthand must reset {side}"
+            );
+        }
+    }
+}
+
+#[test]
+fn expands_var_dependent_all_transition_and_font_shorthands() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "--wide: initial; color: red; all: var(--wide); \
+         --transition: opacity 2s; transition: var(--transition); \
+         --font: italic 20px TestFace; font: var(--font)",
+    );
+
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("black".to_string()))
+    );
+    assert_eq!(
+        style.get("transition-property"),
+        Some(&ComputedValue::Keyword("opacity".to_string()))
+    );
+    assert_eq!(
+        style.get("transition-duration"),
+        Some(&ComputedValue::Keyword("2s".to_string()))
+    );
+    assert_eq!(
+        style.get("font-style"),
+        Some(&ComputedValue::Keyword("italic".to_string()))
+    );
+    assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(20.0)));
+    assert_eq!(
+        style.get("font-family"),
+        Some(&ComputedValue::Keyword("TestFace".to_string()))
+    );
+}
+
+#[test]
 fn inline_property_names_are_ascii_case_insensitive() {
     let element = NodeHandle::element("div");
     element.set_attribute("style", "COLOR: red");

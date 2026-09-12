@@ -2244,11 +2244,10 @@
         }
         return "";
       };
-      // Sets a kebab-case property. When the property is already declared, the
-      // last (winning) occurrence is updated in place and any earlier duplicates
-      // are dropped, so a block with redundant declarations (e.g. from cssText)
-      // normalizes to a single declaration that matches the last-wins reads of
-      // getValue/getPriority.
+      // Sets a kebab-case property. Existing occurrences are removed and the
+      // replacement is appended, matching CSSOM's declaration-list ordering.
+      // This also collapses redundant declarations (e.g. from cssText) to the
+      // single value returned by getValue/getPriority.
       const setValue = (kebab, value, priority) => {
         value = String(value);
         if (kebab === "transition" || kebab.startsWith("transition-") || validatesSpecialStyleProperties.has(kebab)) {
@@ -2257,16 +2256,9 @@
           value = normalized;
         }
         const decls = parseDecls();
-        const matches = decls.filter(d => d.name === kebab);
-        if (matches.length > 0) {
-          const winner = matches[matches.length - 1];
-          winner.value = value;
-          winner.priority = priority || "";
-          writeDecls(decls.filter(d => d.name !== kebab || d === winner));
-        } else {
-          decls.push({ name: kebab, value, priority: priority || "" });
-          writeDecls(decls);
-        }
+        const remaining = decls.filter(d => d.name !== kebab);
+        remaining.push({ name: kebab, value, priority: priority || "" });
+        writeDecls(remaining);
       };
       // Removes a kebab-case property and returns its previous value ("" if it
       // was not set), per CSSOM `removeProperty`. The returned value is the
