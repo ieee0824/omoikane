@@ -34,6 +34,15 @@ git_wpt sparse-checkout add "/css/css-cascade/scope-cssom.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-media.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-supports.html"
 git_wpt sparse-checkout add "/css/cssom/CSSContainerRule.tentative.html"
+git_wpt sparse-checkout add \
+  "/css/css-font-loading/fontfaceset-has.html" \
+  "/css/css-font-loading/fontfaceset-clear-css-connected.html" \
+  "/css/css-font-loading/fontfaceset-delete-css-connected.html" \
+  "/css/css-font-loading/fontfaceset-update-after-stylesheet-change.html" \
+  "/css/css-font-loading/fontfacesetloadevent-constructor.html" \
+  "/css/css-font-loading/font-face-reject.html" \
+  "/css/css-font-loading/resources/Rochester.otf" \
+  "/css/css-font-loading/resources/GenR102.woff2"
 git_wpt sparse-checkout add "/css/css-transforms/transform-getBoundingClientRect-001.html"
 git_wpt sparse-checkout add \
   "/css/support/parsing-testcommon.js" \

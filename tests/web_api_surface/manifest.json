@@ -305,6 +305,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.font-loading",
+      "area": "cssom",
+      "description": "FontFaceSet and CSSFontFaceRule expose live CSS-connected font descriptors",
+      "setup": "(() => { const style = document.createElement('style'); style.textContent = '@font-face { font-family: SurfaceFace; src: url(data:font/ttf;base64,AA==); font-weight: 400; }'; document.head.appendChild(style); globalThis.__surfaceFontSheet = style.sheet; globalThis.__surfaceFontRule = style.sheet.cssRules[0]; globalThis.__surfaceFontFace = Array.from(document.fonts).find(face => face.family === 'SurfaceFace'); __surfaceFontRule.style.setProperty('font-weight', '700'); })()",
+      "probe": "typeof FontFace === 'function' && document.fonts instanceof FontFaceSet && __surfaceFontRule instanceof CSSFontFaceRule && __surfaceFontSheet.cssRules[0] === __surfaceFontRule && __surfaceFontFace instanceof FontFace && __surfaceFontFace.weight === '700' && document.fonts.has(__surfaceFontFace)",
+      "baseline_supported": false
+    },
+    {
       "id": "css.container-size-query",
       "area": "cssom",
       "description": "Size container queries feed layout geometry back into cascade and expose CSSContainerRule",
