@@ -2104,6 +2104,195 @@ fn drops_declaration_when_var_cannot_be_resolved() {
 }
 
 #[test]
+fn invalid_color_values_do_not_override_valid_values_in_the_same_rule() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "h1 { \
+             color: blue; color: not-a-color; color: red, green; color: rgb(, 0, 0, 0); \
+             background-color: red; background-color: #12; \
+             border-top-color: green; border-top-color: bogus; \
+             border-right-color: purple; border-right-color: rgb(1, 2); \
+             border-bottom-color: orange; border-bottom-color: nope; \
+             border-left-color: teal; border-left-color: invalid; \
+             outline-color: navy; outline-color: unknown; \
+             text-decoration-color: maroon; text-decoration-color: wrong; \
+             }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    for (name, expected) in [
+        ("color", "blue"),
+        ("background-color", "red"),
+        ("border-top-color", "green"),
+        ("border-right-color", "purple"),
+        ("border-bottom-color", "orange"),
+        ("border-left-color", "teal"),
+        ("outline-color", "navy"),
+        ("text-decoration-color", "maroon"),
+    ] {
+        assert_eq!(
+            style.get(name),
+            Some(&ComputedValue::Color(expected.to_string())),
+            "invalid {name} declaration must be discarded"
+        );
+    }
+}
+
+#[test]
+fn invalid_color_at_higher_specificity_does_not_override_valid_color() {
+    let (_document, _body, title, _html) = sample_tree();
+    title.set_attribute("id", "target");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: blue; } #target { color: not-a-color; }").unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&title).get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+}
+
+#[test]
+fn invalid_color_at_higher_origin_does_not_override_valid_color() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::User,
+        parse_stylesheet("h1 { color: green; }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: not-a-color; }").unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&title).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn invalid_color_at_higher_layer_does_not_override_valid_color() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer base, override; \
+             @layer base { h1 { color: purple; } } \
+             @layer override { h1 { color: not-a-color; } }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&title).get("color"),
+        Some(&ComputedValue::Color("purple".to_string()))
+    );
+}
+
+#[test]
+fn invalid_color_after_var_substitution_does_not_override_valid_color() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ":root { --invalid-color: not-a-color; } \
+             h1 { color: blue; color: var(--invalid-color); }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&title).get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+}
+
+#[test]
+fn valid_color_grammar_remains_accepted() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { color: ReBeccAPurple; } \
+             h1 { \
+             color: inherit; \
+             background-color: #0f08; \
+             border-top-color: rgb(255, 0, 0); \
+             border-right-color: hsl(120, 100%, 50%); \
+             border-bottom-color: currentcolor; \
+             border-left-color: transparent; \
+             outline-color: currentcolor; \
+             text-decoration-color: #123456; \
+             }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("ReBeccAPurple".to_string()))
+    );
+    assert_eq!(
+        style.get("background-color"),
+        Some(&ComputedValue::Color("#0f08".to_string()))
+    );
+    assert_eq!(
+        style.get("border-top-color"),
+        Some(&ComputedValue::Color("#ff0000".to_string()))
+    );
+    assert_eq!(
+        style.get("border-right-color"),
+        Some(&ComputedValue::Color("#00ff00".to_string()))
+    );
+    assert_eq!(
+        style.get("border-bottom-color"),
+        Some(&ComputedValue::Color("currentcolor".to_string()))
+    );
+    assert_eq!(
+        style.get("border-left-color"),
+        Some(&ComputedValue::Color("transparent".to_string()))
+    );
+    assert_eq!(
+        style.get("outline-color"),
+        Some(&ComputedValue::Color("currentcolor".to_string()))
+    );
+    assert_eq!(
+        style.get("text-decoration-color"),
+        Some(&ComputedValue::Color("#123456".to_string()))
+    );
+
+    for invalid in [
+        "rgb(1,2,3,4,5)",
+        "rgb(10%, 20, 30%)",
+        "rgba(-2, 300, 400%, -0.5)",
+        "hsl(10, 50%, 0)",
+        "hsl(0, 50, 30%)",
+        "hsla(0, 50%, 30, 1)",
+    ] {
+        assert!(
+            !supports_declaration("color", invalid),
+            "accepted invalid color function: {invalid}"
+        );
+    }
+    assert!(supports_declaration(
+        "color",
+        "hsl(120 100% 50% / 0.5)"
+    ));
+}
+
+#[test]
 fn resolves_calc_with_var_lengths() {
     let (_document, body, _title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

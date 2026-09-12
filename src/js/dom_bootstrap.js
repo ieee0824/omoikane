@@ -254,6 +254,9 @@
     configurable: false,
   });
   const validatesSpecialStyleProperties = new Set([
+    "color", "background-color", "border-color",
+    "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
+    "outline-color", "text-decoration-color",
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
     "mask-composite", "-webkit-mask-composite",
@@ -5180,6 +5183,11 @@
       const key = propertyName(name);
       value = String(value);
       if (!key || value === "") return removeValue(key);
+      if (key === "transition" || key.startsWith("transition-") || validatesSpecialStyleProperties.has(key)) {
+        const normalized = __omoikane_normalize_style_value(key, value);
+        if (normalized === null) return;
+        value = normalized;
+      }
       const values = declarations().filter(declaration => declaration.name !== key);
       values.push({ name: key, value: value + (priority ? " !important" : "") });
       write(values, key);

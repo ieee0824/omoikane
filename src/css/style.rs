@@ -1364,6 +1364,42 @@ fn is_supported_pointer_events_keyword(value: &str) -> bool {
         || value.eq_ignore_ascii_case("all")
 }
 
+fn is_color_property(name: &str) -> bool {
+    name.eq_ignore_ascii_case("color")
+        || name.eq_ignore_ascii_case("background-color")
+        || name.eq_ignore_ascii_case("border-color")
+        || name.eq_ignore_ascii_case("border-top-color")
+        || name.eq_ignore_ascii_case("border-right-color")
+        || name.eq_ignore_ascii_case("border-bottom-color")
+        || name.eq_ignore_ascii_case("border-left-color")
+        || name.eq_ignore_ascii_case("outline-color")
+        || name.eq_ignore_ascii_case("text-decoration-color")
+}
+
+fn validate_color_value(value: &Value) -> DeclarationValidation {
+    if let Value::Keyword(keyword) = value {
+        let lower = keyword.to_ascii_lowercase();
+        if is_css_wide_keyword(&lower) || lower == "currentcolor" {
+            return DeclarationValidation::Unvalidated;
+        }
+    }
+
+    let valid = match value {
+        Value::Keyword(color) | Value::Color(color) => {
+            crate::paint::color::parse_color(color).is_some()
+        }
+        Value::Function { .. } => {
+            crate::paint::color::parse_color(&render_value(value)).is_some()
+        }
+        _ => false,
+    };
+    if valid {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    }
+}
+
 /// Validates a resolved declaration value against the property's grammar.
 ///
 /// This is the single extension point for per-property value validation.
@@ -1372,6 +1408,14 @@ fn is_supported_pointer_events_keyword(value: &str) -> bool {
 /// property, match its name and return [`DeclarationValidation::Valid`] /
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
+    // Color shorthands are expanded before entering the cascade. Validate all
+    // resulting longhands here, after var() substitution and before selecting
+    // a winner, so one malformed color cannot hide an earlier valid candidate.
+    // This must precede the generic comma-list handling because a single color
+    // never accepts a top-level comma-separated list.
+    if is_color_property(name) {
+        return validate_color_value(value);
+    }
     if let Value::CommaList(values) = value {
         let is_mask_layer_property = matches!(
             name.to_ascii_lowercase().as_str(),

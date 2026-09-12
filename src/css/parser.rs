@@ -1112,6 +1112,34 @@ fn parse_function_arguments_with_mode(
     Ok(arguments)
 }
 
+fn has_empty_top_level_comma_segment(tokens: &[CssToken]) -> bool {
+    let mut depth = 0usize;
+    let mut segment_has_value = false;
+    let mut saw_comma = false;
+    for token in tokens {
+        match token {
+            CssToken::ParenOpen => {
+                depth += 1;
+                segment_has_value = true;
+            }
+            CssToken::ParenClose => {
+                depth = depth.saturating_sub(1);
+                segment_has_value = true;
+            }
+            CssToken::Comma if depth == 0 => {
+                if !segment_has_value {
+                    return true;
+                }
+                saw_comma = true;
+                segment_has_value = false;
+            }
+            CssToken::Whitespace => {}
+            _ => segment_has_value = true,
+        }
+    }
+    saw_comma && !segment_has_value
+}
+
 fn parse_value_sequence_with_mode(
     tokens: &[CssToken],
     preserve_math_delims: bool,
@@ -1152,6 +1180,19 @@ fn parse_value_sequence_with_mode(
                         render_tokens(&tokens[start..end]).trim()
                     )));
                 } else {
+                    if (name.eq_ignore_ascii_case("rgb")
+                        || name.eq_ignore_ascii_case("rgba")
+                        || name.eq_ignore_ascii_case("hsl")
+                        || name.eq_ignore_ascii_case("hsla"))
+                        && has_empty_top_level_comma_segment(&tokens[start..end])
+                    {
+                        values.push(Value::Keyword(format!(
+                            "{name}({})",
+                            render_tokens(&tokens[start..end])
+                        )));
+                        index = end + 1;
+                        continue;
+                    }
                     let arguments = if name.eq_ignore_ascii_case("calc") {
                         parse_function_arguments_with_mode(&tokens[start..end], true)?
                     } else {

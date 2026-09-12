@@ -11156,7 +11156,16 @@ fn normalize_style_value_native(
         crate::css::normalize_transition_longhand(&property, &value)
     } else if matches!(
         property.as_str(),
-        "clip-path"
+        "color"
+            | "background-color"
+            | "border-color"
+            | "border-top-color"
+            | "border-right-color"
+            | "border-bottom-color"
+            | "border-left-color"
+            | "outline-color"
+            | "text-decoration-color"
+            | "clip-path"
             | "-webkit-clip-path"
             | "mask"
             | "-webkit-mask"
@@ -21962,6 +21971,59 @@ b</textarea></form>"#);
             ),
             "5px"
         );
+    }
+
+    #[test]
+    fn style_color_properties_ignore_invalid_assignments() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div);
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r##"
+                const target = document.querySelector("div");
+                target.style.color = "blue";
+                target.style.color = "not-a-color";
+                target.style.backgroundColor = "red";
+                target.style.backgroundColor = "#12";
+                target.style.setProperty("border-top-color", "green");
+                target.style.setProperty("border-top-color", "rgb(1, 2)");
+                target.style.outlineColor = "purple";
+                target.style.outlineColor = "red, green";
+                const sheetNode = document.createElement("style");
+                sheetNode.textContent = "div { color: green; }";
+                document.appendChild(sheetNode);
+                const rule = sheetNode.sheet.cssRules[0];
+                rule.style.color = "not-a-color";
+                globalThis.ruleColor = rule.style.color;
+                "##,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "JSON.stringify([target.style.color, target.style.backgroundColor, target.style.borderTopColor, target.style.outlineColor])",
+            ),
+            r#"["blue","red","green","purple"]"#,
+        );
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).color"),
+            "rgb(0, 0, 255)",
+        );
+        assert_eq!(eval_str(&mut runtime, "ruleColor"), "green");
+        assert!(!runtime
+            .eval("CSS.supports('color', 'not-a-color')")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval("CSS.supports('color', 'currentcolor')")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]
