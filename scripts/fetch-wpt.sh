@@ -36,6 +36,7 @@ git_wpt sparse-checkout add "/css/css-cascade/scope-supports.html"
 git_wpt sparse-checkout add \
   "/css/css-cascade/layer-basic.html" \
   "/css/css-cascade/layer-important.html" \
+  "/css/css-cascade/layer-keyframes-override.html" \
   "/css/css-cascade/layer-vs-inline-style.html" \
   "/css/css-cascade/layer-rules-cssom.html" \
   "/css/css-cascade/parsing/layer.html" \
