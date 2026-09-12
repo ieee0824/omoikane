@@ -5797,27 +5797,34 @@ fn text_decoration_underline_draws_pixels_below_text() {
 
     // Find the bottom-most row that contains colored pixels in the no-underline render.
     // This is the lower boundary of the text glyph area.
-    let glyph_bottom: u32 = (0..h)
-        .filter(|&y| (0..w).any(|x| canvas_none.pixel(x, y).map_or(false, |c| c.a > 0)))
-        .last()
+    let glyph_rows: Vec<u32> = (0..h)
+        .filter(|&y| (0..w).any(|x| canvas_none.pixel(x, y).is_some_and(|c| c.a > 0)))
+        .collect();
+    let glyph_top = *glyph_rows
+        .first()
         .expect("no-decoration render must contain at least one colored pixel");
+    let glyph_bottom = *glyph_rows.last().unwrap();
 
     // Rows strictly below the glyph area.
     let below_glyph_start = glyph_bottom + 1;
 
-    // Compare the two canvases: all differing pixels must be strictly below glyph_bottom,
-    // and at least one differing pixel must exist there.
+    // Compare the two canvases: the underline may touch the glyph's final
+    // raster row, but it must not alter any row above it and must extend below.
     let mut diff_below = false;
-    let mut diff_at_or_above = false;
+    let mut diff_above = false;
+    let mut diff_top = h;
+    let mut diff_bottom = 0;
     for y in 0..h {
         for x in 0..w {
             let a_ul = canvas_underline.pixel(x, y).map_or(0, |c| c.a);
             let a_none = canvas_none.pixel(x, y).map_or(0, |c| c.a);
             if a_ul != a_none {
+                diff_top = diff_top.min(y);
+                diff_bottom = diff_bottom.max(y);
                 if y > glyph_bottom {
                     diff_below = true;
-                } else {
-                    diff_at_or_above = true;
+                } else if y < glyph_bottom {
+                    diff_above = true;
                 }
             }
         }
@@ -5829,9 +5836,9 @@ fn text_decoration_underline_draws_pixels_below_text() {
          (glyph_bottom={glyph_bottom}, checked rows {below_glyph_start}..{h})"
     );
     assert!(
-        !diff_at_or_above,
-        "text-decoration: underline should only differ from none below the glyph area \
-         (glyph_bottom={glyph_bottom})"
+        !diff_above,
+        "text-decoration: underline must not differ from none above the glyph area \
+         (glyph={glyph_top}..{glyph_bottom}, diff={diff_top}..{diff_bottom})"
     );
 }
 

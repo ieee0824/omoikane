@@ -49,6 +49,19 @@ floating-point coordinate rounding alone produces 630 false differing pixels
 when that operation is applied to the fixed-font image itself. The strict
 comparison therefore checks the stored pixels without involving image drawing.
 
+## Baseline refresh review for #677 (2026-09-12)
+
+The CSS em-square correction changed 7,931 pixels within the introduction text
+region `(60, 101)`–`(729, 152)`. It did not change wrapping, link positions,
+bars, or the Acid2 face. The old and new text-region crops were inspected before
+refreshing: the new glyph size and baseline follow the same Liberation Sans
+`unitsPerEm` scale used by shaping and layout. The strict local-baseline test
+passes with zero changed pixels after the refresh.
+
+The uncompressed old baseline, new render, and diff remain in the development
+evidence under `/workspace/.artifacts/issues677/acid2-baseline-review/`. The
+displayed crop was losslessly compressed and the original images were retained.
+
 Font source:
 [official Liberation Fonts 2.1.5 release](https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5),
 [`liberation-fonts-ttf-2.1.5.tar.gz`](https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz).

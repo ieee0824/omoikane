@@ -1291,3 +1291,27 @@ fn system_collection_rejects_face_counts_without_an_offset_table() {
     assert!(database.faces().is_empty());
     assert_eq!(database.unreadable_paths(), &[path.canonicalize().unwrap()]);
 }
+
+#[test]
+fn css_pixel_size_uses_the_em_square_for_shaping_and_rasterization() {
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/acid2/LiberationSans-Regular.ttf").to_vec(),
+    )
+    .unwrap();
+    let shaped = font
+        .shape_text("A", 20.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    let raster = font.rasterize_glyph(shaped[0].glyph_id, 20.0).unwrap();
+    let shaped_advance = shaped[0].x_advance;
+
+    assert!(
+        (raster.advance_x - shaped_advance).abs() < 0.0001,
+        "raster advance {} must use the same em-square scale as shaped advance {}",
+        raster.advance_x,
+        shaped_advance
+    );
+    assert!(
+        (font.glyph_advance('A', 20.0) - shaped_advance).abs() < 0.0001,
+        "character advance must use the same em-square scale as shaping"
+    );
+}

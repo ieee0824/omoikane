@@ -12,7 +12,9 @@ use crate::css::{
     TransformReferenceBox, parse_perspective_with_origin, parse_transform_with_origin,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, WebFontRegistry};
+use crate::font::{
+    Font, FontFamilyKey, FontStyle, FontVariantKey, FontWeight, LayoutFontMetrics, WebFontRegistry,
+};
 use crate::http::{Client, Url};
 use crate::paint::Image;
 use rusqlite::{Connection, params};
@@ -88,6 +90,8 @@ pub(crate) fn with_image_animation_time<T>(time_ms: u64, f: impl FnOnce() -> T) 
 struct LayoutFontContext {
     system_fonts: Vec<Arc<Font>>,
     web_fonts: Option<Arc<WebFontRegistry>>,
+    exact_metrics: bool,
+    metrics_cache: HashMap<(Option<FontFamilyKey>, FontVariantKey, u32), LayoutFontMetrics>,
 }
 
 /// Runs `f` with the given fonts installed as the thread-local layout font
@@ -109,7 +113,12 @@ pub(crate) fn with_layout_fonts<T>(
     }
 
     LAYOUT_FONTS.with(|cell| {
-        let previous = cell.replace(Some(LayoutFontContext { system_fonts, web_fonts }));
+        let previous = cell.replace(Some(LayoutFontContext {
+            system_fonts,
+            web_fonts,
+            exact_metrics: true,
+            metrics_cache: HashMap::new(),
+        }));
         let _guard = LayoutFontsGuard(previous);
         f()
     })

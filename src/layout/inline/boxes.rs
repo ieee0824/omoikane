@@ -30,6 +30,8 @@ fn face_metrics(metrics: FontMetrics) -> (f32, f32) {
         let context = fonts.get_or_insert_with(|| super::super::LayoutFontContext {
             system_fonts: load_layout_fonts(),
             web_fonts: None,
+            exact_metrics: false,
+            metrics_cache: HashMap::new(),
         });
         let selected = select_text_font(
             "layout",

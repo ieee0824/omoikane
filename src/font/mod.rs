@@ -270,6 +270,19 @@ impl Font {
         self.face_index
     }
 
+    /// Converts a CSS pixel em-square size to ab_glyph's full-height scale.
+    ///
+    /// `ab_glyph` defines `PxScale` against `ascent - descent`, while CSS
+    /// `font-size` and OpenType shaping scale against `unitsPerEm`.
+    fn ab_glyph_scale_for_css_px(&self, size_px: f32) -> f32 {
+        self.inner
+            .units_per_em()
+            .filter(|units| *units > 0.0)
+            .map_or(size_px, |units| {
+                size_px * self.inner.height_unscaled() / units
+            })
+    }
+
     /// Rasterize a character at a given font size.
     pub fn rasterize(&self, ch: char, size_px: f32) -> Result<GlyphRaster, FontError> {
         // Get glyph ID for character
@@ -277,7 +290,7 @@ impl Font {
 
         // Get scaled advance width for layout
         let advance_x = {
-            let scaled = self.inner.as_scaled(size_px);
+            let scaled = self.inner.as_scaled(self.ab_glyph_scale_for_css_px(size_px));
             scaled.h_advance(glyph_id)
         };
 
@@ -322,7 +335,10 @@ impl Font {
     /// Rasterizes a glyph selected by the shaping engine.
     pub fn rasterize_glyph(&self, glyph_id: u16, size_px: f32) -> Result<GlyphRaster, FontError> {
         let glyph_id = GlyphId(glyph_id);
-        let advance_x = self.inner.as_scaled(size_px).h_advance(glyph_id);
+        let advance_x = self
+            .inner
+            .as_scaled(self.ab_glyph_scale_for_css_px(size_px))
+            .h_advance(glyph_id);
         self.rasterize_glyph_id(glyph_id, size_px, advance_x)
     }
 
@@ -333,7 +349,7 @@ impl Font {
         advance_x: f32,
     ) -> Result<GlyphRaster, FontError> {
         // Create a glyph with scale at position (0,0)
-        let glyph = glyph_id.with_scale(size_px);
+        let glyph = glyph_id.with_scale(self.ab_glyph_scale_for_css_px(size_px));
 
         // Get the outlined glyph (None for space characters and glyphs with no outline)
         let Some(outlined) = self.inner.outline_glyph(glyph) else {
@@ -398,7 +414,7 @@ impl Font {
     /// Get the horizontal advance width for a character at a given font size.
     pub fn glyph_advance(&self, ch: char, size_px: f32) -> f32 {
         let glyph_id = self.inner.glyph_id(ch);
-        let scaled = self.inner.as_scaled(size_px);
+        let scaled = self.inner.as_scaled(self.ab_glyph_scale_for_css_px(size_px));
         scaled.h_advance(glyph_id)
     }
 
@@ -406,7 +422,7 @@ impl Font {
     pub fn glyph_kerning(&self, previous: char, current: char, size_px: f32) -> f32 {
         let prev_id = self.inner.glyph_id(previous);
         let curr_id = self.inner.glyph_id(current);
-        let scaled = self.inner.as_scaled(size_px);
+        let scaled = self.inner.as_scaled(self.ab_glyph_scale_for_css_px(size_px));
         scaled.kern(prev_id, curr_id)
     }
 
@@ -1640,7 +1656,7 @@ impl Font {
     ///
     /// This sums advances and pair kerning for all characters in the string.
     pub fn measure_text_width(&self, text: &str, size_px: f32) -> f32 {
-        let scaled = self.inner.as_scaled(size_px);
+        let scaled = self.inner.as_scaled(self.ab_glyph_scale_for_css_px(size_px));
         let mut width = 0.0;
         let mut previous_id = None;
 

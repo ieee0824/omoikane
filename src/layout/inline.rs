@@ -1,5 +1,6 @@
 //! Inline layout: text segments, line breaking, and inline image handling.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
@@ -8,9 +9,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
-    Font, FontFamilyKey, FontStyle, FontWeight, ShapingDirection, grapheme_spacing_boundaries,
-    is_zero_advance_character, load_default_text_fonts_shared, select_text_font,
-    shape_text_with_fallback,
+    Font, FontFamilyKey, FontStyle, FontVariantKey, FontWeight, ShapingDirection,
+    grapheme_spacing_boundaries, is_zero_advance_character, load_default_text_fonts_shared,
+    select_text_font, shape_text_with_fallback,
 };
 use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
@@ -1911,6 +1912,41 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
     metrics.font_style = computed_font_property(style, "font-style")
         .map(FontStyle::parse)
         .unwrap_or_default();
+    LAYOUT_FONTS.with(|cell| {
+        let mut fonts = cell.borrow_mut();
+        let Some(context) = fonts.as_mut() else {
+            return;
+        };
+        if !context.exact_metrics {
+            return;
+        }
+        let variant = FontVariantKey::new(metrics.font_weight, metrics.font_style);
+        let key = (metrics.font_family, variant, metrics.font_size.to_bits());
+        let actual = context.metrics_cache.get(&key).copied().or_else(|| {
+            let selected = select_text_font(
+                "layout",
+                metrics.font_family,
+                variant,
+                context.web_fonts.as_deref(),
+                &context.system_fonts,
+            );
+            let actual = selected
+                .as_ref()
+                .map(AsRef::as_ref)
+                .or_else(|| context.system_fonts.first().map(AsRef::as_ref))
+                .map(|font| font.layout_metrics(metrics.font_size));
+            if let Some(actual) = actual {
+                context.metrics_cache.insert(key, actual);
+            }
+            actual
+        });
+        if let Some(actual) = actual {
+            metrics.ascent = actual.ascent;
+            metrics.descent = actual.descent;
+            metrics.line_gap = actual.line_gap;
+            metrics.average_advance = actual.average_advance;
+        }
+    });
     metrics
 }
 
@@ -2651,11 +2687,26 @@ fn push_line(
     let baseline = fragments
         .iter()
         .filter_map(|fragment| match fragment.vertical_align {
-            VerticalAlign::Baseline | VerticalAlign::Length(_) => Some(fragment_ascent(fragment)),
+            VerticalAlign::Baseline | VerticalAlign::Length(_) => {
+                let ascent = fragment_ascent(fragment);
+                match &fragment.content {
+                    InlineFragmentContent::Text(_) => {
+                        let leading =
+                            (fragment.rect.height - ascent - fragment.metrics.descent) / 2.0;
+                        Some(leading + ascent)
+                    }
+                    InlineFragmentContent::AtomicInline(_)
+                    | InlineFragmentContent::Image(_, _)
+                    | InlineFragmentContent::FormControl(_, _, _) => Some(ascent),
+                    InlineFragmentContent::InlineBox(_)
+                    | InlineFragmentContent::GeneratedBox(_)
+                    | InlineFragmentContent::IconFormControl(_, _, _, _) => None,
+                }
+            }
             _ => None,
         })
-        .fold(0.0f32, f32::max)
-        .max(if has_atomic_inline { 0.0 } else { height * 0.8 });
+        .reduce(f32::max)
+        .unwrap_or(if has_atomic_inline { 0.0 } else { height * 0.8 });
 
     for fragment in fragments.iter_mut() {
         fragment.rect.y = match fragment.vertical_align {
@@ -2795,6 +2846,8 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
             *fonts_ref = Some(super::LayoutFontContext {
                 system_fonts: load_layout_fonts(),
                 web_fonts: None,
+                exact_metrics: false,
+                metrics_cache: HashMap::new(),
             });
         }
 
