@@ -18,6 +18,7 @@ pub(crate) enum ResourceType {
     Script,
     Style,
     Connect,
+    Font,
 }
 
 impl ResourceType {
@@ -26,6 +27,7 @@ impl ResourceType {
             Self::Script => "script-src",
             Self::Style => "style-src",
             Self::Connect => "connect-src",
+            Self::Font => "font-src",
         }
     }
 
@@ -34,6 +36,7 @@ impl ResourceType {
             Self::Script => "script",
             Self::Style => "style",
             Self::Connect => "connect",
+            Self::Font => "font",
         }
     }
 }

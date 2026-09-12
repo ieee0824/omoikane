@@ -5074,52 +5074,11 @@
   // serialization; it understands strings, comments and nested blocks.
   function splitCssRules(source) {
     const css = String(source || "");
-    let expected;
     try {
-      expected = __omoikane_css_rule_count(css);
+      return JSON.parse(__omoikane_css_rule_sources(css));
     } catch (error) {
       throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError");
     }
-    const rules = [];
-    let start = 0, depth = 0, parenDepth = 0, bracketDepth = 0;
-    let quote = "", comment = false;
-    for (let i = 0; i < css.length; i++) {
-      const ch = css[i], next = css[i + 1];
-      if (comment) {
-        if (ch === "*" && next === "/") { comment = false; i++; }
-        continue;
-      }
-      if (quote) {
-        if (ch === "\\") i++;
-        else if (ch === quote) quote = "";
-        continue;
-      }
-      if (ch === "/" && next === "*") { comment = true; i++; continue; }
-      if (ch === "'" || ch === '"') { quote = ch; continue; }
-      if (ch === "(") parenDepth++;
-      else if (ch === ")") parenDepth = Math.max(0, parenDepth - 1);
-      else if (ch === "[") bracketDepth++;
-      else if (ch === "]") bracketDepth = Math.max(0, bracketDepth - 1);
-      else if (ch === "{" && parenDepth === 0 && bracketDepth === 0) depth++;
-      else if (ch === "}" && parenDepth === 0 && bracketDepth === 0) {
-        depth--;
-        if (depth === 0) {
-          const text = css.slice(start, i + 1).trim();
-          if (text) rules.push(text);
-          start = i + 1;
-        }
-      } else if (ch === ";" && depth === 0 && parenDepth === 0 && bracketDepth === 0) {
-        const text = css.slice(start, i + 1).trim();
-        if (text) rules.push(text);
-        start = i + 1;
-      }
-    }
-    const tail = css.slice(start).trim();
-    if (tail) rules.push(tail);
-    if (rules.length !== expected) {
-      throw new DOMException("Unable to enumerate stylesheet rules.", "SyntaxError");
-    }
-    return rules;
   }
 
   function scopeRulesValid(source) {
@@ -5127,30 +5086,76 @@
     catch (_) { return false; }
   }
 
-  function declarationView(block) {
-    const declarations = [];
-    for (const part of block.split(";")) {
-      const colon = part.indexOf(":");
-      if (colon < 0) continue;
-      const name = part.slice(0, colon).trim().toLowerCase();
-      const value = part.slice(colon + 1).trim();
-      if (name && value) declarations.push({ name, value });
-    }
+  function declarationView(block, onChange = null) {
+    let source = String(block || "");
+    const declarations = () => JSON.parse(__omoikane_css_declarations(source)).map(
+      ([name, value]) => ({ name, value })
+    );
+    const serialize = values => values.map(
+      declaration => declaration.name + ": " + declaration.value + ";"
+    ).join(" ");
+    const propertyName = name => String(name).replace(/[A-Z]/g, letter =>
+      "-" + letter.toLowerCase()).toLowerCase();
+    const write = (values, changedName) => {
+      source = serialize(values);
+      if (onChange) onChange(source, changedName);
+    };
+    const getValue = name => {
+      const key = propertyName(name);
+      const found = declarations().filter(declaration => declaration.name === key);
+      return found.length ? found[found.length - 1].value : "";
+    };
+    const setValue = (name, value, priority = "") => {
+      const key = propertyName(name);
+      value = String(value);
+      if (!key || value === "") return removeValue(key);
+      const values = declarations().filter(declaration => declaration.name !== key);
+      values.push({ name: key, value: value + (priority ? " !important" : "") });
+      write(values, key);
+    };
+    const removeValue = name => {
+      const key = propertyName(name);
+      const values = declarations();
+      let previous = "";
+      for (let index = values.length - 1; index >= 0; index--) {
+        if (values[index].name === key) { previous = values[index].value; break; }
+      }
+      if (previous !== "") write(values.filter(declaration => declaration.name !== key), key);
+      return previous;
+    };
     const target = {
-      getPropertyValue(name) {
-        const key = String(name).toLowerCase();
-        const found = declarations.filter(d => d.name === key);
-        return found.length ? found[found.length - 1].value : "";
+      getPropertyValue(name) { return getValue(name); },
+      getPropertyPriority(name) {
+        return /\s*!\s*important\s*$/i.test(getValue(name)) ? "important" : "";
       },
-      item(index) { return declarations[Number(index) | 0]?.name || ""; },
-      get length() { return declarations.length; },
-      get cssText() { return declarations.map(d => d.name + ": " + d.value + ";").join(" "); },
+      setProperty(name, value, priority = "") {
+        if (value === null || value === "") { removeValue(name); return; }
+        const important = String(priority).toLowerCase() === "important";
+        if (priority !== "" && !important) return;
+        setValue(name, value, important ? "important" : "");
+      },
+      removeProperty(name) { return removeValue(name); },
+      item(index) { return declarations()[Number(index) | 0]?.name || ""; },
+      get length() { return declarations().length; },
+      get cssText() { return serialize(declarations()); },
+      set cssText(value) {
+        source = String(value == null ? "" : value);
+        const parsed = declarations();
+        write(parsed, null);
+      },
     };
     return new Proxy(target, {
       get(object, prop) {
         if (typeof prop === "symbol" || prop in object) return object[prop];
-        const name = String(prop).replace(/[A-Z]/g, m => "-" + m.toLowerCase());
-        return object.getPropertyValue(name);
+        return object.getPropertyValue(prop);
+      },
+      set(object, prop, value) {
+        if (typeof prop !== "string") return true;
+        if (prop === "cssText") { object.cssText = value; return true; }
+        if (prop in object) return true;
+        if (value === null || value === undefined || value === "") removeValue(prop);
+        else setValue(prop, value);
+        return true;
       },
     });
   }
@@ -5188,7 +5193,13 @@
       const close = this.__text.lastIndexOf("}");
       this.__hasBlock = open >= 0 && close > open;
       this.__selectorText = this.__hasBlock ? this.__text.slice(0, open).trim() : "";
-      this.__style = declarationView(this.__hasBlock ? this.__text.slice(open + 1, close) : "");
+      this.__style = declarationView(
+        this.__hasBlock ? this.__text.slice(open + 1, close) : "",
+        declarations => {
+          this.__text = this.selectorText + " { " + declarations + " }";
+          if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
+        }
+      );
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get selectorText() { return this.__selectorText; }
@@ -5208,6 +5219,30 @@
         ? this.selectorText + " { " + this.style.cssText + " }"
         : this.__text.trim();
     }
+    get style() { return this.__style; }
+  }
+
+  class CSSFontFaceRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__text = text;
+      this.__sheet = sheet;
+      this.__index = index;
+      const open = cssRuleBlockStart(text);
+      const close = text.lastIndexOf("}");
+      this.__style = declarationView(
+        open >= 0 && close > open ? text.slice(open + 1, close) : "",
+        (declarations, name) => {
+          this.__text = "@font-face { " + declarations + " }";
+          if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
+          if (typeof globalThis.__omoikane_font_face_rule_changed === "function") {
+            globalThis.__omoikane_font_face_rule_changed(this, name);
+          }
+        }
+      );
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get type() { return 5; }
+    get cssText() { return "@font-face { " + this.style.cssText + " }"; }
     get style() { return this.__style; }
   }
 
@@ -5384,7 +5419,9 @@
   }
 
   function createCssRule(text, sheet = null, index = -1) {
-    return /^\s*@container(?=\s|\/\*|\()/i.test(text)
+    return /^\s*@font-face(?=\s|\/\*|\{)/i.test(text)
+      ? new CSSFontFaceRule(text, sheet, index)
+      : /^\s*@container(?=\s|\/\*|\()/i.test(text)
       ? new CSSContainerRule(text, sheet, index)
       : /^\s*@scope(?=\s|\/\*|\(|\{)/i.test(text)
       ? new CSSScopeRule(text, sheet, index)
@@ -5396,9 +5433,7 @@
   class CSSRuleList {
     constructor(sheet) { this.__sheet = sheet; }
     __rules() {
-      return this.__sheet.__ruleTexts().map(
-        (text, index) => createCssRule(text, this.__sheet, index)
-      );
+      return this.__sheet.__ruleTexts().map((_text, index) => this.__sheet.__ruleAt(index));
     }
     item(index) { return this.__rules()[Number(index) | 0] || null; }
     get length() { return this.__rules().length; }
@@ -5626,6 +5661,7 @@
       this.__rules = splitCssRules(ownerText);
       this.__ownerText = this.ownerNode ? this.ownerNode.textContent : ownerText;
       this.__ruleViews = new Set();
+      this.__ruleCache = [];
       this.__cssRules = ruleListProxy(this);
       this.__parentRule = null;
     }
@@ -5639,6 +5675,7 @@
           rule.__index = -1;
         }
         this.__ruleViews.clear();
+        this.__ruleCache = [];
         this.__rules = splitCssRules(text);
         this.__ownerText = text;
       }
@@ -5663,10 +5700,19 @@
       if (this.__parentRule) this.__parentRule.__syncFromInner();
     }
     __registerRuleView(rule) { this.__ruleViews.add(rule); }
+    __ruleAt(index) {
+      let rule = this.__ruleCache[index];
+      if (!rule) {
+        rule = createCssRule(this.__rules[index], this, index);
+        this.__ruleCache[index] = rule;
+      }
+      return rule;
+    }
     __shiftRuleViewsForInsert(index) {
       for (const rule of this.__ruleViews) {
         if (rule.__index >= index) rule.__index++;
       }
+      this.__ruleCache.splice(index, 0, null);
     }
     __shiftRuleViewsForDelete(index) {
       for (const rule of Array.from(this.__ruleViews)) {
@@ -5678,6 +5724,7 @@
           rule.__index--;
         }
       }
+      this.__ruleCache.splice(index, 1);
     }
     __replaceRule(index, text) {
       const rules = this.__ruleTexts();
@@ -5740,6 +5787,7 @@
         rule.__index = -1;
       }
       this.__ruleViews.clear();
+      this.__ruleCache = [];
       this.__markDirty();
     }
     replace(text) {
@@ -5760,6 +5808,7 @@
             rule.__index = -1;
           }
           this.__ruleViews.clear();
+          this.__ruleCache = [];
           this.__markDirty();
           return this;
         } finally {
@@ -10772,6 +10821,7 @@
   globalThis.CSSStyleSheet = CSSStyleSheet;
   globalThis.CSSRuleList = CSSRuleList;
   globalThis.CSSStyleRule = CSSStyleRule;
+  globalThis.CSSFontFaceRule = CSSFontFaceRule;
   globalThis.CSSSupportsRule = CSSSupportsRule;
   globalThis.CSSContainerRule = CSSContainerRule;
   globalThis.CSSGroupingRule = CSSGroupingRule;

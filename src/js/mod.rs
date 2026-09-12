@@ -53,6 +53,10 @@ mod node_lifetime_tests;
 #[cfg(test)]
 mod query_tests;
 mod module_fetch;
+mod font_descriptors;
+mod font_loading;
+#[cfg(test)]
+mod font_loading_tests;
 #[cfg(test)]
 mod module_loading_tests;
 use module_fetch::{ModuleFetch, ModuleFetchPool};
@@ -300,7 +304,11 @@ impl<F: Future> Future for ActiveDocumentFuture<F> {
     }
 }
 
-const DOM_BOOTSTRAP: &str = include_str!("dom_bootstrap.js");
+const DOM_BOOTSTRAP: &str = concat!(
+    include_str!("dom_bootstrap.js"),
+    "\n",
+    include_str!("font_loading.js")
+);
 
 #[derive(Debug)]
 struct BrowserHostHooks;
@@ -1044,6 +1052,7 @@ struct HostState {
     /// the document that node actually lives in — the main document's rules
     /// never leak into a sub-document and vice versa (issue 016-15).
     document_styles: HashMap<usize, DocumentStyleEntry>,
+    font_loading: font_loading::FontStore,
     /// Cached layout tree for the **main** document, matching its entry in
     /// [`HostState::document_styles`]. Rebuilt lazily and only when a layout
     /// metric (not just a computed style) is requested. Sub-documents do not
@@ -1189,6 +1198,9 @@ unsafe impl Trace for HostState {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.event_loop.trace(tracer) };
         unsafe { self.node_lifetimes.trace(tracer) };
+        if let Some(maps) = &self.font_loading.maps {
+            unsafe { maps.trace(tracer) };
+        }
         // `IframeDocument.realm` and rendering callbacks retained by the event
         // loop are Boa `Realm` handles backed by `Rooted<RealmInner>`. They are
         // explicit native GC roots rather than JsValue edges, so retaining the
@@ -1639,6 +1651,7 @@ impl HostState {
             pending_scroll_targets: Vec::new(),
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
+            font_loading: Default::default(),
             layout_root: None,
             style_generation: 0,
             layout_generation: 0,
@@ -2176,6 +2189,7 @@ impl HostState {
         }
         self.event_loop.cancel_tasks_for_document(document_id);
         self.document_styles.remove(&document_id);
+        self.font_loading.remove_document(document_id);
         self.write_parsers.remove(&document_id);
         self.written_script_queue
             .retain(|script| script.document.identity() != document_id);
@@ -2589,18 +2603,14 @@ impl HostState {
             .map(|entry| std::mem::take(&mut entry.resources))
             .unwrap_or_default();
         let mut web_fonts = crate::font::WebFontRegistry::new();
+        let mut font_rules = Vec::new();
         for (style_node, scope, implicit_scope_root) in collect_stylesheet_nodes(document) {
             let (css, blocked) = resources.load_node(&style_node, base.as_ref(), &policy);
             for blocked_uri in blocked {
                 self.record_csp_violation(document, ResourceType::Style, blocked_uri);
             }
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
-            for font in crate::paint::stylesheet::fetch_font_face_fonts(
-                std::slice::from_ref(&sheet),
-                base.as_ref(),
-            ) {
-                web_fonts.push_shared(&font.family, font.weight, font.style, font.font);
-            }
+            font_rules.extend(crate::css::extract_font_face_rules(&sheet));
             if let Some((scope, order)) = scope {
                 resolver.add_scoped_stylesheet_in_order_with_implicit_scope_root(
                     Origin::Author,
@@ -2627,6 +2637,7 @@ impl HostState {
         } else {
             for (scope, css) in adopted_stylesheets {
                 let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+                font_rules.extend(crate::css::extract_font_face_rules(&sheet));
                 if let Some((scope_root, order)) = scope {
                     resolver.add_scoped_stylesheet_in_order(Origin::Author, sheet, scope_root, order);
                 } else {
@@ -2634,6 +2645,8 @@ impl HostState {
                 }
             }
         }
+        font_loading::sync_stylesheets(self, document, font_rules);
+        self.font_loading.append_to(document_id, &mut web_fonts);
         let blocked_inline_styles = if policy.allows_inline(ResourceType::Style) {
             HashSet::new()
         } else {
@@ -7620,6 +7633,7 @@ fn register_host_bindings(
     context: &mut Context,
     host_state: &Rc<RefCell<HostState>>,
 ) -> JsResult<()> {
+    font_loading::register(context, host_state)?;
     let state = host_state.borrow();
     context.register_global_property(
         js_string!("__omoikane_document_id"),
@@ -7960,6 +7974,16 @@ fn register_host_bindings(
             js_string!("__omoikane_fetch"),
             4,
             NativeFunction::from_copy_closure(fetch_native),
+        ),
+        (
+            js_string!("__omoikane_font_loading"),
+            3,
+            NativeFunction::from_copy_closure(font_loading::native),
+        ),
+        (
+            js_string!("__omoikane_queue_font_loading_task"),
+            1,
+            NativeFunction::from_copy_closure(font_loading::queue_task),
         ),
         (
             js_string!("__omoikane_register_object_url"),
@@ -8360,6 +8384,16 @@ fn register_host_bindings(
             js_string!("__omoikane_css_rule_count"),
             1,
             NativeFunction::from_copy_closure(css_rule_count_native),
+        ),
+        (
+            js_string!("__omoikane_css_rule_sources"),
+            1,
+            NativeFunction::from_copy_closure(css_rule_sources_native),
+        ),
+        (
+            js_string!("__omoikane_css_declarations"),
+            1,
+            NativeFunction::from_copy_closure(css_declarations_native),
         ),
         (
             js_string!("__omoikane_css_scope_rules_valid"),
@@ -10945,6 +10979,49 @@ fn css_rule_count_native(
     let sheet = crate::css::parse_stylesheet(&css)
         .map_err(|error| JsError::from(JsNativeError::syntax().with_message(error.to_string())))?;
     Ok(JsValue::from(sheet.rules.len() as f64))
+}
+
+/// Parses CSS and returns each top-level rule as an original source slice.
+fn css_rule_sources_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let css = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let sheet = crate::css::parse_stylesheet(&css)
+        .map_err(|error| JsError::from(JsNativeError::syntax().with_message(error.to_string())))?;
+    let rules = font_descriptors::rule_sources(&css);
+    if rules.len() != sheet.rules.len() {
+        return Err(JsError::from(
+            JsNativeError::syntax().with_message("Unable to enumerate stylesheet rules."),
+        ));
+    }
+    let rules = serde_json::to_string(&rules)
+        .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
+    Ok(js_string!(rules.as_str()).into())
+}
+
+/// Returns source-preserving declarations for CSSOM descriptor blocks.
+fn css_declarations_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let block = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let declarations = font_descriptors::declarations(&block);
+    let declarations = serde_json::to_string(&declarations)
+        .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
+    Ok(js_string!(declarations.as_str()).into())
 }
 
 /// Validates every `@scope` prelude in a stylesheet.  The regular stylesheet
