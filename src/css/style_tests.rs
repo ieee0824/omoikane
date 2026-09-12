@@ -2019,6 +2019,29 @@ fn border_style_none_zeroes_side_width_even_when_width_only_comes_from_shorthand
 }
 
 #[test]
+fn border_width_keywords_resolve_to_pixels_before_none_style_zeroing() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "h1 { border: solid thin; border-right-width: medium; \
+             border-bottom-width: thick; border-left-style: none; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("border-top-width"), Some(&ComputedValue::Px(1.0)));
+    assert_eq!(style.get("border-right-width"), Some(&ComputedValue::Px(3.0)));
+    assert_eq!(
+        style.get("border-bottom-width"),
+        Some(&ComputedValue::Px(5.0))
+    );
+    assert_eq!(style.get("border-left-width"), Some(&ComputedValue::Px(0.0)));
+}
+
+#[test]
 fn resolves_var_from_inherited_root_custom_properties() {
     let (_document, body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

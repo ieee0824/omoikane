@@ -79,6 +79,8 @@ pub(super) fn append(
         } else {
             natural_height
         },
+        main_start_auto: false,
+        main_end_auto: false,
         explicit_cross_size: cross_size,
         flex_grow: 0.0,
         flex_shrink: 1.0,

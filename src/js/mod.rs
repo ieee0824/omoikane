@@ -11021,7 +11021,8 @@ fn css_rule_count_native(
     Ok(JsValue::from(sheet.rules.len() as f64))
 }
 
-/// Parses CSS and returns each top-level rule as an original source slice.
+/// Parses CSS forgivingly and returns each accepted top-level rule as an
+/// original source slice.
 fn css_rule_sources_native(
     _: &JsValue,
     args: &[JsValue],
@@ -11033,14 +11034,7 @@ fn css_rule_sources_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    let sheet = crate::css::parse_stylesheet(&css)
-        .map_err(|error| JsError::from(JsNativeError::syntax().with_message(error.to_string())))?;
-    let rules = font_descriptors::rule_sources(&css);
-    if rules.len() != sheet.rules.len() {
-        return Err(JsError::from(
-            JsNativeError::syntax().with_message("Unable to enumerate stylesheet rules."),
-        ));
-    }
+    let rules = font_descriptors::accepted_rule_sources(&css);
     let rules = serde_json::to_string(&rules)
         .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
     Ok(js_string!(rules.as_str()).into())
@@ -24917,6 +24911,32 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn cssom_drops_invalid_style_rules_without_breaking_font_face_set() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>[class=second two] { color: red; } p { color: blue; }</style></head><body><p class='second two'></p></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        assert_eq!(
+            eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"),
+            1.0
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.styleSheets[0].cssRules[0].selectorText"
+            ),
+            "p"
+        );
+        assert_eq!(eval_str(&mut runtime, "document.fonts.status"), "loaded");
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(document.querySelector('p')).color"),
+            "rgb(0, 0, 255)"
+        );
+    }
+
+    #[test]
     fn css_supports_rules_expose_conditions_and_nested_rules() {
         let doc = crate::html::TreeBuilder::parse(
             "<html><head><style>@supports (display: grid) { main { display: grid; } } @supports/* comment */(display: block) { section { display: block; } }</style></head><body><main></main></body></html>",
@@ -25530,7 +25550,7 @@ b</textarea></form>"#);
             ),
             "IndexSizeError:1"
         );
-        assert!(runtime.eval("(() => { document.styleSheets[0].ownerNode.textContent = 'not css'; try { document.styleSheets[0].insertRule('p { color: blue; }', 0); return false; } catch (e) { return e.name === 'SyntaxError' && e instanceof DOMException; } })()").unwrap().as_boolean().unwrap(), "stylesheet enumeration errors must be wrapped as SyntaxError DOMExceptions");
+        assert!(runtime.eval("(() => { const sheet = document.styleSheets[0]; sheet.ownerNode.textContent = 'not css'; const before = sheet.cssRules.length; const index = sheet.insertRule('p { color: blue; }', 0); return before === 0 && index === 0 && sheet.cssRules.length === 1 && sheet.cssRules[0].selectorText === 'p'; })()").unwrap().as_boolean().unwrap(), "embedded stylesheets must discard invalid rules and remain mutable");
     }
 
     #[test]
