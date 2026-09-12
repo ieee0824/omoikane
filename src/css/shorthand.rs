@@ -263,6 +263,7 @@ fn expand_css_wide_shorthand(
             "animation-fill-mode",
             "animation-duration",
             "animation-iteration-count",
+            "animation-play-state",
             "animation",
         ]
         .into_iter()
@@ -2148,9 +2149,9 @@ fn is_background_color_keyword(keyword: &str) -> bool {
 
 /// Expand `animation` shorthand into longhands.
 ///
-/// Simplified parser that extracts `animation-name` and `animation-fill-mode`
-/// from the shorthand value. Timing functions, delays, and iteration counts
-/// are preserved as the original `animation` declaration for future use.
+/// Simplified parser that extracts the animation longhands used by static
+/// rendering. Unsupported timing details remain available in the original
+/// `animation` declaration for future use.
 fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     let values = match &value {
         Value::List(vs) => vs.clone(),
@@ -2161,6 +2162,7 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
     let mut fill_mode: Option<String> = None;
     let mut duration: Option<Value> = None;
     let mut iteration_count: Option<String> = None;
+    let mut play_state: Option<String> = None;
 
     for item in &values {
         if let Value::Keyword(kw) = item {
@@ -2188,7 +2190,9 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
                     // animation-timing-function — skip for now
                 }
                 "running" | "paused" => {
-                    // animation-play-state — skip for now
+                    if play_state.is_none() {
+                        play_state = Some(lower);
+                    }
                 }
                 _ => {
                     if name.is_none() {
@@ -2233,6 +2237,11 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
             important,
         });
     }
+    decls.push(Declaration {
+        name: "animation-play-state".to_string(),
+        value: Value::Keyword(play_state.unwrap_or_else(|| "running".to_string())),
+        important,
+    });
 
     // Keep original animation declaration as well for properties we don't expand
     decls.push(Declaration {

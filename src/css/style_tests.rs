@@ -1120,6 +1120,7 @@ fn identifies_supported_property_names() {
         "animation-name",
         "animation-fill-mode",
         "animation-duration",
+        "animation-play-state",
     ] {
         assert!(
             is_supported_property(property),
@@ -5840,6 +5841,294 @@ fn animation_forwards_applies_keyframe_final_state() {
 }
 
 #[test]
+fn keyframes_follow_cascade_layer_order() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer framework, override; \
+             @layer override { @keyframes fade { to { opacity: 1; } } } \
+             @layer framework { @keyframes fade { to { opacity: 0.25; } } } \
+             div { animation: fade 1s forwards; }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("opacity"),
+        Some(&ComputedValue::Number(1.0)),
+        "the higher-priority layer wins even when its @keyframes occurs first"
+    );
+}
+
+#[test]
+fn unlayered_keyframes_outrank_later_layered_keyframes() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fade { to { opacity: 1; } } \
+             @layer framework { @keyframes fade { to { opacity: 0.25; } } } \
+             div { animation: fade 1s forwards; }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("opacity"),
+        Some(&ComputedValue::Number(1.0))
+    );
+}
+
+#[test]
+fn keyframes_use_nested_anonymous_and_cross_stylesheet_layer_order() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@layer base, override;").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer override { \
+                 @layer nested { @keyframes fade { to { opacity: 0.75; } } } \
+                 @keyframes fade { to { opacity: 1; } } \
+             } \
+             div { animation: fade 1s forwards; }",
+        )
+        .unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@layer base { @-webkit-keyframes fade { to { opacity: 0.25; } } }")
+            .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("opacity"),
+        Some(&ComputedValue::Number(1.0)),
+        "direct rules form the final implicit sublayer and a later base sheet stays lower"
+    );
+
+    let mut anonymous_resolver = StyleResolver::new();
+    anonymous_resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer { @keyframes fade { to { opacity: 0.25; } } } \
+             @layer { @keyframes fade { to { opacity: 0.75; } } } \
+             div { animation: fade 1s forwards; }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        anonymous_resolver.computed_style(&target).get("opacity"),
+        Some(&ComputedValue::Number(0.75)),
+        "separate anonymous layers retain their source-ordered identities"
+    );
+}
+
+#[test]
+fn string_keyframe_names_match_identifiers_and_allow_quoted_keywords() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer base, override; \
+             @layer override { @keyframes \"fade\" { to { opacity: 1; } } } \
+             @layer base { @keyframes fade { to { opacity: 0.25; } } } \
+             div { animation-name: \"fade\"; animation-fill-mode: forwards; }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        resolver.computed_style(&target).get("opacity"),
+        Some(&ComputedValue::Number(1.0)),
+        "string and identifier spellings participate in the same name collision"
+    );
+
+    let keyword_target = NodeHandle::element("span");
+    document.append_child(keyword_target.clone());
+    let mut keyword_resolver = StyleResolver::new();
+    keyword_resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes \"initial\" { to { width: 12px; } } \
+             span { animation-name: \"initial\"; animation-fill-mode: forwards; }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        keyword_resolver
+            .computed_style(&keyword_target)
+            .get("width"),
+        Some(&ComputedValue::Px(12.0)),
+        "quoted CSS-wide keywords remain valid keyframe names"
+    );
+}
+
+#[test]
+fn keyframes_follow_origin_and_active_global_conditions() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fade { to { opacity: 0.5; } } \
+             @media (max-width: 300px) { \
+                 @keyframes fade { to { opacity: 1; } } \
+             } \
+             div { animation: fade 1s forwards; }",
+        )
+        .unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::User,
+        parse_stylesheet("@keyframes fade { to { opacity: 0.25; } }").unwrap(),
+    );
+
+    resolver.set_viewport(500.0, 500.0);
+    assert_eq!(
+        resolver.computed_style(&target).get("opacity"),
+        Some(&ComputedValue::Number(0.5)),
+        "author keyframes outrank later user-origin keyframes"
+    );
+
+    resolver.set_viewport(300.0, 500.0);
+    assert_eq!(
+        resolver.computed_style(&target).get("opacity"),
+        Some(&ComputedValue::Number(1.0)),
+        "a matching global condition rebuilds the active keyframes winner"
+    );
+
+    resolver.set_viewport(500.0, 500.0);
+    assert_eq!(
+        resolver.computed_style(&target).get("opacity"),
+        Some(&ComputedValue::Number(0.5)),
+        "an inactive global condition stops contributing its definition"
+    );
+}
+
+#[test]
+fn keyframe_names_are_tree_scoped_and_inherit_from_outer_trees() {
+    let document = NodeHandle::document();
+    let local_host = NodeHandle::element("x-local");
+    let fallback_host = NodeHandle::element("x-fallback");
+    document.append_child(local_host.clone());
+    document.append_child(fallback_host.clone());
+
+    let local_root = local_host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let local_target = NodeHandle::element("span");
+    local_target.set_attribute("class", "target");
+    local_target.set_attribute("part", "target");
+    local_root.append_child(local_target.clone());
+
+    let fallback_root = fallback_host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let fallback_target = NodeHandle::element("span");
+    fallback_target.set_attribute("class", "target");
+    fallback_root.append_child(fallback_target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fade { to { width: 10px; } } \
+             x-local::part(target) { animation: fade 1s forwards; }",
+        )
+        .unwrap(),
+    );
+    resolver.add_scoped_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fade { to { width: 20px; } } \
+             .target { animation: fade 1s forwards; }",
+        )
+        .unwrap(),
+        local_root.clone(),
+    );
+    resolver.add_scoped_stylesheet(
+        Origin::Author,
+        parse_stylesheet(".target { animation: fade 1s forwards; }").unwrap(),
+        fallback_root,
+    );
+
+    assert_eq!(
+        resolver.computed_style(&local_target).get("width"),
+        Some(&ComputedValue::Px(10.0)),
+        "an outer ::part declaration keeps its outer keyframes reference scope"
+    );
+    assert_eq!(
+        resolver.computed_style(&fallback_target).get("width"),
+        Some(&ComputedValue::Px(10.0)),
+        "a shadow tree without the name falls back to its host's outer tree"
+    );
+
+    let local_only = NodeHandle::element("span");
+    local_only.set_attribute("class", "target");
+    local_root.append_child(local_only.clone());
+    resolver.invalidate_style_cache_for_test();
+    assert_eq!(
+        resolver.computed_style(&local_only).get("width"),
+        Some(&ComputedValue::Px(20.0)),
+        "a declaration in the shadow tree resolves the same name locally"
+    );
+}
+
+#[test]
+fn inherited_animation_name_keeps_the_defining_tree_scope() {
+    let document = NodeHandle::document();
+    let host = NodeHandle::element("x-card");
+    document.append_child(host.clone());
+    let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let child = NodeHandle::element("span");
+    child.set_attribute("class", "child");
+    root.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes size { to { width: 10px; } } \
+             x-card { animation: size 1s forwards; }",
+        )
+        .unwrap(),
+    );
+    resolver.add_scoped_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes size { to { width: 20px; } } \
+             .child { animation-name: inherit; animation-fill-mode: inherit; }",
+        )
+        .unwrap(),
+        root,
+    );
+
+    assert_eq!(
+        resolver.computed_style(&child).get("width"),
+        Some(&ComputedValue::Px(10.0)),
+        "an inherited tree-scoped reference keeps the root captured by its parent"
+    );
+}
+
+#[test]
 fn animation_fill_mode_none_does_not_apply_keyframe() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
@@ -5951,6 +6240,34 @@ fn animation_shorthand_forwards_applies_final_state() {
     assert!(
         matches!(opacity, Some(ComputedValue::Number(v)) if (*v - 1.0).abs() < 0.01),
         "animation shorthand with forwards should apply final opacity: 1.0, got {opacity:?}"
+    );
+}
+
+#[test]
+fn paused_animation_shorthand_applies_initial_keyframe() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    target.set_attribute("class", "target");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes colors { from { background-color: green; } } \
+             .target { background-color: red; animation: colors 1s paused; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("animation-play-state"),
+        Some(&ComputedValue::Keyword("paused".to_string()))
+    );
+    assert_eq!(
+        style.get("background-color"),
+        Some(&ComputedValue::Color("green".to_string()))
     );
 }
 

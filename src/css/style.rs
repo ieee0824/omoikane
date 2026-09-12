@@ -46,6 +46,8 @@ pub enum ComputedValue {
 pub struct ComputedStyle {
     properties: BTreeMap<String, ComputedValue>,
     custom_properties: BTreeMap<String, Value>,
+    /// Tree scope captured by the declaration that supplied `animation-name`.
+    animation_name_scope_root: Option<usize>,
 }
 
 impl ComputedStyle {
@@ -167,8 +169,10 @@ pub struct StyleResolver {
     container_query_cache: HashMap<String, Option<super::ContainerQuery>>,
     /// Query-container geometry and metadata from the previous layout pass.
     container_contexts: HashMap<usize, ContainerContext>,
-    /// Parsed `@keyframes` rules keyed by animation name.
-    keyframes: HashMap<String, Vec<KeyframeStep>>,
+    /// Winning `@keyframes` rules, grouped by their tree scope and name.
+    keyframes: HashMap<Option<usize>, HashMap<String, KeyframesDefinition>>,
+    /// Monotonic order assigned to parsed `@keyframes` definitions.
+    next_keyframes_source_order: usize,
     /// Before/after style snapshots and running CSS transitions.
     transition_timeline: super::transition::TransitionTimeline,
     /// Node identities whose inline `style` attribute is blocked by the
@@ -180,6 +184,14 @@ pub struct StyleResolver {
 struct KeyframeStep {
     offset: f32,
     declarations: Vec<Declaration>,
+}
+
+#[derive(Debug, Clone)]
+struct KeyframesDefinition {
+    origin: Origin,
+    layer_order: Vec<usize>,
+    source_order: usize,
+    steps: Vec<KeyframeStep>,
 }
 
 #[derive(Debug, Clone)]
@@ -538,6 +550,7 @@ impl StyleResolver {
         self.viewport_height = height;
         if layer_order_changed {
             self.rebuild_layer_orders();
+            self.rebuild_keyframes();
         }
         self.cache.clear();
         self.pseudo_cache.clear();
@@ -555,6 +568,7 @@ impl StyleResolver {
         self.color_scheme_dark = dark;
         if layer_order_changed {
             self.rebuild_layer_orders();
+            self.rebuild_keyframes();
         }
         self.cache.clear();
         self.pseudo_cache.clear();
@@ -578,8 +592,6 @@ impl StyleResolver {
 
     /// Adds a stylesheet with its origin.
     pub fn add_stylesheet(&mut self, origin: Origin, stylesheet: Stylesheet) {
-        // Extract @keyframes rules before storing the stylesheet.
-        collect_keyframes(&stylesheet.rules, &mut self.keyframes);
         let stylesheet_id = self.register_stylesheet_layers(origin, None, &stylesheet);
         self.rule_indexes
             .push(StylesheetRuleIndex::build(&stylesheet));
@@ -591,6 +603,7 @@ impl StyleResolver {
             implicit_scope_root: None,
             encapsulation_order: 0,
         });
+        self.register_latest_stylesheet_keyframes();
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -604,7 +617,6 @@ impl StyleResolver {
         stylesheet: Stylesheet,
         implicit_scope_root: NodeHandle,
     ) {
-        collect_keyframes(&stylesheet.rules, &mut self.keyframes);
         let stylesheet_id = self.register_stylesheet_layers(origin, None, &stylesheet);
         self.rule_indexes
             .push(StylesheetRuleIndex::build(&stylesheet));
@@ -616,6 +628,7 @@ impl StyleResolver {
             implicit_scope_root: Some(implicit_scope_root),
             encapsulation_order: 0,
         });
+        self.register_latest_stylesheet_keyframes();
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -674,7 +687,6 @@ impl StyleResolver {
         encapsulation_order: usize,
         implicit_scope_root: Option<NodeHandle>,
     ) {
-        collect_keyframes(&stylesheet.rules, &mut self.keyframes);
         let scope_root = Some(scope.identity());
         let stylesheet_id = self.register_stylesheet_layers(origin, scope_root, &stylesheet);
         self.rule_indexes
@@ -687,6 +699,7 @@ impl StyleResolver {
             implicit_scope_root,
             encapsulation_order,
         });
+        self.register_latest_stylesheet_keyframes();
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -734,6 +747,68 @@ impl StyleResolver {
             );
         }
         self.layer_orders = orders;
+    }
+
+    fn rebuild_keyframes(&mut self) {
+        let mut keyframes = HashMap::new();
+        let mut source_order = 0;
+        for (position, (input, scope)) in self
+            .stylesheets
+            .iter()
+            .zip(&self.stylesheet_scopes)
+            .enumerate()
+        {
+            let layer_context = LayerContextKey {
+                origin: input.origin,
+                scope_root: scope.root.as_ref().map(NodeHandle::identity),
+            };
+            let layer_order = self
+                .layer_orders
+                .get(&layer_context)
+                .expect("stylesheet layer order should be registered");
+            collect_keyframes(
+                &input.stylesheet.rules,
+                input.origin,
+                self.stylesheet_ids[position],
+                layer_context.scope_root,
+                layer_order,
+                None,
+                &mut source_order,
+                &mut keyframes,
+                self.viewport_width,
+                self.viewport_height,
+                self.color_scheme_dark,
+            );
+        }
+        self.keyframes = keyframes;
+        self.next_keyframes_source_order = source_order;
+    }
+
+    fn register_latest_stylesheet_keyframes(&mut self) {
+        let position = self.stylesheets.len() - 1;
+        let input = &self.stylesheets[position];
+        let scope = &self.stylesheet_scopes[position];
+        let layer_context = LayerContextKey {
+            origin: input.origin,
+            scope_root: scope.root.as_ref().map(NodeHandle::identity),
+        };
+        let layer_order = self
+            .layer_orders
+            .get(&layer_context)
+            .expect("stylesheet layer order should be registered");
+        collect_keyframes(
+            &input.stylesheet.rules,
+            input.origin,
+            self.stylesheet_ids[position],
+            layer_context.scope_root,
+            layer_order,
+            None,
+            &mut self.next_keyframes_source_order,
+            &mut self.keyframes,
+            self.viewport_width,
+            self.viewport_height,
+            self.color_scheme_dark,
+        );
     }
 
     /// Resolves computed style for `node`, using the cache when possible.
@@ -962,6 +1037,7 @@ impl StyleResolver {
         };
 
         let mut important_properties = HashSet::new();
+        let mut animation_name_scope_root = None;
 
         // Process font-size first so that em units in other properties
         // resolve against the element's own computed font-size.
@@ -1027,6 +1103,13 @@ impl StyleResolver {
             // handling), never overriding an earlier valid declaration.
             match validate_declaration(&candidate.name, &resolved_value) {
                 DeclarationValidation::Valid(computed) => {
+                    if candidate.name.eq_ignore_ascii_case("animation-name") {
+                        animation_name_scope_root = animation_reference_scope_root(
+                            &resolved_value,
+                            candidate.layer_context.scope_root,
+                            parent_style,
+                        );
+                    }
                     insert_computed_property(
                         &mut properties,
                         &candidate.name.to_ascii_lowercase(),
@@ -1072,6 +1155,13 @@ impl StyleResolver {
                 continue;
             }
             let computed = compute_value(&resolved_value, &candidate.name, ctx);
+            if candidate.name.eq_ignore_ascii_case("animation-name") {
+                animation_name_scope_root = animation_reference_scope_root(
+                    &resolved_value,
+                    candidate.layer_context.scope_root,
+                    parent_style,
+                );
+            }
             insert_computed_property(&mut properties, &candidate.name, computed);
             if candidate.important {
                 important_properties.insert(candidate.name.to_ascii_lowercase());
@@ -1094,7 +1184,12 @@ impl StyleResolver {
         // CSS Animations contribute below CSS Transitions in the cascade. The
         // transition compares and samples the animation-adjusted before/after
         // values, then its active value wins for the transitioned property.
-        self.apply_animation_snapshot(&mut properties, parent_style, &important_properties);
+        self.apply_animation_snapshot(
+            node,
+            &mut properties,
+            &important_properties,
+            animation_name_scope_root,
+        );
         if pseudo.is_none() {
             self.transition_timeline
                 .sample(node.identity(), &mut properties);
@@ -1103,26 +1198,29 @@ impl StyleResolver {
         ComputedStyle {
             properties,
             custom_properties,
+            animation_name_scope_root,
         }
     }
 
-    /// Applies a deterministic animation snapshot. Completed forwards/both
-    /// animations keep their final state; running infinite animations are
-    /// sampled at a fixed post-load instant so screenshots remain stable.
+    /// Applies a deterministic animation snapshot. Paused animations are
+    /// sampled at timeline time zero, completed forwards/both animations keep
+    /// their final state, and running infinite animations are sampled at a
+    /// fixed post-load instant so screenshots remain stable.
     fn apply_animation_snapshot(
         &self,
+        node: &NodeHandle,
         properties: &mut BTreeMap<String, ComputedValue>,
-        _parent_style: Option<&ComputedStyle>,
         important_properties: &HashSet<String>,
+        animation_name_scope_root: Option<usize>,
     ) {
         let anim_name = match properties.get("animation-name") {
-            Some(ComputedValue::Keyword(name)) => name.clone(),
+            Some(ComputedValue::Keyword(name) | ComputedValue::String(name)) => name.clone(),
             _ => return,
         };
         if anim_name.eq_ignore_ascii_case("none") || anim_name.is_empty() {
             return;
         }
-        let Some(steps) = self.keyframes.get(&anim_name) else {
+        let Some(steps) = self.keyframes_for(node, animation_name_scope_root, &anim_name) else {
             return;
         };
 
@@ -1134,7 +1232,48 @@ impl StyleResolver {
             properties.get("animation-iteration-count"),
             Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("infinite")
         );
-        let declarations = if fill_mode == "forwards" || fill_mode == "both" {
+        let paused = matches!(
+            properties.get("animation-play-state"),
+            Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("paused")
+        );
+        let declarations = if paused {
+            let duration = animation_seconds(properties.get("animation-duration")).unwrap_or(0.0);
+            let delay = animation_seconds(properties.get("animation-delay")).unwrap_or(0.0);
+            if delay > 0.0 {
+                if fill_mode == "backwards" || fill_mode == "both" {
+                    steps.first().map(|step| &step.declarations)
+                } else {
+                    None
+                }
+            } else if duration <= 0.0 {
+                if fill_mode == "forwards" || fill_mode == "both" {
+                    steps.last().map(|step| &step.declarations)
+                } else {
+                    None
+                }
+            } else {
+                let elapsed = -delay;
+                if infinite {
+                    let progress = (elapsed / duration).rem_euclid(1.0);
+                    steps
+                        .iter()
+                        .rev()
+                        .find(|step| step.offset <= progress)
+                        .map(|step| &step.declarations)
+                } else if elapsed <= duration {
+                    let progress = (elapsed / duration).clamp(0.0, 1.0);
+                    steps
+                        .iter()
+                        .rev()
+                        .find(|step| step.offset <= progress)
+                        .map(|step| &step.declarations)
+                } else if fill_mode == "forwards" || fill_mode == "both" {
+                    steps.last().map(|step| &step.declarations)
+                } else {
+                    None
+                }
+            }
+        } else if fill_mode == "forwards" || fill_mode == "both" {
             steps.last().map(|step| &step.declarations)
         } else if infinite {
             let duration = animation_seconds(properties.get("animation-duration")).unwrap_or(0.0);
@@ -1197,6 +1336,50 @@ impl StyleResolver {
             insert_computed_property(properties, property_name, computed);
         }
     }
+
+    fn keyframes_for(
+        &self,
+        node: &NodeHandle,
+        reference_scope_root: Option<usize>,
+        animation_name: &str,
+    ) -> Option<&[KeyframeStep]> {
+        let mut scope_root = reference_scope_root;
+        loop {
+            if let Some(definition) = self
+                .keyframes
+                .get(&scope_root)
+                .and_then(|definitions| definitions.get(animation_name))
+            {
+                return Some(&definition.steps);
+            }
+            let Some(scope_id) = scope_root else {
+                return None;
+            };
+            let root = self
+                .stylesheet_scopes
+                .iter()
+                .filter_map(|scope| scope.root.as_ref())
+                .find(|root| root.identity() == scope_id)
+                .cloned()
+                .or_else(|| {
+                    let mut root = node.containing_shadow_root();
+                    while let Some(current) = root {
+                        if current.identity() == scope_id {
+                            return Some(current);
+                        }
+                        root = current
+                            .shadow_host()
+                            .and_then(|host| host.containing_shadow_root());
+                    }
+                    None
+                });
+            scope_root = root
+                .and_then(|root| root.shadow_host())
+                .and_then(|host| host.containing_shadow_root())
+                .as_ref()
+                .map(NodeHandle::identity);
+        }
+    }
 }
 
 fn contains_at_rule_named(rules: &[Rule], expected: &str) -> bool {
@@ -1217,6 +1400,17 @@ fn animation_seconds(value: Option<&ComputedValue>) -> Option<f32> {
         Some(ComputedValue::Number(value)) => Some(*value),
         _ => None,
     }
+}
+
+fn animation_reference_scope_root(
+    value: &Value,
+    declaration_scope_root: Option<usize>,
+    parent_style: Option<&ComputedStyle>,
+) -> Option<usize> {
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("inherit")) {
+        return parent_style.and_then(|style| style.animation_name_scope_root);
+    }
+    declaration_scope_root
 }
 
 fn compute_gap_shorthand(
@@ -3485,18 +3679,32 @@ fn is_length_property(name: &str) -> bool {
     )
 }
 
-/// Extracts all `@keyframes` steps from a stylesheet.
-fn collect_keyframes(rules: &[Rule], keyframes: &mut HashMap<String, Vec<KeyframeStep>>) {
+/// Collects `@keyframes` definitions and resolves name collisions by origin,
+/// cascade layer, and source order within one tree scope.
+#[allow(clippy::too_many_arguments)]
+fn collect_keyframes(
+    rules: &[Rule],
+    origin: Origin,
+    stylesheet_id: usize,
+    scope_root: Option<usize>,
+    layer_order: &CascadeLayerOrder,
+    active_layer: Option<&LayerPath>,
+    source_order: &mut usize,
+    keyframes: &mut HashMap<Option<usize>, HashMap<String, KeyframesDefinition>>,
+    viewport_width: f32,
+    viewport_height: f32,
+    color_scheme_dark: bool,
+) {
     for rule in rules {
         match rule {
             Rule::At(at_rule)
                 if at_rule.name.eq_ignore_ascii_case("keyframes")
                     || at_rule.name.eq_ignore_ascii_case("-webkit-keyframes") =>
             {
-                let animation_name = at_rule.prelude.trim().to_string();
-                if animation_name.is_empty() {
+                let Some(animation_name) = parse_keyframes_name(&at_rule.prelude) else {
+                    *source_order += 1;
                     continue;
-                }
+                };
                 let raw_block = at_rule
                     .declarations
                     .iter()
@@ -3506,17 +3714,105 @@ fn collect_keyframes(rules: &[Rule], keyframes: &mut HashMap<String, Vec<Keyfram
                         _ => None,
                     });
                 if let Some(block_text) = raw_block {
-                    let steps = parse_keyframe_steps(&block_text);
-                    if !steps.is_empty() {
-                        keyframes.insert(animation_name, steps);
+                    let candidate = KeyframesDefinition {
+                        origin,
+                        layer_order: layer_order.rank(active_layer),
+                        source_order: *source_order,
+                        steps: parse_keyframe_steps(&block_text),
+                    };
+                    let definitions = keyframes.entry(scope_root).or_default();
+                    match definitions.entry(animation_name) {
+                        std::collections::hash_map::Entry::Occupied(mut entry)
+                            if compare_keyframes_priority(&candidate, entry.get()).is_gt() =>
+                        {
+                            entry.insert(candidate);
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(candidate);
+                        }
+                        _ => {}
                     }
                 }
+                *source_order += 1;
             }
             Rule::At(at_rule) if at_rule.block.is_some() => {
-                collect_keyframes(at_rule.block.as_ref().unwrap(), keyframes);
+                if !layer_group_rule_is_active(
+                    at_rule,
+                    viewport_width,
+                    viewport_height,
+                    color_scheme_dark,
+                ) {
+                    continue;
+                }
+                let block = at_rule.block.as_deref().unwrap();
+                if at_rule.name.eq_ignore_ascii_case("layer") {
+                    let Some(path) = layer_block_path(
+                        at_rule,
+                        stylesheet_id,
+                        active_layer.map(Vec::as_slice).unwrap_or(&[]),
+                    ) else {
+                        continue;
+                    };
+                    collect_keyframes(
+                        block,
+                        origin,
+                        stylesheet_id,
+                        scope_root,
+                        layer_order,
+                        Some(&path),
+                        source_order,
+                        keyframes,
+                        viewport_width,
+                        viewport_height,
+                        color_scheme_dark,
+                    );
+                } else {
+                    collect_keyframes(
+                        block,
+                        origin,
+                        stylesheet_id,
+                        scope_root,
+                        layer_order,
+                        active_layer,
+                        source_order,
+                        keyframes,
+                        viewport_width,
+                        viewport_height,
+                        color_scheme_dark,
+                    );
+                }
             }
             _ => {}
         }
+    }
+}
+
+fn compare_keyframes_priority(
+    left: &KeyframesDefinition,
+    right: &KeyframesDefinition,
+) -> std::cmp::Ordering {
+    left.origin
+        .cmp(&right.origin)
+        .then(left.layer_order.cmp(&right.layer_order))
+        .then(left.source_order.cmp(&right.source_order))
+}
+
+fn parse_keyframes_name(prelude: &str) -> Option<String> {
+    let mut tokens = super::tokenizer::tokenize(prelude)
+        .ok()?
+        .into_iter()
+        .filter(|token| !matches!(token, CssToken::Whitespace));
+    let token = tokens.next()?;
+    if tokens.next().is_some() {
+        return None;
+    }
+    match token {
+        CssToken::Ident(name) => {
+            let lower = name.to_ascii_lowercase();
+            (!is_css_wide_keyword(&lower) && lower != "none" && lower != "default").then_some(name)
+        }
+        CssToken::String(name) => (!name.is_empty()).then_some(name),
+        _ => None,
     }
 }
 
