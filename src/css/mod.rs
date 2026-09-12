@@ -226,6 +226,11 @@ pub struct AtRule {
     pub prelude: String,
     pub block: Option<Vec<Rule>>,
     pub declarations: Vec<Declaration>,
+    /// Parser-local identity for an anonymous `@layer` block.
+    ///
+    /// The style resolver combines this with the stylesheet identity so that
+    /// separate anonymous blocks never merge into the same cascade layer.
+    pub(crate) anonymous_layer_id: Option<usize>,
 }
 
 /// A parsed `@media` query.

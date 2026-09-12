@@ -3064,6 +3064,174 @@ fn applies_rules_nested_in_cascade_layer() {
 }
 
 #[test]
+fn cascade_layer_statement_fixes_named_layer_order() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer reset, theme; \
+             @layer theme { div { color: green; } } \
+             @layer reset { #target { color: red; } }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string())),
+        "later layers win before selector specificity is compared"
+    );
+}
+
+#[test]
+fn unlayered_rules_outrank_normal_layered_rules() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { color: green; } \
+             @layer framework { #target { color: red; } }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn important_declarations_reverse_cascade_layer_order() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer first, second; \
+             @layer second { #target { color: red !important; } } \
+             @layer first { div { color: green !important; } } \
+             #target { color: blue !important; }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string())),
+        "the first explicit layer wins for important declarations"
+    );
+}
+
+#[test]
+fn nested_layers_precede_their_parent_implicit_sublayer() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer framework { \
+                 div { color: green; } \
+                 @layer components { #target { color: red; } } \
+             }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn anonymous_layers_have_distinct_source_ordered_identity() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer { #target { color: red; } } \
+             @layer { div { color: green; } }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn named_layer_order_is_shared_across_stylesheets() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@layer base, overrides;").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@layer overrides { div { color: green; } }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@layer base { #target { color: red; } }").unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn important_inline_style_outranks_important_layered_rules() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    target.set_attribute("style", "color: green !important");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@layer framework { div { color: red !important; } }").unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
 fn resolves_vmin_unit() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
@@ -5311,13 +5479,7 @@ fn valid_white_space_keyword_survives_cascade() {
 }
 
 #[test]
-fn revert_layer_keyword_survives_enumerated_validation() {
-    // `revert-layer` (CSS Cascade 5) is a CSS-wide keyword and must be handled
-    // exactly like `inherit`/`initial`/`unset`/`revert`: the enumerated-keyword
-    // validation must NOT discard it as an invalid `white-space` value. Since it
-    // is not dropped, the later `revert-layer` declaration overrides the earlier
-    // `pre-wrap` and is preserved as-is (CSS-wide keywords other than `inherit`
-    // are not further resolved here).
+fn revert_layer_rolls_back_the_current_cascade_layer() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
     let body = NodeHandle::element("body");
@@ -5330,14 +5492,19 @@ fn revert_layer_keyword_survives_enumerated_validation() {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
-        parse_stylesheet("#target { white-space: pre-wrap; white-space: revert-layer; }").unwrap(),
+        parse_stylesheet(
+            "@layer base, override; \
+             @layer base { #target { white-space: pre-wrap; } } \
+             @layer override { #target { white-space: nowrap; white-space: revert-layer; } }",
+        )
+        .unwrap(),
     );
 
     let style = resolver.computed_style(&p);
     assert_eq!(
         style.get("white-space"),
-        Some(&ComputedValue::Keyword("revert-layer".to_string())),
-        "`revert-layer` is CSS-wide and must not be dropped; it overrides `pre-wrap`"
+        Some(&ComputedValue::Keyword("pre-wrap".to_string())),
+        "`revert-layer` removes declarations from its own layer"
     );
 }
 

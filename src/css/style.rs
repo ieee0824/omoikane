@@ -16,11 +16,11 @@ use rusqlite::{Connection, params};
 use super::{
     Combinator, CssToken, Declaration, MediaQuery, PseudoElement, Rule, Selector, SelectorPart,
     SimpleSelector, Specificity, Stylesheet, Value, evaluate_media_query, parse_media_query_list,
-    specificity,
+    specificity, tokenize,
 };
 
 /// CSS origin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Origin {
     UserAgent,
     User,
@@ -133,6 +133,9 @@ impl Default for ResolutionContext {
 pub struct StyleResolver {
     stylesheets: Vec<StylesheetInput>,
     stylesheet_scopes: Vec<StylesheetScope>,
+    stylesheet_ids: Vec<usize>,
+    next_stylesheet_id: usize,
+    layer_orders: HashMap<LayerContextKey, CascadeLayerOrder>,
     rule_indexes: Vec<StylesheetRuleIndex>,
     cache: HashMap<usize, ComputedStyle>,
     pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
@@ -183,6 +186,160 @@ struct StylesheetScope {
     root: Option<NodeHandle>,
     implicit_scope_root: Option<NodeHandle>,
     encapsulation_order: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LayerContextKey {
+    origin: Origin,
+    scope_root: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum LayerSegment {
+    Named(String),
+    Anonymous {
+        stylesheet_id: usize,
+        parser_id: usize,
+    },
+}
+
+type LayerPath = Vec<LayerSegment>;
+
+#[derive(Debug, Default)]
+struct CascadeLayerOrder {
+    children: HashMap<LayerPath, Vec<LayerSegment>>,
+}
+
+impl CascadeLayerOrder {
+    fn register_stylesheet(&mut self, rules: &[Rule], stylesheet_id: usize) {
+        self.register_rules(rules, stylesheet_id, &[]);
+    }
+
+    fn register_rules(&mut self, rules: &[Rule], stylesheet_id: usize, parent: &[LayerSegment]) {
+        for rule in rules {
+            let Rule::At(at_rule) = rule else {
+                continue;
+            };
+            if at_rule.name.eq_ignore_ascii_case("layer") {
+                if let Some(block) = at_rule.block.as_deref() {
+                    let Some(path) = layer_block_path(at_rule, stylesheet_id, parent) else {
+                        continue;
+                    };
+                    self.register_path(&path);
+                    self.register_rules(block, stylesheet_id, &path);
+                } else if let Some(names) = parse_layer_name_list(&at_rule.prelude) {
+                    for name in names {
+                        let mut path = parent.to_vec();
+                        path.extend(name.into_iter().map(LayerSegment::Named));
+                        self.register_path(&path);
+                    }
+                }
+            } else if let Some(block) = at_rule.block.as_deref() {
+                self.register_rules(block, stylesheet_id, parent);
+            }
+        }
+    }
+
+    fn register_path(&mut self, path: &[LayerSegment]) {
+        let mut parent = Vec::new();
+        for segment in path {
+            let siblings = self.children.entry(parent.clone()).or_default();
+            if !siblings.contains(segment) {
+                siblings.push(segment.clone());
+            }
+            parent.push(segment.clone());
+        }
+    }
+
+    fn rank(&self, path: Option<&LayerPath>) -> Vec<usize> {
+        let Some(path) = path else {
+            return vec![usize::MAX];
+        };
+        let mut parent = Vec::new();
+        let mut rank = Vec::with_capacity(path.len() + 1);
+        for segment in path {
+            let position = self
+                .children
+                .get(&parent)
+                .and_then(|siblings| siblings.iter().position(|candidate| candidate == segment))
+                .unwrap_or(usize::MAX - 1);
+            rank.push(position);
+            parent.push(segment.clone());
+        }
+        // Rules directly in a layer form an implicit final sublayer after all
+        // explicit children of that layer.
+        rank.push(usize::MAX);
+        rank
+    }
+}
+
+fn layer_block_path(
+    at_rule: &super::AtRule,
+    stylesheet_id: usize,
+    parent: &[LayerSegment],
+) -> Option<LayerPath> {
+    if at_rule.prelude.trim().is_empty() {
+        let parser_id = at_rule.anonymous_layer_id?;
+        let mut path = parent.to_vec();
+        path.push(LayerSegment::Anonymous {
+            stylesheet_id,
+            parser_id,
+        });
+        return Some(path);
+    }
+
+    let mut names = parse_layer_name_list(&at_rule.prelude)?;
+    if names.len() != 1 {
+        return None;
+    }
+    let mut path = parent.to_vec();
+    path.extend(names.pop()?.into_iter().map(LayerSegment::Named));
+    Some(path)
+}
+
+fn parse_layer_name_list(input: &str) -> Option<Vec<Vec<String>>> {
+    let tokens = tokenize(input).ok()?;
+    let mut index = 0usize;
+    let mut names = Vec::new();
+
+    loop {
+        while matches!(tokens.get(index), Some(CssToken::Whitespace)) {
+            index += 1;
+        }
+        let Some(CssToken::Ident(first)) = tokens.get(index) else {
+            return None;
+        };
+        let mut name = vec![first.clone()];
+        index += 1;
+
+        loop {
+            while matches!(tokens.get(index), Some(CssToken::Whitespace)) {
+                index += 1;
+            }
+            if !matches!(tokens.get(index), Some(CssToken::Delim('.'))) {
+                break;
+            }
+            index += 1;
+            while matches!(tokens.get(index), Some(CssToken::Whitespace)) {
+                index += 1;
+            }
+            let Some(CssToken::Ident(segment)) = tokens.get(index) else {
+                return None;
+            };
+            name.push(segment.clone());
+            index += 1;
+        }
+        names.push(name);
+
+        while matches!(tokens.get(index), Some(CssToken::Whitespace)) {
+            index += 1;
+        }
+        match tokens.get(index) {
+            None => return Some(names),
+            Some(CssToken::Comma) => index += 1,
+            _ => return None,
+        }
+    }
 }
 
 /// Geometry and computed containment properties captured after a layout pass.
@@ -393,10 +550,12 @@ impl StyleResolver {
     pub fn add_stylesheet(&mut self, origin: Origin, stylesheet: Stylesheet) {
         // Extract @keyframes rules before storing the stylesheet.
         collect_keyframes(&stylesheet.rules, &mut self.keyframes);
+        let stylesheet_id = self.register_stylesheet_layers(origin, None, &stylesheet);
         self.rule_indexes
             .push(StylesheetRuleIndex::build(&stylesheet));
         self.stylesheets
             .push(StylesheetInput { origin, stylesheet });
+        self.stylesheet_ids.push(stylesheet_id);
         self.stylesheet_scopes.push(StylesheetScope {
             root: None,
             implicit_scope_root: None,
@@ -416,10 +575,12 @@ impl StyleResolver {
         implicit_scope_root: NodeHandle,
     ) {
         collect_keyframes(&stylesheet.rules, &mut self.keyframes);
+        let stylesheet_id = self.register_stylesheet_layers(origin, None, &stylesheet);
         self.rule_indexes
             .push(StylesheetRuleIndex::build(&stylesheet));
         self.stylesheets
             .push(StylesheetInput { origin, stylesheet });
+        self.stylesheet_ids.push(stylesheet_id);
         self.stylesheet_scopes.push(StylesheetScope {
             root: None,
             implicit_scope_root: Some(implicit_scope_root),
@@ -484,10 +645,13 @@ impl StyleResolver {
         implicit_scope_root: Option<NodeHandle>,
     ) {
         collect_keyframes(&stylesheet.rules, &mut self.keyframes);
+        let scope_root = Some(scope.identity());
+        let stylesheet_id = self.register_stylesheet_layers(origin, scope_root, &stylesheet);
         self.rule_indexes
             .push(StylesheetRuleIndex::build(&stylesheet));
         self.stylesheets
             .push(StylesheetInput { origin, stylesheet });
+        self.stylesheet_ids.push(stylesheet_id);
         self.stylesheet_scopes.push(StylesheetScope {
             root: Some(scope),
             implicit_scope_root,
@@ -496,6 +660,21 @@ impl StyleResolver {
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
+    }
+
+    fn register_stylesheet_layers(
+        &mut self,
+        origin: Origin,
+        scope_root: Option<usize>,
+        stylesheet: &Stylesheet,
+    ) -> usize {
+        let stylesheet_id = self.next_stylesheet_id;
+        self.next_stylesheet_id += 1;
+        self.layer_orders
+            .entry(LayerContextKey { origin, scope_root })
+            .or_default()
+            .register_stylesheet(&stylesheet.rules, stylesheet_id);
+        stylesheet_id
     }
 
     /// Resolves computed style for `node`, using the cache when possible.
@@ -598,11 +777,12 @@ impl StyleResolver {
         let color_scheme_dark = self.color_scheme_dark;
         let element_keys = ElementMatchKeys::from_node(node);
 
-        for ((input, index), stylesheet_scope) in self
+        for (stylesheet_position, ((input, index), stylesheet_scope)) in self
             .stylesheets
             .iter()
             .zip(&self.rule_indexes)
             .zip(&self.stylesheet_scopes)
+            .enumerate()
         {
             if input.origin == Origin::Author
                 && stylesheet_scope.root.is_none()
@@ -611,11 +791,22 @@ impl StyleResolver {
             {
                 continue;
             }
+            let layer_context = LayerContextKey {
+                origin: input.origin,
+                scope_root: stylesheet_scope.root.as_ref().map(NodeHandle::identity),
+            };
+            let layer_order = self
+                .layer_orders
+                .get(&layer_context)
+                .expect("stylesheet layer order should be registered");
             collect_indexed_rule_candidates(
                 node,
                 &input.stylesheet.rules,
                 index,
                 input.origin,
+                self.stylesheet_ids[stylesheet_position],
+                layer_context,
+                layer_order,
                 pseudo,
                 &mut source_order,
                 &mut candidates,
@@ -639,6 +830,10 @@ impl StyleResolver {
             && !self.blocked_inline_style_nodes.contains(&node.identity())
             && let Some(inline_style) = node.get_attribute("style")
         {
+            let layer_context = LayerContextKey {
+                origin: Origin::Author,
+                scope_root: node.containing_shadow_root().as_ref().map(NodeHandle::identity),
+            };
             for declaration in super::parse_style_attribute(&inline_style) {
                 candidates.push(Candidate {
                     name: canonical_property_name(&declaration.name).to_string(),
@@ -655,6 +850,9 @@ impl StyleResolver {
                     scope_proximity: None,
                     source_order,
                     encapsulation_order: tree_scope_order(&self.stylesheet_scopes, node),
+                    layer_context,
+                    layer_path: None,
+                    layer_order: vec![usize::MAX],
                 });
                 source_order += 1;
             }
@@ -664,12 +862,15 @@ impl StyleResolver {
             cascade_rank(left)
                 .cmp(&cascade_rank(right))
                 .then(encapsulation_rank(left).cmp(&encapsulation_rank(right)))
-                .then(right.prefixed_alias.cmp(&left.prefixed_alias))
                 .then(left.inline.cmp(&right.inline))
+                .then_with(|| compare_layer_priority(left, right))
+                .then(right.prefixed_alias.cmp(&left.prefixed_alias))
                 .then(left.specificity.cmp(&right.specificity))
                 .then_with(|| compare_scope_proximity(left, right))
                 .then(left.source_order.cmp(&right.source_order))
         });
+
+        remove_reverted_layer_candidates(&mut candidates);
 
         let mut properties: BTreeMap<String, ComputedValue> = BTreeMap::new();
         let mut custom_properties = inherited_custom_properties(parent_style);
@@ -1937,6 +2138,9 @@ struct Candidate {
     /// Position of this declaration's tree scope in tree-of-trees order.
     /// Encapsulation order reverses for important declarations.
     encapsulation_order: usize,
+    layer_context: LayerContextKey,
+    layer_path: Option<LayerPath>,
+    layer_order: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -2417,6 +2621,9 @@ fn collect_indexed_rule_candidates(
     rules: &[Rule],
     index: &StylesheetRuleIndex,
     origin: Origin,
+    stylesheet_id: usize,
+    layer_context: LayerContextKey,
+    layer_order: &CascadeLayerOrder,
     pseudo: Option<PseudoElement>,
     source_order: &mut usize,
     out: &mut Vec<Candidate>,
@@ -2438,6 +2645,9 @@ fn collect_indexed_rule_candidates(
             node,
             rules,
             origin,
+            stylesheet_id,
+            layer_context,
+            layer_order,
             pseudo,
             source_order,
             out,
@@ -2454,6 +2664,7 @@ fn collect_indexed_rule_candidates(
             implicit_scope_root,
             encapsulation_order,
             None,
+            None,
         );
         return;
     };
@@ -2465,6 +2676,9 @@ fn collect_indexed_rule_candidates(
             node,
             &rules[rule_index..=rule_index],
             origin,
+            stylesheet_id,
+            layer_context,
+            layer_order,
             pseudo,
             &mut rule_order,
             out,
@@ -2480,6 +2694,7 @@ fn collect_indexed_rule_candidates(
             shadow_scope,
             implicit_scope_root,
             encapsulation_order,
+            None,
             None,
         );
     }
@@ -2492,6 +2707,9 @@ fn collect_indexed_rule_candidates(
             node,
             &rules[rule_index..=rule_index],
             origin,
+            stylesheet_id,
+            layer_context,
+            layer_order,
             pseudo,
             &mut rule_order,
             out,
@@ -2508,6 +2726,7 @@ fn collect_indexed_rule_candidates(
             implicit_scope_root,
             encapsulation_order,
             None,
+            None,
         );
     }
     *source_order += index.total_declarations;
@@ -2517,6 +2736,9 @@ fn collect_rule_candidates(
     node: &NodeHandle,
     rules: &[Rule],
     origin: Origin,
+    stylesheet_id: usize,
+    layer_context: LayerContextKey,
+    layer_order: &CascadeLayerOrder,
     pseudo: Option<PseudoElement>,
     source_order: &mut usize,
     out: &mut Vec<Candidate>,
@@ -2533,6 +2755,7 @@ fn collect_rule_candidates(
     implicit_scope_root: Option<&NodeHandle>,
     encapsulation_order: usize,
     active_scope: Option<&ActiveScope>,
+    active_layer: Option<&LayerPath>,
 ) {
     if node.node_type() != NodeType::Element {
         return;
@@ -2614,6 +2837,9 @@ fn collect_rule_candidates(
                             scope_proximity: active_scope.map(|_| proximity),
                             source_order: *source_order,
                             encapsulation_order,
+                            layer_context,
+                            layer_path: active_layer.cloned(),
+                            layer_order: layer_order.rank(active_layer),
                         });
                         *source_order += 1;
                     }
@@ -2623,6 +2849,44 @@ fn collect_rule_candidates(
             }
             Rule::At(at_rule) => {
                 if let Some(block) = &at_rule.block {
+                    if at_rule.name.eq_ignore_ascii_case("layer") {
+                        let Some(path) =
+                            layer_block_path(
+                                at_rule,
+                                stylesheet_id,
+                                active_layer.map(Vec::as_slice).unwrap_or(&[]),
+                            )
+                        else {
+                            *source_order += count_declarations(block);
+                            continue;
+                        };
+                        collect_rule_candidates(
+                            node,
+                            block,
+                            origin,
+                            stylesheet_id,
+                            layer_context,
+                            layer_order,
+                            pseudo,
+                            source_order,
+                            out,
+                            viewport_width,
+                            viewport_height,
+                            color_scheme_dark,
+                            media_cache,
+                            scope_cache,
+                            container_cache,
+                            container_contexts,
+                            element_keys,
+                            selector_cache,
+                            shadow_scope,
+                            implicit_scope_root,
+                            encapsulation_order,
+                            active_scope,
+                            Some(&path),
+                        );
+                        continue;
+                    }
                     if at_rule.name.eq_ignore_ascii_case("scope") {
                         let prelude = scope_cache
                             .entry(at_rule.prelude.clone())
@@ -2645,6 +2909,9 @@ fn collect_rule_candidates(
                             node,
                             block,
                             origin,
+                            stylesheet_id,
+                            layer_context,
+                            layer_order,
                             pseudo,
                             source_order,
                             out,
@@ -2661,6 +2928,7 @@ fn collect_rule_candidates(
                             implicit_scope_root,
                             encapsulation_order,
                             Some(&scope),
+                            active_layer,
                         );
                         continue;
                     }
@@ -2696,6 +2964,9 @@ fn collect_rule_candidates(
                             node,
                             block,
                             origin,
+                            stylesheet_id,
+                            layer_context,
+                            layer_order,
                             pseudo,
                             source_order,
                             out,
@@ -2712,6 +2983,7 @@ fn collect_rule_candidates(
                             implicit_scope_root,
                             encapsulation_order,
                             active_scope,
+                            active_layer,
                         );
                     } else {
                         // Count the rules inside for correct source_order numbering.
@@ -3217,6 +3489,72 @@ fn cascade_rank(candidate: &Candidate) -> (u8, u8) {
         (false, Origin::UserAgent) => 0,
     };
     (importance, origin)
+}
+
+fn compare_layer_priority(left: &Candidate, right: &Candidate) -> std::cmp::Ordering {
+    if left.inline || right.inline {
+        return std::cmp::Ordering::Equal;
+    }
+    let order = left.layer_order.cmp(&right.layer_order);
+    if left.important {
+        order.reverse()
+    } else {
+        order
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RevertedLayer {
+    important: bool,
+    inline: bool,
+    context: LayerContextKey,
+    path: Option<LayerPath>,
+}
+
+impl From<&Candidate> for RevertedLayer {
+    fn from(candidate: &Candidate) -> Self {
+        Self {
+            important: candidate.important,
+            inline: candidate.inline,
+            context: candidate.layer_context,
+            path: candidate.layer_path.clone(),
+        }
+    }
+}
+
+fn remove_reverted_layer_candidates(candidates: &mut Vec<Candidate>) {
+    let property_names: BTreeSet<String> = candidates
+        .iter()
+        .map(|candidate| candidate.name.clone())
+        .collect();
+    let mut reverted_by_property: HashMap<String, HashSet<RevertedLayer>> = HashMap::new();
+
+    for property_name in property_names {
+        let reverted = reverted_by_property.entry(property_name.clone()).or_default();
+        loop {
+            let winner = candidates.iter().rev().find(|candidate| {
+                candidate.name == property_name
+                    && !reverted.contains(&RevertedLayer::from(*candidate))
+            });
+            let Some(winner) = winner else {
+                break;
+            };
+            if !is_revert_layer_value(&winner.value) {
+                break;
+            }
+            reverted.insert(RevertedLayer::from(winner));
+        }
+    }
+
+    candidates.retain(|candidate| {
+        !reverted_by_property
+            .get(&candidate.name)
+            .is_some_and(|reverted| reverted.contains(&RevertedLayer::from(candidate)))
+    });
+}
+
+fn is_revert_layer_value(value: &Value) -> bool {
+    matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("revert-layer"))
 }
 
 fn compare_scope_proximity(left: &Candidate, right: &Candidate) -> std::cmp::Ordering {
