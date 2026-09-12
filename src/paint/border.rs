@@ -7,7 +7,7 @@ use super::color::{Color, parse_color};
 use super::{
     BorderRegion, Canvas, border_box_rect, border_color, border_radius_corners,
     fill_triangle_clipped, fill_triangle_clipped_inclusive, has_border_radius, length_property,
-    normalize_rect, padding_box_rect, resolve_color_value,
+    normalize_rect, padding_box_rect, resolve_color_value, rounded_rect_pixel_coverage,
 };
 
 pub(crate) fn paint_borders(
@@ -689,27 +689,13 @@ pub(crate) fn paint_outer_box_shadow(
                 bl + spread,
                 None,
             );
-            // border_box 内側のアルファをゼロにして要素本体を除外する
             let box_local = Rect {
                 x: border_box.x - buf_x as f32,
                 y: border_box.y - buf_y as f32,
                 width: border_box.width,
                 height: border_box.height,
             };
-            if let Some(box_local_n) = normalize_rect(box_local) {
-                let x0 = box_local_n.x.floor().max(0.0) as i32;
-                let y0 = box_local_n.y.floor().max(0.0) as i32;
-                let x1 = (box_local_n.x + box_local_n.width).ceil().min(buf_w as f32) as i32;
-                let y1 = (box_local_n.y + box_local_n.height)
-                    .ceil()
-                    .min(buf_h as f32) as i32;
-                for py in y0..y1 {
-                    for px in x0..x1 {
-                        let idx = (py as u32 * buf_w + px as u32) as usize * 4;
-                        shadow_buf.pixels[idx + 3] = 0;
-                    }
-                }
-            }
+            knock_out_shadow_interior(&mut shadow_buf, box_local, Some((tl, tr, br, bl)));
             // color.a は合成時に適用し、一時バッファへの追加走査を避ける。
             let alpha_scale = color.a as f32 / 255.0;
             canvas.composite_canvas_clipped(
@@ -795,13 +781,26 @@ pub(crate) fn paint_outer_box_shadow(
             }
         }
     } else {
-        // blur あり: 影の領域を含む一時バッファに描画し、
-        // border_box 部分のアルファをゼロにしてから blur を適用する。
-        let margin = blur.ceil() as i32 + 1;
-        let buf_x = (shadow_rect.x - margin as f32).floor() as i32;
-        let buf_y = (shadow_rect.y - margin as f32).floor() as i32;
-        let buf_w = (shadow_rect.width + margin as f32 * 2.0).ceil() as u32 + 2;
-        let buf_h = (shadow_rect.height + margin as f32 * 2.0).ceil() as u32 + 2;
+        // CSS blur radiusの半分を標準偏差とするGaussianへ合わせる。小さいkernelは
+        // 直接畳み込み、それ以外は3つのbox blurで線形時間に近似する。
+        // 全passの支持範囲をmarginに取り、端を透明として畳み込む。
+        let sigma = blur * 0.5;
+        let use_direct_gaussian = sigma > 0.5 && sigma <= 2.0;
+        let blur_radii = gaussian_box_blur_radii(blur);
+        let blur_support = if use_direct_gaussian {
+            (sigma * 3.0).ceil() as u32
+        } else {
+            blur_radii
+                .iter()
+                .copied()
+                .fold(0u32, u32::saturating_add)
+        };
+        let margin = blur_support.saturating_add(1);
+        let margin_f = margin as f32;
+        let buf_x = (shadow_rect.x - margin_f).floor() as i32;
+        let buf_y = (shadow_rect.y - margin_f).floor() as i32;
+        let buf_w = (shadow_rect.width + margin_f * 2.0).ceil() as u32 + 2;
+        let buf_h = (shadow_rect.height + margin_f * 2.0).ceil() as u32 + 2;
 
         if buf_w == 0 || buf_h == 0 {
             return;
@@ -829,31 +828,20 @@ pub(crate) fn paint_outer_box_shadow(
             shadow_buf.fill_rect(local_rect, Color::rgba(color.r, color.g, color.b, 255));
         }
 
-        // border_box に対応するバッファ内領域のアルファをゼロにする（要素内側を除外）
+        // 先に不透明なborder-box形状全体をblurし、完成したouter shadowだけを
+        // border edgeの内側から除外する。
+        if use_direct_gaussian {
+            shadow_buf.gaussian_blur_alpha_zero_padded(sigma);
+        } else {
+            shadow_buf.box_blur_alpha_radii_zero_padded(&blur_radii);
+        }
         let box_local = Rect {
             x: border_box.x - buf_x as f32,
             y: border_box.y - buf_y as f32,
             width: border_box.width,
             height: border_box.height,
         };
-        if let Some(box_local_n) = normalize_rect(box_local) {
-            let x0 = box_local_n.x.floor().max(0.0) as i32;
-            let y0 = box_local_n.y.floor().max(0.0) as i32;
-            let x1 = (box_local_n.x + box_local_n.width).ceil().min(buf_w as f32) as i32;
-            let y1 = (box_local_n.y + box_local_n.height)
-                .ceil()
-                .min(buf_h as f32) as i32;
-            for py in y0..y1 {
-                for px in x0..x1 {
-                    let idx = (py as u32 * buf_w + px as u32) as usize * 4;
-                    shadow_buf.pixels[idx + 3] = 0;
-                }
-            }
-        }
-
-        // 簡易 box blur: 半径 r = ceil(blur) のボックスで 3 回適用
-        let r = blur.ceil() as u32;
-        shadow_buf.box_blur_alpha_passes(r, 3);
+        knock_out_shadow_interior(&mut shadow_buf, box_local, radii);
 
         // color.a は合成時に適用し、一時バッファへの追加走査を避ける。
         let alpha_scale = color.a as f32 / 255.0;
@@ -869,5 +857,69 @@ pub(crate) fn paint_outer_box_shadow(
             alpha_scale,
             clip,
         );
+    }
+}
+
+fn gaussian_box_blur_radii(blur_radius: f32) -> [u32; 3] {
+    let sigma = f64::from(blur_radius.max(0.0)) / 2.0;
+    if sigma == 0.0 || !sigma.is_finite() {
+        return [0; 3];
+    }
+
+    const PASSES: usize = 3;
+    let ideal_width = (12.0 * sigma * sigma / PASSES as f64 + 1.0).sqrt();
+    let mut lower_width = ideal_width.floor() as i64;
+    if lower_width % 2 == 0 {
+        lower_width -= 1;
+    }
+    lower_width = lower_width.max(1);
+    let upper_width = lower_width.saturating_add(2);
+    let lower_count = ((12.0 * sigma * sigma
+        - PASSES as f64 * lower_width as f64 * lower_width as f64
+        - 4.0 * PASSES as f64 * lower_width as f64
+        - 3.0 * PASSES as f64)
+        / (-4.0 * lower_width as f64 - 4.0))
+        .round()
+        .clamp(0.0, PASSES as f64) as usize;
+
+    let lower_radius = ((lower_width - 1) / 2) as u32;
+    let upper_radius = ((upper_width - 1) / 2) as u32;
+    let mut radii = [upper_radius; PASSES];
+    radii[..lower_count].fill(lower_radius);
+    radii
+}
+
+fn knock_out_shadow_interior(
+    shadow: &mut Canvas,
+    border_box: Rect,
+    radii: Option<(f32, f32, f32, f32)>,
+) {
+    let Some(area) = normalize_rect(border_box) else {
+        return;
+    };
+    let x0 = area.x.floor().max(0.0) as i32;
+    let y0 = area.y.floor().max(0.0) as i32;
+    let x1 = (area.x + area.width).ceil().min(shadow.width as f32) as i32;
+    let y1 = (area.y + area.height).ceil().min(shadow.height as f32) as i32;
+
+    if let Some(radii) = radii {
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let coverage = rounded_rect_pixel_coverage(px, py, area, radii);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let index = (py as u32 * shadow.width + px as u32) as usize * 4 + 3;
+                shadow.pixels[index] =
+                    (shadow.pixels[index] as f32 * (1.0 - coverage)).round() as u8;
+            }
+        }
+    } else {
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let index = (py as u32 * shadow.width + px as u32) as usize * 4 + 3;
+                shadow.pixels[index] = 0;
+            }
+        }
     }
 }

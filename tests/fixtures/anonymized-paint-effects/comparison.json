@@ -1,0 +1,32 @@
+{
+  "environment": {
+    "date": "2026-09-12",
+    "platform": "Linux ARM64",
+    "firefox": "155.0.1",
+    "geckodriver": "0.37.1",
+    "dpr": 1
+  },
+  "original_fixture": {
+    "geometry_max_delta_css_px": 0.0,
+    "repeat_ae": { "firefox": 0, "omoikane": 0 },
+    "shadow": {
+      "before": { "ae": 5168, "max_channel": 74, "normalized_mae": 0.0218553 },
+      "after": { "ae": 4024, "max_channel": 5, "normalized_mae": 0.00110876 }
+    },
+    "rounded_border": {
+      "before": { "ae": 267, "max_channel": 140, "normalized_mae": 0.00218048 },
+      "after": { "ae": 293, "max_channel": 118, "normalized_mae": 0.00157813 }
+    },
+    "controls": { "overflow_clip_ae": 0, "translation_ae": 0 }
+  },
+  "matrix_max_channel_error": {
+    "blur_1px": 4,
+    "blur_2px": 2,
+    "blur_4px": 5,
+    "blur_8px": 5,
+    "blur_16px": 3,
+    "blur_0px": 0,
+    "positive_spread": 5,
+    "negative_spread": 5
+  }
+}
