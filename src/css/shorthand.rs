@@ -3,6 +3,9 @@
 use super::{Declaration, Value};
 
 pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    if let Some(declarations) = expand_revert_layer_shorthand(name, &value, important) {
+        return declarations;
+    }
     match name {
         "margin" | "padding" => expand_box_shorthand(name, value, important),
         "margin-inline" | "margin-block" | "padding-inline" | "padding-block" => {
@@ -49,6 +52,186 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
             important,
         }],
     }
+}
+
+fn expand_revert_layer_shorthand(
+    name: &str,
+    value: &Value,
+    important: bool,
+) -> Option<Vec<Declaration>> {
+    let Value::Keyword(keyword) = value else {
+        return None;
+    };
+    if !keyword.eq_ignore_ascii_case("revert-layer") {
+        return None;
+    }
+
+    let longhands: Vec<String> = match name {
+        "margin" | "padding" => ["top", "right", "bottom", "left"]
+            .into_iter()
+            .map(|side| format!("{name}-{side}"))
+            .collect(),
+        "margin-inline" | "padding-inline" => ["inline-start", "inline-end"]
+            .into_iter()
+            .map(|side| format!("{}-{side}", name.split('-').next().unwrap_or(name)))
+            .collect(),
+        "margin-block" | "padding-block" => ["block-start", "block-end"]
+            .into_iter()
+            .map(|side| format!("{}-{side}", name.split('-').next().unwrap_or(name)))
+            .collect(),
+        "border-width" | "border-style" | "border-color" => {
+            let suffix = name.strip_prefix("border-").unwrap_or(name);
+            ["top", "right", "bottom", "left"]
+                .into_iter()
+                .map(|side| format!("border-{side}-{suffix}"))
+                .collect()
+        }
+        "border" => {
+            let mut names = vec![
+                "border-width".to_string(),
+                "border-style".to_string(),
+                "border-color".to_string(),
+            ];
+            names.extend(["top", "right", "bottom", "left"].into_iter().flat_map(|side| {
+                ["width", "style", "color"]
+                    .into_iter()
+                    .map(move |suffix| format!("border-{side}-{suffix}"))
+            }));
+            names
+        }
+        "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            ["width", "style", "color"]
+                .into_iter()
+                .map(|suffix| format!("{name}-{suffix}"))
+                .collect()
+        }
+        "background" => [
+            "background-image",
+            "background-position-x",
+            "background-position-y",
+            "background-size",
+            "background-repeat",
+            "background-attachment",
+            "background-origin",
+            "background-clip",
+            "background-color",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "background-position" => ["background-position-x", "background-position-y"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "mask" | "-webkit-mask" => [
+            "mask-image",
+            "mask-position-x",
+            "mask-position-y",
+            "mask-size",
+            "mask-repeat",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "mask-position" | "-webkit-mask-position" => {
+            ["mask-position-x", "mask-position-y"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        }
+        "overflow" => ["overflow-x", "overflow-y"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "flex" => ["flex-grow", "flex-shrink", "flex-basis"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "text-decoration" => [
+            "text-decoration-line",
+            "text-decoration-style",
+            "text-decoration-color",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "border-radius" => [
+            "border-top-left-radius",
+            "border-top-right-radius",
+            "border-bottom-right-radius",
+            "border-bottom-left-radius",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "list-style" => ["list-style-type", "list-style-position", "list-style-image"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "flex-flow" => ["flex-direction", "flex-wrap"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "animation" => [
+            "animation-name",
+            "animation-fill-mode",
+            "animation-duration",
+            "animation-iteration-count",
+            "animation",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "outline" => ["outline-style", "outline-width", "outline-color"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "grid-column" | "grid-row" => ["start", "end"]
+            .into_iter()
+            .map(|edge| format!("{name}-{edge}"))
+            .collect(),
+        "grid-area" => [
+            "grid-row-start",
+            "grid-column-start",
+            "grid-row-end",
+            "grid-column-end",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "grid-template" => [
+            "grid-template-areas",
+            "grid-template-rows",
+            "grid-template-columns",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "place-items" => ["align-items", "justify-items"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "place-self" => ["align-self", "justify-self"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "place-content" => ["align-content", "justify-content"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        _ => return None,
+    };
+
+    Some(
+        longhands
+            .into_iter()
+            .map(|name| Declaration {
+                name,
+                value: Value::Keyword("revert-layer".to_string()),
+                important,
+            })
+            .collect(),
+    )
 }
 
 fn expand_background_position_shorthand(value: Value, important: bool) -> Vec<Declaration> {

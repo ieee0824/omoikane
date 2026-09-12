@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::css::{CssToken, Stylesheet, extract_font_face_rules, parse_stylesheet, tokenize};
+use crate::css::{Stylesheet, extract_font_face_rules, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::Font;
 use crate::http::url::resolve_url;
@@ -533,26 +533,10 @@ pub(crate) fn parse_import_prelude(prelude: &str) -> Option<(String, Option<Impo
 }
 
 fn normalize_import_layer_name(input: &str) -> Option<String> {
-    let tokens = tokenize(input).ok()?;
-    let mut index = 0usize;
-    let mut segments = Vec::new();
-    loop {
-        while matches!(tokens.get(index), Some(CssToken::Whitespace)) {
-            index += 1;
-        }
-        let Some(CssToken::Ident(segment)) = tokens.get(index) else {
-            return None;
-        };
-        segments.push(segment.clone());
-        index += 1;
-        while matches!(tokens.get(index), Some(CssToken::Whitespace)) {
-            index += 1;
-        }
-        match tokens.get(index) {
-            None => return Some(segments.join(".")),
-            Some(CssToken::Delim('.')) => index += 1,
-            _ => return None,
-        }
+    let names = crate::css::parse_layer_name_list(input)?;
+    match names.as_slice() {
+        [name] => Some(name.join(".")),
+        _ => None,
     }
 }
 

@@ -3213,6 +3213,37 @@ fn named_layer_order_is_shared_across_stylesheets() {
 }
 
 #[test]
+fn media_queries_rebuild_the_active_cascade_layer_order() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@media (max-width: 300px) { @layer second, first; } \
+             @media (min-width: 500px) { @layer first, second; } \
+             @layer first { div { color: red; } } \
+             @layer second { div { color: green; } }",
+        )
+        .unwrap(),
+    );
+
+    resolver.set_viewport(300.0, 300.0);
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
+
+    resolver.set_viewport(500.0, 300.0);
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
 fn important_inline_style_outranks_important_layered_rules() {
     let document = NodeHandle::document();
     let target = NodeHandle::element("div");
@@ -5505,6 +5536,172 @@ fn revert_layer_rolls_back_the_current_cascade_layer() {
         style.get("white-space"),
         Some(&ComputedValue::Keyword("pre-wrap".to_string())),
         "`revert-layer` removes declarations from its own layer"
+    );
+}
+
+#[test]
+fn revert_layer_rolls_back_background_shorthand_from_the_current_layer() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer base, override; \
+             @layer base { div { background: #a855f7; } } \
+             @layer override { div { background: #eab308; background: revert-layer; } }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("background-color"),
+        Some(&ComputedValue::Color("#a855f7".to_string())),
+        "`revert-layer` on a shorthand must roll back every expanded longhand"
+    );
+}
+
+#[test]
+fn revert_layer_treats_logical_and_physical_properties_as_one_group() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer base, override; \
+             @layer base { div { margin-left: 11px; } } \
+             @layer override { div { margin-left: 22px; margin-inline-start: revert-layer; } }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("margin-left"),
+        Some(&ComputedValue::Px(11.0)),
+        "a logical revert-layer must also roll back its physical counterpart"
+    );
+}
+
+#[test]
+fn invalid_higher_declaration_does_not_hide_revert_layer() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::User,
+        parse_stylesheet("div { white-space: pre-wrap; }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer base { div { white-space: nowrap; white-space: revert-layer; } } \
+             div { white-space: x-bogus; }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("white-space"),
+        Some(&ComputedValue::Keyword("pre-wrap".to_string())),
+        "an invalid higher declaration must be discarded before revert-layer is resolved"
+    );
+}
+
+#[test]
+fn unresolved_var_does_not_hide_revert_layer() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::User,
+        parse_stylesheet("div { white-space: pre-wrap; }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer base { div { white-space: nowrap; white-space: revert-layer; } } \
+             div { white-space: var(--missing); }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("white-space"),
+        Some(&ComputedValue::Keyword("pre-wrap".to_string())),
+        "an unresolved var() must be discarded before revert-layer is resolved"
+    );
+}
+
+#[test]
+fn revert_layer_from_unlayered_rules_uses_the_last_explicit_layer() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer base { div { color: green; } } \
+             div { color: red; color: revert-layer; }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn important_revert_layer_uses_the_next_important_layer() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer first, second; \
+             @layer first { div { color: red !important; color: revert-layer !important; } } \
+             @layer second { div { color: green !important; } }",
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+}
+
+#[test]
+fn important_inline_revert_layer_uses_stylesheet_important_rule() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    target.set_attribute("style", "color: red !important; color: revert-layer !important");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { color: green !important; }").unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&target).get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
     );
 }
 

@@ -80,6 +80,58 @@ pub(crate) fn split_top_level_commas(value: &str) -> Vec<&str> {
     values.push(&value[start..]);
     values
 }
+
+/// Parses a comma-separated list of dot-separated cascade layer names.
+///
+/// Whitespace around a dot and CSS-wide keywords are invalid in a layer name.
+pub(crate) fn parse_layer_name_list(input: &str) -> Option<Vec<Vec<String>>> {
+    let tokens = tokenize(input).ok()?;
+    let mut index = 0usize;
+    let mut names = Vec::new();
+
+    loop {
+        while matches!(tokens.get(index), Some(CssToken::Whitespace)) {
+            index += 1;
+        }
+        let Some(CssToken::Ident(first)) = tokens.get(index) else {
+            return None;
+        };
+        if is_reserved_layer_name(first) {
+            return None;
+        }
+        let mut name = vec![first.clone()];
+        index += 1;
+
+        while matches!(tokens.get(index), Some(CssToken::Delim('.'))) {
+            index += 1;
+            let Some(CssToken::Ident(segment)) = tokens.get(index) else {
+                return None;
+            };
+            if is_reserved_layer_name(segment) {
+                return None;
+            }
+            name.push(segment.clone());
+            index += 1;
+        }
+        names.push(name);
+
+        while matches!(tokens.get(index), Some(CssToken::Whitespace)) {
+            index += 1;
+        }
+        match tokens.get(index) {
+            None => return Some(names),
+            Some(CssToken::Comma) => index += 1,
+            _ => return None,
+        }
+    }
+}
+
+fn is_reserved_layer_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "revert-rule"
+    )
+}
 pub use transform::AffineTransform;
 pub(crate) use transform::{
     TransformReferenceBox, interpolate_transform_lists, parse_perspective_origin,
@@ -613,6 +665,43 @@ mod tests {
     }
 
     #[test]
+    fn validates_layer_rule_names_and_assigns_anonymous_ids() {
+        let stylesheet = parse_stylesheet(
+            "@layer reset, theme.components; \
+             @layer theme.components { h1 { color: green; } } \
+             @layer { h2 { color: blue; } } \
+             @layer { h3 { color: red; } }",
+        )
+        .unwrap();
+
+        let anonymous_ids: Vec<_> = stylesheet
+            .rules
+            .iter()
+            .filter_map(|rule| match rule {
+                Rule::At(rule) if rule.name.eq_ignore_ascii_case("layer") => {
+                    rule.anonymous_layer_id
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(anonymous_ids, vec![0, 1]);
+
+        for invalid in [
+            "@layer;",
+            "@layer first . second;",
+            "@layer initial;",
+            "@layer theme.revert-layer;",
+            "@layer first, second {}",
+            "@layer first . second {}",
+        ] {
+            assert!(
+                parse_stylesheet(invalid).is_err(),
+                "accepted invalid rule: {invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_general_enclosed_braces_in_supports_prelude() {
         let stylesheet = parse_stylesheet("@supports ({future}) { main { display: block; } }")
             .expect("parse supports general-enclosed condition");
@@ -636,6 +725,34 @@ mod tests {
         assert!(rule.declarations.iter().any(|decl| decl.name == "border-width"));
         assert!(rule.declarations.iter().any(|decl| decl.name == "border-style"));
         assert!(rule.declarations.iter().any(|decl| decl.name == "border-color"));
+    }
+
+    #[test]
+    fn expands_revert_layer_shorthands_to_their_longhands() {
+        let stylesheet = parse_stylesheet(
+            "div { background: revert-layer; margin: revert-layer; border: revert-layer; }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        for name in [
+            "background-color",
+            "background-image",
+            "margin-top",
+            "margin-left",
+            "border-top-width",
+            "border-left-color",
+        ] {
+            assert!(
+                rule.declarations.iter().any(|declaration| {
+                    declaration.name == name
+                        && declaration.value == Value::Keyword("revert-layer".to_string())
+                }),
+                "missing revert-layer longhand `{name}`"
+            );
+        }
     }
 
     #[test]

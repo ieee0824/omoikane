@@ -2340,6 +2340,13 @@
       });
     }
 
+    set style(value) {
+      // HTMLElement.style is [PutForwards=cssText]: assigning a string replaces
+      // the declaration block while preserving the CSSStyleDeclaration object
+      // returned by the getter.
+      this.style.cssText = value;
+    }
+
     get textContent() {
       const type = this.nodeType;
       if (type === 9 || type === 10) return null;
@@ -5272,6 +5279,104 @@
   }
   class CSSConditionRule extends CSSGroupingRule {}
 
+  function cssLayerNames(prelude) {
+    return String(prelude)
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split(",")
+      .map(name => name.trim());
+  }
+
+  class CSSLayerBlockRule extends CSSGroupingRule {
+    constructor(text, sheet = null, index = -1) {
+      super();
+      this.__text = text;
+      this.__sheet = sheet;
+      this.__index = index;
+      const open = cssRuleBlockStart(this.__text);
+      const close = this.__text.lastIndexOf("}");
+      this.__hasBlock = open >= 0 && close > open;
+      this.__name = this.__hasBlock
+        ? cssLayerNames(this.__text.slice("@layer".length, open))[0] || ""
+        : "";
+      const inner = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
+      this.__innerSheet = new CSSStyleSheet({ textContent: inner });
+      this.__innerSheet.__parentRule = this;
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get type() { return 0; }
+    get name() { return this.__name; }
+    get cssRules() { return this.__innerSheet.cssRules; }
+    __serializeCssText() {
+      const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
+      const name = this.name ? " " + this.name : "";
+      return "@layer" + name + " {\n" + (nested ? nested + "\n" : "") + "}";
+    }
+    get cssText() { return this.__serializeCssText(); }
+  }
+
+  class CSSLayerStatementRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__text = text;
+      this.__sheet = sheet;
+      this.__index = index;
+      const prelude = this.__text
+        .replace(/^\s*@layer/i, "")
+        .replace(/;\s*$/, "");
+      this.__nameList = Object.freeze(cssLayerNames(prelude));
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get type() { return 0; }
+    get nameList() { return this.__nameList; }
+    get cssText() { return "@layer " + this.nameList.join(", ") + ";"; }
+  }
+
+  function cssImportParts(text) {
+    const prelude = String(text)
+      .replace(/^\s*@import/i, "")
+      .replace(/;\s*$/, "")
+      .trim();
+    let href = "", trailing = "";
+    const url = prelude.match(/^url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)([\s\S]*)$/i);
+    const string = prelude.match(/^(?:"([^"]*)"|'([^']*)')([\s\S]*)$/);
+    if (url) {
+      href = url[1] ?? url[2] ?? (url[3] || "").trim();
+      trailing = (url[4] || "").trim();
+    } else if (string) {
+      href = string[1] ?? string[2] ?? "";
+      trailing = (string[3] || "").trim();
+    }
+    let layerName = null;
+    if (/^layer$/i.test(trailing)) layerName = "";
+    else {
+      const layer = trailing.match(/^layer\(([^)]*)\)$/i);
+      if (layer) layerName = layer[1].trim();
+    }
+    return { href, layerName };
+  }
+
+  class CSSImportRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__text = text;
+      this.__sheet = sheet;
+      this.__index = index;
+      const parts = cssImportParts(text);
+      this.__href = parts.href;
+      this.__layerName = parts.layerName;
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get type() { return 3; }
+    get href() { return this.__href; }
+    get layerName() { return this.__layerName; }
+    get styleSheet() { return null; }
+    get cssText() {
+      const escaped = this.href.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const layer = this.layerName === null
+        ? ""
+        : this.layerName === "" ? " layer" : " layer(" + this.layerName + ")";
+      return '@import url("' + escaped + '")' + layer + ";";
+    }
+  }
+
   class CSSSupportsRule extends CSSConditionRule {
     constructor(text, sheet = null, index = -1) {
       super();
@@ -5421,6 +5526,12 @@
   function createCssRule(text, sheet = null, index = -1) {
     return /^\s*@font-face(?=\s|\/\*|\{)/i.test(text)
       ? new CSSFontFaceRule(text, sheet, index)
+      : /^\s*@import(?=\s|\/\*)/i.test(text)
+      ? new CSSImportRule(text, sheet, index)
+      : /^\s*@layer(?=\s|\/\*|\{|;)/i.test(text)
+      ? (cssRuleBlockStart(text) >= 0
+        ? new CSSLayerBlockRule(text, sheet, index)
+        : new CSSLayerStatementRule(text, sheet, index))
       : /^\s*@container(?=\s|\/\*|\()/i.test(text)
       ? new CSSContainerRule(text, sheet, index)
       : /^\s*@scope(?=\s|\/\*|\(|\{)/i.test(text)
@@ -10822,6 +10933,9 @@
   globalThis.CSSRuleList = CSSRuleList;
   globalThis.CSSStyleRule = CSSStyleRule;
   globalThis.CSSFontFaceRule = CSSFontFaceRule;
+  globalThis.CSSImportRule = CSSImportRule;
+  globalThis.CSSLayerBlockRule = CSSLayerBlockRule;
+  globalThis.CSSLayerStatementRule = CSSLayerStatementRule;
   globalThis.CSSSupportsRule = CSSSupportsRule;
   globalThis.CSSContainerRule = CSSContainerRule;
   globalThis.CSSGroupingRule = CSSGroupingRule;

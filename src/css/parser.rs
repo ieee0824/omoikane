@@ -226,9 +226,15 @@ impl Parser {
             match token {
                 CssToken::Semicolon if at_top_level => {
                     self.next();
+                    let prelude = render_tokens(&prelude_tokens).trim().to_string();
+                    if name.eq_ignore_ascii_case("layer")
+                        && super::parse_layer_name_list(&prelude).is_none()
+                    {
+                        return Err(CssParseError::InvalidDeclaration);
+                    }
                     return Ok(Rule::At(AtRule {
                         name,
-                        prelude: render_tokens(&prelude_tokens).trim().to_string(),
+                        prelude,
                         block: None,
                         declarations: Vec::new(),
                         anonymous_layer_id: None,
@@ -238,6 +244,16 @@ impl Parser {
                     self.next();
                     if name.eq_ignore_ascii_case("import") {
                         return Err(CssParseError::InvalidDeclaration);
+                    }
+
+                    if name.eq_ignore_ascii_case("layer") {
+                        let prelude = render_tokens(&prelude_tokens).trim().to_string();
+                        if !prelude.is_empty()
+                            && super::parse_layer_name_list(&prelude)
+                                .is_none_or(|names| names.len() != 1)
+                        {
+                            return Err(CssParseError::InvalidDeclaration);
+                        }
                     }
 
                     if name.eq_ignore_ascii_case("media")
