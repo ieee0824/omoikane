@@ -1733,7 +1733,13 @@ impl HostState {
         }
         fn visit(state: &mut HostState, node: &NodeHandle, include_scripts: bool) {
             let tag = node.tag_name().unwrap_or_default();
+            let style_has_import = tag.eq_ignore_ascii_case("style")
+                && !crate::paint::stylesheet::extract_import_directives(
+                    &collect_text_content(node),
+                )
+                .is_empty();
             let is_resource = tag.eq_ignore_ascii_case("iframe")
+                || style_has_import
                 || (include_scripts
                     && tag.eq_ignore_ascii_case("script")
                     && node
@@ -21936,6 +21942,33 @@ b</textarea></form>"#);
     }
 
     #[test]
+    fn style_assignment_forwards_to_css_text() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div);
+
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval("document.querySelector('div').style = 'color: green !important; width: 17px'")
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.querySelector('div').getAttribute('style')"
+            ),
+            "color: green !important; width: 17px"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).width"
+            ),
+            "17px"
+        );
+    }
+
+    #[test]
     fn style_remove_property_returns_previous_value_and_updates_attribute() {
         let doc = NodeHandle::document();
         let div = NodeHandle::element("div");
@@ -24590,6 +24623,68 @@ b</textarea></form>"#);
             .unwrap()
             .as_boolean()
             .unwrap());
+    }
+
+    #[test]
+    fn css_layer_rules_expose_names_imports_and_live_children() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>@layer first, second; @import url(data:text/css,) layer(imported); @layer outer { @layer inner { #target { width: 41px; } } }</style></head><body><div id='target'></div></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                        const sheet = document.styleSheets[0];
+                        const statement = sheet.cssRules[0];
+                        const imported = sheet.cssRules[1];
+                        const outer = sheet.cssRules[2];
+                        const inner = outer.cssRules[0];
+                        inner.insertRule('#target { height: 43px; }', 1);
+                        return statement instanceof CSSLayerStatementRule &&
+                            Object.isFrozen(statement.nameList) &&
+                            statement.nameList.join('.') === 'first.second' &&
+                            imported instanceof CSSImportRule &&
+                            imported.layerName === 'imported' &&
+                            imported.href === 'data:text/css,' &&
+                            outer instanceof CSSLayerBlockRule && outer.name === 'outer' &&
+                            inner instanceof CSSLayerBlockRule && inner.name === 'inner' &&
+                            inner.cssRules.length === 2 &&
+                            getComputedStyle(document.getElementById('target')).width === '41px' &&
+                            getComputedStyle(document.getElementById('target')).height === '43px';
+                    })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn imported_dynamic_style_dispatches_load_and_applies_its_layer() {
+        let mut runtime = runtime_from_html(
+            "<html><head></head><body><div id='target'></div></body></html>",
+        );
+        runtime
+            .eval(
+                r#"globalThis.__layerStyleLoads = 0;
+                   const style = document.createElement('style');
+                   style.textContent = '@import url("data:text/css,%23target%7Bwidth%3A47px%7D") layer(imported);';
+                   style.addEventListener('load', () => { __layerStyleLoads++; });
+                   document.head.appendChild(style);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(eval_num(&mut runtime, "__layerStyleLoads"), 1.0);
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).width"
+            ),
+            "47px"
+        );
     }
 
     #[test]

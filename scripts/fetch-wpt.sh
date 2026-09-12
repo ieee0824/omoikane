@@ -33,6 +33,13 @@ git_wpt sparse-checkout add "/css/css-conditional/js/supports-conditionText.html
 git_wpt sparse-checkout add "/css/css-cascade/scope-cssom.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-media.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-supports.html"
+git_wpt sparse-checkout add \
+  "/css/css-cascade/layer-basic.html" \
+  "/css/css-cascade/layer-important.html" \
+  "/css/css-cascade/layer-vs-inline-style.html" \
+  "/css/css-cascade/layer-rules-cssom.html" \
+  "/css/css-cascade/parsing/layer.html" \
+  "/css/css-cascade/layer-import.html"
 git_wpt sparse-checkout add "/css/cssom/CSSContainerRule.tentative.html"
 git_wpt sparse-checkout add \
   "/css/css-font-loading/fontfaceset-has.html" \
