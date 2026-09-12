@@ -228,7 +228,8 @@
   }
   function requestUsedFonts(set) {
     const state = setState(set);
-    if (!state.document || state.usedQueued) return;
+    if (!state.document || state.usedQueued ||
+        !Array.from(state.members).some(face => faceState(face).status === 'unloaded')) return;
     state.usedQueued = true;
     state.queue(() => { state.usedQueued = false; loadUsedFonts(set); });
   }
