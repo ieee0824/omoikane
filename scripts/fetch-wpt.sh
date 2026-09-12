@@ -70,6 +70,10 @@ git_wpt sparse-checkout add \
   "/html/semantics/forms/constraints/radio-group-valueMissing.html"
 git_wpt sparse-checkout add "/css/css-transforms/transform-getBoundingClientRect-001.html"
 git_wpt sparse-checkout add \
+  "/css/css-color/parsing/color-invalid.html" \
+  "/css/css-color/parsing/color-invalid-rgb.html" \
+  "/css/css-color/parsing/color-invalid-hsl.html"
+git_wpt sparse-checkout add \
   "/css/support/parsing-testcommon.js" \
   "/css/support/computed-testcommon.js" \
   "/css/css-overflow/parsing/text-overflow-invalid.html" \

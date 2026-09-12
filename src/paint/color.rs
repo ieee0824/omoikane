@@ -163,58 +163,99 @@ fn parse_function_call(value: &str) -> Option<(&str, &str)> {
     Some((name, args))
 }
 
-/// Parses `rgb()` / `rgba()` argument string.
+/// Splits a three-channel color function with optional alpha.
 ///
-/// Supports both comma-separated `rgb(r, g, b)` / `rgba(r, g, b, a)` and
-/// modern space-separated `rgb(r g b / a)` syntax.
+/// The boolean result identifies legacy comma syntax; modern syntax uses
+/// whitespace-separated channels and an optional slash before alpha.
+fn split_color_function_args(args: &str) -> Option<(Vec<&str>, Option<&str>, bool)> {
+    let (channels, alpha): (Vec<&str>, Option<&str>) = if args.contains(',') {
+        if args.contains('/') {
+            return None;
+        }
+        let mut parts = args.split(',').map(str::trim).collect::<Vec<_>>();
+        if !matches!(parts.len(), 3 | 4) {
+            return None;
+        }
+        let alpha = if parts.len() == 4 {
+            parts.pop()
+        } else {
+            None
+        };
+        (parts, alpha)
+    } else {
+        let mut split = args.split('/');
+        let channel_source = split.next()?;
+        let alpha = split.next().map(str::trim);
+        if split.next().is_some() {
+            return None;
+        }
+        let channels = channel_source.split_whitespace().collect::<Vec<_>>();
+        if channels.len() != 3
+            || alpha.is_some_and(|value| {
+                value.is_empty() || value.split_whitespace().count() != 1
+            })
+        {
+            return None;
+        }
+        (channels, alpha)
+    };
+    Some((channels, alpha, args.contains(',')))
+}
+
+/// Parses `rgb()` / `rgba()` arguments in legacy or modern syntax.
 fn parse_rgb_args(args: &str) -> Option<Color> {
-    let parts = split_color_args(args);
-
-    // Parse first 3 parts as RGB channels (support %)
-    if parts.len() < 3 {
-        return None;
-    }
-    let r = parse_rgb_channel(parts[0].trim())?;
-    let g = parse_rgb_channel(parts[1].trim())?;
-    let b = parse_rgb_channel(parts[2].trim())?;
-
-    if parts.len() == 3 {
-        return Some(Color::rgb(
-            clamp_channel(r),
-            clamp_channel(g),
-            clamp_channel(b),
-        ));
+    let (channels, alpha, legacy) = split_color_function_args(args)?;
+    // Legacy comma syntax requires all three channels to use either numbers
+    // or percentages. Modern space syntax may mix the two representations.
+    if legacy {
+        let percentage_channels = channels[0].ends_with('%');
+        if channels
+            .iter()
+            .any(|channel| channel.ends_with('%') != percentage_channels)
+        {
+            return None;
+        }
     }
 
-    // 4th part is alpha (0-1 or percentage)
-    if parts.len() >= 4 {
-        let alpha = parse_alpha_value(parts[3].trim())?;
-        return Some(Color::rgba(
-            clamp_channel(r),
-            clamp_channel(g),
-            clamp_channel(b),
-            (alpha * 255.0).round() as u8,
-        ));
+    let r = parse_rgb_channel(channels[0])?;
+    let g = parse_rgb_channel(channels[1])?;
+    let b = parse_rgb_channel(channels[2])?;
+    let (r, g, b) = (clamp_channel(r), clamp_channel(g), clamp_channel(b));
+    match alpha {
+        Some(alpha) => Some(Color::rgba(
+            r,
+            g,
+            b,
+            (parse_alpha_value(alpha)? * 255.0).round() as u8,
+        )),
+        None => Some(Color::rgb(r, g, b)),
     }
-
-    None
 }
 
 /// Parses an RGB channel value: plain number (0-255) or percentage (0%-100%).
 fn parse_rgb_channel(s: &str) -> Option<f32> {
     if let Some(pct) = s.strip_suffix('%') {
-        pct.parse::<f32>().ok().map(|p| p * 255.0 / 100.0)
+        pct.parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|p| p * 255.0 / 100.0)
     } else {
-        s.parse().ok()
+        s.parse().ok().filter(|value: &f32| value.is_finite())
     }
 }
 
 /// Parses an alpha value: plain number (0-1) or percentage (0%-100%).
 fn parse_alpha_value(s: &str) -> Option<f32> {
     if let Some(pct) = s.strip_suffix('%') {
-        pct.parse::<f32>().ok().map(|p| (p / 100.0).clamp(0.0, 1.0))
+        pct.parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|p| (p / 100.0).clamp(0.0, 1.0))
     } else {
-        s.parse::<f32>().ok().map(|v| v.clamp(0.0, 1.0))
+        s.parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
     }
 }
 
@@ -225,39 +266,36 @@ fn clamp_channel(v: f32) -> u8 {
 
 /// Parses `hsl()` / `hsla()` argument string.
 fn parse_hsl_args(args: &str) -> Option<Color> {
-    let parts = split_color_args(args);
-    let nums: Vec<f32> = parts
-        .iter()
-        .filter_map(|s| s.trim_end_matches('%').parse().ok())
-        .collect();
-
-    match nums.as_slice() {
-        [h, s, l] => {
-            let (r, g, b) = hsl_to_rgb(*h, *s / 100.0, *l / 100.0);
-            Some(Color::rgb(r, g, b))
-        }
-        [h, s, l, a] => {
-            let (r, g, b) = hsl_to_rgb(*h, *s / 100.0, *l / 100.0);
-            let alpha = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
-            Some(Color::rgba(r, g, b, alpha))
-        }
-        _ => None,
+    let (channels, alpha, _) = split_color_function_args(args)?;
+    let hue = parse_hue(channels[0])?;
+    let saturation = parse_percentage(channels[1])?;
+    let lightness = parse_percentage(channels[2])?;
+    let (r, g, b) = hsl_to_rgb(hue, saturation / 100.0, lightness / 100.0);
+    match alpha {
+        Some(alpha) => Some(Color::rgba(
+            r,
+            g,
+            b,
+            (parse_alpha_value(alpha)? * 255.0).round() as u8,
+        )),
+        None => Some(Color::rgb(r, g, b)),
     }
 }
 
-/// Splits a CSS color function argument string by commas or whitespace+slash.
-///
-/// Handles both `255, 0, 0, 0.5` and `255 0 0 / 0.5` forms.
-fn split_color_args(args: &str) -> Vec<String> {
-    if args.contains(',') {
-        args.split(',').map(|s| s.trim().to_string()).collect()
-    } else {
-        // Modern syntax: "r g b / a" — strip "/" and split by whitespace
-        args.split_whitespace()
-            .filter(|s| *s != "/")
-            .map(|s| s.to_string())
-            .collect()
-    }
+fn parse_hue(value: &str) -> Option<f32> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .or_else(|| parse_angle(value))
+}
+
+fn parse_percentage(value: &str) -> Option<f32> {
+    value
+        .strip_suffix('%')?
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 // HSL→RGB conversion is shared with src/css/style.rs
