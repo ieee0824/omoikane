@@ -4367,6 +4367,25 @@ fn resolve_time_calc(value: &Value) -> Option<f32> {
 }
 
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if matches!(
+        property_name,
+        "border-width"
+            | "border-top-width"
+            | "border-right-width"
+            | "border-bottom-width"
+            | "border-left-width"
+    ) && let Value::Keyword(keyword) = value
+    {
+        let pixels = match keyword.to_ascii_lowercase().as_str() {
+            "thin" => Some(1.0),
+            "medium" => Some(3.0),
+            "thick" => Some(5.0),
+            _ => None,
+        };
+        if let Some(pixels) = pixels {
+            return ComputedValue::Px(pixels);
+        }
+    }
     if property_name.eq_ignore_ascii_case("animation-duration")
         || property_name.eq_ignore_ascii_case("animation-delay")
     {
