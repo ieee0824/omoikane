@@ -770,6 +770,14 @@
       "setup": "globalThis.__chainFrame = document.createElement('iframe'); document.body.appendChild(__chainFrame); globalThis.__chainDocument = __chainFrame.contentDocument; globalThis.__chainInput = __chainDocument.createElement('input'); __chainDocument.body.appendChild(__chainInput); globalThis.__chainEvents = []; __chainDocument.addEventListener('focus', event => { __chainEvents.push(event.target === __chainDocument ? 'document' : 'element'); }, true)",
       "probe": "(() => { __chainInput.focus(); const inner = __chainDocument.activeElement === __chainInput; const parent = document.activeElement === __chainFrame; const focus = document.hasFocus() === true && __chainDocument.hasFocus() === true; const events = __chainEvents.join(',') === 'document,element'; __chainInput.blur(); const afterBlur = document.activeElement === __chainFrame && __chainDocument.activeElement === __chainDocument.body; return inner && parent && focus && events && afterBlur; })()",
       "baseline_supported": true
+    },
+    {
+      "id": "css.text-overflow-ellipsis",
+      "area": "cssom",
+      "description": "One-value text-overflow computes to ellipsis, ignores a later invalid declaration, and retains full scroll geometry",
+      "setup": "globalThis.__textOverflowStyle = document.createElement('style'); __textOverflowStyle.textContent = '#surface-text-overflow { text-overflow:ellipsis; text-overflow:auto; }'; document.head.appendChild(__textOverflowStyle); globalThis.__textOverflow = document.createElement('div'); __textOverflow.id = 'surface-text-overflow'; __textOverflow.style.cssText = 'width:40px;overflow:hidden;white-space:nowrap'; __textOverflow.textContent = 'a deliberately overflowing line'; document.body.appendChild(__textOverflow)",
+      "probe": "getComputedStyle(__textOverflow).textOverflow === 'ellipsis' && __textOverflow.scrollWidth > __textOverflow.clientWidth",
+      "baseline_supported": true
     }
   ]
 }

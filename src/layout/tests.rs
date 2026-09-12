@@ -363,7 +363,12 @@ fn adjacent_bidi_isolates_do_not_merge_into_one_reversed_run() {
     let layout = layout_tree(
         &body,
         &mut resolver,
-        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 0.0,
+        },
     )
     .unwrap();
     let line = &layout.children[0].lines[0];
@@ -885,6 +890,161 @@ fn overflow_shorthand_two_values_marks_hidden_axis() {
 
     let child = &layout.children[0];
     assert_eq!(child.overflow, Overflow::Hidden);
+}
+
+#[test]
+fn text_overflow_ellipsis_keeps_scroll_geometry_and_grapheme_boundaries() {
+    use crate::html::TreeBuilder;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let source = "A👩‍💻BCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let document = TreeBuilder::parse(
+        "<html><body><div id='target'><span>A👩‍💻B</span><span>CDEFGHIJKLMNOPQRSTUVWXYZ</span></div></body></html>",
+    )
+    .document();
+    let body = document.query_selector("body").unwrap();
+    let target = document.query_selector("#target").unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#target { width: 90px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 16px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect { x: 0.0, y: 0.0, width: 200.0, height: 0.0 },
+    )
+    .unwrap();
+    let target_box = find_layout_box(&layout, &target).unwrap();
+    let line = &target_box.lines[0];
+    assert!(line.rect.width > target_box.dimensions.content.width);
+    assert!(target_box.scrollable_overflow().0 > target_box.dimensions.content.width);
+    let painted = &line.text_overflow.as_ref().unwrap().fragments;
+    assert!(matches!(
+        painted.last().unwrap().content,
+        InlineFragmentContent::Text(ref text) if text == "…"
+    ));
+    let visible = painted
+        .iter()
+        .filter_map(InlineFragment::text)
+        .filter(|text| *text != "…")
+        .collect::<String>();
+    assert!(
+        source.starts_with(&visible),
+        "visible text must be a logical prefix: {visible:?}"
+    );
+    assert!(
+        visible.starts_with("A👩‍💻BC"),
+        "both inline spans must contribute: {visible:?}"
+    );
+    assert!(
+        source
+            .grapheme_indices(true)
+            .any(|(index, _)| index == visible.len())
+    );
+    let first_text = painted
+        .iter()
+        .find(|fragment| fragment.text().is_some())
+        .unwrap();
+    assert_eq!(first_text.rect.x, target_box.dimensions.content.x);
+}
+
+#[test]
+fn text_overflow_ellipsis_uses_the_inline_end_for_rtl() {
+    use crate::html::TreeBuilder;
+
+    let source = "אבגדהוזחטיכלמנסעפצקרשת";
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><div id='target'>{source}</div></body></html>"
+    ))
+    .document();
+    let body = document.query_selector("body").unwrap();
+    let target = document.query_selector("#target").unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#target { width: 60px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: rtl; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 160.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let target_box = find_layout_box(&layout, &target).unwrap();
+    let painted = &target_box.lines[0].text_overflow.as_ref().unwrap().fragments;
+    let marker = painted
+        .iter()
+        .find(|fragment| {
+            matches!(fragment.content, InlineFragmentContent::Text(ref text) if text == "…")
+        })
+        .unwrap();
+    assert_eq!(marker.rect.x, target_box.dimensions.content.x);
+    let visible = painted
+        .iter()
+        .filter_map(InlineFragment::text)
+        .filter(|text| *text != "…")
+        .collect::<String>();
+    assert!(
+        source.starts_with(&visible),
+        "RTL inline-start content must remain: {visible:?}"
+    );
+}
+
+#[test]
+fn text_overflow_requires_clipping_and_handles_too_narrow_width() {
+    use crate::html::TreeBuilder;
+
+    let document = TreeBuilder::parse(
+        "<html><body><div id='visible'>long overflowing text</div><div id='clip'>long overflowing text</div><div id='narrow'>long overflowing text</div></body></html>",
+    )
+    .document();
+    let body = document.query_selector("body").unwrap();
+    let visible = document.query_selector("#visible").unwrap();
+    let clip = document.query_selector("#clip").unwrap();
+    let narrow = document.query_selector("#narrow").unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { width: 40px; white-space: nowrap; } #visible { text-overflow: ellipsis; overflow: visible; } #clip { text-overflow: clip; overflow: hidden; } #narrow { width: 1px; font-size: 24px; text-overflow: ellipsis; overflow: hidden; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 160.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    assert!(
+        find_layout_box(&layout, &visible).unwrap().lines[0]
+            .text_overflow
+            .is_none()
+    );
+    assert!(
+        find_layout_box(&layout, &clip).unwrap().lines[0]
+            .text_overflow
+            .is_none()
+    );
+    let narrow_box = find_layout_box(&layout, &narrow).unwrap();
+    assert!(narrow_box.lines[0].text_overflow.is_none());
 }
 
 #[test]

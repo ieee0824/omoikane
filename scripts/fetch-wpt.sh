@@ -71,6 +71,7 @@ git_wpt sparse-checkout add "/css/css-transforms/transform-getBoundingClientRect
 git_wpt sparse-checkout add \
   "/css/support/parsing-testcommon.js" \
   "/css/support/computed-testcommon.js" \
+  "/css/css-overflow/parsing/text-overflow-invalid.html" \
   "/css/css-transitions/parsing/transition-property-valid.html" \
   "/css/css-transitions/parsing/transition-property-invalid.html" \
   "/css/css-transitions/parsing/transition-property-computed.html" \

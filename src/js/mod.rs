@@ -9702,9 +9702,9 @@ fn json_number(value: f32) -> String {
 /// - `clientWidth` / `clientHeight` use the padding box (content + padding),
 ///   and `clientTop` / `clientLeft` are the top/left border widths.
 /// - `scrollWidth` / `scrollHeight` are the padding box extended to enclose the
-///   border boxes of every overflowing descendant plus the container's
-///   end-edge padding (not just the direct children). Traversal stops at any
-///   descendant that clips its overflow
+///   box's inline line content and the border boxes or unclipped line content
+///   of every overflowing descendant plus the container's end-edge padding.
+///   Traversal stops at any descendant that clips its overflow
 ///   (`overflow` other than `visible`): such a box still contributes its own
 ///   border box, but its clipped content cannot overflow past it into this
 ///   element's scrollable area. See [`expand_scroll_bounds`].
@@ -11142,6 +11142,7 @@ fn normalize_style_value_native(
             | "backface-visibility"
             | "mix-blend-mode"
             | "isolation"
+            | "text-overflow"
     ) {
         crate::css::supports_declaration(&property, &value).then_some(value)
     } else {
@@ -21722,6 +21723,40 @@ b</textarea></form>"#);
                 "document.querySelector('div').style.getPropertyValue('margin-top')"
             ),
             "5px"
+        );
+    }
+
+    #[test]
+    fn style_text_overflow_accepts_one_value_and_ignores_invalid_assignments() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div);
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"
+                const target = document.querySelector("div");
+                target.style.textOverflow = "ellipsis";
+                target.style.textOverflow = "auto";
+                target.style.setProperty("text-overflow", "clip ellipsis clip");
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.querySelector('div').style.textOverflow",
+            ),
+            "ellipsis",
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.querySelector('div')).textOverflow",
+            ),
+            "ellipsis",
         );
     }
 

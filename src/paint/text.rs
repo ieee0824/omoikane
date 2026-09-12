@@ -196,7 +196,11 @@ pub(crate) fn paint_text_with_registry(
     let block_decoration_color = text_decoration_color(style, fallback_color);
 
     for line in &layout.lines {
-        for fragment in &line.fragments {
+        let fragments = line
+            .text_overflow
+            .as_ref()
+            .map_or(line.fragments.as_slice(), |overflow| overflow.fragments.as_slice());
+        for fragment in fragments {
             let fragment_rect = offset.rect(fragment.rect);
             match &fragment.content {
                 InlineFragmentContent::Text(text) => {

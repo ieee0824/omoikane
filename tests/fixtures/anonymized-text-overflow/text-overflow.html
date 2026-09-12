@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Text overflow rendering fixture</title>
+<style>
+  html, body { margin: 0; background: white; }
+  body { padding: 12px; font-family: "Liberation Sans", sans-serif; font-size: 20px; line-height: 30px; }
+  .sample {
+    width: 180px;
+    height: 30px;
+    margin-bottom: 10px;
+    border: 1px solid black;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: #e00000;
+  }
+  .sample span { color: #0040d0; }
+  #rtl { direction: rtl; }
+  #visible { overflow: visible; }
+  #clip { text-overflow: clip; }
+  #narrow { width: 4px; }
+  #large { width: 230px; height: 38px; font-size: 30px; line-height: 38px; }
+</style>
+<div id="ltr" class="sample" data-probe><span>AB AB</span><span> AB AB AB AB AB</span></div>
+<div id="rtl" class="sample" data-probe><span>AB AB</span><span> AB AB AB AB AB</span></div>
+<div id="visible" class="sample" data-probe><span>AB AB AB AB AB AB AB</span></div>
+<div id="clip" class="sample" data-probe><span>AB AB AB AB AB AB AB</span></div>
+<div id="narrow" class="sample" data-probe><span>AB AB AB</span></div>
+<div id="large" class="sample" data-probe><span>AB AB AB AB AB AB AB</span></div>

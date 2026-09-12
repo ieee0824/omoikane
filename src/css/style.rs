@@ -1329,6 +1329,7 @@ fn enumerated_keyword_set(name: &str) -> Option<&'static [&'static str]> {
             "pre-line",
             "break-spaces",
         ]),
+        "text-overflow" => Some(&["clip", "ellipsis"]),
         _ => None,
     }
 }
@@ -1413,6 +1414,19 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             DeclarationValidation::Unvalidated
         } else {
             DeclarationValidation::Valid(ComputedValue::Keyword(normalized.join(", ")))
+        };
+    }
+    if name.eq_ignore_ascii_case("text-overflow") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "clip" | "ellipsis") {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
         };
     }
     if name.eq_ignore_ascii_case("position") {
@@ -4189,6 +4203,7 @@ pub(super) fn is_supported_property(name: &str) -> bool {
             | "text-decoration-line"
             | "text-decoration-color"
             | "text-decoration-style"
+            | "text-overflow"
             | "text-transform"
             | "unicode-bidi"
             | "letter-spacing"
@@ -6000,6 +6015,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("text-transform".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("text-overflow".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("clip".to_string()));
     // `cursor` initial value is `auto` (CSS UI). Ensuring it is always present
     // lets a dropped/absent `cursor` declaration serialize as `auto` in
     // getComputedStyle (Acid3 test 47).
