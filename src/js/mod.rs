@@ -22816,7 +22816,13 @@ b</textarea></form>"#,
             &mut runtime,
             r#"(() => {
                 const el = document.querySelector('div');
-                const initial = getComputedStyle(el);
+                const initialStyle = getComputedStyle(el);
+                const initial = [
+                    initialStyle.transformStyle,
+                    initialStyle.backfaceVisibility,
+                    initialStyle.mixBlendMode,
+                    initialStyle.isolation,
+                ];
                 el.style.transformStyle = 'preserve-3d';
                 el.style.backfaceVisibility = 'hidden';
                 el.style.mixBlendMode = 'multiply';
@@ -22828,10 +22834,7 @@ b</textarea></form>"#,
                     CSS.supports('backface-visibility', 'hidden'),
                     CSS.supports('mix-blend-mode', 'multiply'),
                     CSS.supports('isolation', 'isolate'),
-                    initial.transformStyle,
-                    initial.backfaceVisibility,
-                    initial.mixBlendMode,
-                    initial.isolation,
+                    ...initial,
                     getComputedStyle(el).transformStyle,
                     getComputedStyle(el).backfaceVisibility,
                     getComputedStyle(el).mixBlendMode,
@@ -34079,6 +34082,56 @@ b</textarea></form>"#,
             ),
             "pre-wrap",
             "`:last-child` must re-match after the final child is removed"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_object_stays_live_after_style_mutations() {
+        let html = r#"<html><head><style>
+            #target { width: 10px; height: 11px; }
+        </style></head><body><div id="target"></div></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const target = document.getElementById("target");
+                const style = getComputedStyle(target);
+                const before = [style.width, style.height];
+                const beforeLength = style.length;
+
+                target.style.width = "20px";
+                target.style.setProperty("--live-token", "ready");
+                const names = [...style];
+                const tokenIndex = names.indexOf("--live-token");
+                const afterInline = [
+                    style.width,
+                    style.getPropertyValue("width"),
+                    style.getPropertyValue("--live-token"),
+                    style.length === beforeLength + 1,
+                    style.item(tokenIndex),
+                    style[tokenIndex],
+                    "--live-token" in style,
+                    style.cssText.includes("--live-token: ready;"),
+                ];
+
+                document.styleSheets[0].cssRules[0].style.height = "22px";
+                const afterRule = style.height;
+                const writeAccepted = Reflect.set(style, "height", "99px");
+                return JSON.stringify({
+                    before,
+                    afterInline,
+                    afterRule,
+                    afterWrite: style.height,
+                    writeAccepted,
+                });
+            })()"#,
+        );
+
+        assert_eq!(
+            result,
+            r#"{"before":["10px","11px"],"afterInline":["20px","20px","ready",true,"--live-token","--live-token",true,true],"afterRule":"22px","afterWrite":"22px","writeAccepted":false}"#,
+            "a retained computed-style declaration must expose every later style mutation"
         );
     }
 

@@ -12350,27 +12350,49 @@
     if (prop === "cssFloat" || prop === "styleFloat") return "float";
     return String(prop).replace(/[A-Z]/g, m => "-" + m.toLowerCase());
   }
-  // Builds a read-only CSSStyleDeclaration-like object over `map` (kebab-case
-  // property names -> CSS string values). Supports camelCase access
+  // Builds a read-only CSSStyleDeclaration-like object over a map provider
+  // (kebab-case property names -> CSS string values). Supports camelCase access
   // (`style.whiteSpace`), `cssFloat`, `getPropertyValue('white-space')`,
-  // `length`, and `item(i)`.
-  function __makeComputedStyle(map) {
+  // `length`, and indexed/item access. The provider is read for every operation
+  // so retained resolved declarations stay live after DOM or CSSOM mutations.
+  function __makeComputedStyle(source) {
+    const readMap = typeof source === "function"
+      ? () => {
+          try {
+            const map = source();
+            return map && typeof map === "object" ? map : {};
+          } catch (_) {
+            return {};
+          }
+        }
+      : () => source;
+    const indexedName = (map, prop) => {
+      if (typeof prop !== "string" || !/^(0|[1-9][0-9]*)$/.test(prop)) return null;
+      const index = Number(prop);
+      if (!Number.isSafeInteger(index) || index >= 0xFFFFFFFF) return null;
+      return Object.keys(map)[index] || "";
+    };
     const decl = {
       getPropertyValue(name) {
+        const map = readMap();
         const key = __styleNameToCss(name).toLowerCase();
         return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : "";
       },
       getPropertyPriority() { return ""; },
-      get length() { return Object.keys(map).length; },
-      item(index) { return Object.keys(map)[index] || ""; },
-      [Symbol.iterator]() { return Object.keys(map)[Symbol.iterator](); },
+      get length() { return Object.keys(readMap()).length; },
+      item(index) { return Object.keys(readMap())[index] || ""; },
+      [Symbol.iterator]() { return Object.keys(readMap())[Symbol.iterator](); },
       get cssText() {
+        const map = readMap();
         return Object.keys(map).map(k => k + ": " + map[k] + ";").join(" ");
       },
     };
     return new Proxy(decl, {
       get(target, prop) {
         if (typeof prop === "symbol" || prop in target) return target[prop];
+        const map = readMap();
+        const indexed = indexedName(map, prop);
+        if (indexed !== null) return indexed;
         const key = __styleNameToCss(prop);
         return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : "";
       },
@@ -12380,6 +12402,9 @@
         // only, matching the `get` trap's symbol guard.
         if (typeof prop === "symbol") return prop in target;
         if (prop in target) return true;
+        const map = readMap();
+        const indexed = indexedName(map, prop);
+        if (indexed !== null) return indexed !== "";
         return Object.prototype.hasOwnProperty.call(map, __styleNameToCss(prop));
       },
       set() {
@@ -12415,8 +12440,15 @@
     void pseudoElt;
     flushStyleSheets();
     if (element && element.__id != null) {
+      const nodeId = element.__id;
       try {
-        const style = __makeComputedStyle(JSON.parse(__omoikane_computed_style(element.__id)));
+        // Resolve once before dispatching transition events, preserving the
+        // synchronous behavior of getComputedStyle itself.
+        JSON.parse(__omoikane_computed_style(nodeId));
+        const style = __makeComputedStyle(() => {
+          flushStyleSheets();
+          return JSON.parse(__omoikane_computed_style(nodeId));
+        });
         __dispatchPendingTransitionEvents();
         return style;
       } catch (e) {
