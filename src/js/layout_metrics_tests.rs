@@ -1,4 +1,5 @@
 use super::JsRuntime;
+use crate::dom::Node;
 use crate::html::TreeBuilder;
 
 fn runtime(html: &str) -> JsRuntime {
@@ -13,6 +14,108 @@ fn runtime(html: &str) -> JsRuntime {
 
 fn number(runtime: &mut JsRuntime, source: &str) -> f64 {
     runtime.eval(source).unwrap().as_number().unwrap()
+}
+
+#[test]
+fn inline_block_uses_its_internal_line_box_for_border_box_geometry() {
+    let mut runtime = runtime(
+        "<html><head><style>html,body{margin:0}body{padding:24px}#before{font:10px/10px monospace}#target{display:inline-block;font:40px/50px monospace;padding:8px;border:2px solid}</style></head><body><span id='before'>A</span><span id='target'>ABBA BAAB</span></body></html>",
+    );
+    runtime.set_viewport(800.0, 300.0);
+    runtime
+        .eval("globalThis.target=document.getElementById('target');globalThis.before=document.getElementById('before')")
+        .unwrap();
+
+    assert_eq!(number(&mut runtime, "target.getBoundingClientRect().height"), 70.0);
+    assert_eq!(number(&mut runtime, "target.offsetHeight"), 70.0);
+    assert_eq!(number(&mut runtime, "target.clientHeight"), 66.0);
+    assert_eq!(number(&mut runtime, "target.getClientRects().length"), 1.0);
+    assert_eq!(number(&mut runtime, "target.getBoundingClientRect().y"), 24.0);
+    assert!(
+        number(&mut runtime, "target.getBoundingClientRect().x")
+            > number(&mut runtime, "before.getBoundingClientRect().x"),
+        "the atomic inline-level box must remain on the same line after preceding text",
+    );
+}
+
+#[test]
+fn inline_block_shrink_wraps_and_contains_block_children() {
+    let mut runtime = runtime(
+        "<html><head><style>html,body{margin:0}#target{display:inline-block;padding:3px;border:1px solid}#inner{display:block;width:40px;height:12px}</style></head><body><span id='target'><span id='inner'></span></span></body></html>",
+    );
+    runtime.set_viewport(320.0, 200.0);
+    runtime
+        .eval("globalThis.target=document.getElementById('target');globalThis.inner=document.getElementById('inner')")
+        .unwrap();
+
+    assert_eq!(number(&mut runtime, "target.getBoundingClientRect().width"), 48.0);
+    assert_eq!(number(&mut runtime, "target.getBoundingClientRect().height"), 20.0);
+    assert_eq!(
+        number(&mut runtime, "inner.getBoundingClientRect().x-target.getBoundingClientRect().x"),
+        4.0,
+    );
+    assert_eq!(
+        number(&mut runtime, "inner.getBoundingClientRect().y-target.getBoundingClientRect().y"),
+        4.0,
+    );
+}
+
+#[test]
+fn inline_block_honors_top_and_baseline_alignment() {
+    let mut runtime = runtime(
+        "<html><head><style>html,body{margin:0}.row{line-height:0}.box{display:inline-block;width:10px}.short{height:10px}.tall{height:30px}.top{vertical-align:top}</style></head><body><div class='row'><span id='baseline-tall' class='box tall'></span><span id='baseline-short' class='box short'></span></div><div class='row'><span id='top-tall' class='box tall top'></span><span id='top-short' class='box short top'></span></div></body></html>",
+    );
+    runtime.set_viewport(320.0, 200.0);
+
+    let baseline_bottom_delta = number(
+        &mut runtime,
+        "(()=>{const a=document.getElementById('baseline-tall').getBoundingClientRect(),b=document.getElementById('baseline-short').getBoundingClientRect();return (a.y+a.height)-(b.y+b.height)})()",
+    );
+    assert_eq!(baseline_bottom_delta, 0.0);
+    let top_delta = number(
+        &mut runtime,
+        "document.getElementById('top-tall').getBoundingClientRect().y-document.getElementById('top-short').getBoundingClientRect().y",
+    );
+    assert_eq!(top_delta, 0.0);
+}
+
+#[test]
+fn inline_block_wraps_text_and_clips_its_transformed_subtree() {
+    let mut runtime = runtime(
+        "<html><head><style>html,body{margin:0}#wrap{display:inline-block;width:30px;font:10px/12px monospace;word-break:break-all}#clip{display:inline-block;width:30px;height:20px;overflow:hidden;transform:translate(10px,40px)}#inner{display:block;width:60px;height:20px}</style></head><body><span id='wrap'>ABCDEFGHIJKL</span><span id='clip'><span id='inner'></span></span></body></html>",
+    );
+    runtime.set_viewport(320.0, 200.0);
+
+    assert!(
+        number(
+            &mut runtime,
+            "document.getElementById('wrap').getBoundingClientRect().height",
+        ) >= 24.0,
+        "text must wrap inside the inline-block's independent formatting context",
+    );
+    let clip_x = number(
+        &mut runtime,
+        "document.getElementById('clip').getBoundingClientRect().x",
+    );
+    let clip_y = number(
+        &mut runtime,
+        "document.getElementById('clip').getBoundingClientRect().y",
+    );
+    assert_eq!(clip_x, 40.0);
+    assert_eq!(
+        runtime
+            .hit_test(clip_x as f32 + 5.0, clip_y as f32 + 5.0)
+            .and_then(|node| node.get_attribute("id"))
+            .as_deref(),
+        Some("inner"),
+    );
+    assert_ne!(
+        runtime
+            .hit_test(clip_x as f32 + 35.0, clip_y as f32 + 5.0)
+            .and_then(|node| node.get_attribute("id"))
+            .as_deref(),
+        Some("inner"),
+    );
 }
 
 #[test]
