@@ -1,5 +1,4 @@
 use super::JsRuntime;
-use crate::dom::Node;
 use crate::html::TreeBuilder;
 
 fn runtime(html: &str) -> JsRuntime {

@@ -27,6 +27,8 @@ pub(crate) enum TaskSource {
     /// The file reading task source, used by `FileReader` to deliver its
     /// `loadstart`/`progress`/`load`/`loadend` events.
     FileReading,
+    /// CSS Font Loading promises and loading events.
+    FontLoading,
     /// The geolocation task source, used to deliver position/error callbacks.
     Geolocation,
 }
@@ -283,6 +285,17 @@ impl EventLoop {
             Task::Timer {
                 payload,
                 owner_document_id: None,
+            },
+        );
+    }
+
+    /// Queues a font callback owned by a live Document.
+    pub(crate) fn enqueue_font_loading(&mut self, payload: TimerPayload, document_id: usize) {
+        self.enqueue(
+            TaskSource::FontLoading,
+            Task::Timer {
+                payload,
+                owner_document_id: Some(document_id),
             },
         );
     }

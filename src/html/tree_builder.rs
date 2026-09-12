@@ -242,8 +242,10 @@ impl Builder {
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
             }
-            Token::StartTag { name, .. } if name == "head" => {
-                let head = self.insert_element("head");
+            Token::StartTag {
+                name, attributes, ..
+            } if name == "head" => {
+                let head = self.insert_element_with_attributes("head", &attributes);
                 self.open_elements.push(head);
                 self.mode = InsertionMode::InHead;
             }
@@ -840,10 +842,6 @@ impl Builder {
         node
     }
 
-    fn insert_element(&mut self, name: &str) -> NodeHandle {
-        self.insert_element_with_attributes(name, &[])
-    }
-
     fn insert_element_with_attributes(
         &mut self,
         name: &str,
@@ -1175,6 +1173,18 @@ mod tests {
         assert_eq!(
             attrs.get("bgcolor").map(|value| value.as_str()),
             Some("#f0f0ff")
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_head_attributes() {
+        let result = TreeBuilder::parse("<html><head id='head' data-kind='primary'></head></html>");
+        let head = result.document().query_selector("head").unwrap();
+        let attrs = head.attributes().unwrap_or_default();
+        assert_eq!(attrs.get("id").map(String::as_str), Some("head"));
+        assert_eq!(
+            attrs.get("data-kind").map(String::as_str),
+            Some("primary")
         );
     }
 
