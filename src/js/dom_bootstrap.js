@@ -258,6 +258,7 @@
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
     "mask-composite", "-webkit-mask-composite",
     "transform-style", "backface-visibility", "mix-blend-mode", "isolation",
+    "text-overflow",
   ]);
   const customElementConstructionStack = [];
   const customElementDefinitionByConstructor = new Map();

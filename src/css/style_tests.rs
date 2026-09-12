@@ -5510,6 +5510,38 @@ fn valid_white_space_keyword_survives_cascade() {
 }
 
 #[test]
+fn text_overflow_accepts_one_value_keywords_and_rejects_other_grammars() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    target.set_attribute("id", "target");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#target { text-overflow: ellipsis; text-overflow: clip ellipsis; }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        resolver.computed_style(&target).get("text-overflow"),
+        Some(&ComputedValue::Keyword("ellipsis".to_string())),
+    );
+
+    let plain = NodeHandle::element("p");
+    body.append_child(plain.clone());
+    assert_eq!(
+        resolver.computed_style(&plain).get("text-overflow"),
+        Some(&ComputedValue::Keyword("clip".to_string())),
+    );
+}
+
+#[test]
 fn revert_layer_rolls_back_the_current_cascade_layer() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

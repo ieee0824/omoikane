@@ -1,0 +1,9 @@
+[
+  {
+    "name": "anonymized-text-overflow",
+    "path": "text-overflow.html",
+    "width": 500,
+    "height": 320,
+    "fixture_sha256": "d2b816f4e1b2f257dd355163b347fee99735570f9fdb502ae3cbf9d3473c0309"
+  }
+]

@@ -60,6 +60,7 @@
     { "path": "html/semantics/forms/constraints/form-validation-willValidate.html" },
     { "path": "html/semantics/forms/constraints/radio-group-valueMissing.html" },
     { "path": "css/css-transforms/transform-getBoundingClientRect-001.html" },
+    { "path": "css/css-overflow/parsing/text-overflow-invalid.html" },
     { "path": "css/css-transitions/parsing/transition-property-valid.html" },
     { "path": "css/css-transitions/parsing/transition-property-invalid.html" },
     { "path": "css/css-transitions/parsing/transition-property-computed.html" },

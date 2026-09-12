@@ -1373,6 +1373,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                         vertical_align: VerticalAlign::Top,
                         style: FragmentStyle::default(),
                     }],
+                    text_overflow: None,
                 }],
                 children: Vec::new(),
                 marker: None,
@@ -5704,6 +5705,88 @@ fn render_text_with_decoration(decoration: &str) -> Canvas {
 }
 
 #[test]
+fn text_overflow_fixture_paints_markers_at_inline_ends() {
+    let fixture = fixture_dir("anonymized-text-overflow");
+    let html = fs::read_to_string(fixture.join("text-overflow.html")).unwrap();
+    let document = TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 480.0,
+        height: 320.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    let ink_bounds = |rect: Rect, red: bool| {
+        let mut bounds: Option<(u32, u32, u32, u32)> = None;
+        let start_x = rect.x.max(0.0).floor() as u32;
+        let start_y = rect.y.max(0.0).floor() as u32;
+        let end_x = (rect.x + rect.width).ceil().max(0.0) as u32;
+        let end_y = (rect.y + rect.height).ceil().max(0.0) as u32;
+        for y in start_y..end_y.min(canvas.height()) {
+            for x in start_x..end_x.min(canvas.width()) {
+                let Some(pixel) = canvas.pixel(x, y) else {
+                    continue;
+                };
+                let saturated = if red {
+                    pixel.r > pixel.g.saturating_add(40)
+                        && pixel.r > pixel.b.saturating_add(40)
+                } else {
+                    pixel.b > pixel.r.saturating_add(40)
+                        && pixel.b > pixel.g.saturating_add(40)
+                };
+                if !saturated {
+                    continue;
+                }
+                bounds = Some(match bounds {
+                    None => (x, y, x, y),
+                    Some((min_x, min_y, max_x, max_y)) => {
+                        (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                    }
+                });
+            }
+        }
+        bounds
+    };
+
+    let ltr = find_layout_box_by_id(&layout, "ltr").unwrap();
+    let rtl = find_layout_box_by_id(&layout, "rtl").unwrap();
+    let visible = find_layout_box_by_id(&layout, "visible").unwrap();
+    let clip = find_layout_box_by_id(&layout, "clip").unwrap();
+    let narrow = find_layout_box_by_id(&layout, "narrow").unwrap();
+    let large = find_layout_box_by_id(&layout, "large").unwrap();
+
+    let ltr_red = ink_bounds(ltr.dimensions.content, true).expect("LTR ellipsis must be painted");
+    assert!(
+        ltr_red.0 as f32 > ltr.dimensions.content.x + ltr.dimensions.content.width / 2.0
+    );
+    let rtl_red = ink_bounds(rtl.dimensions.content, true).expect("RTL ellipsis must be painted");
+    assert!(
+        (rtl_red.2 as f32) < rtl.dimensions.content.x + rtl.dimensions.content.width / 2.0
+    );
+    assert!(ink_bounds(visible.dimensions.content, true).is_none());
+    assert!(ink_bounds(clip.dimensions.content, true).is_none());
+
+    assert!(narrow.lines[0].text_overflow.is_none());
+    assert!(ink_bounds(narrow.dimensions.content, true).is_none());
+    assert!(ink_bounds(narrow.dimensions.content, false).is_some());
+    let large_marker = large.lines[0]
+        .text_overflow
+        .as_ref()
+        .unwrap()
+        .fragments
+        .last()
+        .unwrap();
+    assert_eq!(large_marker.metrics.font_size, 30.0);
+    assert!(ink_bounds(large.dimensions.content, true).is_some());
+}
+
+#[test]
 fn text_decoration_underline_draws_pixels_below_text() {
     // Render the same text with and without underline.
     let canvas_underline = render_text_with_decoration("underline");
@@ -9190,6 +9273,7 @@ fn form_control_label_uses_web_font_variant() {
                     ..FragmentStyle::default()
                 },
             }],
+            text_overflow: None,
         }],
         children: Vec::new(),
         marker: None,
@@ -9278,7 +9362,12 @@ fn focused_text_control_paints_selection_and_caret() {
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
         paint_scroll: None,
-        lines: vec![LineBox { rect: viewport, baseline: 12.8, fragments: vec![fragment] }],
+        lines: vec![LineBox {
+            rect: viewport,
+            baseline: 12.8,
+            fragments: vec![fragment],
+            text_overflow: None,
+        }],
         children: Vec::new(),
         marker: None,
     };

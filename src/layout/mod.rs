@@ -519,6 +519,15 @@ pub struct LineBox {
     pub rect: Rect,
     pub baseline: f32,
     pub fragments: Vec<InlineFragment>,
+    /// Paint-only replacement fragments for CSS `text-overflow: ellipsis`.
+    /// The original fragments remain available for intrinsic/scroll geometry.
+    pub text_overflow: Option<TextOverflowPaint>,
+}
+
+/// A grapheme-safe inline paint sequence ending in an ellipsis marker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextOverflowPaint {
+    pub fragments: Vec<InlineFragment>,
 }
 
 /// Approximate font metrics used by inline layout.
@@ -729,7 +738,9 @@ impl LayoutBox {
     /// Returns the size of this box's scrolling area (`scrollWidth` /
     /// `scrollHeight`): its padding box grown to contain every descendant box,
     /// including this box's end-edge padding after overflowing content, and
-    /// never smaller than the padding box itself.
+    /// never smaller than the padding box itself. Inline line boxes are included
+    /// because text fragments are stored directly on their containing box rather
+    /// than as descendant [`LayoutBox`] values.
     ///
     /// Layout coordinates are absolute (see `layout_document` / `layout_element`),
     /// so descendant border-box edges compare directly against this box's
@@ -745,6 +756,7 @@ impl LayoutBox {
         let padding_bottom_edge = content.y + content.height + padding.bottom;
         let mut max_right = padding_right_edge;
         let mut max_bottom = padding_bottom_edge;
+        expand_line_overflow(&self.lines, &mut max_right, &mut max_bottom, true, true);
         expand_scrollable_overflow(&self.children, &mut max_right, &mut max_bottom);
         // Once descendant content crosses the padding-box end edge, the
         // scrollable overflow region includes the box's end padding after that
@@ -844,13 +856,39 @@ fn expand_scrollable_overflow_axes(
         if include_y {
             *max_bottom = max_bottom.max(content.y + content.height + padding.bottom + border.bottom);
         }
+        let include_child_x = include_x && !child.overflow.clips_x();
+        let include_child_y = include_y && !child.overflow.clips_y();
+        expand_line_overflow(
+            &child.lines,
+            max_right,
+            max_bottom,
+            include_child_x,
+            include_child_y,
+        );
         expand_scrollable_overflow_axes(
             &child.children,
             max_right,
             max_bottom,
-            include_x && !child.overflow.clips_x(),
-            include_y && !child.overflow.clips_y(),
+            include_child_x,
+            include_child_y,
         );
+    }
+}
+
+fn expand_line_overflow(
+    lines: &[LineBox],
+    max_right: &mut f32,
+    max_bottom: &mut f32,
+    include_x: bool,
+    include_y: bool,
+) {
+    for line in lines {
+        if include_x {
+            *max_right = max_right.max(line.rect.x + line.rect.width);
+        }
+        if include_y {
+            *max_bottom = max_bottom.max(line.rect.y + line.rect.height);
+        }
     }
 }
 
@@ -1215,6 +1253,7 @@ fn flush_pending_inline_nodes(
         text_align(style),
         line_height(style),
         direction_is_rtl(style),
+        (text_overflow_is_ellipsis(style) && overflow(style).clips_x()).then_some(style),
         containing_height,
         viewport,
         positioned_ancestor,
@@ -1480,6 +1519,7 @@ fn layout_element_with_cell(
             text_align(&style),
             0.0,
             direction_is_rtl(&style),
+            None,
             containing_block.height,
             viewport,
             positioned_ancestor,
@@ -1576,6 +1616,7 @@ fn layout_element_with_cell(
             inline::TextAlign::Left,
             0.0,
             direction_is_rtl(&style),
+            None,
             containing_block.height,
             viewport,
             positioned_ancestor,
@@ -2035,6 +2076,7 @@ fn flush_pending_vertical_inline_nodes(
         line_height(style),
         vertical_rl,
         direction_is_rtl(style),
+        (text_overflow_is_ellipsis(style) && overflow(style).clips_y()).then_some(style),
         width,
         viewport,
         positioned_ancestor,
@@ -3055,6 +3097,13 @@ fn visibility(style: &ComputedStyle) -> Visibility {
         }
         _ => Visibility::Visible,
     }
+}
+
+fn text_overflow_is_ellipsis(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("text-overflow"),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("ellipsis")
+    )
 }
 
 fn overflow(style: &ComputedStyle) -> Overflow {

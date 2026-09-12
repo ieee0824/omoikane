@@ -20,6 +20,7 @@ fn lines(
         align,
         line_height(style),
         super::super::direction_is_rtl(style),
+        None,
         0.0,
         Rect {
             x: 0.0,

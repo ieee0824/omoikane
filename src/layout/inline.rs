@@ -17,7 +17,7 @@ use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
     BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, InlineFragmentContent,
-    LayoutBox, LineBox, Rect, TextControlPaintState, VerticalAlign,
+    LayoutBox, LineBox, Rect, TextControlPaintState, TextOverflowPaint, VerticalAlign,
     border_box_adjust_length, edge_sizes, explicit_length, is_border_box, is_display_none,
     is_non_rendered_html_element,
     HTTP_CLIENT, IMAGE_ANIMATION_CACHE, IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE,
@@ -90,6 +90,7 @@ pub(super) fn layout_inline_nodes(
     align: TextAlign,
     strut_line_height: f32,
     direction_rtl: bool,
+    text_overflow_style: Option<&ComputedStyle>,
     containing_height: f32,
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
@@ -119,6 +120,9 @@ pub(super) fn layout_inline_nodes(
         direction_rtl,
     );
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
+    if let Some(style) = text_overflow_style {
+        apply_text_overflow(&mut lines, nodes, start_x, available_width, direction_rtl, style);
+    }
     position_atomic_boxes(&lines, &mut atomic_boxes);
     InlineLayoutResult { lines, atomic_boxes }
 }
@@ -144,6 +148,7 @@ pub(super) fn layout_vertical_inline_nodes(
     strut_line_height: f32,
     vertical_rl: bool,
     direction_rtl: bool,
+    text_overflow_style: Option<&ComputedStyle>,
     containing_width: f32,
     viewport: Rect,
     positioned_ancestor: Option<BoxDimensions>,
@@ -176,9 +181,19 @@ pub(super) fn layout_vertical_inline_nodes(
     );
 
     boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
+    if let Some(style) = text_overflow_style {
+        apply_text_overflow(
+            &mut horizontal_lines,
+            nodes,
+            0.0,
+            available_height.max(0.0),
+            direction_rtl,
+            style,
+        );
+    }
     let lines = horizontal_lines
         .into_iter()
-        .map(|line| {
+        .map(|mut line| {
             // Horizontal line stacking (local y) becomes vertical block-axis
             // column stacking.  A vertical-rl block starts at the right edge;
             // vertical-lr starts at the left edge.
@@ -190,7 +205,8 @@ pub(super) fn layout_vertical_inline_nodes(
                 start_x + column_offset
             };
 
-            let mut fragments = line.fragments;
+            let original_inline_extent = line.rect.width;
+            let mut fragments = std::mem::take(&mut line.fragments);
             for fragment in &mut fragments {
                 // The local fragment's y offset is vertical-align within its
                 // line.  Its x offset is the inline-axis position and maps to
@@ -200,13 +216,33 @@ pub(super) fn layout_vertical_inline_nodes(
                 fragment.rect = Rect {
                     x: column_x + cross_offset,
                     y: if direction_rtl {
-                        start_y + (line.rect.width - inline_offset - fragment.rect.width).max(0.0)
+                        start_y
+                            + (original_inline_extent - inline_offset - fragment.rect.width)
+                                .max(0.0)
                     } else {
                         start_y + inline_offset
                     },
                     width: fragment.rect.height,
                     height: fragment.rect.width,
                 };
+            }
+            if let Some(overflow) = &mut line.text_overflow {
+                for fragment in &mut overflow.fragments {
+                    let inline_offset = fragment.rect.x - line.rect.x;
+                    let cross_offset = fragment.rect.y - line.rect.y;
+                    fragment.rect = Rect {
+                        x: column_x + cross_offset,
+                        y: if direction_rtl {
+                            start_y
+                                + (available_height - inline_offset - fragment.rect.width)
+                                    .max(0.0)
+                        } else {
+                            start_y + inline_offset
+                        },
+                        width: fragment.rect.height,
+                        height: fragment.rect.width,
+                    };
+                }
             }
 
             LineBox {
@@ -221,11 +257,199 @@ pub(super) fn layout_vertical_inline_nodes(
                 // callers inspecting line geometry still get a stable value.
                 baseline: start_y + line.baseline,
                 fragments,
+                text_overflow: line.text_overflow,
             }
         })
         .collect::<Vec<_>>();
     position_atomic_boxes(&lines, &mut atomic_boxes);
     InlineLayoutResult { lines, atomic_boxes }
+}
+
+fn apply_text_overflow(
+    lines: &mut [LineBox],
+    nodes: &[NodeHandle],
+    start: f32,
+    available_width: f32,
+    direction_rtl: bool,
+    style: &ComputedStyle,
+) {
+    let Some(marker_node) = nodes.first().cloned() else {
+        return;
+    };
+    let available_width = available_width.max(0.0);
+    let marker_metrics = font_metrics(style);
+    let marker_width = measure_text_width("…", marker_metrics).max(0.0);
+
+    for line in lines {
+        if !exceeds_available_inline_width(line.rect.width, available_width) {
+            continue;
+        }
+        let content_budget = (available_width - marker_width).max(0.0);
+        let content_start = if direction_rtl {
+            start + marker_width
+        } else {
+            start
+        };
+        let content_end = if direction_rtl {
+            start + available_width
+        } else {
+            start + content_budget
+        };
+        let mut decorations = line
+            .fragments
+            .iter()
+            .filter(|fragment| matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
+            .filter_map(|fragment| {
+                let left = fragment.rect.x.max(content_start);
+                let right = (fragment.rect.x + fragment.rect.width).min(content_end);
+                (right > left).then(|| {
+                    let mut clipped = fragment.clone();
+                    clipped.rect.x = left;
+                    clipped.rect.width = right - left;
+                    clipped
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut candidates = line
+            .fragments
+            .iter()
+            .filter(|fragment| !matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
+        if direction_rtl {
+            candidates.reverse();
+        }
+        let first_unit_width = candidates.iter().find_map(|fragment| match &fragment.content {
+            InlineFragmentContent::Text(text) => {
+                let odd_level = fragment
+                    .style
+                    .resolved_bidi_level
+                    .map_or(direction_rtl, |level| level % 2 == 1);
+                let keep_prefix = direction_rtl == odd_level;
+                let mut graphemes = text.graphemes(true);
+                let grapheme = if keep_prefix {
+                    graphemes.next()
+                } else {
+                    graphemes.next_back()
+                }?;
+                Some(measure_text_width(grapheme, fragment.metrics))
+            },
+            _ => Some(fragment.rect.width.max(0.0)),
+        });
+        // The inline-start unit must be clipped rather than removed to make
+        // room for an ellipsis. Leaving the original fragments in place lets
+        // the container's overflow clip expose the fitting part of that unit.
+        if first_unit_width
+            .is_some_and(|width| exceeds_available_inline_width(width, content_budget))
+        {
+            continue;
+        }
+
+        let mut remaining = content_budget;
+        let mut cursor = if direction_rtl {
+            start + available_width
+        } else {
+            start
+        };
+        let mut visible = Vec::new();
+        for fragment in candidates {
+            let mut painted = fragment.clone();
+            let width = fragment.rect.width.max(0.0);
+            if width > remaining + 0.01 {
+                let InlineFragmentContent::Text(text) = &fragment.content else {
+                    break;
+                };
+                let odd_level = fragment
+                    .style
+                    .resolved_bidi_level
+                    .map_or(direction_rtl, |level| level % 2 == 1);
+                let keep_prefix = direction_rtl == odd_level;
+                let Some((text, width)) =
+                    text_fitting_graphemes(text, fragment.metrics, remaining, keep_prefix)
+                else {
+                    break;
+                };
+                painted.content = InlineFragmentContent::Text(text);
+                painted.rect.width = width;
+            }
+
+            let painted_width = painted.rect.width.max(0.0);
+            if direction_rtl {
+                cursor -= painted_width;
+                painted.rect.x = cursor;
+            } else {
+                painted.rect.x = cursor;
+                cursor += painted_width;
+            }
+            remaining = (remaining - painted_width).max(0.0);
+            visible.push(painted);
+            if width > remaining + painted_width + 0.01 {
+                break;
+            }
+        }
+
+        let mut marker_style = FragmentStyle::from_computed(style);
+        marker_style.resolved_bidi_level = Some(if direction_rtl { 1 } else { 0 });
+        let marker = InlineFragment {
+            node: marker_node.clone(),
+            content: InlineFragmentContent::Text("…".to_string()),
+            rect: Rect {
+                x: if direction_rtl {
+                    start
+                } else {
+                    start + (available_width - marker_width).max(0.0)
+                },
+                y: line.baseline - marker_metrics.ascent,
+                width: marker_width,
+                height: marker_metrics.ascent + marker_metrics.descent,
+            },
+            metrics: marker_metrics,
+            vertical_align: VerticalAlign::Baseline,
+            style: marker_style,
+        };
+        visible.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
+        decorations.extend(visible);
+        decorations.push(marker);
+        line.text_overflow = Some(TextOverflowPaint { fragments: decorations });
+    }
+}
+
+fn text_fitting_graphemes(
+    text: &str,
+    metrics: FontMetrics,
+    max_width: f32,
+    keep_prefix: bool,
+) -> Option<(String, f32)> {
+    if max_width <= 0.0 {
+        return None;
+    }
+    let mut boundaries = text.grapheme_indices(true).map(|(index, _)| index).collect::<Vec<_>>();
+    boundaries.push(text.len());
+    let grapheme_count = boundaries.len().saturating_sub(1);
+    let mut low = 0;
+    let mut high = grapheme_count + 1;
+    while low + 1 < high {
+        let count = (low + high) / 2;
+        let candidate = if keep_prefix {
+            &text[..boundaries[count]]
+        } else {
+            &text[boundaries[grapheme_count - count]..]
+        };
+        if measure_text_width(candidate, metrics) <= max_width + 0.01 {
+            low = count;
+        } else {
+            high = count;
+        }
+    }
+    if low == 0 {
+        return None;
+    }
+    let fitted = if keep_prefix {
+        &text[..boundaries[low]]
+    } else {
+        &text[boundaries[grapheme_count - low]..]
+    };
+    Some((fitted.to_string(), measure_text_width(fitted, metrics)))
 }
 
 fn position_atomic_boxes(lines: &[LineBox], atomic_boxes: &mut [LayoutBox]) {
@@ -2458,6 +2682,7 @@ fn push_line(
         },
         baseline: y + baseline,
         fragments: std::mem::take(fragments),
+        text_overflow: None,
     });
 }
 
