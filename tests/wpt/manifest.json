@@ -36,6 +36,8 @@
     { "path": "css/css-cascade/layer-rules-cssom.html" },
     { "path": "css/css-cascade/parsing/layer.html" },
     { "path": "css/css-cascade/layer-import.html" },
+    { "path": "css/css-cascade/parsing/layer-import-parsing.html" },
+    { "path": "css/css-cascade/parsing/supports-import-parsing.html" },
     { "path": "css/cssom/CSSContainerRule.tentative.html" },
     { "path": "css/css-font-loading/fontfaceset-has.html" },
     { "path": "css/css-font-loading/fontfaceset-clear-css-connected.html" },

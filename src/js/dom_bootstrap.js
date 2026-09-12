@@ -5402,28 +5402,74 @@
     get cssText() { return "@layer " + this.nameList.join(", ") + ";"; }
   }
 
+  function cssMediaQueries(text) {
+    const queries = [];
+    let start = 0, depth = 0, quote = null, escaped = false;
+    text = String(text || "");
+    for (let index = 0; index < text.length; index++) {
+      const character = text[index];
+      if (escaped) { escaped = false; continue; }
+      if (character === "\\" && quote !== null) { escaped = true; continue; }
+      if (quote !== null) {
+        if (character === quote) quote = null;
+        continue;
+      }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === "(") depth++;
+      else if (character === ")") depth = Math.max(0, depth - 1);
+      else if (character === "," && depth === 0) {
+        const query = text.slice(start, index).trim();
+        if (query) queries.push(query);
+        start = index + 1;
+      }
+    }
+    const trailing = text.slice(start).trim();
+    if (trailing) queries.push(trailing);
+    return queries;
+  }
+
+  class MediaList {
+    constructor(text = "", onChange = null) {
+      this.__queries = cssMediaQueries(text);
+      this.__onChange = onChange;
+      return new Proxy(this, {
+        get(target, property, receiver) {
+          if (typeof property === "string" && /^(?:0|[1-9]\d*)$/.test(property)) {
+            return target.item(Number(property));
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    }
+    __changed() {
+      if (this.__onChange) this.__onChange(this.mediaText);
+    }
+    get mediaText() { return this.__queries.join(", "); }
+    set mediaText(value) {
+      this.__queries = cssMediaQueries(value);
+      this.__changed();
+    }
+    get length() { return this.__queries.length; }
+    item(index) { return this.__queries[Number(index) | 0] || null; }
+    appendMedium(value) {
+      const query = String(value).trim();
+      if (query && !this.__queries.includes(query)) {
+        this.__queries.push(query);
+        this.__changed();
+      }
+    }
+    deleteMedium(value) {
+      const query = String(value).trim();
+      const index = this.__queries.indexOf(query);
+      if (index < 0) throw new DOMException("The medium was not found.", "NotFoundError");
+      this.__queries.splice(index, 1);
+      this.__changed();
+    }
+  }
+
   function cssImportParts(text) {
-    const prelude = String(text)
-      .replace(/^\s*@import/i, "")
-      .replace(/;\s*$/, "")
-      .trim();
-    let href = "", trailing = "";
-    const url = prelude.match(/^url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)([\s\S]*)$/i);
-    const string = prelude.match(/^(?:"([^"]*)"|'([^']*)')([\s\S]*)$/);
-    if (url) {
-      href = url[1] ?? url[2] ?? (url[3] || "").trim();
-      trailing = (url[4] || "").trim();
-    } else if (string) {
-      href = string[1] ?? string[2] ?? "";
-      trailing = (string[3] || "").trim();
-    }
-    let layerName = null;
-    if (/^layer$/i.test(trailing)) layerName = "";
-    else {
-      const layer = trailing.match(/^layer\(([^)]*)\)$/i);
-      if (layer) layerName = layer[1].trim();
-    }
-    return { href, layerName };
+    const encoded = __omoikane_css_import_parts(String(text));
+    return encoded === null ? null : JSON.parse(encoded);
   }
 
   class CSSImportRule {
@@ -5432,20 +5478,44 @@
       this.__sheet = sheet;
       this.__index = index;
       const parts = cssImportParts(text);
+      if (parts === null) throw new DOMException("Invalid @import rule.", "SyntaxError");
       this.__href = parts.href;
       this.__layerName = parts.layerName;
+      this.__supportsText = parts.supportsText;
+      this.__media = new MediaList(parts.mediaText, () => {
+        if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.cssText);
+      });
+      this.__importedSheet = null;
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get type() { return 3; }
     get href() { return this.__href; }
     get layerName() { return this.__layerName; }
-    get styleSheet() { return null; }
+    get supportsText() { return this.__supportsText; }
+    get media() { return this.__media; }
+    get styleSheet() {
+      if (this.__importedSheet) return this.__importedSheet;
+      const owner = this.__sheet && this.__sheet.ownerNode;
+      if (!owner || owner.__id === undefined) return null;
+      const encoded = __omoikane_imported_stylesheet(owner.__id, this.href);
+      if (encoded === null) return null;
+      const imported = JSON.parse(encoded);
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(imported.text);
+      sheet.__constructed = false;
+      sheet.href = imported.href;
+      sheet.ownerRule = this;
+      this.__importedSheet = sheet;
+      return sheet;
+    }
     get cssText() {
       const escaped = this.href.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       const layer = this.layerName === null
         ? ""
         : this.layerName === "" ? " layer" : " layer(" + this.layerName + ")";
-      return '@import url("' + escaped + '")' + layer + ";";
+      const supports = this.supportsText === null ? "" : " supports(" + this.supportsText + ")";
+      const media = this.media.mediaText ? " " + this.media.mediaText : "";
+      return '@import url("' + escaped + '")' + layer + supports + media + ";";
     }
   }
 
@@ -5847,6 +5917,7 @@
       this.__ruleCache = [];
       this.__cssRules = ruleListProxy(this);
       this.__parentRule = null;
+      this.ownerRule = null;
     }
     __syncFromOwner() {
       if (!this.ownerNode) return;
@@ -5929,6 +6000,9 @@
         throw new DOMException("The stylesheet is being replaced.", "NotAllowedError");
       }
       const text = String(rule);
+      if (/^\s*@import(?=\s|\/\*)/i.test(text) && cssImportParts(text) === null) {
+        throw new DOMException("Invalid @import rule.", "SyntaxError");
+      }
       let count;
       try { count = __omoikane_css_rule_count(text); }
       catch (error) { throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError"); }
@@ -11530,6 +11604,7 @@
   globalThis.CustomElementRegistry = CustomElementRegistry;
   globalThis.CSSStyleSheet = CSSStyleSheet;
   globalThis.CSSRuleList = CSSRuleList;
+  globalThis.MediaList = MediaList;
   globalThis.CSSStyleRule = CSSStyleRule;
   globalThis.CSSFontFaceRule = CSSFontFaceRule;
   globalThis.CSSImportRule = CSSImportRule;

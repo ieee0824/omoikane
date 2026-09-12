@@ -6,23 +6,30 @@ use super::{CssToken, parse_selector_list, supports_declaration, tokenize};
 /// Evaluates a CSS supports condition using the same declaration and selector
 /// parsers as the cascade and DOM APIs.
 pub(crate) fn supports_condition_matches(input: &str) -> bool {
+    supports_condition_result(input).unwrap_or(false)
+}
+
+/// Parses and evaluates a CSS supports condition.
+///
+/// `None` denotes invalid syntax, while `Some(false)` denotes a valid condition
+/// whose feature is unsupported. Conditional `@import` processing needs this
+/// distinction because an unsupported condition is still a valid import rule.
+pub(crate) fn supports_condition_result(input: &str) -> Option<bool> {
     let Ok(tokens) = tokenize(input) else {
-        return false;
+        return None;
     };
     let tokens = trim_tokens(&tokens);
     if tokens.is_empty() {
-        return false;
+        return None;
     }
 
     // CSS.supports() also accepts an unwrapped declaration in its one-argument
     // form. This does not affect @supports, whose grammar requires parentheses.
     if let Some(result) = evaluate_declaration(tokens) {
-        return result;
+        return Some(result);
     }
 
-    SupportsConditionParser::new(tokens.to_vec())
-        .parse_complete()
-        .unwrap_or(false)
+    SupportsConditionParser::new(tokens.to_vec()).parse_complete()
 }
 
 struct SupportsConditionParser {
@@ -83,6 +90,9 @@ impl SupportsConditionParser {
         self.skip_whitespace();
         if matches!(self.tokens.get(self.index), Some(CssToken::ParenOpen)) {
             let inner = self.take_parenthesized()?;
+            if trim_tokens(&inner).is_empty() {
+                return None;
+            }
             if let Some(result) = evaluate_declaration(&inner) {
                 return Some(result);
             }
@@ -190,7 +200,7 @@ fn trim_tokens(tokens: &[CssToken]) -> &[CssToken] {
 
 #[cfg(test)]
 mod tests {
-    use super::supports_condition_matches;
+    use super::{supports_condition_matches, supports_condition_result};
 
     #[test]
     fn evaluates_declarations_and_boolean_conditions() {
@@ -237,5 +247,16 @@ mod tests {
         assert!(!supports_condition_matches(
             "(display: block)and(color: red)"
         ));
+    }
+
+    #[test]
+    fn distinguishes_invalid_and_unsupported_conditions() {
+        assert_eq!(supports_condition_result(""), None);
+        assert_eq!(supports_condition_result("()"), None);
+        assert_eq!(
+            supports_condition_result("(unknown-property: value)"),
+            Some(false)
+        );
+        assert_eq!(supports_condition_result("(display: grid)"), Some(true));
     }
 }

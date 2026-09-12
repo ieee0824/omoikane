@@ -65,8 +65,8 @@ pub fn parse_media_query_list(prelude: &str) -> Option<Vec<MediaQuery>> {
     if prelude.is_empty() {
         return None;
     }
-    let queries: Option<Vec<MediaQuery>> = prelude
-        .split(',')
+    let queries: Option<Vec<MediaQuery>> = super::split_top_level_commas(prelude)
+        .into_iter()
         .map(|part| parse_single_media_query(part.trim()))
         .collect();
     queries
