@@ -9560,7 +9560,7 @@ fn format_css_number(value: f32) -> String {
 }
 
 /// Serializes a single [`ComputedValue`] to its CSS string form.
-fn computed_value_to_css_string(value: &ComputedValue) -> String {
+fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> String {
     match value {
         ComputedValue::Keyword(keyword) => keyword.clone(),
         ComputedValue::Color(color) => crate::paint::color::parse_color(color).map_or_else(
@@ -9583,6 +9583,27 @@ fn computed_value_to_css_string(value: &ComputedValue) -> String {
         ComputedValue::Px(px) => format!("{}px", format_css_number(*px)),
         ComputedValue::Percentage(pct) => format!("{}%", format_css_number(*pct)),
         ComputedValue::Number(number) => format_css_number(*number),
+        ComputedValue::CalcPxPercent(px, pct)
+            if property_name.eq_ignore_ascii_case("text-decoration-thickness") =>
+        {
+            if *px == 0.0 {
+                format!("{}%", format_css_number(*pct))
+            } else if *pct == 0.0 {
+                format!("{}px", format_css_number(*px))
+            } else if *px < 0.0 {
+                format!(
+                    "calc({}% - {}px)",
+                    format_css_number(*pct),
+                    format_css_number(px.abs())
+                )
+            } else {
+                format!(
+                    "calc({}% + {}px)",
+                    format_css_number(*pct),
+                    format_css_number(*px)
+                )
+            }
+        }
         ComputedValue::CalcPxPercent(px, pct) => {
             format!(
                 "calc({}px + {}%)",
@@ -9606,7 +9627,9 @@ fn serialize_computed_style(style: &ComputedStyle) -> String {
         json.push('"');
         json.push_str(&escape_json_string(name));
         json.push_str("\":\"");
-        json.push_str(&escape_json_string(&computed_value_to_css_string(value)));
+        json.push_str(&escape_json_string(&computed_value_to_css_string(
+            name, value,
+        )));
         json.push('"');
     }
     json.push('}');
@@ -11467,7 +11490,9 @@ fn normalize_style_value_native(
                 | "border-bottom-color"
                 | "border-left-color"
                 | "outline-color"
+                | "text-decoration"
                 | "text-decoration-color"
+                | "text-decoration-thickness"
                 | "clip-path"
                 | "-webkit-clip-path"
                 | "mask"
@@ -22950,6 +22975,56 @@ b</textarea></form>"#,
                 "getComputedStyle(document.querySelector('div')).textOverflow",
             ),
             "ellipsis",
+        );
+    }
+
+    #[test]
+    fn text_decoration_thickness_cssom_computes_and_rejects_invalid_values() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<div id='parent' style='font-size:20px;color:rgb(1,2,3);\
+             text-decoration-thickness:9px'>\
+             <span id='target'></span><span id='initial'></span></div>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"
+                const target = document.getElementById("target");
+                target.style.textDecorationThickness = "2em";
+                target.style.textDecoration = "underline 2em red";
+                target.style.textDecoration = "underline thin blue";
+                target.style.textDecorationThickness = "invalid";
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "JSON.stringify([target.style.textDecorationThickness,\
+                 getComputedStyle(target).textDecorationLine,\
+                 getComputedStyle(target).textDecorationStyle,\
+                 getComputedStyle(target).textDecorationThickness,\
+                 getComputedStyle(document.getElementById('initial')).textDecorationThickness,\
+                 getComputedStyle(document.getElementById('initial')).textDecorationColor])",
+            ),
+            r#"["2em","underline","solid","40px","auto","rgb(1, 2, 3)"]"#,
+        );
+        assert!(
+            runtime
+                .eval("CSS.supports('text-decoration-thickness','calc(20% + 2px)')")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert!(
+            !runtime
+                .eval("CSS.supports('text-decoration-thickness','from font')")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
         );
     }
 

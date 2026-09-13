@@ -454,6 +454,13 @@ impl Font {
             line_gap: self.inner.line_gap_unscaled(),
         }
     }
+
+    /// Returns the font's preferred underline thickness at `size_px`.
+    pub fn underline_thickness(&self, size_px: f32) -> Option<f32> {
+        let face = Face::from_slice(self.inner.font_data(), self.face_index)?;
+        let metrics = face.underline_metrics()?;
+        Some(metrics.thickness as f32 * size_px / face.units_per_em().max(1) as f32)
+    }
 }
 
 /// Font metrics extracted from font tables.

@@ -88,6 +88,9 @@ git_wpt sparse-checkout add \
 git_wpt sparse-checkout add \
   "/css/support/parsing-testcommon.js" \
   "/css/support/computed-testcommon.js" \
+  "/css/css-text-decor/text-decoration-thickness-valid.html" \
+  "/css/css-text-decor/text-decoration-thickness-invalid.html" \
+  "/css/css-text-decor/text-decoration-thickness-computed.html" \
   "/css/css-overflow/parsing/text-overflow-invalid.html" \
   "/css/css-transitions/parsing/transition-property-valid.html" \
   "/css/css-transitions/parsing/transition-property-invalid.html" \

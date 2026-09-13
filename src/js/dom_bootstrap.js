@@ -262,7 +262,7 @@
     "all",
     "color", "background-color", "border-color",
     "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
-    "outline-color", "text-decoration-color",
+    "outline-color", "text-decoration", "text-decoration-color", "text-decoration-thickness",
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
     "mask-composite", "-webkit-mask-composite",
