@@ -34286,11 +34286,21 @@ b</textarea></form>"#,
                 border: 2px solid black;
             }
             #border > div { height: 30px; }
+            #intrinsic-parent { width: 200px; }
+            #intrinsic {
+                width: min-content;
+                padding: 0 7px;
+                border: 2px solid black;
+            }
+            #intrinsic > span { display: inline-block; }
+            #intrinsic > span:first-child { width: 50px; }
+            #intrinsic > span:last-child { width: 70px; }
             #inline { display: inline; width: min-content; height: auto; }
             #gone { display: none; width: min-content; height: auto; }
         </style></head><body>
             <div id="content-parent"><div id="content"><div id="content-child"></div></div></div>
             <div id="border-parent"><div id="border"><div></div></div></div>
+            <div id="intrinsic-parent"><div id="intrinsic"><span></span><span></span></div></div>
             <span id="inline">text</span>
             <div id="gone"></div>
         </body></html>"#;
@@ -34309,6 +34319,8 @@ b</textarea></form>"#,
                 child.style.height = "40px";
                 const after = [live.width, live.height];
                 const border = getComputedStyle(document.getElementById("border"));
+                const intrinsicElement = document.getElementById("intrinsic");
+                const intrinsic = getComputedStyle(intrinsicElement);
                 const inline = getComputedStyle(document.getElementById("inline"));
                 const gone = getComputedStyle(document.getElementById("gone"));
                 return JSON.stringify({
@@ -34316,6 +34328,7 @@ b</textarea></form>"#,
                     rectWidth,
                     after,
                     border: [border.width, border.height],
+                    intrinsic: [intrinsic.width, intrinsicElement.getBoundingClientRect().width],
                     inline: [inline.width, inline.height],
                     gone: [gone.width, gone.height],
                 });
@@ -34324,7 +34337,7 @@ b</textarea></form>"#,
 
         assert_eq!(
             result,
-            r#"{"before":["102px","30px"],"rectWidth":240,"after":["112px","40px"],"border":["150px","44px"],"inline":["min-content","auto"],"gone":["min-content","auto"]}"#,
+            r#"{"before":["102px","30px"],"rectWidth":240,"after":["112px","40px"],"border":["150px","44px"],"intrinsic":["70px",88],"inline":["min-content","auto"],"gone":["min-content","auto"]}"#,
         );
     }
 
