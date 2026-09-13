@@ -445,6 +445,14 @@
       "baseline_supported": true
     },
     {
+      "id": "network.compression-streams",
+      "area": "network",
+      "description": "CompressionStream and DecompressionStream round-trip split byte chunks",
+      "setup": "globalThis.__compressionProbe = { done: false, ok: false }; (async () => { const collect = async readable => { const reader = readable.getReader(); const chunks = []; let size = 0; while (true) { const result = await reader.read(); if (result.done) break; chunks.push(result.value); size += result.value.byteLength; } const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; } return bytes; }; const compressor = new CompressionStream('gzip'); const compressedReading = collect(compressor.readable); const writer = compressor.writable.getWriter(); await writer.write(new Uint8Array([65, 66])); await writer.write(new Uint8Array([67])); await writer.close(); const compressed = await compressedReading; const decompressor = new DecompressionStream('gzip'); const decodedReading = collect(decompressor.readable); const decoder = decompressor.writable.getWriter(); for (let offset = 0; offset < compressed.length; offset += 2) await decoder.write(compressed.slice(offset, offset + 2)); await decoder.close(); const decoded = await decodedReading; let invalid = false; try { new CompressionStream('invalid'); } catch (error) { invalid = error instanceof TypeError; } __compressionProbe = { done: true, ok: invalid && decoded instanceof Uint8Array && Array.from(decoded).join(',') === '65,66,67' }; })().catch(error => { __compressionProbe = { done: true, ok: false, error: String(error) }; })",
+      "probe": "typeof CompressionStream === 'function' && typeof DecompressionStream === 'function' && __compressionProbe.done && __compressionProbe.ok",
+      "baseline_supported": true
+    },
+    {
       "id": "network.websocket",
       "area": "realtime",
       "description": "Page JavaScript can create WebSocket connections",

@@ -185,6 +185,32 @@ fn content_type(path: &Path) -> &str {
         _ => "application/octet-stream",
     }
 }
+
+fn any_script_dependencies(source: &[u8], test_path: &str) -> Vec<String> {
+    let parent = Path::new(test_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    String::from_utf8_lossy(source)
+        .lines()
+        .filter_map(|line| line.strip_prefix("// META: script="))
+        .filter_map(|script| {
+            let path = if let Some(absolute) = script.strip_prefix('/') {
+                PathBuf::from(absolute)
+            } else {
+                parent.join(script)
+            };
+            if path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::RootDir
+                )
+            }) {
+                return None;
+            }
+            Some(format!("/{}", path.to_string_lossy()))
+        })
+        .collect()
+}
 fn js_bool(runtime: &mut JsRuntime, source: &str) -> bool {
     runtime
         .eval(source)
@@ -708,9 +734,13 @@ fn selected_wpt_testharness_cases_match_expectations() {
             case.path
         );
         let document_source = if case.path.ends_with(".any.js") {
+            let dependencies = any_script_dependencies(response.body(), &case.path)
+                .into_iter()
+                .map(|path| format!("<script src=\"{path}\"></script>"))
+                .collect::<String>();
             format!(
                 "<!doctype html><script src=\"/resources/testharness.js\"></script>\
-                 <script src=\"/resources/testharnessreport.js\"></script>\
+                 <script src=\"/resources/testharnessreport.js\"></script>{dependencies}\
                  <script src=\"/{0}\"></script>",
                 case.path
             )
