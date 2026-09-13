@@ -195,10 +195,27 @@
     const families = query.families.map(s => s.toLowerCase());
     const characters = Array.from(String(text), c => c.codePointAt(0));
     const result = [];
-    const styleOrder = query.style === 'normal' ? ['normal','oblique','italic'] : query.style === 'italic' ? ['italic','oblique','normal'] : ['oblique','italic','normal'];
+    const stretchValue = value => ({
+      'ultra-condensed':50, 'extra-condensed':62.5, condensed:75,
+      'semi-condensed':87.5, normal:100, 'semi-expanded':112.5,
+      expanded:125, 'extra-expanded':150, 'ultra-expanded':200
+    })[value] || parseFloat(value);
+    const targetStretch = stretchValue(query.stretch);
+    const stretchRank = face => {
+      const values = faceState(face).descriptors.stretch.split(/\s+/).map(stretchValue);
+      const low = Math.min(values[0], values[1] === undefined ? values[0] : values[1]);
+      const high = Math.max(values[0], values[1] === undefined ? values[0] : values[1]);
+      if (low <= targetStretch && targetStretch <= high) return [0, 0];
+      if (targetStretch <= 100) return high < targetStretch ? [1, targetStretch - high] : [2, low - targetStretch];
+      return low > targetStretch ? [1, low - targetStretch] : [2, targetStretch - high];
+    };
+    const queryStyleParts = query.style.split(/\s+/), queryStyle = queryStyleParts[0];
+    const targetAngle = queryStyle === 'oblique' ? parseFloat(queryStyleParts[1] || '14') : 0;
+    const styleOrder = queryStyle === 'normal' ? ['normal','oblique','italic'] : queryStyle === 'italic' ? ['italic','oblique','normal'] : ['oblique','italic','normal'];
     const weightRank = value => {
-      const weight = value === 'normal' ? 400 : value === 'bold' ? 700 : Number(value.split(/\s+/)[0]);
-      const end = Number(value.split(/\s+/)[1] || weight);
+      const parts = value.split(/\s+/).map(item => item === 'normal' ? 400 : item === 'bold' ? 700 : Number(item));
+      const weight = Math.min(parts[0], parts[1] === undefined ? parts[0] : parts[1]);
+      const end = Math.max(parts[0], parts[1] === undefined ? parts[0] : parts[1]);
       if (weight <= query.weight && query.weight <= end) return 0;
       const target = query.weight, candidate = target < weight ? weight : end;
       if (target >= 400 && target <= 500) return candidate >= target && candidate <= 500 ? candidate - target : candidate < target ? 1000 + target - candidate : 2000 + candidate - target;
@@ -207,9 +224,20 @@
     for (const family of families) {
       let candidates = Array.from(setState(set).members).filter(face => unquote(faceState(face).descriptors.family).toLowerCase() === family);
       if (!candidates.length) continue;
-      const styleRank = face => styleOrder.indexOf(faceState(face).descriptors.style.split(/\s+/)[0]);
-      const bestStyle = Math.min(...candidates.map(styleRank));
-      candidates = candidates.filter(face => styleRank(face) === bestStyle);
+      const stretchRanks = candidates.map(stretchRank);
+      const bestStretch = stretchRanks.reduce((best, rank) => rank[0] < best[0] || rank[0] === best[0] && rank[1] < best[1] ? rank : best);
+      candidates = candidates.filter(face => { const rank = stretchRank(face); return rank[0] === bestStretch[0] && rank[1] === bestStretch[1]; });
+      const styleRank = face => {
+        const parts = faceState(face).descriptors.style.split(/\s+/), order = styleOrder.indexOf(parts[0]);
+        if (order || parts[0] !== 'oblique') return [order, 0];
+        const angles = parts.slice(1).map(part => parseFloat(part));
+        const low = Math.min(angles[0] === undefined ? 14 : angles[0], angles[1] === undefined ? angles[0] === undefined ? 14 : angles[0] : angles[1]);
+        const high = Math.max(angles[0] === undefined ? 14 : angles[0], angles[1] === undefined ? angles[0] === undefined ? 14 : angles[0] : angles[1]);
+        return [order, low <= targetAngle && targetAngle <= high ? 0 : Math.min(Math.abs(targetAngle - low), Math.abs(targetAngle - high))];
+      };
+      const styleRanks = candidates.map(styleRank);
+      const bestStyle = styleRanks.reduce((best, rank) => rank[0] < best[0] || rank[0] === best[0] && rank[1] < best[1] ? rank : best);
+      candidates = candidates.filter(face => { const rank = styleRank(face); return rank[0] === bestStyle[0] && rank[1] === bestStyle[1]; });
       const bestWeight = Math.min(...candidates.map(face => weightRank(faceState(face).descriptors.weight)));
       candidates = candidates.filter(face => weightRank(faceState(face).descriptors.weight) === bestWeight);
       for (const face of candidates) {
@@ -331,7 +359,7 @@
         for (const [name, property] of Object.entries(descriptorProperties)) {
           const raw = rule && rule.style.getPropertyValue(property);
           data.descriptors[name] = descriptor(name,
-            raw || (name === 'family' ? snapshot.family : name === 'weight' ? snapshot.weight : name === 'style' ? snapshot.style : defaults[name]));
+            raw || (name === 'family' ? snapshot.family : name === 'weight' ? snapshot.weight : name === 'style' ? snapshot.style : name === 'stretch' ? snapshot.stretch : name === 'unicodeRange' ? snapshot.unicodeRange : defaults[name]));
         }
         if (rule) cssRuleFaces.set(rule, face);
         if (data.status === 'unloaded') start(face);

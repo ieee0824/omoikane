@@ -5244,6 +5244,45 @@ fn inherits_font_style_from_parent() {
 }
 
 #[test]
+fn inherits_font_stretch_from_parent() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { font-stretch: condensed; }").unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("font-stretch"),
+        Some(&ComputedValue::Keyword("condensed".to_string())),
+        "font-stretch should inherit from parent"
+    );
+}
+
+#[test]
+fn computed_font_style_preserves_oblique_angle() {
+    let document = NodeHandle::document();
+    let element = NodeHandle::element("span");
+    document.append_child(element.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("span { font-style: oblique -10deg; }").unwrap(),
+    );
+    assert_eq!(
+        resolver.computed_style(&element).get("font-style"),
+        Some(&ComputedValue::Keyword("oblique -10deg".to_string()))
+    );
+}
+
+#[test]
 fn inherits_text_align_from_parent() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

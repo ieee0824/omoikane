@@ -60,17 +60,38 @@ pub(super) fn expand(
         let (_, token) = significant
             .get(index)
             .ok_or(CssParseError::InvalidDeclaration)?;
-        if let Some(size) = font_size(token) {
+        let percentage_is_stretch = matches!(token, CssToken::Percentage(value) if *value > 0.0)
+            && significant[index + 1..]
+                .iter()
+                .any(|(_, candidate)| font_size(candidate).is_some());
+        if !percentage_is_stretch && let Some(size) = font_size(token) {
             index += 1;
             break size;
         }
+        let mut consumed = 1;
         let (name, value) = match token {
             CssToken::Ident(keyword) => match keyword.as_str() {
                 "normal" => {
                     index += 1;
                     continue;
                 }
-                "italic" | "oblique" => ("font-style", Value::Keyword(keyword.clone())),
+                "italic" => ("font-style", Value::Keyword(keyword.clone())),
+                "oblique" => {
+                    let mut rendered = keyword.clone();
+                    while consumed <= 2
+                        && let Some((_, CssToken::Dimension(angle, unit))) =
+                            significant.get(index + consumed)
+                        && unit.eq_ignore_ascii_case("deg")
+                        && angle.is_finite()
+                        && (-90.0..=90.0).contains(angle)
+                    {
+                        rendered.push(' ');
+                        rendered
+                            .push_str(&format!("{}deg", super::tokenizer::trimmed_number(*angle)));
+                        consumed += 1;
+                    }
+                    ("font-style", Value::Keyword(rendered))
+                }
                 "small-caps" => ("font-variant", Value::Keyword(keyword.clone())),
                 "bold" | "bolder" | "lighter" => ("font-weight", Value::Keyword(keyword.clone())),
                 "ultra-condensed" | "extra-condensed" | "condensed" | "semi-condensed"
@@ -82,13 +103,16 @@ pub(super) fn expand(
             CssToken::Number(weight) if (1.0..=1000.0).contains(weight) => {
                 ("font-weight", Value::Number(*weight))
             }
+            CssToken::Percentage(stretch) if *stretch > 0.0 => {
+                ("font-stretch", Value::Percentage(*stretch))
+            }
             _ => return Err(CssParseError::InvalidDeclaration),
         };
         if !assigned.insert(name) {
             return Err(CssParseError::InvalidDeclaration);
         }
         values.insert(name, value);
-        index += 1;
+        index += consumed;
     };
     values.insert("font-size", size);
     if matches!(significant.get(index), Some((_, CssToken::Delim('/')))) {
@@ -221,6 +245,25 @@ mod tests {
             declarations
                 .iter()
                 .any(|d| d.name == "font-weight" && d.value == Value::Keyword("normal".into()))
+        );
+        let declarations =
+            parse_style_attribute("font:oblique -10deg 700 condensed 16px AngleFace");
+        assert!(declarations.iter().any(|d| {
+            d.name == "font-style" && d.value == Value::Keyword("oblique -10deg".into())
+        }));
+        assert!(declarations.iter().any(|d| {
+            d.name == "font-stretch" && d.value == Value::Keyword("condensed".into())
+        }));
+        let declarations = parse_style_attribute("font:75% 16px PercentageFace");
+        assert!(
+            declarations
+                .iter()
+                .any(|d| { d.name == "font-stretch" && d.value == Value::Percentage(75.0) })
+        );
+        assert!(
+            declarations
+                .iter()
+                .any(|d| { d.name == "font-size" && d.value == Value::Length(16.0, "px".into()) })
         );
     }
 

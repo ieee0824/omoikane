@@ -51,6 +51,8 @@ pub(crate) struct PropagatedTextDecoration {
     pub(crate) font_family: Option<crate::font::FontFamilyKey>,
     pub(crate) font_weight: crate::font::FontWeight,
     pub(crate) font_style: crate::font::FontStyle,
+    pub(crate) font_style_angle: i32,
+    pub(crate) font_stretch: crate::font::FontStretch,
     pub(crate) font_scope_root: Option<usize>,
 }
 
@@ -234,8 +236,7 @@ struct KeyframesDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FontFaceKey {
     family: String,
-    weight: crate::font::FontWeight,
-    style: crate::font::FontStyle,
+    descriptors: crate::font::WebFontDescriptors,
 }
 
 #[derive(Debug, Clone)]
@@ -1685,7 +1686,28 @@ fn propagated_text_decorations(
             .get("font-style")
             .and_then(|value| match value {
                 ComputedValue::Keyword(value) | ComputedValue::String(value) => {
-                    Some(crate::font::FontStyle::parse(value))
+                    Some(crate::font::FontStyleRange::parse(value).style)
+                }
+                _ => None,
+            })
+            .unwrap_or_default(),
+        font_style_angle: properties
+            .get("font-style")
+            .and_then(|value| match value {
+                ComputedValue::Keyword(value) | ComputedValue::String(value) => {
+                    Some(crate::font::FontStyleRange::parse(value).requested_angle())
+                }
+                _ => None,
+            })
+            .unwrap_or(0),
+        font_stretch: properties
+            .get("font-stretch")
+            .and_then(|value| match value {
+                ComputedValue::Keyword(value) | ComputedValue::String(value) => {
+                    Some(crate::font::FontStretch::parse(value))
+                }
+                ComputedValue::Percentage(value) => {
+                    Some(crate::font::FontStretch::parse(&format!("{value}%")))
                 }
                 _ => None,
             })
@@ -4154,12 +4176,22 @@ fn collect_font_faces(
                 };
                 let key = FontFaceKey {
                     family: rule.font_family.to_ascii_lowercase(),
-                    weight: crate::font::FontWeight::parse(
-                        rule.font_weight.as_deref().unwrap_or("normal"),
-                    ),
-                    style: crate::font::FontStyle::parse(
-                        rule.font_style.as_deref().unwrap_or("normal"),
-                    ),
+                    descriptors: crate::font::WebFontDescriptors {
+                        weight: crate::font::FontWeightRange::parse(
+                            rule.font_weight.as_deref().unwrap_or("normal"),
+                        ),
+                        style: crate::font::FontStyleRange::parse(
+                            rule.font_style.as_deref().unwrap_or("normal"),
+                        ),
+                        stretch: crate::font::FontStretchRange::parse(
+                            rule.font_stretch.as_deref().unwrap_or("normal"),
+                        ),
+                        unicode_range: rule
+                            .unicode_range
+                            .as_deref()
+                            .and_then(crate::font::UnicodeRangeSet::parse)
+                            .unwrap_or_default(),
+                    },
                 };
                 let definitions = font_faces.entry(scope_root).or_default();
                 match definitions.entry(key) {
@@ -4984,6 +5016,7 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "font-family",
     "font-size",
     "font-style",
+    "font-stretch",
     "font-weight",
     "gap",
     "grid-gap",
@@ -5410,6 +5443,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 || property_name.eq_ignore_ascii_case("background-repeat")
                 || property_name.eq_ignore_ascii_case("mask-size")
                 || property_name.eq_ignore_ascii_case("border-spacing")
+                || property_name.eq_ignore_ascii_case("font-style")
             {
                 return ComputedValue::Keyword(render_value(value));
             }
@@ -7251,6 +7285,7 @@ const INHERITED_PROPERTIES: &[&str] = &[
     "font-family",
     "font-size",
     "font-style",
+    "font-stretch",
     "font-weight",
     "letter-spacing",
     "line-height",

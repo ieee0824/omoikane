@@ -2,15 +2,16 @@
 
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{
-    Font, ShapingDirection, grapheme_spacing_cluster_starts, shape_text_with_fallback,
+    FontFallbackCandidate, ShapingDirection, grapheme_spacing_cluster_starts,
+    shape_text_with_fallback_candidates,
 };
 use crate::layout::{FragmentStyle, Rect, TextControlPaintState};
 use unicode_bidi::{BidiClass, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::text::{
-    measure_form_control_text_width, paint_shaped_horizontal_text, paint_text_placeholder,
-    text_prefix_by_utf16_offset,
+    measure_form_control_text_width_with_candidates, paint_shaped_horizontal_text_with_candidates,
+    paint_text_placeholder, text_prefix_by_utf16_offset,
 };
 use super::{Canvas, Color};
 
@@ -221,6 +222,7 @@ fn push_visual_line<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn paint_textarea_value(
     canvas: &mut Canvas,
     content_rect: Rect,
@@ -231,7 +233,46 @@ pub(crate) fn paint_textarea_value(
     fragment_style: &FragmentStyle,
     font_size: f32,
     ascent: f32,
-    fonts: &[&Font],
+    fonts: &[&crate::font::Font],
+    color: Color,
+    inherited_clip: Option<Rect>,
+    letter_spacing: f32,
+    soft_wrap: bool,
+) {
+    let candidates = fonts
+        .iter()
+        .map(|font| FontFallbackCandidate::unrestricted(font))
+        .collect::<Vec<_>>();
+    paint_textarea_value_with_candidates(
+        canvas,
+        content_rect,
+        padding_rect,
+        value,
+        editing,
+        style,
+        fragment_style,
+        font_size,
+        ascent,
+        &candidates,
+        color,
+        inherited_clip,
+        letter_spacing,
+        soft_wrap,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_textarea_value_with_candidates(
+    canvas: &mut Canvas,
+    content_rect: Rect,
+    padding_rect: Rect,
+    value: &str,
+    editing: Option<TextControlPaintState>,
+    style: &ComputedStyle,
+    fragment_style: &FragmentStyle,
+    font_size: f32,
+    ascent: f32,
+    fonts: &[FontFallbackCandidate<'_>],
     color: Color,
     inherited_clip: Option<Rect>,
     letter_spacing: f32,
@@ -292,7 +333,7 @@ pub(crate) fn paint_textarea_value(
 
         if !line.text.is_empty() {
             if fonts.is_empty()
-                || paint_shaped_horizontal_text(
+                || paint_shaped_horizontal_text_with_candidates(
                     canvas,
                     text_rect,
                     line.text,
@@ -352,7 +393,7 @@ fn paint_textarea_selection(
     state: TextControlPaintState,
     text_rect: Rect,
     font_size: f32,
-    fonts: &[&Font],
+    fonts: &[FontFallbackCandidate<'_>],
     fragment_style: &FragmentStyle,
     letter_spacing: f32,
     clip: Rect,
@@ -391,12 +432,17 @@ fn paint_textarea_selection(
 fn measure_textarea_text_width(
     text: &str,
     font_size: f32,
-    fonts: &[&Font],
+    fonts: &[FontFallbackCandidate<'_>],
     style: &FragmentStyle,
     letter_spacing: f32,
 ) -> f32 {
     if fonts.is_empty() {
-        return measure_form_control_text_width(text, font_size, fonts, letter_spacing);
+        return measure_form_control_text_width_with_candidates(
+            text,
+            font_size,
+            fonts,
+            letter_spacing,
+        );
     }
     let rtl = style
         .resolved_bidi_level
@@ -411,7 +457,7 @@ fn measure_textarea_text_width(
     } else {
         ShapingDirection::LeftToRight
     };
-    if let Ok(runs) = shape_text_with_fallback(fonts, text, font_size, direction) {
+    if let Ok(runs) = shape_text_with_fallback_candidates(fonts, text, font_size, direction) {
         let advance = runs
             .iter()
             .flat_map(|run| &run.glyphs)
@@ -423,7 +469,7 @@ fn measure_textarea_text_width(
             * letter_spacing;
         return advance + spacing;
     }
-    measure_form_control_text_width(text, font_size, fonts, letter_spacing)
+    measure_form_control_text_width_with_candidates(text, font_size, fonts, letter_spacing)
 }
 
 fn textarea_line_height(style: &ComputedStyle, font_size: f32) -> f32 {

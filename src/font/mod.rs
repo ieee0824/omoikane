@@ -123,10 +123,46 @@ pub(crate) struct ShapedRun {
     pub glyphs: Vec<ShapedGlyph>,
 }
 
+/// A shaping candidate with an optional `unicode-range` restriction.
+#[derive(Clone, Copy)]
+pub(crate) struct FontFallbackCandidate<'a> {
+    pub font: &'a Font,
+    pub unicode_range: Option<&'a UnicodeRangeSet>,
+}
+
+impl<'a> FontFallbackCandidate<'a> {
+    pub fn unrestricted(font: &'a Font) -> Self {
+        Self {
+            font,
+            unicode_range: None,
+        }
+    }
+
+    pub(crate) fn supports_range(self, cluster: &str) -> bool {
+        self.unicode_range
+            .is_none_or(|ranges| ranges.contains_cluster(cluster))
+    }
+}
+
 /// Selects fallback fonts at extended grapheme-cluster boundaries and shapes
 /// adjacent clusters that chose the same font as one contextual run.
+#[cfg(test)]
 pub(crate) fn shape_text_with_fallback(
     fonts: &[&Font],
+    text: &str,
+    size_px: f32,
+    direction: ShapingDirection,
+) -> Result<Vec<ShapedRun>, FontError> {
+    let candidates = fonts
+        .iter()
+        .map(|font| FontFallbackCandidate::unrestricted(font))
+        .collect::<Vec<_>>();
+    shape_text_with_fallback_candidates(&candidates, text, size_px, direction)
+}
+
+/// Shapes text while applying each web face's effective character range.
+pub(crate) fn shape_text_with_fallback_candidates(
+    fonts: &[FontFallbackCandidate<'_>],
     text: &str,
     size_px: f32,
     direction: ShapingDirection,
@@ -142,8 +178,9 @@ pub(crate) fn shape_text_with_fallback(
 
     // Most runs are fully covered by the primary font. Shape them once and
     // avoid probing and shaping every grapheme cluster independently.
-    let primary_glyphs = fonts[0].shape_text(text, size_px, direction);
+    let primary_glyphs = fonts[0].font.shape_text(text, size_px, direction);
     if let Ok(primary_glyphs) = primary_glyphs
+        && fonts[0].supports_range(text)
         && primary_glyphs.iter().all(|glyph| glyph.glyph_id != 0)
     {
         return Ok(vec![ShapedRun {
@@ -158,11 +195,15 @@ pub(crate) fn shape_text_with_fallback(
         let end = start + cluster.len();
         let font_index = fonts
             .iter()
-            .position(|font| cluster_supported_by_font(font, cluster, size_px, direction))
+            .position(|font| {
+                font.supports_range(cluster)
+                    && cluster_supported_by_font(font.font, cluster, size_px, direction)
+            })
             .or_else(|| {
-                fonts
-                    .iter()
-                    .position(|font| font.shape_text(cluster, size_px, direction).is_ok())
+                fonts.iter().position(|font| {
+                    font.supports_range(cluster)
+                        && font.font.shape_text(cluster, size_px, direction).is_ok()
+                })
             })
             .ok_or_else(|| FontError::Other("No usable font available for shaping".to_string()))?;
         if let Some((previous_font, range)) = selections.last_mut()
@@ -176,7 +217,10 @@ pub(crate) fn shape_text_with_fallback(
 
     let mut runs = Vec::with_capacity(selections.len());
     for (font_index, range) in selections {
-        let mut glyphs = fonts[font_index].shape_text(&text[range.clone()], size_px, direction)?;
+        let mut glyphs =
+            fonts[font_index]
+                .font
+                .shape_text(&text[range.clone()], size_px, direction)?;
         for glyph in &mut glyphs {
             glyph.cluster += range.start;
         }
@@ -1254,11 +1298,297 @@ impl FontStyle {
     }
 }
 
-/// Cache key for a specific font variant (weight + style).
+/// Computed `font-stretch` value in thousandths of one percent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct FontStretch(pub u32);
+
+impl FontStretch {
+    /// Normal width (100%).
+    pub(crate) const NORMAL: Self = Self(100_000);
+
+    /// Parse a CSS `font-stretch`/`font-width` value.
+    pub(crate) fn parse(value: &str) -> Self {
+        let value = value.trim();
+        let percent = match value.to_ascii_lowercase().as_str() {
+            "ultra-condensed" => 50.0,
+            "extra-condensed" => 62.5,
+            "condensed" => 75.0,
+            "semi-condensed" => 87.5,
+            "normal" => 100.0,
+            "semi-expanded" => 112.5,
+            "expanded" => 125.0,
+            "extra-expanded" => 150.0,
+            "ultra-expanded" => 200.0,
+            _ => value
+                .strip_suffix('%')
+                .and_then(|number| number.trim().parse::<f64>().ok())
+                .filter(|number| number.is_finite() && *number > 0.0)
+                .unwrap_or(100.0),
+        };
+        Self((percent * 1_000.0).round().clamp(1.0, u32::MAX as f64) as u32)
+    }
+}
+
+impl Default for FontStretch {
+    fn default() -> Self {
+        Self::NORMAL
+    }
+}
+
+/// Inclusive weight range declared by one `@font-face` rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FontWeightRange {
+    pub(crate) min: FontWeight,
+    pub(crate) max: FontWeight,
+}
+
+impl FontWeightRange {
+    pub(crate) fn exact(weight: FontWeight) -> Self {
+        Self {
+            min: weight,
+            max: weight,
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        let mut values = value.split_whitespace().map(FontWeight::parse);
+        let first = values.next().unwrap_or_default();
+        let second = values.next().unwrap_or(first);
+        Self {
+            min: FontWeight(first.0.min(second.0)),
+            max: FontWeight(first.0.max(second.0)),
+        }
+    }
+
+    fn rank(self, target: FontWeight) -> (u8, u16) {
+        if (self.min.0..=self.max.0).contains(&target.0) {
+            (0, 0)
+        } else {
+            let endpoint = if target.0 < self.min.0 {
+                self.min.0
+            } else {
+                self.max.0
+            };
+            system::weight_rank(target.0, endpoint)
+        }
+    }
+}
+
+/// Inclusive oblique-angle range, or a fixed normal/italic style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FontStyleRange {
+    pub(crate) style: FontStyle,
+    /// Angle bounds in thousandths of a degree for oblique faces.
+    pub(crate) min_angle: i32,
+    pub(crate) max_angle: i32,
+}
+
+impl FontStyleRange {
+    pub(crate) fn exact(style: FontStyle) -> Self {
+        let angle = if style == FontStyle::Oblique {
+            14_000
+        } else {
+            0
+        };
+        Self {
+            style,
+            min_angle: angle,
+            max_angle: angle,
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        let normalized = value.to_ascii_lowercase();
+        let mut parts = normalized.split_whitespace();
+        let style = FontStyle::parse(parts.next().unwrap_or("normal"));
+        if style != FontStyle::Oblique {
+            return Self::exact(style);
+        }
+        let parse_angle = |part: &str| {
+            part.strip_suffix("deg")
+                .and_then(|number| number.parse::<f64>().ok())
+                .filter(|number| number.is_finite())
+                .map(|number| (number * 1_000.0).round() as i32)
+        };
+        let first = parts.next().and_then(parse_angle).unwrap_or(14_000);
+        let second = parts.next().and_then(parse_angle).unwrap_or(first);
+        Self {
+            style,
+            min_angle: first.min(second),
+            max_angle: first.max(second),
+        }
+    }
+
+    pub(crate) fn requested_angle(self) -> i32 {
+        if self.style == FontStyle::Oblique {
+            self.min_angle
+        } else {
+            0
+        }
+    }
+
+    fn rank(self, target: FontStyle, target_angle: i32) -> (u8, u32) {
+        let style = system::style_rank(target, self.style);
+        let angle = if style == 0 && self.style == FontStyle::Oblique {
+            if (self.min_angle..=self.max_angle).contains(&target_angle) {
+                0
+            } else {
+                target_angle.abs_diff(if target_angle < self.min_angle {
+                    self.min_angle
+                } else {
+                    self.max_angle
+                })
+            }
+        } else {
+            0
+        };
+        (style, angle)
+    }
+}
+
+/// Inclusive stretch range declared by one `@font-face` rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FontStretchRange {
+    pub(crate) min: FontStretch,
+    pub(crate) max: FontStretch,
+}
+
+impl FontStretchRange {
+    pub(crate) fn exact(stretch: FontStretch) -> Self {
+        Self {
+            min: stretch,
+            max: stretch,
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        let mut values = value.split_whitespace().map(FontStretch::parse);
+        let first = values.next().unwrap_or_default();
+        let second = values.next().unwrap_or(first);
+        Self {
+            min: first.min(second),
+            max: first.max(second),
+        }
+    }
+
+    fn rank(self, target: FontStretch) -> (u8, u32) {
+        if (self.min.0..=self.max.0).contains(&target.0) {
+            return (0, 0);
+        }
+        if target <= FontStretch::NORMAL {
+            if self.max < target {
+                (1, target.0 - self.max.0)
+            } else {
+                (2, self.min.0 - target.0)
+            }
+        } else if self.min > target {
+            (1, self.min.0 - target.0)
+        } else {
+            (2, target.0 - self.max.0)
+        }
+    }
+}
+
+/// Code-point coverage declared by `unicode-range`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct UnicodeRangeSet(Vec<(u32, u32)>);
+
+impl UnicodeRangeSet {
+    pub(crate) fn all() -> Self {
+        Self(vec![(0, 0x10ffff)])
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let mut ranges = Vec::new();
+        for part in value.split(',') {
+            let value = part.trim();
+            let digits = value
+                .strip_prefix("U+")
+                .or_else(|| value.strip_prefix("u+"))?;
+            let (first, last) = if let Some((first, last)) = digits.split_once('-') {
+                if !(1..=6).contains(&first.len())
+                    || !(1..=6).contains(&last.len())
+                    || first.contains('?')
+                    || last.contains('?')
+                {
+                    return None;
+                }
+                (
+                    u32::from_str_radix(first, 16).ok()?,
+                    u32::from_str_radix(last, 16).ok()?,
+                )
+            } else if digits.contains('?') {
+                if !(1..=6).contains(&digits.len()) {
+                    return None;
+                }
+                let question = digits.find('?')?;
+                if digits[question..].chars().any(|ch| ch != '?') {
+                    return None;
+                }
+                (
+                    u32::from_str_radix(&digits.replace('?', "0"), 16).ok()?,
+                    u32::from_str_radix(&digits.replace('?', "F"), 16).ok()?,
+                )
+            } else {
+                if !(1..=6).contains(&digits.len()) {
+                    return None;
+                }
+                let code = u32::from_str_radix(digits, 16).ok()?;
+                (code, code)
+            };
+            if first > last || last > 0x10ffff {
+                return None;
+            }
+            ranges.push((first, last));
+        }
+        (!ranges.is_empty()).then_some(Self(ranges))
+    }
+
+    pub(crate) fn contains(&self, ch: char) -> bool {
+        let code = ch as u32;
+        self.0
+            .iter()
+            .any(|(first, last)| (*first..=*last).contains(&code))
+    }
+
+    fn contains_cluster(&self, cluster: &str) -> bool {
+        cluster.chars().all(|ch| self.contains(ch))
+    }
+}
+
+impl Default for UnicodeRangeSet {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+/// Parsed selection descriptors for one web-font resource.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WebFontDescriptors {
+    pub(crate) weight: FontWeightRange,
+    pub(crate) style: FontStyleRange,
+    pub(crate) stretch: FontStretchRange,
+    pub(crate) unicode_range: UnicodeRangeSet,
+}
+
+impl WebFontDescriptors {
+    pub(crate) fn exact(weight: FontWeight, style: FontStyle) -> Self {
+        Self {
+            weight: FontWeightRange::exact(weight),
+            style: FontStyleRange::exact(style),
+            stretch: FontStretchRange::exact(FontStretch::NORMAL),
+            unicode_range: UnicodeRangeSet::all(),
+        }
+    }
+}
+
+/// Cache key for a requested font variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontVariantKey {
     pub weight: FontWeight,
     pub style: FontStyle,
+    pub(crate) style_angle: i32,
+    pub(crate) stretch: FontStretch,
 }
 
 /// Stable, case-insensitive identifier for a CSS font family or ordered family list.
@@ -1305,7 +1635,42 @@ impl FontFamilyKey {
 impl FontVariantKey {
     /// Create a new variant key.
     pub fn new(weight: FontWeight, style: FontStyle) -> Self {
-        Self { weight, style }
+        Self {
+            weight,
+            style,
+            style_angle: if style == FontStyle::Oblique {
+                14_000
+            } else {
+                0
+            },
+            stretch: FontStretch::NORMAL,
+        }
+    }
+
+    /// Create a variant request including its computed stretch.
+    #[cfg(test)]
+    pub(crate) fn with_stretch(weight: FontWeight, style: FontStyle, stretch: FontStretch) -> Self {
+        Self {
+            weight,
+            style,
+            style_angle: if style == FontStyle::Oblique {
+                14_000
+            } else {
+                0
+            },
+            stretch,
+        }
+    }
+
+    /// Create a request from the computed CSS style text and stretch.
+    pub(crate) fn from_css(weight: FontWeight, style: &str, stretch: FontStretch) -> Self {
+        let style = FontStyleRange::parse(style);
+        Self {
+            weight,
+            style: style.style,
+            style_angle: style.requested_angle(),
+            stretch,
+        }
     }
 
     /// Normal weight (400), normal style.
@@ -1313,6 +1678,8 @@ impl FontVariantKey {
         Self {
             weight: FontWeight(400),
             style: FontStyle::Normal,
+            style_angle: 0,
+            stretch: FontStretch::NORMAL,
         }
     }
 }
@@ -1498,12 +1865,26 @@ impl Default for FontCache {
 ///
 /// Use `WebFontRegistry::push` to add variants after loading, then pass a reference
 /// to the paint stage for per-fragment font selection.
+struct WebFontEntry {
+    descriptors: WebFontDescriptors,
+    font: Arc<Font>,
+    source_order: u64,
+}
+
+/// A selected web-font resource and its declared character coverage.
+#[derive(Clone, Copy)]
+pub(crate) struct WebFontCandidate<'a> {
+    pub font: &'a Font,
+    pub unicode_range: &'a UnicodeRangeSet,
+}
+
 #[derive(Default)]
 pub struct WebFontRegistry {
-    /// `(tree_scope, family_lowercase) -> Vec<(key, font)>`
-    entries: HashMap<(Option<usize>, FontFamilyKey), Vec<(FontVariantKey, Arc<Font>)>>,
+    /// `(tree_scope, family_lowercase) -> faces in registration order`.
+    entries: HashMap<(Option<usize>, FontFamilyKey), Vec<WebFontEntry>>,
     /// Shadow-tree scope to its host's containing shadow-tree scope.
     scope_parents: HashMap<usize, Option<usize>>,
+    next_source_order: u64,
 }
 
 impl WebFontRegistry {
@@ -1536,11 +1917,31 @@ impl WebFontRegistry {
         style: FontStyle,
         font: Arc<Font>,
     ) {
-        let key = FontVariantKey::new(weight, style);
+        self.push_shared_scoped_with_descriptors(
+            scope_root,
+            family,
+            WebFontDescriptors::exact(weight, style),
+            font,
+        );
+    }
+
+    pub(crate) fn push_shared_scoped_with_descriptors(
+        &mut self,
+        scope_root: Option<usize>,
+        family: &str,
+        descriptors: WebFontDescriptors,
+        font: Arc<Font>,
+    ) {
+        let source_order = self.next_source_order;
+        self.next_source_order = self.next_source_order.saturating_add(1);
         self.entries
             .entry((scope_root, FontFamilyKey::new(family)))
             .or_default()
-            .push((key, font));
+            .push(WebFontEntry {
+                descriptors,
+                font,
+                source_order,
+            });
     }
 
     pub(crate) fn register_scope_parent(
@@ -1575,20 +1976,66 @@ impl WebFontRegistry {
 
     pub(crate) fn select_best_scoped_by_key(
         &self,
-        mut scope_root: Option<usize>,
+        scope_root: Option<usize>,
         family: FontFamilyKey,
         target_weight: FontWeight,
         target_style: FontStyle,
     ) -> Option<&Font> {
+        self.select_best_scoped_variant(
+            scope_root,
+            family,
+            FontVariantKey::new(target_weight, target_style),
+        )
+    }
+
+    pub(crate) fn select_best_scoped_variant(
+        &self,
+        scope_root: Option<usize>,
+        family: FontFamilyKey,
+        target: FontVariantKey,
+    ) -> Option<&Font> {
+        let candidates = self.select_candidates_scoped_by_key(scope_root, family, target);
+        candidates
+            .iter()
+            .copied()
+            .find(|candidate| {
+                candidate.unicode_range.contains(' ') && candidate.font.has_glyph(' ')
+            })
+            .or_else(|| candidates.first().copied())
+            .map(|candidate| candidate.font)
+    }
+
+    pub(crate) fn select_candidates_scoped_by_key(
+        &self,
+        mut scope_root: Option<usize>,
+        family: FontFamilyKey,
+        target: FontVariantKey,
+    ) -> Vec<WebFontCandidate<'_>> {
         loop {
-            if let Some(variants) = self.entries.get(&(scope_root, family))
-                && let Some(font) = select_best_web_font(variants, target_weight, target_style)
-            {
-                return Some(font);
+            if let Some(variants) = self.entries.get(&(scope_root, family)) {
+                return select_best_web_fonts(variants, target);
             }
-            let scope = scope_root?;
+            let Some(scope) = scope_root else {
+                return Vec::new();
+            };
             scope_root = self.scope_parents.get(&scope).copied().flatten();
         }
+    }
+
+    pub(crate) fn select_candidates_for_family_list(
+        &self,
+        scope_root: Option<usize>,
+        family: FontFamilyKey,
+        target: FontVariantKey,
+    ) -> Vec<WebFontCandidate<'_>> {
+        for name in family.families().iter() {
+            let selected =
+                self.select_candidates_scoped_by_key(scope_root, FontFamilyKey::new(name), target);
+            if !selected.is_empty() {
+                return selected;
+            }
+        }
+        Vec::new()
     }
 
     /// Returns `true` when any variant for the family is registered in the
@@ -1609,36 +2056,43 @@ impl WebFontRegistry {
     pub fn iter_fonts(&self) -> impl Iterator<Item = &Font> {
         self.entries
             .values()
-            .flat_map(|variants| variants.iter().map(|(_, font)| font.as_ref()))
+            .flat_map(|variants| variants.iter().map(|entry| entry.font.as_ref()))
     }
 }
 
-fn select_best_web_font(
-    variants: &[(FontVariantKey, Arc<Font>)],
-    target_weight: FontWeight,
-    target_style: FontStyle,
-) -> Option<&Font> {
+fn select_best_web_fonts(
+    variants: &[WebFontEntry],
+    target: FontVariantKey,
+) -> Vec<WebFontCandidate<'_>> {
     if variants.is_empty() {
-        return None;
+        return Vec::new();
     }
-
-    // Exact match shortcut
-    if let Some((_, font)) = variants
+    let rank = |entry: &WebFontEntry| {
+        (
+            entry.descriptors.stretch.rank(target.stretch),
+            entry
+                .descriptors
+                .style
+                .rank(target.style, target.style_angle),
+            entry.descriptors.weight.rank(target.weight),
+        )
+    };
+    let Some(best) = variants.iter().map(&rank).min() else {
+        return Vec::new();
+    };
+    let mut selected = variants
         .iter()
-        .find(|(k, _)| k.weight == target_weight && k.style == target_style)
-    {
-        return Some(font.as_ref());
-    }
-
-    variants
-        .iter()
-        .min_by_key(|(k, _)| {
-            (
-                system::style_rank(target_style, k.style),
-                system::weight_rank(target_weight.0, k.weight.0),
-            )
+        .filter(|entry| rank(entry) == best)
+        .collect::<Vec<_>>();
+    // Later rules win within a composite face when unicode ranges overlap.
+    selected.sort_by_key(|entry| std::cmp::Reverse(entry.source_order));
+    selected
+        .into_iter()
+        .map(|entry| WebFontCandidate {
+            font: entry.font.as_ref(),
+            unicode_range: &entry.descriptors.unicode_range,
         })
-        .map(|(_, font)| font.as_ref())
+        .collect()
 }
 
 /// Cache key for rasterized glyphs: (character, size in tenths of pixels).

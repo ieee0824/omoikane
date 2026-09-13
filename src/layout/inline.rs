@@ -9,9 +9,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
-    Font, FontFamilyKey, FontStyle, FontVariantKey, FontWeight, ShapingDirection,
-    grapheme_spacing_boundaries, is_zero_advance_character, load_default_text_fonts_shared,
-    select_text_font, shape_text_with_fallback,
+    Font, FontFallbackCandidate, FontFamilyKey, FontStyle, FontVariantKey, FontWeight,
+    ShapingDirection, WebFontCandidate, grapheme_spacing_boundaries, is_zero_advance_character,
+    load_default_text_fonts_shared, select_text_font, shape_text_with_fallback_candidates,
 };
 use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
@@ -2009,9 +2009,20 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
     metrics.font_family = style.get("font-family").and_then(computed_font_family_key);
     metrics.font_scope_root = style.font_family_scope_root();
     metrics.font_weight = computed_font_weight(style);
-    metrics.font_style = computed_font_property(style, "font-style")
-        .map(FontStyle::parse)
-        .unwrap_or_default();
+    let font_style = computed_font_property(style, "font-style")
+        .map(crate::font::FontStyleRange::parse)
+        .unwrap_or_else(|| crate::font::FontStyleRange::exact(FontStyle::default()));
+    metrics.font_style = font_style.style;
+    metrics.font_style_angle = font_style.requested_angle();
+    metrics.font_stretch = match style.get("font-stretch") {
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
+            crate::font::FontStretch::parse(value)
+        }
+        Some(ComputedValue::Percentage(value)) => {
+            crate::font::FontStretch::parse(&format!("{value}%"))
+        }
+        _ => crate::font::FontStretch::default(),
+    };
     LAYOUT_FONTS.with(|cell| {
         let mut fonts = cell.borrow_mut();
         let Some(context) = fonts.as_mut() else {
@@ -2020,7 +2031,12 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
         if !context.exact_metrics {
             return;
         }
-        let variant = FontVariantKey::new(metrics.font_weight, metrics.font_style);
+        let variant = FontVariantKey {
+            weight: metrics.font_weight,
+            style: metrics.font_style,
+            style_angle: metrics.font_style_angle,
+            stretch: metrics.font_stretch,
+        };
         let key = (
             metrics.font_family,
             metrics.font_scope_root,
@@ -2982,11 +2998,29 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
         }
 
         if let Some(ref context) = *fonts_ref {
+            let variant = crate::font::FontVariantKey {
+                weight: metrics.font_weight,
+                style: metrics.font_style,
+                style_angle: metrics.font_style_angle,
+                stretch: metrics.font_stretch,
+            };
+            let web_candidates = metrics
+                .font_family
+                .and_then(|family| {
+                    context.web_fonts.as_deref().map(|registry| {
+                        registry.select_candidates_for_family_list(
+                            metrics.font_scope_root,
+                            family,
+                            variant,
+                        )
+                    })
+                })
+                .unwrap_or_default();
             let selected = select_text_font(
                 "layout",
                 metrics.font_family,
                 metrics.font_scope_root,
-                crate::font::FontVariantKey::new(metrics.font_weight, metrics.font_style),
+                variant,
                 context.web_fonts.as_deref(),
                 &context.system_fonts,
             );
@@ -2996,6 +3030,7 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                     text,
                     metrics.font_size,
                     primary,
+                    &web_candidates,
                     &context.system_fonts,
                 );
                 // Shaped paint inserts spacing between extended grapheme
@@ -3024,6 +3059,7 @@ fn measure_text_width_with_fallback(
     text: &str,
     font_size: f32,
     primary: Option<&Font>,
+    web_fonts: &[WebFontCandidate<'_>],
     fonts: &[Arc<Font>],
 ) -> f32 {
     let direction = if text
@@ -3034,13 +3070,26 @@ fn measure_text_width_with_fallback(
     } else {
         ShapingDirection::LeftToRight
     };
-    let mut run_fonts = Vec::with_capacity(fonts.len() + usize::from(primary.is_some()));
-    if let Some(primary) = primary {
-        run_fonts.push(primary);
+    let mut run_fonts =
+        Vec::with_capacity(web_fonts.len() + fonts.len() + usize::from(primary.is_some()));
+    run_fonts.extend(web_fonts.iter().map(|candidate| FontFallbackCandidate {
+        font: candidate.font,
+        unicode_range: Some(candidate.unicode_range),
+    }));
+    if web_fonts.is_empty()
+        && let Some(primary) = primary
+    {
+        run_fonts.push(FontFallbackCandidate::unrestricted(primary));
     }
-    run_fonts.extend(fonts.iter().map(Arc::as_ref));
+    run_fonts.extend(
+        fonts
+            .iter()
+            .map(Arc::as_ref)
+            .map(FontFallbackCandidate::unrestricted),
+    );
     if !run_fonts.is_empty()
-        && let Ok(runs) = shape_text_with_fallback(&run_fonts, text, font_size, direction)
+        && let Ok(runs) =
+            shape_text_with_fallback_candidates(&run_fonts, text, font_size, direction)
     {
         return runs
             .iter()
@@ -3049,7 +3098,20 @@ fn measure_text_width_with_fallback(
             .sum();
     }
 
-    if let Some(font) = select_layout_run_font(primary, fonts, text) {
+    if let Some(font) = run_fonts
+        .iter()
+        .find(|candidate| {
+            candidate
+                .unicode_range
+                .is_none_or(|range| text.chars().all(|ch| range.contains(ch)))
+                && text.chars().all(|ch| {
+                    ch.is_whitespace()
+                        || is_zero_advance_character(ch)
+                        || candidate.font.has_glyph(ch)
+                })
+        })
+        .map(|candidate| candidate.font)
+    {
         if let Ok(glyphs) = font.shape_text(text, font_size, direction) {
             return glyphs.iter().map(|glyph| glyph.x_advance.abs()).sum();
         }
@@ -3059,7 +3121,16 @@ fn measure_text_width_with_fallback(
     let mut previous: Option<(char, *const Font)> = None;
 
     for ch in text.chars() {
-        let Some(font) = select_layout_font(primary, fonts, ch) else {
+        let Some(font) = run_fonts
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .unicode_range
+                    .is_none_or(|range| range.contains(ch))
+                    && (ch.is_whitespace() || candidate.font.has_glyph(ch))
+            })
+            .map(|candidate| candidate.font)
+        else {
             continue;
         };
         let font_id = std::ptr::from_ref(font);
@@ -3080,55 +3151,3 @@ fn measure_text_width_with_fallback(
 
     width
 }
-
-fn select_layout_run_font<'a>(
-    primary: Option<&'a Font>,
-    fonts: &'a [Arc<Font>],
-    text: &str,
-) -> Option<&'a Font> {
-    let supports_run = |font: &Font| {
-        text.chars()
-            .all(|ch| ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch))
-    };
-    primary.filter(|font| supports_run(font)).or_else(|| {
-        fonts
-            .iter()
-            .map(Arc::as_ref)
-            .find(|font| supports_run(font))
-    })
-}
-
-fn select_layout_font<'a>(
-    primary: Option<&'a Font>,
-    fonts: &'a [Arc<Font>],
-    ch: char,
-) -> Option<&'a Font> {
-    let prefer_cjk = is_cjk_preferred_character(ch);
-
-    if prefer_cjk && fonts.len() > 1 {
-        // Try CJK-capable fallback fonts first
-        for font in fonts.iter().skip(1) {
-            if font.has_glyph(ch) {
-                return Some(font);
-            }
-        }
-        return primary.or_else(|| fonts.first().map(AsRef::as_ref));
-    }
-
-    if let Some(font) = primary
-        && (ch.is_whitespace() || font.has_glyph(ch))
-    {
-        return Some(font);
-    }
-
-    for font in fonts {
-        if !ch.is_whitespace() && !font.has_glyph(ch) {
-            continue;
-        }
-        return Some(font);
-    }
-
-    primary.or_else(|| fonts.first().map(AsRef::as_ref))
-}
-
-use crate::font::is_cjk_preferred_character;
