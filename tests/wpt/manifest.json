@@ -55,6 +55,8 @@
     { "path": "css/css-font-loading/fontfacesetloadevent-constructor.html" },
     { "path": "css/css-font-loading/font-face-reject.html" },
     { "path": "domparsing/createContextualFragment.html" },
+    { "path": "domparsing/XMLSerializer-serializeToString.html" },
+    { "path": "domparsing/xml-parse-serialize-roundtrip.html" },
     { "path": "html/semantics/forms/constraints/form-validation-checkValidity.html" },
     { "path": "html/semantics/forms/constraints/form-validation-reportValidity.html" },
     { "path": "html/semantics/forms/constraints/form-validation-validate.html" },

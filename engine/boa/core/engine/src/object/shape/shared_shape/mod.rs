@@ -218,9 +218,7 @@ where
     pub(crate) fn change_prototype_transition(&self, prototype: JsPrototype) -> SharedShape {
         if let Some(shape) = self.forward_transitions().get_prototype(&prototype) {
             if let Some(inner) = shape.upgrade() {
-                return SharedShape {
-                    inner: inner.root(),
-                };
+                return SharedShape { inner };
             }
 
             self.forward_transitions().prune_prototype_transitions();
@@ -247,9 +245,7 @@ where
         // Check if we have already created such a transition, if so use it!
         if let Some(shape) = self.forward_transitions().get_property(&key) {
             if let Some(inner) = shape.upgrade() {
-                return SharedShape {
-                    inner: inner.root(),
-                };
+                return SharedShape { inner };
             }
 
             self.forward_transitions().prune_property_transitions();
@@ -298,9 +294,7 @@ where
                 };
 
                 return ChangeTransition {
-                    shape: SharedShape {
-                        inner: inner.root(),
-                    },
+                    shape: SharedShape { inner },
                     action,
                 };
             }

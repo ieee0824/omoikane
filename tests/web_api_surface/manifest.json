@@ -780,6 +780,13 @@
       "baseline_supported": true
     },
     {
+      "id": "dom.xml-serializer",
+      "area": "dom",
+      "description": "XMLSerializer preserves namespaces, escaping, CDATA sections, and required-argument errors across an XML round trip",
+      "probe": "(() => { try { const parser = new DOMParser(); const serializer = new XMLSerializer(); const parsed = parser.parseFromString('<root xmlns=\"urn:root\"><p:item xmlns:p=\"urn:item\" value=\"&quot;\">before&lt;<![CDATA[<raw>&data]]></p:item></root>', 'application/xml'); const serialized = serializer.serializeToString(parsed); const reparsed = parser.parseFromString(serialized, 'application/xml'); const item = reparsed.documentElement.firstElementChild; let missingArgument = false; try { serializer.serializeToString(); } catch (error) { missingArgument = error instanceof TypeError; } return typeof XMLSerializer === 'function' && XMLSerializer.prototype.serializeToString.length === 1 && reparsed.documentElement.namespaceURI === 'urn:root' && item.namespaceURI === 'urn:item' && item.getAttribute('value') === '\"' && item.childNodes.length === 2 && item.childNodes[1] instanceof CDATASection && item.childNodes[1].data === '<raw>&data' && missingArgument; } catch (_) { return false; } })()",
+      "baseline_supported": false
+    },
+    {
       "id": "css.text-overflow-ellipsis",
       "area": "cssom",
       "description": "One-value text-overflow computes to ellipsis, ignores a later invalid declaration, and retains full scroll geometry",
