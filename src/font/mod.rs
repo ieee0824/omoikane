@@ -1493,8 +1493,10 @@ impl Default for FontCache {
 /// to the paint stage for per-fragment font selection.
 #[derive(Default)]
 pub struct WebFontRegistry {
-    /// `family_lowercase -> Vec<(key, font)>`
-    entries: HashMap<FontFamilyKey, Vec<(FontVariantKey, Arc<Font>)>>,
+    /// `(tree_scope, family_lowercase) -> Vec<(key, font)>`
+    entries: HashMap<(Option<usize>, FontFamilyKey), Vec<(FontVariantKey, Arc<Font>)>>,
+    /// Shadow-tree scope to its host's containing shadow-tree scope.
+    scope_parents: HashMap<usize, Option<usize>>,
 }
 
 impl WebFontRegistry {
@@ -1516,11 +1518,30 @@ impl WebFontRegistry {
         style: FontStyle,
         font: Arc<Font>,
     ) {
+        self.push_shared_scoped(None, family, weight, style, font);
+    }
+
+    pub(crate) fn push_shared_scoped(
+        &mut self,
+        scope_root: Option<usize>,
+        family: &str,
+        weight: FontWeight,
+        style: FontStyle,
+        font: Arc<Font>,
+    ) {
         let key = FontVariantKey::new(weight, style);
         self.entries
-            .entry(FontFamilyKey::new(family))
+            .entry((scope_root, FontFamilyKey::new(family)))
             .or_default()
             .push((key, font));
+    }
+
+    pub(crate) fn register_scope_parent(
+        &mut self,
+        scope_root: usize,
+        parent_scope_root: Option<usize>,
+    ) {
+        self.scope_parents.insert(scope_root, parent_scope_root);
     }
 
     /// Select the best available font for the given family, weight, and style.
@@ -1542,33 +1563,32 @@ impl WebFontRegistry {
         target_weight: FontWeight,
         target_style: FontStyle,
     ) -> Option<&Font> {
-        let variants = self.entries.get(&family)?;
-        if variants.is_empty() {
-            return None;
-        }
-
-        // Exact match shortcut
-        if let Some((_, font)) = variants
-            .iter()
-            .find(|(k, _)| k.weight == target_weight && k.style == target_style)
-        {
-            return Some(font.as_ref());
-        }
-
-        variants
-            .iter()
-            .min_by_key(|(k, _)| {
-                (
-                    system::style_rank(target_style, k.style),
-                    system::weight_rank(target_weight.0, k.weight.0),
-                )
-            })
-            .map(|(_, font)| font.as_ref())
+        self.select_best_scoped_by_key(None, family, target_weight, target_style)
     }
 
-    /// Returns `true` when any variant for the family is registered.
+    pub(crate) fn select_best_scoped_by_key(
+        &self,
+        mut scope_root: Option<usize>,
+        family: FontFamilyKey,
+        target_weight: FontWeight,
+        target_style: FontStyle,
+    ) -> Option<&Font> {
+        loop {
+            if let Some(variants) = self.entries.get(&(scope_root, family))
+                && let Some(font) = select_best_web_font(variants, target_weight, target_style)
+            {
+                return Some(font);
+            }
+            let scope = scope_root?;
+            scope_root = self.scope_parents.get(&scope).copied().flatten();
+        }
+    }
+
+    /// Returns `true` when any variant for the family is registered in the
+    /// document tree scope.
     pub fn contains_family(&self, family: &str) -> bool {
-        self.entries.contains_key(&FontFamilyKey::new(family))
+        self.entries
+            .contains_key(&(None, FontFamilyKey::new(family)))
     }
 
     /// Returns `true` when no fonts have been registered.
@@ -1584,6 +1604,34 @@ impl WebFontRegistry {
             .values()
             .flat_map(|variants| variants.iter().map(|(_, font)| font.as_ref()))
     }
+}
+
+fn select_best_web_font(
+    variants: &[(FontVariantKey, Arc<Font>)],
+    target_weight: FontWeight,
+    target_style: FontStyle,
+) -> Option<&Font> {
+    if variants.is_empty() {
+        return None;
+    }
+
+    // Exact match shortcut
+    if let Some((_, font)) = variants
+        .iter()
+        .find(|(k, _)| k.weight == target_weight && k.style == target_style)
+    {
+        return Some(font.as_ref());
+    }
+
+    variants
+        .iter()
+        .min_by_key(|(k, _)| {
+            (
+                system::style_rank(target_style, k.style),
+                system::weight_rank(target_weight.0, k.weight.0),
+            )
+        })
+        .map(|(_, font)| font.as_ref())
 }
 
 /// Cache key for rasterized glyphs: (character, size in tenths of pixels).

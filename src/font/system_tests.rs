@@ -196,7 +196,8 @@ fn family_lists_preserve_order_and_quoted_commas_for_web_and_system_fonts() {
         let fallbacks = [fallback];
         let variant = FontVariantKey::new(FontWeight(700), FontStyle::Normal);
         let family = FontFamilyKey::new("'Missing Font', 'Omoikane Fixture'");
-        let selected = select_text_font("layout", Some(family), variant, None, &fallbacks).unwrap();
+        let selected =
+            select_text_font("layout", Some(family), None, variant, None, &fallbacks).unwrap();
         assert_eq!(selected.as_ref().glyph_advance('A', 20.0), 14.0);
         let mut registry = WebFontRegistry::new();
         registry.push(
@@ -209,11 +210,73 @@ fn family_lists_preserve_order_and_quoted_commas_for_web_and_system_fonts() {
             .unwrap(),
         );
         let family = FontFamilyKey::new("'Comma, Family', 'Omoikane Fixture'");
-        let selected =
-            select_text_font("layout", Some(family), variant, Some(&registry), &fallbacks).unwrap();
+        let selected = select_text_font(
+            "layout",
+            Some(family),
+            None,
+            variant,
+            Some(&registry),
+            &fallbacks,
+        )
+        .unwrap();
         assert!(selected.as_ref().system_face().is_none());
         assert_eq!(selected.as_ref().glyph_advance('A', 20.0), 12.0);
     });
+}
+
+#[test]
+fn web_font_lookup_stays_in_its_tree_scope_then_falls_back_to_ancestors() {
+    let normal = FontVariantKey::normal();
+    let mut registry = WebFontRegistry::new();
+    registry.push_shared_scoped(
+        None,
+        "Scoped Face",
+        normal.weight,
+        normal.style,
+        Arc::new(
+            Font::load_from_bytes(
+                std::fs::read(fixture_dir().join("OmoikaneFixture-Regular.ttf")).unwrap(),
+            )
+            .unwrap(),
+        ),
+    );
+    registry.push_shared_scoped(
+        Some(10),
+        "Scoped Face",
+        normal.weight,
+        normal.style,
+        Arc::new(
+            Font::load_from_bytes(
+                std::fs::read(fixture_dir().join("OmoikaneFixture-Italic.ttf")).unwrap(),
+            )
+            .unwrap(),
+        ),
+    );
+    registry.register_scope_parent(10, None);
+    registry.register_scope_parent(20, Some(10));
+
+    let family = FontFamilyKey::new("Scoped Face");
+    let nested = select_text_font(
+        "layout",
+        Some(family),
+        Some(20),
+        normal,
+        Some(&registry),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(nested.as_ref().glyph_advance('A', 20.0), 12.0);
+
+    let unrelated = select_text_font(
+        "layout",
+        Some(family),
+        Some(30),
+        normal,
+        Some(&registry),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(unrelated.as_ref().glyph_advance('A', 20.0), 10.0);
 }
 
 #[test]
@@ -252,7 +315,7 @@ fn selected_system_faces_keep_cjk_and_combining_clusters_in_fallback_runs() {
 fn font_diagnostic_scopes_restore_after_nesting_and_panics() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let capture = || {
-        select_text_font("layout", None, FontVariantKey::normal(), None, &[]);
+        select_text_font("layout", None, None, FontVariantKey::normal(), None, &[]);
     };
     let (_, outer) = with_font_selection_diagnostics(|| {
         capture();

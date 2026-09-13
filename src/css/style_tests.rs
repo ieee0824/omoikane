@@ -5866,6 +5866,184 @@ fn keyframes_follow_cascade_layer_order() {
 }
 
 #[test]
+fn font_face_rules_follow_layer_order_and_keep_scoped_variants() {
+    let document = NodeHandle::document();
+    let host = NodeHandle::element("x-card");
+    document.append_child(host.clone());
+    let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer base, override; \
+             @layer base { \
+               @font-face { font-family: Demo; src: url(low.ttf); } \
+               @font-face { font-family: Demo; src: url(bold.ttf); font-weight: 700; } \
+             } \
+             @layer override { \
+               @font-face { font-family: Demo; src: url(high.ttf); } \
+             }",
+        )
+        .unwrap(),
+    );
+    resolver.add_scoped_stylesheet(
+        Origin::Author,
+        parse_stylesheet("@font-face { font-family: Demo; src: url(shadow.ttf); }").unwrap(),
+        root.clone(),
+    );
+
+    let active_rules = resolver.active_font_face_rules();
+    assert_eq!(active_rules.len(), 4);
+    assert!(
+        active_rules
+            .iter()
+            .any(|(_, rule)| rule.src_url == "low.ttf")
+    );
+
+    let rules = resolver.resolved_font_face_rules();
+    assert_eq!(rules.len(), 3);
+    assert!(rules.iter().any(|(scope, rule)| {
+        scope.is_none() && rule.font_weight.is_none() && rule.src_url == "high.ttf"
+    }));
+    assert!(rules.iter().any(|(scope, rule)| {
+        scope.is_none() && rule.font_weight.as_deref() == Some("700") && rule.src_url == "bold.ttf"
+    }));
+    assert!(
+        rules.iter().any(|(scope, rule)| {
+            *scope == Some(root.identity()) && rule.src_url == "shadow.ttf"
+        })
+    );
+    assert!(!rules.iter().any(|(_, rule)| rule.src_url == "low.ttf"));
+}
+
+#[test]
+fn font_face_rules_follow_origin_nested_and_anonymous_layer_order() {
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::UserAgent,
+        parse_stylesheet("@font-face { font-family: OriginFace; src: url(ua.ttf); }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::User,
+        parse_stylesheet("@font-face { font-family: OriginFace; src: url(user.ttf); }").unwrap(),
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@layer author-low { \
+               @font-face { font-family: OriginFace; src: url(author.ttf); } \
+             } \
+             @layer outer { \
+               @layer early, late; \
+               @layer late { \
+                 @font-face { font-family: NestedFace; src: url(nested.ttf); } \
+               } \
+               @font-face { font-family: NestedFace; src: url(parent.ttf); } \
+             } \
+             @layer { \
+               @font-face { font-family: AnonymousFace; src: url(first.ttf); } \
+             } \
+             @layer { \
+               @font-face { font-family: AnonymousFace; src: url(second.ttf); } \
+             }",
+        )
+        .unwrap(),
+    );
+
+    let rules = resolver.resolved_font_face_rules();
+    let source_for = |family: &str| {
+        rules
+            .iter()
+            .find_map(|(_, rule)| {
+                rule.font_family
+                    .eq_ignore_ascii_case(family)
+                    .then_some(rule.src_url.as_str())
+            })
+            .unwrap()
+    };
+    assert_eq!(source_for("OriginFace"), "author.ttf");
+    assert_eq!(source_for("NestedFace"), "parent.ttf");
+    assert_eq!(source_for("AnonymousFace"), "second.ttf");
+}
+
+#[test]
+fn font_face_rules_rebuild_for_global_conditions_and_unlayered_priority() {
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@font-face { font-family: Demo; src: url(default.ttf); } \
+             @media (max-width: 300px) { \
+               @font-face { font-family: Demo; src: url(narrow.ttf); } \
+             } \
+             @layer later { \
+               @font-face { font-family: Demo; src: url(layered.ttf); } \
+             }",
+        )
+        .unwrap(),
+    );
+
+    resolver.set_viewport(500.0, 500.0);
+    assert_eq!(
+        resolver.resolved_font_face_rules()[0].1.src_url,
+        "default.ttf"
+    );
+
+    resolver.set_viewport(300.0, 500.0);
+    assert_eq!(
+        resolver.resolved_font_face_rules()[0].1.src_url,
+        "narrow.ttf"
+    );
+}
+
+#[test]
+fn font_family_references_keep_declaration_tree_scope_through_inheritance() {
+    let document = NodeHandle::document();
+    let host = NodeHandle::element("x-card");
+    document.append_child(host.clone());
+    let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let inherited = NodeHandle::element("span");
+    let local = NodeHandle::element("span");
+    local.set_attribute("class", "local");
+    root.append_child(inherited.clone());
+    root.append_child(local.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@font-face { font-family: Demo; src: url(document.ttf); } \
+             x-card { font-family: Demo; }",
+        )
+        .unwrap(),
+    );
+    resolver.add_scoped_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@font-face { font-family: Demo; src: url(shadow.ttf); } \
+             .local { font-family: Demo; }",
+        )
+        .unwrap(),
+        root.clone(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&host).font_family_scope_root(),
+        None
+    );
+    assert_eq!(
+        resolver.computed_style(&inherited).font_family_scope_root(),
+        None,
+        "an inherited outer reference must not switch to a local shadow definition"
+    );
+    assert_eq!(
+        resolver.computed_style(&local).font_family_scope_root(),
+        Some(root.identity())
+    );
+}
+
+#[test]
 fn unlayered_keyframes_outrank_later_layered_keyframes() {
     let document = NodeHandle::document();
     let target = NodeHandle::element("div");
