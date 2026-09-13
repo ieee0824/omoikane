@@ -102,6 +102,116 @@ fn unloaded_faces_are_matched_by_font_and_unicode_range() {
 }
 
 #[test]
+fn font_set_matching_applies_stretch_before_style_and_weight() {
+    let mut runtime = runtime();
+    runtime
+        .eval(&format!(
+            "globalThis.condensed=new FontFace('StretchSet',{},{{stretch:'75%',style:'normal',weight:'400'}});globalThis.normal=new FontFace('StretchSet','url(missing.ttf)',{{stretch:'100%',style:'italic',weight:'700'}});document.fonts.add(condensed).add(normal);globalThis.stretchResult=null;document.fonts.load('italic 700 condensed 16px StretchSet','A').then(value=>stretchResult=[value.length,value[0]===condensed],e=>stretchResult=e.name);",
+            serde_json::to_string(&format!("url({})", font_url())).unwrap()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[condensed.status,normal.status,stretchResult]"
+        ),
+        json!(["loaded", "unloaded", [1, true]])
+    );
+}
+
+#[test]
+fn font_set_matching_applies_oblique_angle_ranges() {
+    let mut runtime = runtime();
+    runtime
+        .eval(&format!(
+            "globalThis.negative=new FontFace('AngleSet',{},{{style:'oblique -20deg -5deg'}});globalThis.positive=new FontFace('AngleSet','url(missing.ttf)',{{style:'oblique 5deg 20deg'}});document.fonts.add(negative).add(positive);globalThis.angleResult=null;document.fonts.load('oblique -10deg 16px AngleSet','A').then(value=>angleResult=[value.length,value[0]===negative],e=>angleResult=e.name);",
+            serde_json::to_string(&format!("url({})", font_url())).unwrap()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[negative.status,positive.status,angleResult]"
+        ),
+        json!(["loaded", "unloaded", [1, true]])
+    );
+}
+
+#[test]
+fn css_connected_face_round_trips_range_descriptors() {
+    let mut runtime = runtime();
+    runtime
+        .eval(&format!(
+            "globalThis.rangeSheet=document.createElement('style');rangeSheet.textContent={};document.head.appendChild(rangeSheet);globalThis.rangeRule=rangeSheet.sheet.cssRules[0];globalThis.rangeFace=Array.from(document.fonts)[0];",
+            serde_json::to_string(&format!(
+                "@font-face{{font-family:RangeFace;src:url({});font-weight:300 700;font-style:oblique -10deg 20deg;font-stretch:75% 125%;unicode-range:U+0-7F, U+600-6FF}}",
+                font_url()
+            ))
+            .unwrap()
+        ))
+        .unwrap();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[rangeFace.weight,rangeFace.style,rangeFace.stretch,rangeFace.unicodeRange]"
+        ),
+        json!([
+            "300 700",
+            "oblique -10deg 20deg",
+            "75% 125%",
+            "U+0-7F, U+600-6FF"
+        ])
+    );
+    runtime
+        .eval("rangeFace.stretch='expanded';rangeFace.unicodeRange='U+41-42';")
+        .unwrap();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[rangeRule.style.getPropertyValue('font-stretch'),rangeRule.style.getPropertyValue('unicode-range'),Array.from(document.fonts)[0]===rangeFace]"
+        ),
+        json!(["expanded", "U+41-42", true])
+    );
+}
+
+#[test]
+fn css_unicode_range_faces_contribute_separate_text_runs() {
+    let encode = |bytes: &[u8]| {
+        format!(
+            "data:font/ttf;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    };
+    let regular = encode(include_bytes!(
+        "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"
+    ));
+    let bold = encode(include_bytes!(
+        "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Bold.ttf"
+    ));
+    let document = TreeBuilder::parse(&format!(
+        "<!doctype html><style>\
+         @font-face{{font-family:Composite;src:url({regular});unicode-range:U+41}}\
+         @font-face{{font-family:Composite;src:url({bold});unicode-range:U+42}}\
+         @font-face{{font-family:OnlyRegular;src:url({regular})}}\
+         @font-face{{font-family:OnlyBold;src:url({bold})}}\
+         span{{font-size:20px}}#both{{font-family:Composite}}\
+         #a{{font-family:OnlyRegular}}#b{{font-family:OnlyBold}}\
+         </style><span id=both>AB</span><span id=a>A</span><span id=b>B</span>"
+    ))
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let widths = eval_json(
+        &mut runtime,
+        "['both','a','b'].map(id=>document.getElementById(id).getBoundingClientRect().width)",
+    );
+    let both = widths[0].as_f64().unwrap();
+    let pieces = widths[1].as_f64().unwrap() + widths[2].as_f64().unwrap();
+    assert!((both - pieces).abs() < 0.01, "{widths:?}");
+}
+
+#[test]
 fn binary_source_is_copied_and_used_by_both_layout_and_paint() {
     let mut runtime = runtime();
     let bytes = include_bytes!("../../tests/fixtures/anonymized-arabic-fallback/DejaVuSans.ttf");
@@ -341,6 +451,26 @@ fn a_registered_font_used_by_the_document_loads_without_an_explicit_load_call() 
     runtime.eval(&format!("globalThis.autoFace=new FontFace('RuntimeFont',{});document.fonts.add(autoFace);document.getElementById('sample').getBoundingClientRect();",serde_json::to_string(&format!("url({})",font_url())).unwrap())).unwrap();
     runtime.run_until_idle().unwrap();
     assert_eq!(eval_json(&mut runtime, "autoFace.status"), "loaded");
+}
+
+#[test]
+fn automatic_font_loading_uses_the_computed_stretch() {
+    let document = TreeBuilder::parse(
+        "<!doctype html><style>#sample{font-family:AutoStretch;font-stretch:75%;font-size:20px}</style><span id=sample>A</span>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval(&format!(
+            "globalThis.condensedAuto=new FontFace('AutoStretch',{},{{stretch:'75%'}});globalThis.normalAuto=new FontFace('AutoStretch','url(missing.ttf)',{{stretch:'100%'}});document.fonts.add(condensedAuto).add(normalAuto);document.getElementById('sample').getBoundingClientRect();",
+            serde_json::to_string(&format!("url({})", font_url())).unwrap()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_json(&mut runtime, "[condensedAuto.status,normalAuto.status]"),
+        json!(["loaded", "unloaded"])
+    );
 }
 
 #[test]

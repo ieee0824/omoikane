@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{
-    Font, FontError, FontFamilyKey, FontStyle, FontVariantKey, FontWeight, GlyphRaster,
-    ShapingDirection, WebFontRegistry, grapheme_spacing_cluster_starts, is_zero_advance_character,
-    load_default_text_fonts_shared, select_text_font, shape_text_with_fallback,
+    Font, FontError, FontFallbackCandidate, FontFamilyKey, FontVariantKey, FontWeight, GlyphRaster,
+    ShapingDirection, WebFontCandidate, WebFontRegistry, grapheme_spacing_cluster_starts,
+    is_zero_advance_character, load_default_text_fonts_shared, select_text_font,
+    shape_text_with_fallback_candidates,
 };
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
@@ -17,7 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
 use super::color::{Color, parse_color};
-use super::form_control::paint_textarea_value;
+use super::form_control::paint_textarea_value_with_candidates;
 use super::{Canvas, Image, background_color, length_property, paint_background_image};
 
 const MAX_RENDER_GLYPH_CACHE_ENTRIES: usize = 16_384;
@@ -229,18 +230,32 @@ pub(crate) fn paint_text_with_registry(
                     // retaining the existing cluster-level fallback fonts.
                     let selected = select_fragment_font(web_fonts, fragment, fonts);
                     if let Some(primary_font) = selected.as_ref().map(AsRef::as_ref) {
-                        // Requested installed or web face first, then fallbacks.
-                        let mut variant_fonts: Vec<&Font> = vec![primary_font];
-                        variant_fonts.extend(fonts.iter().map(|font| font.as_ref()));
+                        let web_candidates = select_fragment_web_fonts(web_fonts, fragment);
+                        let mut shaping_fonts: Vec<FontFallbackCandidate<'_>> = web_candidates
+                            .iter()
+                            .map(|candidate| FontFallbackCandidate {
+                                font: candidate.font,
+                                unicode_range: Some(candidate.unicode_range),
+                            })
+                            .collect();
+                        if web_candidates.is_empty() {
+                            shaping_fonts.push(FontFallbackCandidate::unrestricted(primary_font));
+                        }
+                        shaping_fonts.extend(
+                            fonts
+                                .iter()
+                                .map(Arc::as_ref)
+                                .map(FontFallbackCandidate::unrestricted),
+                        );
                         if vertical_mode.is_some()
                             || !can_shape_logical_text
-                            || paint_shaped_horizontal_text(
+                            || paint_shaped_horizontal_text_with_candidates(
                                 canvas,
                                 fragment_rect,
                                 transformed_text,
                                 font_size,
                                 fragment.metrics.ascent,
-                                &variant_fonts,
+                                &shaping_fonts,
                                 &fragment.style,
                                 frag_color,
                                 clip,
@@ -254,7 +269,7 @@ pub(crate) fn paint_text_with_registry(
                                 display_text,
                                 font_size,
                                 fragment.metrics.ascent,
-                                &variant_fonts,
+                                &shaping_fonts,
                                 frag_color,
                                 clip,
                                 fragment.metrics.letter_spacing,
@@ -263,8 +278,11 @@ pub(crate) fn paint_text_with_registry(
                         }
                     } else if !fonts.is_empty() {
                         if let Some(vertical_mode) = vertical_mode {
-                            let font_refs: Vec<&Font> =
-                                fonts.iter().map(|font| font.as_ref()).collect();
+                            let font_refs: Vec<FontFallbackCandidate<'_>> = fonts
+                                .iter()
+                                .map(Arc::as_ref)
+                                .map(FontFallbackCandidate::unrestricted)
+                                .collect();
                             paint_fragment_text(
                                 canvas,
                                 fragment_rect,
@@ -337,7 +355,12 @@ pub(crate) fn paint_text_with_registry(
                                 "paint decoration",
                                 decoration.font_family,
                                 decoration.font_scope_root,
-                                FontVariantKey::new(decoration.font_weight, decoration.font_style),
+                                FontVariantKey {
+                                    weight: decoration.font_weight,
+                                    style: decoration.font_style,
+                                    style_angle: decoration.font_style_angle,
+                                    stretch: decoration.font_stretch,
+                                },
                                 web_fonts,
                                 fonts,
                             )
@@ -418,19 +441,39 @@ pub(crate) fn paint_text_with_registry(
                     let color = fragment_text_color(&fragment.style).unwrap_or(fallback_color);
                     // Same font policy as the Text branch: the fragment's
                     // resolved installed or web face first, then the global fonts.
-                    let mut fragment_fonts: Vec<&Font> = Vec::new();
+                    let web_candidates = select_fragment_web_fonts(web_fonts, fragment);
+                    let mut fragment_fonts: Vec<&Font> = web_candidates
+                        .iter()
+                        .map(|candidate| candidate.font)
+                        .collect();
+                    let mut fragment_candidates: Vec<FontFallbackCandidate<'_>> = web_candidates
+                        .iter()
+                        .map(|candidate| FontFallbackCandidate {
+                            font: candidate.font,
+                            unicode_range: Some(candidate.unicode_range),
+                        })
+                        .collect();
                     let selected = select_fragment_font(web_fonts, fragment, fonts);
-                    if let Some(font) = selected.as_ref().map(AsRef::as_ref) {
+                    if web_candidates.is_empty()
+                        && let Some(font) = selected.as_ref().map(AsRef::as_ref)
+                    {
                         fragment_fonts.push(font);
+                        fragment_candidates.push(FontFallbackCandidate::unrestricted(font));
                     }
                     fragment_fonts.extend(fonts.iter().map(|font| font.as_ref()));
+                    fragment_candidates.extend(
+                        fonts
+                            .iter()
+                            .map(Arc::as_ref)
+                            .map(FontFallbackCandidate::unrestricted),
+                    );
                     if fragment.node.tag_name().as_deref() == Some("textarea") {
                         let soft_wrap = !fragment
                             .node
                             .attributes()
                             .and_then(|attributes| attributes.get("wrap").cloned())
                             .is_some_and(|wrap| wrap.eq_ignore_ascii_case("off"));
-                        paint_textarea_value(
+                        paint_textarea_value_with_candidates(
                             canvas,
                             content_rect,
                             Rect {
@@ -445,7 +488,7 @@ pub(crate) fn paint_text_with_registry(
                             &fragment.style,
                             fragment.metrics.font_size,
                             fragment.metrics.ascent,
-                            &fragment_fonts,
+                            &fragment_candidates,
                             color,
                             clip,
                             fragment.metrics.letter_spacing,
@@ -454,10 +497,10 @@ pub(crate) fn paint_text_with_registry(
                         continue;
                     }
                     let x_offset = if is_text_align_center(style) {
-                        let text_width = measure_form_control_text_width(
+                        let text_width = measure_form_control_text_width_with_candidates(
                             value,
                             fragment.metrics.font_size,
-                            &fragment_fonts,
+                            &fragment_candidates,
                             fragment.metrics.letter_spacing,
                         );
                         ((content_rect.width - text_width) / 2.0).max(0.0)
@@ -476,17 +519,17 @@ pub(crate) fn paint_text_with_registry(
                         let before = text_prefix_by_utf16_offset(value, editing.selection_start);
                         let selected = text_prefix_by_utf16_offset(value, editing.selection_end);
                         let start_x = text_rect.x
-                            + measure_form_control_text_width(
+                            + measure_form_control_text_width_with_candidates(
                                 before,
                                 fragment.metrics.font_size,
-                                &fragment_fonts,
+                                &fragment_candidates,
                                 fragment.metrics.letter_spacing,
                             );
                         let end_x = text_rect.x
-                            + measure_form_control_text_width(
+                            + measure_form_control_text_width_with_candidates(
                                 selected,
                                 fragment.metrics.font_size,
-                                &fragment_fonts,
+                                &fragment_candidates,
                                 fragment.metrics.letter_spacing,
                             );
                         if editing.selection_start != editing.selection_end {
@@ -516,17 +559,32 @@ pub(crate) fn paint_text_with_registry(
                                 fragment.metrics.letter_spacing,
                             );
                         } else {
-                            paint_text_with_font_refs(
+                            if paint_shaped_horizontal_text_with_candidates(
                                 canvas,
                                 text_rect,
                                 value,
                                 fragment.metrics.font_size,
                                 fragment.metrics.ascent,
-                                &fragment_fonts,
+                                &fragment_candidates,
+                                &fragment.style,
                                 color,
                                 clip,
                                 fragment.metrics.letter_spacing,
-                            );
+                            )
+                            .is_none()
+                            {
+                                paint_text_with_font_refs(
+                                    canvas,
+                                    text_rect,
+                                    value,
+                                    fragment.metrics.font_size,
+                                    fragment.metrics.ascent,
+                                    &fragment_fonts,
+                                    color,
+                                    clip,
+                                    fragment.metrics.letter_spacing,
+                                );
+                            }
                         }
                     }
                     if let Some(x) = caret_x {
@@ -958,6 +1016,43 @@ fn vertical_paint_characters(text: &str, direction_rtl: bool) -> Vec<char> {
     }
 }
 
+fn fallback_font_for_cluster(fonts: &[FontFallbackCandidate<'_>], cluster: &str) -> Option<usize> {
+    fonts
+        .iter()
+        .position(|candidate| {
+            candidate.supports_range(cluster)
+                && cluster.chars().all(|ch| {
+                    ch.is_whitespace()
+                        || is_zero_advance_character(ch)
+                        || candidate.font.has_glyph(ch)
+                })
+        })
+        .or_else(|| {
+            fonts
+                .iter()
+                .position(|candidate| candidate.supports_range(cluster))
+        })
+}
+
+fn fallback_paint_characters(
+    text: &str,
+    direction_rtl: bool,
+    fonts: &[FontFallbackCandidate<'_>],
+) -> Vec<(char, usize)> {
+    let mut clusters = text.graphemes(true).collect::<Vec<_>>();
+    if direction_rtl {
+        clusters.reverse();
+    }
+    clusters
+        .into_iter()
+        .filter_map(|cluster| {
+            fallback_font_for_cluster(fonts, cluster)
+                .map(|font_index| cluster.chars().map(move |ch| (ch, font_index)))
+        })
+        .flatten()
+        .collect()
+}
+
 fn horizontal_glyph_origin(
     cursor_x: f32,
     cluster_origin_x: f32,
@@ -1038,14 +1133,14 @@ fn paint_fragment_text(
     text: &str,
     font_size: f32,
     layout_ascent: f32,
-    fonts: &[&Font],
+    fonts: &[FontFallbackCandidate<'_>],
     color: Color,
     clip: Option<Rect>,
     letter_spacing: f32,
     vertical_mode: Option<(bool, bool)>,
 ) {
     if let Some((vertical_rl, direction_rtl)) = vertical_mode {
-        paint_text_vertical_with_font_refs(
+        paint_text_vertical_with_candidates(
             canvas,
             rect,
             text,
@@ -1059,7 +1154,7 @@ fn paint_fragment_text(
             direction_rtl,
         );
     } else {
-        paint_text_with_font_refs(
+        paint_text_with_candidates(
             canvas,
             rect,
             text,
@@ -1073,6 +1168,69 @@ fn paint_fragment_text(
     }
 }
 
+fn paint_text_with_candidates(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    layout_ascent: f32,
+    fonts: &[FontFallbackCandidate<'_>],
+    color: Color,
+    clip: Option<Rect>,
+    letter_spacing: f32,
+) {
+    let chars = fallback_paint_characters(text, false, fonts);
+    let baseline_y = rect.y + layout_ascent;
+    let mut cursor_x = rect.x;
+    let mut cluster_origin_x = rect.x;
+    let mut previous_char: Option<(char, usize)> = None;
+    let mut remaining_non_zero = chars
+        .iter()
+        .filter(|(ch, _)| !is_zero_advance_character(*ch))
+        .count();
+
+    for (ch, font_index) in chars {
+        let font = fonts[font_index].font;
+        let zero_advance = is_zero_advance_character(ch);
+        let (_, glyph, advance_x) = rasterize_with_fallback_refs(&[font], ch, font_size);
+        let glyph = (!is_invisible_shaping_control(ch))
+            .then_some(glyph)
+            .flatten();
+        if !zero_advance
+            && let Some((previous, previous_font_index)) = previous_char
+            && previous_font_index == font_index
+        {
+            cursor_x += font.glyph_kerning(previous, ch, font_size);
+        }
+        if !zero_advance {
+            cluster_origin_x = cursor_x;
+        }
+        if let Some(glyph) = glyph
+            && glyph.width > 0
+            && glyph.height > 0
+            && !glyph.bitmap.is_empty()
+        {
+            canvas.draw_glyph_mask(
+                horizontal_glyph_origin(cursor_x, cluster_origin_x, zero_advance, glyph.offset_x),
+                baseline_y + glyph.offset_y,
+                glyph.width,
+                glyph.height,
+                &glyph.bitmap,
+                color,
+                clip,
+            );
+        }
+        cursor_x += advance_x;
+        if !zero_advance && remaining_non_zero > 1 {
+            cursor_x += letter_spacing;
+        }
+        if !zero_advance {
+            previous_char = Some((ch, font_index));
+            remaining_non_zero -= 1;
+        }
+    }
+}
+
 pub(crate) fn paint_shaped_horizontal_text(
     canvas: &mut Canvas,
     rect: Rect,
@@ -1080,6 +1238,36 @@ pub(crate) fn paint_shaped_horizontal_text(
     font_size: f32,
     layout_ascent: f32,
     fonts: &[&Font],
+    style: &FragmentStyle,
+    color: Color,
+    clip: Option<Rect>,
+    letter_spacing: f32,
+) -> Option<f32> {
+    let candidates = fonts
+        .iter()
+        .map(|font| FontFallbackCandidate::unrestricted(font))
+        .collect::<Vec<_>>();
+    paint_shaped_horizontal_text_with_candidates(
+        canvas,
+        rect,
+        text,
+        font_size,
+        layout_ascent,
+        &candidates,
+        style,
+        color,
+        clip,
+        letter_spacing,
+    )
+}
+
+pub(crate) fn paint_shaped_horizontal_text_with_candidates(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    layout_ascent: f32,
+    fonts: &[FontFallbackCandidate<'_>],
     style: &FragmentStyle,
     color: Color,
     clip: Option<Rect>,
@@ -1098,7 +1286,7 @@ pub(crate) fn paint_shaped_horizontal_text(
     } else {
         ShapingDirection::LeftToRight
     };
-    let Ok(runs) = shape_text_with_fallback(fonts, text, font_size, direction) else {
+    let Ok(runs) = shape_text_with_fallback_candidates(fonts, text, font_size, direction) else {
         return None;
     };
     if runs.iter().all(|run| run.glyphs.is_empty()) && !text.is_empty() {
@@ -1111,7 +1299,7 @@ pub(crate) fn paint_shaped_horizontal_text(
     let spacing_boundaries = spacing_clusters.len().saturating_sub(1);
     let mut applied_spacing = 0usize;
     for (run_index, run) in runs.iter().enumerate() {
-        let font = fonts[run.font_index];
+        let font = fonts[run.font_index].font;
         for (glyph_index, shaped) in run.glyphs.iter().enumerate() {
             if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, font_size)
                 && glyph.width > 0
@@ -1156,20 +1344,20 @@ pub(crate) fn paint_shaped_horizontal_text(
 /// has already transposed the fragment rectangle, so this function only maps
 /// glyph advances onto the physical y axis and keeps the paint order
 /// direction-aware.
-fn paint_text_vertical_with_font_refs(
+fn paint_text_vertical_with_candidates(
     canvas: &mut Canvas,
     rect: Rect,
     text: &str,
     font_size: f32,
     _layout_ascent: f32,
-    fonts: &[&Font],
+    fonts: &[FontFallbackCandidate<'_>],
     color: Color,
     clip: Option<Rect>,
     letter_spacing: f32,
     vertical_rl: bool,
     direction_rtl: bool,
 ) {
-    let chars = vertical_paint_characters(text, direction_rtl);
+    let chars = fallback_paint_characters(text, direction_rtl, fonts);
 
     let mut cursor_y = if direction_rtl {
         rect.y + rect.height
@@ -1180,15 +1368,12 @@ fn paint_text_vertical_with_font_refs(
     let mut previous_cell = None;
     let mut remaining_non_zero = chars
         .iter()
-        .filter(|ch| !is_zero_advance_character(**ch))
+        .filter(|(ch, _)| !is_zero_advance_character(*ch))
         .count();
-    for ch in chars.iter().copied() {
+    for (ch, font_index) in chars {
         let zero_advance = is_zero_advance_character(ch);
-        let preferred_font = zero_advance
-            .then(|| previous_cell.map(|(_, _, index)| index))
-            .flatten();
-        let (font_index, glyph, advance_x) =
-            rasterize_with_fallback_refs_preferred(fonts, ch, font_size, preferred_font);
+        let (_, glyph, advance_x) =
+            rasterize_with_fallback_refs(&[fonts[font_index].font], ch, font_size);
         let glyph = (!is_invisible_shaping_control(ch))
             .then_some(glyph)
             .flatten();
@@ -1886,19 +2071,66 @@ fn select_fragment_font<'a>(
         .as_deref()
         .map(FontWeight::parse)
         .unwrap_or(fragment.metrics.font_weight);
-    let font_style = style
-        .font_style
+    let font_stretch = style
+        .font_stretch
         .as_deref()
-        .map(FontStyle::parse)
-        .unwrap_or(fragment.metrics.font_style);
+        .map(crate::font::FontStretch::parse)
+        .unwrap_or(fragment.metrics.font_stretch);
+    let variant = style.font_style.as_deref().map_or(
+        FontVariantKey {
+            weight,
+            style: fragment.metrics.font_style,
+            style_angle: fragment.metrics.font_style_angle,
+            stretch: font_stretch,
+        },
+        |font_style| FontVariantKey::from_css(weight, font_style, font_stretch),
+    );
     select_text_font(
         "paint",
         family,
         style.font_scope_root,
-        FontVariantKey::new(weight, font_style),
+        variant,
         web_fonts,
         fonts,
     )
+}
+
+fn select_fragment_web_fonts<'a>(
+    web_fonts: Option<&'a WebFontRegistry>,
+    fragment: &crate::layout::InlineFragment,
+) -> Vec<WebFontCandidate<'a>> {
+    let registry = match web_fonts {
+        Some(registry) => registry,
+        None => return Vec::new(),
+    };
+    let style = &fragment.style;
+    let family = fragment
+        .metrics
+        .font_family
+        .or_else(|| style.font_family.as_deref().map(FontFamilyKey::new));
+    let Some(family) = family else {
+        return Vec::new();
+    };
+    let weight = style
+        .font_weight
+        .as_deref()
+        .map(FontWeight::parse)
+        .unwrap_or(fragment.metrics.font_weight);
+    let stretch = style
+        .font_stretch
+        .as_deref()
+        .map(crate::font::FontStretch::parse)
+        .unwrap_or(fragment.metrics.font_stretch);
+    let variant = style.font_style.as_deref().map_or(
+        FontVariantKey {
+            weight,
+            style: fragment.metrics.font_style,
+            style_angle: fragment.metrics.font_style_angle,
+            stretch,
+        },
+        |font_style| FontVariantKey::from_css(weight, font_style, stretch),
+    );
+    registry.select_candidates_for_family_list(style.font_scope_root, family, variant)
 }
 
 /// Measures the painted advance width of `text`, mirroring the advance model of
@@ -1948,6 +2180,42 @@ pub(crate) fn measure_form_control_text_width(
     width
 }
 
+pub(crate) fn measure_form_control_text_width_with_candidates(
+    text: &str,
+    font_size: f32,
+    fonts: &[FontFallbackCandidate<'_>],
+    letter_spacing: f32,
+) -> f32 {
+    if fonts.is_empty() {
+        return measure_form_control_text_width(text, font_size, &[], letter_spacing);
+    }
+    let direction = if text
+        .chars()
+        .any(|ch| matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN))
+    {
+        ShapingDirection::RightToLeft
+    } else {
+        ShapingDirection::LeftToRight
+    };
+    if let Ok(runs) = shape_text_with_fallback_candidates(fonts, text, font_size, direction) {
+        let advance = runs
+            .iter()
+            .flat_map(|run| &run.glyphs)
+            .map(|glyph| glyph.x_advance.abs())
+            .sum::<f32>();
+        return advance
+            + letter_spacing
+                * grapheme_spacing_cluster_starts(text)
+                    .len()
+                    .saturating_sub(1) as f32;
+    }
+    let refs = fonts
+        .iter()
+        .map(|candidate| candidate.font)
+        .collect::<Vec<_>>();
+    measure_form_control_text_width(text, font_size, &refs, letter_spacing)
+}
+
 pub(crate) fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
     if offset == 0 {
         return "";
@@ -1965,10 +2233,11 @@ pub(crate) fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
 #[cfg(test)]
 mod bidi_tests {
     use super::{
-        FragmentStyle, bidi_visual_text, fragment_text_for_paint, horizontal_glyph_origin,
-        is_invisible_shaping_control, vertical_cursor_after, vertical_glyph_cell,
-        vertical_paint_characters,
+        FragmentStyle, bidi_visual_text, fallback_paint_characters, fragment_text_for_paint,
+        horizontal_glyph_origin, is_invisible_shaping_control, vertical_cursor_after,
+        vertical_glyph_cell, vertical_paint_characters,
     };
+    use crate::font::{Font, FontFallbackCandidate, UnicodeRangeSet};
 
     #[test]
     fn mixed_ltr_text_is_reordered_into_visual_runs() {
@@ -2062,6 +2331,35 @@ mod bidi_tests {
         assert_eq!(
             vertical_paint_characters(visual_text.as_ref(), true),
             vec!['a', '\u{301}', 'b']
+        );
+    }
+
+    #[test]
+    fn scalar_fallback_respects_unicode_ranges_in_vertical_order() {
+        let font = Font::load_from_bytes(
+            include_bytes!("../../tests/fixtures/anonymized-font-face-ranges/regular.ttf").to_vec(),
+        )
+        .expect("fixed font fixture");
+        let a = UnicodeRangeSet::parse("U+41").unwrap();
+        let b = UnicodeRangeSet::parse("U+42").unwrap();
+        let fonts = [
+            FontFallbackCandidate {
+                font: &font,
+                unicode_range: Some(&a),
+            },
+            FontFallbackCandidate {
+                font: &font,
+                unicode_range: Some(&b),
+            },
+        ];
+
+        assert_eq!(
+            fallback_paint_characters("AB", false, &fonts),
+            vec![('A', 0), ('B', 1)]
+        );
+        assert_eq!(
+            fallback_paint_characters("AB", true, &fonts),
+            vec![('B', 1), ('A', 0)]
         );
     }
 

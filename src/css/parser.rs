@@ -876,6 +876,12 @@ impl Parser {
             // parser intentionally discards commas, so retain the declaration
             // text for the dedicated transition grammar instead.
             Value::Keyword(render_tokens(&value_tokens).trim().to_string())
+        } else if name == "unicode-range" {
+            // Commas delimit code-point ranges and must survive until the
+            // structured @font-face descriptor parser consumes them. A `+`
+            // immediately before a number is part of the numeric token, so
+            // the generic token renderer cannot reproduce it.
+            Value::Keyword(render_unicode_range_tokens(&value_tokens))
         } else if matches!(
             name.as_str(),
             "mask" | "-webkit-mask" | "font" | "transition"
@@ -954,6 +960,25 @@ impl Parser {
         self.index += 1;
         Some(token)
     }
+}
+
+fn render_unicode_range_tokens(tokens: &[CssToken]) -> String {
+    render_tokens(tokens)
+        .split(',')
+        .map(|part| {
+            let compact = part.split_whitespace().collect::<String>();
+            if compact
+                .get(..1)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("u"))
+                && compact.as_bytes().get(1) != Some(&b'+')
+            {
+                format!("{}+{}", &compact[..1], &compact[1..])
+            } else {
+                compact
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn is_layered_background_property(name: &str) -> bool {
@@ -1491,6 +1516,8 @@ fn build_font_face_rule(declarations: &[Declaration]) -> Option<FontFaceRule> {
     let mut format: Option<String> = None;
     let mut font_weight: Option<String> = None;
     let mut font_style: Option<String> = None;
+    let mut font_stretch: Option<String> = None;
+    let mut unicode_range: Option<String> = None;
 
     for decl in declarations {
         match decl.name.as_str() {
@@ -1507,6 +1534,12 @@ fn build_font_face_rule(declarations: &[Declaration]) -> Option<FontFaceRule> {
             "font-style" => {
                 font_style = Some(extract_string_value(&decl.value));
             }
+            "font-stretch" => {
+                font_stretch = Some(extract_string_value(&decl.value));
+            }
+            "unicode-range" => {
+                unicode_range = Some(extract_string_value(&decl.value));
+            }
             _ => {}
         }
     }
@@ -1520,6 +1553,8 @@ fn build_font_face_rule(declarations: &[Declaration]) -> Option<FontFaceRule> {
         format,
         font_weight,
         font_style,
+        font_stretch,
+        unicode_range,
     })
 }
 

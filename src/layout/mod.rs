@@ -493,6 +493,8 @@ pub struct FragmentStyle {
     /// CSS `font-style` value (raw string, e.g. `"italic"`, `"normal"`), pre-normalized to lowercase.
     /// Used by the paint stage to select the appropriate web font variant.
     pub font_style: Option<String>,
+    /// CSS `font-stretch` value used for face matching.
+    pub font_stretch: Option<String>,
     /// CSS `font-family` value (raw string, first family in list).
     /// Used by the paint stage to look up web font variants.
     pub font_family: Option<String>,
@@ -546,6 +548,10 @@ impl FragmentStyle {
             text_decorations: Arc::clone(style.text_decorations()),
             font_weight: normalize_lower("font-weight"),
             font_style: normalize_lower("font-style"),
+            font_stretch: match style.get("font-stretch") {
+                Some(ComputedValue::Percentage(value)) => Some(format!("{value}%")),
+                _ => normalize_lower("font-stretch"),
+            },
             font_family,
             font_scope_root: style.font_family_scope_root(),
             writing_mode: normalize_lower("writing-mode"),
@@ -627,6 +633,8 @@ pub struct FontMetrics {
     pub(crate) font_scope_root: Option<usize>,
     pub(crate) font_weight: FontWeight,
     pub(crate) font_style: FontStyle,
+    pub(crate) font_style_angle: i32,
+    pub(crate) font_stretch: crate::font::FontStretch,
 }
 
 impl FontMetrics {
@@ -643,6 +651,8 @@ impl FontMetrics {
             font_scope_root: None,
             font_weight: FontWeight::default(),
             font_style: FontStyle::default(),
+            font_style_angle: 0,
+            font_stretch: crate::font::FontStretch::default(),
         }
     }
 }

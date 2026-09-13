@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Font face range matching</title>
+<style>
+  @font-face { font-family: StretchFace; src: url(condensed.ttf); font-stretch: 75%; font-style: normal; font-weight: 400; }
+  @font-face { font-family: StretchFace; src: url(regular.ttf); font-stretch: 100%; font-style: normal; font-weight: 400; }
+  @font-face { font-family: WeightRange; src: url(regular.ttf); font-weight: 300 700; }
+  @font-face { font-family: WeightRange; src: url(bold.ttf); font-weight: 800; }
+  @font-face { font-family: AngleRange; src: url(regular.ttf); font-style: oblique -20deg -5deg; }
+  @font-face { font-family: AngleRange; src: url(bold.ttf); font-style: oblique 5deg 20deg; }
+  @font-face { font-family: CompositeFace; src: url(regular.ttf); unicode-range: U+41; }
+  @font-face { font-family: CompositeFace; src: url(bold.ttf); unicode-range: U+42; }
+  @font-face { font-family: OverlapFace; src: url(regular.ttf); unicode-range: U+41-42; }
+  @font-face { font-family: OverlapFace; src: url(bold.ttf); unicode-range: U+41; }
+  html, body { margin: 0; background: white; color: black; }
+  body { padding: 16px; font: 16px sans-serif; }
+  .case { height: 42px; border-bottom: 1px solid #bbb; }
+  .label { display: inline-block; width: 150px; }
+  .sample { display: inline-block; font-size: 20px; line-height: 30px; background: #dceeff; }
+  #stretch { font-family: StretchFace; font-stretch: 75%; font-style: normal; font-weight: 400; }
+  #weight { font-family: WeightRange; font-weight: 600; }
+  #angle { font-family: AngleRange; font-style: oblique -10deg; }
+  #composite { font-family: CompositeFace; }
+  #overlap { font-family: OverlapFace; }
+</style>
+<div class="case"><span class="label">stretch first</span><span class="sample" data-probe id="stretch">ABBA</span></div>
+<div class="case"><span class="label">weight range</span><span class="sample" data-probe id="weight">ABBA</span></div>
+<div class="case"><span class="label">oblique range</span><span class="sample" data-probe id="angle">ABBA</span></div>
+<div class="case"><span class="label">unicode split</span><span class="sample" data-probe id="composite">ABAB</span></div>
+<div class="case"><span class="label">unicode overlap</span><span class="sample" data-probe id="overlap">AB</span></div>
+<script>
+  document.fonts.ready.then(() => {
+    globalThis.__fontFaceRangeWidths = ['stretch', 'weight', 'angle', 'composite', 'overlap']
+      .map(id => document.getElementById(id).getBoundingClientRect().width);
+  });
+</script>

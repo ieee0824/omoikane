@@ -1,6 +1,9 @@
 //! Document-owned Font Loading API data, shared by style, layout and paint.
 use super::*;
-use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, WebFontRegistry};
+use crate::font::{
+    Font, FontFamilyKey, FontStretchRange, FontStyleRange, FontWeightRange, UnicodeRangeSet,
+    WebFontDescriptors, WebFontRegistry,
+};
 
 #[derive(Default)]
 pub(super) struct FontStore {
@@ -15,14 +18,27 @@ struct Face {
     owner: usize,
     scope_root: Option<usize>,
     family: String,
-    weight: FontWeight,
-    style: FontStyle,
+    weight: String,
+    style: String,
+    stretch: String,
+    unicode_range: String,
     sources: Vec<(String, String)>,
     base: Option<crate::http::Url>,
     bytes: Option<Vec<u8>>,
     font: Option<Arc<Font>>,
     failure: Option<String>,
     documents: HashSet<usize>,
+}
+
+impl Face {
+    fn selection_descriptors(&self) -> WebFontDescriptors {
+        WebFontDescriptors {
+            weight: FontWeightRange::parse(&self.weight),
+            style: FontStyleRange::parse(&self.style),
+            stretch: FontStretchRange::parse(&self.stretch),
+            unicode_range: UnicodeRangeSet::parse(&self.unicode_range).unwrap_or_default(),
+        }
+    }
 }
 
 impl FontStore {
@@ -44,8 +60,13 @@ impl FontStore {
                     (
                         *scope_root,
                         FontFamilyKey::new(&rule.font_family),
-                        FontWeight::parse(rule.font_weight.as_deref().unwrap_or("normal")),
-                        FontStyle::parse(rule.font_style.as_deref().unwrap_or("normal")),
+                        FontWeightRange::parse(rule.font_weight.as_deref().unwrap_or("normal")),
+                        FontStyleRange::parse(rule.font_style.as_deref().unwrap_or("normal")),
+                        FontStretchRange::parse(rule.font_stretch.as_deref().unwrap_or("normal")),
+                        rule.unicode_range
+                            .as_deref()
+                            .and_then(UnicodeRangeSet::parse)
+                            .unwrap_or_default(),
                     ),
                     rule.src_url.as_str(),
                 )
@@ -59,8 +80,10 @@ impl FontStore {
                 let key = (
                     *scope_root,
                     FontFamilyKey::new(&face.family),
-                    face.weight,
-                    face.style,
+                    FontWeightRange::parse(&face.weight),
+                    FontStyleRange::parse(&face.style),
+                    FontStretchRange::parse(&face.stretch),
+                    UnicodeRangeSet::parse(&face.unicode_range).unwrap_or_default(),
                 );
                 if winner_sources
                     .get(&key)
@@ -76,11 +99,10 @@ impl FontStore {
         if let Some(face) = self.faces.get(&id)
             && let Some(font) = &face.font
         {
-            fonts.push_shared_scoped(
+            fonts.push_shared_scoped_with_descriptors(
                 face.scope_root,
                 &face.family,
-                face.weight,
-                face.style,
+                face.selection_descriptors(),
                 font.clone(),
             );
         }
@@ -132,8 +154,13 @@ pub(super) fn sync_stylesheets(
                     owner: document.identity(),
                     scope_root,
                     family: rule.font_family.clone(),
-                    weight: FontWeight::parse(rule.font_weight.as_deref().unwrap_or("normal")),
-                    style: FontStyle::parse(rule.font_style.as_deref().unwrap_or("normal")),
+                    weight: rule.font_weight.clone().unwrap_or_else(|| "normal".into()),
+                    style: rule.font_style.clone().unwrap_or_else(|| "normal".into()),
+                    stretch: rule.font_stretch.clone().unwrap_or_else(|| "normal".into()),
+                    unicode_range: rule
+                        .unicode_range
+                        .clone()
+                        .unwrap_or_else(|| "U+0-10FFFF".into()),
                     sources: vec![("url".into(), rule.src_url.clone())],
                     base: base.clone(),
                     bytes: None,
@@ -147,8 +174,13 @@ pub(super) fn sync_stylesheets(
         if let Some(face) = state.font_loading.faces.get_mut(&id) {
             face.scope_root = scope_root;
             face.family.clone_from(&rule.font_family);
-            face.weight = FontWeight::parse(rule.font_weight.as_deref().unwrap_or("normal"));
-            face.style = FontStyle::parse(rule.font_style.as_deref().unwrap_or("normal"));
+            face.weight = rule.font_weight.clone().unwrap_or_else(|| "normal".into());
+            face.style = rule.font_style.clone().unwrap_or_else(|| "normal".into());
+            face.stretch = rule.font_stretch.clone().unwrap_or_else(|| "normal".into());
+            face.unicode_range = rule
+                .unicode_range
+                .clone()
+                .unwrap_or_else(|| "U+0-10FFFF".into());
             face.base = base.clone();
         }
         // Existing document rendering loads CSS fonts before layout. Retain
@@ -313,7 +345,16 @@ fn parse_font_query(input: &str) -> JsResult<serde_json::Value> {
         Some(Value::Keyword(style)) => style.as_str(),
         _ => "normal",
     };
-    Ok(serde_json::json!({"families":families,"weight":weight,"style":style}))
+    let stretch = match values.get("font-stretch") {
+        Some(Value::Keyword(stretch)) => stretch.as_str(),
+        Some(Value::Percentage(stretch)) => {
+            return Ok(serde_json::json!({
+                "families":families,"weight":weight,"style":style,"stretch":format!("{stretch}%")
+            }));
+        }
+        _ => "normal",
+    };
+    Ok(serde_json::json!({"families":families,"weight":weight,"style":style,"stretch":stretch}))
 }
 
 fn used_fonts(state: &mut HostState, document: &NodeHandle) -> Vec<serde_json::Value> {
@@ -336,9 +377,10 @@ fn used_fonts(state: &mut HostState, document: &NodeHandle) -> Vec<serde_json::V
             }
             let fragment = crate::layout::FragmentStyle::from_computed(&style);
             font = format!(
-                "{} {} 16px {}",
+                "{} {} {} 16px {}",
                 fragment.font_style.as_deref().unwrap_or("normal"),
                 fragment.font_weight.as_deref().unwrap_or("normal"),
+                fragment.font_stretch.as_deref().unwrap_or("normal"),
                 fragment.font_family.as_deref().unwrap_or("serif")
             );
             if node.tag_name().as_deref() == Some("input") {
@@ -562,12 +604,10 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
                     let face = state.font_loading.faces.get(id)?;
                     Some(serde_json::json!({
                         "id": id, "family": face.family,
-                        "weight": face.weight.0.to_string(),
-                        "style": match face.style {
-                            FontStyle::Normal => "normal",
-                            FontStyle::Italic => "italic",
-                            FontStyle::Oblique => "oblique",
-                        },
+                        "weight": face.weight,
+                        "style": face.style,
+                        "stretch": face.stretch,
+                        "unicodeRange": face.unicode_range,
                         "loaded": face.font.is_some(),
                     }))
                 })
@@ -591,8 +631,13 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
                     owner: document_id,
                     scope_root: None,
                     family: payload["family"].as_str().unwrap_or_default().to_owned(),
-                    weight: FontWeight::parse(payload["weight"].as_str().unwrap_or("normal")),
-                    style: FontStyle::parse(payload["style"].as_str().unwrap_or("normal")),
+                    weight: payload["weight"].as_str().unwrap_or("normal").to_owned(),
+                    style: payload["style"].as_str().unwrap_or("normal").to_owned(),
+                    stretch: payload["stretch"].as_str().unwrap_or("normal").to_owned(),
+                    unicode_range: payload["unicodeRange"]
+                        .as_str()
+                        .unwrap_or("U+0-10FFFF")
+                        .to_owned(),
                     sources,
                     base,
                     bytes,
@@ -661,8 +706,13 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
             "update" => {
                 let face = state.font_loading.faces.get_mut(&id).unwrap();
                 face.family = payload["family"].as_str().unwrap_or_default().to_owned();
-                face.weight = FontWeight::parse(payload["weight"].as_str().unwrap_or("normal"));
-                face.style = FontStyle::parse(payload["style"].as_str().unwrap_or("normal"));
+                face.weight = payload["weight"].as_str().unwrap_or("normal").to_owned();
+                face.style = payload["style"].as_str().unwrap_or("normal").to_owned();
+                face.stretch = payload["stretch"].as_str().unwrap_or("normal").to_owned();
+                face.unicode_range = payload["unicodeRange"]
+                    .as_str()
+                    .unwrap_or("U+0-10FFFF")
+                    .to_owned();
             }
             _ => return Err(error("unknown font operation")),
         }

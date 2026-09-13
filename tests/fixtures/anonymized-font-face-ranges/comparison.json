@@ -1,0 +1,43 @@
+{
+  "date": "2026-09-13",
+  "platform": "aarch64",
+  "viewport": [
+    520,
+    260
+  ],
+  "dpr": 1,
+  "fixture_sha256": "7ba649b7850755d8537f3cb0dd04ab86723967ff7f7b4a91adb28c0f65c3e574",
+  "firefox_version": "Mozilla Firefox 155.0.1",
+  "geckodriver_version": "geckodriver 0.37.1 (300705c65d1b 2026-07-17 09:25 +0000)",
+  "widths": {
+    "firefox": {
+      "stretch": 28,
+      "weight": 40,
+      "angle": 40,
+      "composite": 48,
+      "overlap": 24
+    },
+    "omoikane": {
+      "stretch": 28,
+      "weight": 40,
+      "angle": 40,
+      "composite": 48,
+      "overlap": 24
+    }
+  },
+  "repeat_capture_identical": {
+    "firefox": true,
+    "omoikane": true
+  },
+  "image_sha256": {
+    "firefox": "9e58b7e6903b485718d36b4438c276d183ea46e4059e63aae6bef78504f912d1",
+    "omoikane": "d613ce7923ec5caeb8d0271b2dabbf134886d007db9ddebc95dd381856349bba"
+  },
+  "pixel_difference": {
+    "changed_pixels": 4519,
+    "total_pixels": 135200,
+    "ratio": 0.03342455621301775,
+    "rmse_normalized": 0.111582
+  },
+  "visual_review": "Face advances, sample backgrounds, row positions, and glyph counts agree. Differences are confined mainly to system-label rasterization and rule color."
+}

@@ -37,7 +37,12 @@ fn face_metrics(metrics: FontMetrics) -> (f32, f32) {
             "layout",
             metrics.font_family,
             metrics.font_scope_root,
-            crate::font::FontVariantKey::new(metrics.font_weight, metrics.font_style),
+            crate::font::FontVariantKey {
+                weight: metrics.font_weight,
+                style: metrics.font_style,
+                style_angle: metrics.font_style_angle,
+                stretch: metrics.font_stretch,
+            },
             context.web_fonts.as_deref(),
             &context.system_fonts,
         );

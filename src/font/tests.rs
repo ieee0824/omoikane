@@ -993,6 +993,39 @@ fn font_style_parse() {
     assert_eq!(FontStyle::parse("unknown"), FontStyle::Normal);
 }
 
+#[test]
+fn font_face_descriptor_ranges_are_normalized() {
+    assert_eq!(
+        FontWeightRange::parse("700 300"),
+        FontWeightRange {
+            min: FontWeight(300),
+            max: FontWeight(700),
+        }
+    );
+    assert_eq!(
+        FontStretchRange::parse("125% 75%"),
+        FontStretchRange {
+            min: FontStretch(75_000),
+            max: FontStretch(125_000),
+        }
+    );
+    assert_eq!(
+        FontStyleRange::parse("oblique 20deg -10deg"),
+        FontStyleRange {
+            style: FontStyle::Oblique,
+            min_angle: -10_000,
+            max_angle: 20_000,
+        }
+    );
+    let ranges = UnicodeRangeSet::parse("U+41-42, U+6??").unwrap();
+    assert!(ranges.contains('A'));
+    assert!(ranges.contains('\u{600}'));
+    assert!(ranges.contains('\u{6ff}'));
+    assert!(!ranges.contains('C'));
+    assert!(UnicodeRangeSet::parse("U+0000001").is_none());
+    assert!(UnicodeRangeSet::parse("U+1-0000002").is_none());
+}
+
 // ============================================================================
 // WebFontRegistry tests
 // ============================================================================
@@ -1002,6 +1035,134 @@ fn load_test_font_for_registry() -> Option<Font> {
     let path = find_test_font()?;
     let data = std::fs::read(&path).ok()?;
     Font::load_from_bytes(data).ok()
+}
+
+fn load_selection_fixture() -> Arc<Font> {
+    Arc::new(
+        Font::load_from_file(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf")
+                .as_path(),
+        )
+        .expect("fixed selection fixture"),
+    )
+}
+
+#[test]
+fn web_font_registry_matches_stretch_before_style_and_weight() {
+    let condensed = load_selection_fixture();
+    let normal_italic = load_selection_fixture();
+    let mut registry = WebFontRegistry::new();
+    registry.push_shared_scoped_with_descriptors(
+        None,
+        "RangeFixture",
+        WebFontDescriptors {
+            weight: FontWeightRange::exact(FontWeight(400)),
+            style: FontStyleRange::exact(FontStyle::Normal),
+            stretch: FontStretchRange::exact(FontStretch(75_000)),
+            unicode_range: UnicodeRangeSet::all(),
+        },
+        Arc::clone(&condensed),
+    );
+    registry.push_shared_scoped_with_descriptors(
+        None,
+        "RangeFixture",
+        WebFontDescriptors {
+            weight: FontWeightRange::exact(FontWeight(700)),
+            style: FontStyleRange::exact(FontStyle::Italic),
+            stretch: FontStretchRange::exact(FontStretch::NORMAL),
+            unicode_range: UnicodeRangeSet::all(),
+        },
+        Arc::clone(&normal_italic),
+    );
+    let selected = registry
+        .select_best_scoped_variant(
+            None,
+            FontFamilyKey::new("RangeFixture"),
+            FontVariantKey::with_stretch(FontWeight(700), FontStyle::Italic, FontStretch(75_000)),
+        )
+        .unwrap();
+    assert!(std::ptr::eq(selected, condensed.as_ref()));
+}
+
+#[test]
+fn web_font_registry_matches_oblique_angle_ranges() {
+    let negative = load_selection_fixture();
+    let positive = load_selection_fixture();
+    let mut registry = WebFontRegistry::new();
+    let descriptors = |style| WebFontDescriptors {
+        weight: FontWeightRange::exact(FontWeight(400)),
+        style: FontStyleRange::parse(style),
+        stretch: FontStretchRange::exact(FontStretch::NORMAL),
+        unicode_range: UnicodeRangeSet::all(),
+    };
+    registry.push_shared_scoped_with_descriptors(
+        None,
+        "AngleFixture",
+        descriptors("oblique -20deg -5deg"),
+        Arc::clone(&negative),
+    );
+    registry.push_shared_scoped_with_descriptors(
+        None,
+        "AngleFixture",
+        descriptors("oblique 5deg 20deg"),
+        Arc::clone(&positive),
+    );
+    let selected = registry
+        .select_best_scoped_variant(
+            None,
+            FontFamilyKey::new("AngleFixture"),
+            FontVariantKey::from_css(FontWeight(400), "oblique -10deg", FontStretch::NORMAL),
+        )
+        .unwrap();
+    assert!(std::ptr::eq(selected, negative.as_ref()));
+}
+
+#[test]
+fn unicode_range_composite_face_splits_grapheme_runs_in_source_order() {
+    let first = load_selection_fixture();
+    let later = load_selection_fixture();
+    let mut registry = WebFontRegistry::new();
+    let descriptors = |range| WebFontDescriptors {
+        weight: FontWeightRange::exact(FontWeight(400)),
+        style: FontStyleRange::exact(FontStyle::Normal),
+        stretch: FontStretchRange::exact(FontStretch::NORMAL),
+        unicode_range: UnicodeRangeSet::parse(range).unwrap(),
+    };
+    registry.push_shared_scoped_with_descriptors(
+        None,
+        "CompositeFixture",
+        descriptors("U+41"),
+        Arc::clone(&first),
+    );
+    registry.push_shared_scoped_with_descriptors(
+        None,
+        "CompositeFixture",
+        descriptors("U+42"),
+        Arc::clone(&later),
+    );
+    let selected = registry.select_candidates_scoped_by_key(
+        None,
+        FontFamilyKey::new("CompositeFixture"),
+        FontVariantKey::normal(),
+    );
+    assert_eq!(selected.len(), 2);
+    assert!(std::ptr::eq(selected[0].font, later.as_ref()));
+    let candidates = selected
+        .iter()
+        .map(|candidate| FontFallbackCandidate {
+            font: candidate.font,
+            unicode_range: Some(candidate.unicode_range),
+        })
+        .collect::<Vec<_>>();
+    let runs =
+        shape_text_with_fallback_candidates(&candidates, "AB", 16.0, ShapingDirection::LeftToRight)
+            .unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].font_index, 1);
+    assert_eq!(runs[0].text_range, 0..1);
+    assert_eq!(runs[1].font_index, 0);
+    assert_eq!(runs[1].text_range, 1..2);
 }
 
 #[test]

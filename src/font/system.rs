@@ -171,15 +171,19 @@ impl SystemFontDatabase {
             .copied()
             .min_by_key(|index| {
                 let face = &self.faces[*index];
-                // This API requests normal stretch. Match width before style
-                // and weight; condensed aliases must not beat a normal face.
-                let width = if face.width <= 5 {
-                    (0, 5 - face.width)
-                } else {
-                    (1, face.width - 5)
+                let stretch = match face.width {
+                    1 => super::FontStretch(50_000),
+                    2 => super::FontStretch(62_500),
+                    3 => super::FontStretch(75_000),
+                    4 => super::FontStretch(87_500),
+                    6 => super::FontStretch(112_500),
+                    7 => super::FontStretch(125_000),
+                    8 => super::FontStretch(150_000),
+                    9 => super::FontStretch(200_000),
+                    _ => super::FontStretch::NORMAL,
                 };
                 (
-                    width,
+                    super::FontStretchRange::exact(stretch).rank(variant.stretch),
                     style_rank(variant.style, face.style),
                     weight_rank(variant.weight.0, face.weight),
                     *index,
@@ -375,12 +379,7 @@ fn select_text_font_impl<'a>(
     if let Some(family) = family {
         for name in family.families().iter() {
             if let Some(font) = web_fonts.and_then(|registry| {
-                registry.select_best_scoped_by_key(
-                    scope_root,
-                    FontFamilyKey::new(name),
-                    variant.weight,
-                    variant.style,
-                )
+                registry.select_best_scoped_variant(scope_root, FontFamilyKey::new(name), variant)
             }) {
                 return Some(SelectedFont::Web(font));
             }

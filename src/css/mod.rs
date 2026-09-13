@@ -262,6 +262,10 @@ pub struct FontFaceRule {
     pub font_weight: Option<String>,
     /// Optional font-style descriptor (e.g. `"italic"`, `"normal"`).
     pub font_style: Option<String>,
+    /// Optional font-stretch descriptor (e.g. `"condensed"`, `"75% 100%"`).
+    pub font_stretch: Option<String>,
+    /// Optional unicode-range descriptor, including comma-separated ranges.
+    pub unicode_range: Option<String>,
 }
 
 /// A regular style rule.
@@ -1722,7 +1726,7 @@ mod tests {
     #[test]
     fn parses_font_face_with_weight_and_style() {
         let stylesheet = parse_stylesheet(
-            r#"@font-face { font-family: "MyFont"; src: url(font.ttf); font-weight: bold; font-style: italic; }"#,
+            r#"@font-face { font-family: "MyFont"; src: url(font.ttf); font-weight: 300 700; font-style: oblique -10deg 20deg; font-stretch: 75% 125%; unicode-range: U+0-7F, U+600-6FF; }"#,
         )
         .unwrap();
 
@@ -1731,8 +1735,10 @@ mod tests {
         };
         assert_eq!(ff.font_family, "MyFont");
         assert_eq!(ff.src_url, "font.ttf");
-        assert_eq!(ff.font_weight.as_deref(), Some("bold"));
-        assert_eq!(ff.font_style.as_deref(), Some("italic"));
+        assert_eq!(ff.font_weight.as_deref(), Some("300 700"));
+        assert_eq!(ff.font_style.as_deref(), Some("oblique -10deg 20deg"));
+        assert_eq!(ff.font_stretch.as_deref(), Some("75% 125%"));
+        assert_eq!(ff.unicode_range.as_deref(), Some("U+0-7F, U+600-6FF"));
     }
 
     #[test]

@@ -47,6 +47,16 @@ fn installed_faces_match_width_weight_and_style_from_metadata() {
 }
 
 #[test]
+fn installed_faces_match_requested_stretch_before_style_and_weight() {
+    let db = database();
+    let variant =
+        FontVariantKey::with_stretch(FontWeight(700), FontStyle::Italic, FontStretch(75_000));
+    let face = db.select("Omoikane Fixture", variant).unwrap();
+    assert!(face.path.ends_with("OmoikaneFixture-Condensed.ttf"));
+    assert_eq!(face.width, 3);
+}
+
+#[test]
 fn system_family_selection_decodes_mac_roman_collection_names() {
     let bytes = std::fs::read(fixture_dir().join("OmoikaneMacRoman.ttc")).unwrap();
     let face = rustybuzz::ttf_parser::Face::parse(&bytes, 0).unwrap();
