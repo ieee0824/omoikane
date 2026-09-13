@@ -240,7 +240,23 @@ cargo build
 CI=1 cargo test -- --include-ignored
 ```
 
-- ビルド成果物は `CARGO_TARGET_DIR=/target` に出力され、ホストの `target/` とは分離されます。
+- ビルド成果物はホストの `target/` と分け、worktreeごとの専用ディレクトリへ出力します。全体テストなど容量が大きい処理には、開始時22 GiB・実行中2 GiBの空きと、target 20 GiBの上限を確認するguardを使います。
+
+```bash
+export CARGO_TARGET_DIR="/target/$(basename "$PWD")"
+python3 scripts/cargo-space-guard.py run -- \
+  cargo test --locked -- --include-ignored --test-threads=1
+```
+
+完了済みworktreeのCargo cacheは、7日保持・合計60 GiBを既定として確認できます。最初のコマンドはdry-runで、`--execute`を付けた場合もcache root直下でguardが作成したCargo印・lock付きディレクトリだけを削除します。Git worktree、`Cargo.toml`を含むsource、`.artifacts`などの証跡、保持印 `.cargo-space-guard-preserve`、実行中のtarget、guard導入前のcacheは対象外です。
+
+```bash
+python3 scripts/cargo-space-guard.py clean --cache-root /target \
+  --keep "$CARGO_TARGET_DIR"
+python3 scripts/cargo-space-guard.py clean --cache-root /target \
+  --keep "$CARGO_TARGET_DIR" --execute
+```
+
 - crates.io インデックスと crate ソースは named volume（`cargo-registry` / `cargo-git`）に永続化されるため、コンテナを作り直しても（`down` / `up`）クレートを再ダウンロードしません。
 - Claude Code / Codex CLI のログイン情報は named volume に永続化されるため、コンテナを作り直してもログインし直す必要はありません（初回はそれぞれ `claude` / `codex login` でログイン）。
 - Codex CLI は本体パッケージも `~/.codex`（named volume）に置かれるため、更新はコンテナ内で `codex update` を実行します（イメージ再ビルドでは既存 volume 内の本体は更新されません）。
