@@ -4299,6 +4299,187 @@ fn intrinsic_width_ignores_display_none_descendants() {
 }
 
 #[test]
+fn normal_flow_blocks_resolve_intrinsic_width_keywords_and_constraints() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    document.append_child(body.clone());
+
+    let mut targets = Vec::new();
+    let mut append_case = |parent_class: &str, target_id: &str| {
+        let parent = NodeHandle::element("div");
+        parent.set_attribute("class", parent_class);
+        let target = NodeHandle::element("div");
+        target.set_attribute("id", target_id);
+        target.set_attribute("class", "atomic");
+        for width in ["50px", "70px"] {
+            let child = NodeHandle::element("span");
+            child.set_attribute("style", &format!("display: inline-block; width: {width}"));
+            target.append_child(child);
+        }
+        parent.append_child(target.clone());
+        body.append_child(parent);
+        targets.push((target_id.to_string(), target));
+    };
+
+    append_case("parent", "min");
+    append_case("parent", "min-border");
+    append_case("parent", "max");
+    append_case("small", "fit-small");
+    append_case("medium", "fit-medium");
+    append_case("large", "fit-large");
+    append_case("parent", "stretch");
+    append_case("parent", "min-constraint");
+    append_case("parent", "max-constraint");
+    append_case("parent", "min-wins");
+    append_case("parent", "max-number");
+    append_case("parent", "min-number");
+    append_case("parent", "border-min");
+    append_case("parent", "border-max");
+    append_case("parent", "auto-margin");
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".parent { width: 200px; } \
+             .small { width: 60px; } \
+             .medium { width: 100px; } \
+             .large { width: 150px; } \
+             #min { width: min-content; padding: 0 7px; border: 2px solid; } \
+             #min-border { box-sizing: border-box; width: min-content; padding: 0 7px; border: 2px solid; } \
+             #max { width: max-content; } \
+             #fit-small, #fit-medium, #fit-large { width: fit-content; } \
+             #stretch { width: stretch; margin: 0 10px; padding: 0 7px; border: 2px solid; } \
+             #min-constraint { width: 20px; min-width: min-content; } \
+             #max-constraint { width: 200px; max-width: max-content; } \
+             #min-wins { width: 100px; min-width: max-content; max-width: min-content; } \
+             #max-number { width: max-content; max-width: 100px; } \
+             #min-number { width: min-content; min-width: 90px; } \
+             #border-min { box-sizing: border-box; width: 20px; min-width: min-content; padding: 0 7px; border: 2px solid; } \
+             #border-max { box-sizing: border-box; width: 200px; max-width: max-content; padding: 0 7px; border: 2px solid; } \
+             #auto-margin { width: min-content; margin-left: auto; margin-right: auto; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let expected = [
+        ("min", 70.0, 88.0),
+        ("min-border", 70.0, 88.0),
+        ("max", 120.0, 120.0),
+        ("fit-small", 70.0, 70.0),
+        ("fit-medium", 100.0, 100.0),
+        ("fit-large", 120.0, 120.0),
+        ("stretch", 162.0, 180.0),
+        ("min-constraint", 70.0, 70.0),
+        ("max-constraint", 120.0, 120.0),
+        ("min-wins", 120.0, 120.0),
+        ("max-number", 100.0, 100.0),
+        ("min-number", 90.0, 90.0),
+        ("border-min", 70.0, 88.0),
+        ("border-max", 120.0, 138.0),
+        ("auto-margin", 70.0, 70.0),
+    ];
+    for (id, expected_content, expected_border) in expected {
+        let node = targets
+            .iter()
+            .find_map(|(target_id, node)| (target_id == id).then_some(node))
+            .unwrap();
+        let layout_box = find_layout_box(&layout, node).unwrap();
+        assert_eq!(
+            layout_box.dimensions.content.width, expected_content,
+            "{id} content width must match Firefox"
+        );
+        assert_eq!(
+            layout_box.dimensions.border_box().width,
+            expected_border,
+            "{id} border width must match Firefox"
+        );
+    }
+
+    let auto_margin = targets
+        .iter()
+        .find_map(|(id, node)| (id == "auto-margin").then_some(node))
+        .unwrap();
+    let auto_margin_box = find_layout_box(&layout, auto_margin).unwrap();
+    assert_eq!(auto_margin_box.dimensions.margin.left, 65.0);
+    assert_eq!(auto_margin_box.dimensions.margin.right, 65.0);
+}
+
+#[test]
+fn intrinsic_width_keywords_measure_text_with_a_registered_web_font() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let minimum = NodeHandle::element("div");
+    minimum.set_attribute("id", "minimum");
+    minimum.append_child(NodeHandle::text("longword x"));
+    let maximum = NodeHandle::element("div");
+    maximum.set_attribute("id", "maximum");
+    maximum.append_child(NodeHandle::text("longword x"));
+    document.append_child(body.clone());
+    body.append_child(minimum.clone());
+    body.append_child(maximum.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { width: 300px; font: 20px 'Liberation Sans'; } \
+             #minimum { width: min-content; } \
+             #maximum { width: max-content; }",
+        )
+        .unwrap(),
+    );
+    let mut fonts = crate::font::WebFontRegistry::new();
+    fonts.push(
+        "Liberation Sans",
+        crate::font::FontWeight(400),
+        crate::font::FontStyle::Normal,
+        crate::font::Font::load_from_bytes(
+            include_bytes!("../../tests/fixtures/acid2/LiberationSans-Regular.ttf").to_vec(),
+        )
+        .unwrap(),
+    );
+    let layout = with_layout_fonts(Vec::new(), Some(std::sync::Arc::new(fonts)), || {
+        layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 0.0,
+            },
+        )
+        .unwrap()
+    });
+
+    let minimum_box = find_layout_box(&layout, &minimum).unwrap();
+    let maximum_box = find_layout_box(&layout, &maximum).unwrap();
+    assert!(minimum_box.dimensions.content.width > 0.0);
+    assert!(
+        maximum_box.dimensions.content.width > minimum_box.dimensions.content.width,
+        "max-content must include the whole line while min-content uses the longest word"
+    );
+    assert!(minimum_box.lines.len() >= 2, "min-content text must wrap");
+    assert_eq!(
+        maximum_box.lines.len(),
+        1,
+        "max-content text must stay on one line"
+    );
+}
+
+#[test]
 fn lays_out_flex_column() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

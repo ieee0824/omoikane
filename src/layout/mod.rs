@@ -1594,7 +1594,15 @@ fn layout_element_with_cell(
         ..height
     });
 
-    let mut width = compute_width(&style, containing_block.width, padding, border, &mut margin);
+    let mut width = compute_width(
+        node,
+        resolver,
+        &style,
+        containing_block.width,
+        padding,
+        border,
+        &mut margin,
+    );
     if table_cell.is_some() {
         margin = EdgeSizes::default();
         width = (containing_block.width - padding.horizontal() - border.horizontal()).max(0.0);
@@ -2356,7 +2364,80 @@ pub(crate) fn border_box_adjust_length(
     }
 }
 
+#[derive(Default)]
+struct IntrinsicContentWidths {
+    minimum: Option<f32>,
+    maximum: Option<f32>,
+}
+
+impl IntrinsicContentWidths {
+    fn minimum(
+        &mut self,
+        node: &NodeHandle,
+        resolver: &mut StyleResolver,
+        decorations: f32,
+    ) -> f32 {
+        *self.minimum.get_or_insert_with(|| {
+            (minimum_content_width_for_sizing(node, resolver) - decorations).max(0.0)
+        })
+    }
+
+    fn maximum(
+        &mut self,
+        node: &NodeHandle,
+        resolver: &mut StyleResolver,
+        decorations: f32,
+    ) -> f32 {
+        *self.maximum.get_or_insert_with(|| {
+            (intrinsic_width_for_sizing(node, resolver) - decorations).max(0.0)
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolved_content_width(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    property: &str,
+    containing_width: f32,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    stretch_fit_width: f32,
+    intrinsic: &mut IntrinsicContentWidths,
+) -> Option<f32> {
+    if let Some(width) = resolved_length(style, property, containing_width) {
+        return Some(border_box_adjust_length(
+            style,
+            width,
+            padding.left + border.left,
+            padding.right + border.right,
+        ));
+    }
+
+    let Some(ComputedValue::Keyword(keyword)) = style.get(property) else {
+        return None;
+    };
+    let decorations = padding.horizontal() + border.horizontal();
+    if keyword.eq_ignore_ascii_case("min-content") {
+        Some(intrinsic.minimum(node, resolver, decorations))
+    } else if keyword.eq_ignore_ascii_case("max-content") {
+        Some(intrinsic.maximum(node, resolver, decorations))
+    } else if keyword.eq_ignore_ascii_case("fit-content") {
+        let minimum = intrinsic.minimum(node, resolver, decorations);
+        let maximum = intrinsic.maximum(node, resolver, decorations);
+        Some(maximum.min(minimum.max(stretch_fit_width)))
+    } else if keyword.eq_ignore_ascii_case("stretch") {
+        Some(stretch_fit_width)
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn compute_width(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
     style: &ComputedStyle,
     containing_width: f32,
     padding: EdgeSizes,
@@ -2364,18 +2445,23 @@ fn compute_width(
     margin: &mut EdgeSizes,
 ) -> f32 {
     let pb_horizontal = padding.horizontal() + border.horizontal();
+    let stretch_fit_width = (containing_width - pb_horizontal - margin.horizontal()).max(0.0);
+    let mut intrinsic = IntrinsicContentWidths::default();
 
     // `specified_width` is the value given to the `width` property.
     // For border-box, that value already includes padding + border, so we
     // convert it to a content-box width immediately.
-    let specified_width = resolved_length(style, "width", containing_width).map(|w| {
-        border_box_adjust_length(
-            style,
-            w,
-            padding.left + border.left,
-            padding.right + border.right,
-        )
-    });
+    let specified_width = resolved_content_width(
+        node,
+        resolver,
+        style,
+        "width",
+        containing_width,
+        padding,
+        border,
+        stretch_fit_width,
+        &mut intrinsic,
+    );
     let margin_left_auto = margin_start_is_auto(style);
     let margin_right_auto = margin_end_is_auto(style);
 
@@ -2410,25 +2496,37 @@ fn compute_width(
 
     // For border-box, min-width / max-width also refer to the outer (border)
     // box, so subtract padding + border before comparing.
-    let (min_width, max_width) =
-        normalized_min_max_lengths(style, "min-width", "max-width", containing_width);
+    let min_width = resolved_content_width(
+        node,
+        resolver,
+        style,
+        "min-width",
+        containing_width,
+        padding,
+        border,
+        stretch_fit_width,
+        &mut intrinsic,
+    );
+    let max_width = resolved_content_width(
+        node,
+        resolver,
+        style,
+        "max-width",
+        containing_width,
+        padding,
+        border,
+        stretch_fit_width,
+        &mut intrinsic,
+    );
+    let (min_width, max_width) = match (min_width, max_width) {
+        (Some(minimum), Some(maximum)) if minimum > maximum => (Some(minimum), Some(minimum)),
+        pair => pair,
+    };
     if let Some(min_width) = min_width {
-        let content_min = border_box_adjust_length(
-            style,
-            min_width,
-            padding.left + border.left,
-            padding.right + border.right,
-        );
-        width = width.max(content_min);
+        width = width.max(min_width);
     }
     if let Some(max_width) = max_width {
-        let content_max = border_box_adjust_length(
-            style,
-            max_width,
-            padding.left + border.left,
-            padding.right + border.right,
-        );
-        width = width.min(content_max);
+        width = width.min(max_width);
     }
 
     if margin_left_auto || margin_right_auto {
@@ -2833,6 +2931,18 @@ fn cell_contains_image_recursive(node: &NodeHandle) -> bool {
 /// For elements with explicit width, returns that width + padding/border.
 /// This is used for table column sizing where columns should shrink as much as possible.
 pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
+    minimum_content_width_inner(node, resolver, false)
+}
+
+fn minimum_content_width_for_sizing(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
+    minimum_content_width_inner(node, resolver, true)
+}
+
+fn minimum_content_width_inner(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    ignore_own_width: bool,
+) -> f32 {
     match node.node_type() {
         NodeType::Text => node
             .data()
@@ -2863,13 +2973,17 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
             let padding = edge_sizes(&style, "padding");
             let border = edge_sizes(&style, "border");
             // Elements with explicit width use that as minimum.
-            if let Some(width) = explicit_length(&style, "width") {
+            if !ignore_own_width && let Some(width) = explicit_length(&style, "width") {
                 let margin = edge_sizes(&style, "margin");
                 return width + padding.horizontal() + border.horizontal() + margin.horizontal();
             }
             if has_inline_size_containment(&style) {
-                let margin = edge_sizes(&style, "margin");
-                return padding.horizontal() + border.horizontal() + margin.horizontal();
+                let margin = if ignore_own_width {
+                    0.0
+                } else {
+                    edge_sizes(&style, "margin").horizontal()
+                };
+                return padding.horizontal() + border.horizontal() + margin;
             }
             // For images, use rendered size.
             if let Some((image_node, image)) = element_inline_image(node) {
@@ -2883,7 +2997,7 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
             // Recurse: minimum of children's minimum widths
             let mut min_width = 0.0f32;
             for child in node.layout_child_nodes() {
-                min_width = min_width.max(minimum_content_width(&child, resolver));
+                min_width = min_width.max(minimum_content_width_inner(&child, resolver, false));
             }
             min_width + padding.horizontal() + border.horizontal()
         }
@@ -2892,6 +3006,18 @@ pub(super) fn minimum_content_width(node: &NodeHandle, resolver: &mut StyleResol
 }
 
 fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
+    intrinsic_width_inner(node, resolver, false)
+}
+
+fn intrinsic_width_for_sizing(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
+    intrinsic_width_inner(node, resolver, true)
+}
+
+fn intrinsic_width_inner(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    ignore_own_width: bool,
+) -> f32 {
     match node.node_type() {
         NodeType::Text => node
             .data()
@@ -2913,13 +3039,17 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             }
             let padding = edge_sizes(&style, "padding");
             let border = edge_sizes(&style, "border");
-            if let Some(width) = explicit_length(&style, "width") {
+            if !ignore_own_width && let Some(width) = explicit_length(&style, "width") {
                 let margin = edge_sizes(&style, "margin");
                 return width + padding.horizontal() + border.horizontal() + margin.horizontal();
             }
             if has_inline_size_containment(&style) {
-                let margin = edge_sizes(&style, "margin");
-                return padding.horizontal() + border.horizontal() + margin.horizontal();
+                let margin = if ignore_own_width {
+                    0.0
+                } else {
+                    edge_sizes(&style, "margin").horizontal()
+                };
+                return padding.horizontal() + border.horizontal() + margin;
             }
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);
@@ -2955,7 +3085,7 @@ fn intrinsic_width(node: &NodeHandle, resolver: &mut StyleResolver) -> f32 {
             } else {
                 let mut inline_run_width = 0.0f32;
                 for child in node.layout_child_nodes() {
-                    let child_width = intrinsic_width(&child, resolver);
+                    let child_width = intrinsic_width_inner(&child, resolver, false);
                     if is_inline_child(&child, resolver) {
                         inline_run_width += child_width;
                     } else {
