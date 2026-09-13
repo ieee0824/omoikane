@@ -2007,6 +2007,7 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
     let mut metrics = FontMetrics::from_font_size(font_size(style));
     metrics.letter_spacing = letter_spacing(style);
     metrics.font_family = style.get("font-family").and_then(computed_font_family_key);
+    metrics.font_scope_root = style.font_family_scope_root();
     metrics.font_weight = computed_font_weight(style);
     metrics.font_style = computed_font_property(style, "font-style")
         .map(FontStyle::parse)
@@ -2020,11 +2021,17 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
             return;
         }
         let variant = FontVariantKey::new(metrics.font_weight, metrics.font_style);
-        let key = (metrics.font_family, variant, metrics.font_size.to_bits());
+        let key = (
+            metrics.font_family,
+            metrics.font_scope_root,
+            variant,
+            metrics.font_size.to_bits(),
+        );
         let actual = context.metrics_cache.get(&key).copied().or_else(|| {
             let selected = select_text_font(
                 "layout",
                 metrics.font_family,
+                metrics.font_scope_root,
                 variant,
                 context.web_fonts.as_deref(),
                 &context.system_fonts,
@@ -2978,6 +2985,7 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
             let selected = select_text_font(
                 "layout",
                 metrics.font_family,
+                metrics.font_scope_root,
                 crate::font::FontVariantKey::new(metrics.font_weight, metrics.font_style),
                 context.web_fonts.as_deref(),
                 &context.system_fonts,

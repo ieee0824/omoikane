@@ -35,6 +35,7 @@ git_wpt sparse-checkout add "/css/css-cascade/scope-media.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-supports.html"
 git_wpt sparse-checkout add \
   "/css/css-cascade/layer-basic.html" \
+  "/css/css-cascade/layer-font-face-override.html" \
   "/css/css-cascade/layer-important.html" \
   "/css/css-cascade/layer-keyframes-override.html" \
   "/css/css-cascade/layer-vs-inline-style.html" \
@@ -46,6 +47,7 @@ git_wpt sparse-checkout add \
   "/css/css-cascade/layer-import.html" \
   "/css/css-cascade/parsing/layer-import-parsing.html" \
   "/css/css-cascade/parsing/supports-import-parsing.html"
+git_wpt sparse-checkout add "/fonts/Ahem.ttf" "/fonts/noto/noto-sans-v8-latin-regular.woff"
 git_wpt sparse-checkout add "/css/css-variables/variable-substitution-shorthands.html"
 git_wpt sparse-checkout add "/css/cssom/CSSContainerRule.tentative.html"
 git_wpt sparse-checkout add \

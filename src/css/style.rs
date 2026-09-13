@@ -48,6 +48,8 @@ pub struct ComputedStyle {
     custom_properties: BTreeMap<String, Value>,
     /// Tree scope captured by the declaration that supplied `animation-name`.
     animation_name_scope_root: Option<usize>,
+    /// Tree scope captured by the declaration that supplied `font-family`.
+    font_family_scope_root: Option<usize>,
 }
 
 impl ComputedStyle {
@@ -103,6 +105,10 @@ impl ComputedStyle {
             ComputedValue::Keyword(value)
         };
         self.properties.insert(name.to_string(), computed);
+    }
+
+    pub(crate) fn font_family_scope_root(&self) -> Option<usize> {
+        self.font_family_scope_root
     }
 }
 
@@ -179,6 +185,12 @@ pub struct StyleResolver {
     keyframes: HashMap<Option<usize>, HashMap<String, KeyframesDefinition>>,
     /// Monotonic order assigned to parsed `@keyframes` definitions.
     next_keyframes_source_order: usize,
+    /// Winning `@font-face` rules, grouped by tree scope and supported variant.
+    font_faces: HashMap<Option<usize>, HashMap<FontFaceKey, FontFaceDefinition>>,
+    /// Every active `@font-face` rule in stable source order for CSS FontFaceSet.
+    active_font_faces: Vec<(Option<usize>, super::FontFaceRule)>,
+    /// Monotonic order assigned to parsed `@font-face` definitions.
+    next_font_face_source_order: usize,
     /// Before/after style snapshots and running CSS transitions.
     transition_timeline: super::transition::TransitionTimeline,
     /// Node identities whose inline `style` attribute is blocked by the
@@ -198,6 +210,21 @@ struct KeyframesDefinition {
     layer_order: Vec<usize>,
     source_order: usize,
     steps: Vec<KeyframeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FontFaceKey {
+    family: String,
+    weight: crate::font::FontWeight,
+    style: crate::font::FontStyle,
+}
+
+#[derive(Debug, Clone)]
+struct FontFaceDefinition {
+    origin: Origin,
+    layer_order: Vec<usize>,
+    source_order: usize,
+    rule: super::FontFaceRule,
 }
 
 #[derive(Debug, Clone)]
@@ -557,6 +584,7 @@ impl StyleResolver {
         if layer_order_changed {
             self.rebuild_layer_orders();
             self.rebuild_keyframes();
+            self.rebuild_font_faces();
         }
         self.cache.clear();
         self.pseudo_cache.clear();
@@ -575,6 +603,7 @@ impl StyleResolver {
         if layer_order_changed {
             self.rebuild_layer_orders();
             self.rebuild_keyframes();
+            self.rebuild_font_faces();
         }
         self.cache.clear();
         self.pseudo_cache.clear();
@@ -610,6 +639,7 @@ impl StyleResolver {
             encapsulation_order: 0,
         });
         self.register_latest_stylesheet_keyframes();
+        self.register_latest_stylesheet_font_faces();
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -635,6 +665,7 @@ impl StyleResolver {
             encapsulation_order: 0,
         });
         self.register_latest_stylesheet_keyframes();
+        self.register_latest_stylesheet_font_faces();
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -706,6 +737,7 @@ impl StyleResolver {
             encapsulation_order,
         });
         self.register_latest_stylesheet_keyframes();
+        self.register_latest_stylesheet_font_faces();
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -815,6 +847,95 @@ impl StyleResolver {
             self.viewport_height,
             self.color_scheme_dark,
         );
+    }
+
+    fn rebuild_font_faces(&mut self) {
+        let mut font_faces = HashMap::new();
+        let mut active_font_faces = Vec::new();
+        let mut source_order = 0;
+        for (position, (input, scope)) in self
+            .stylesheets
+            .iter()
+            .zip(&self.stylesheet_scopes)
+            .enumerate()
+        {
+            let layer_context = LayerContextKey {
+                origin: input.origin,
+                scope_root: scope.root.as_ref().map(NodeHandle::identity),
+            };
+            let layer_order = self
+                .layer_orders
+                .get(&layer_context)
+                .expect("stylesheet layer order should be registered");
+            collect_font_faces(
+                &input.stylesheet.rules,
+                input.origin,
+                self.stylesheet_ids[position],
+                layer_context.scope_root,
+                layer_order,
+                None,
+                &mut source_order,
+                &mut font_faces,
+                &mut active_font_faces,
+                self.viewport_width,
+                self.viewport_height,
+                self.color_scheme_dark,
+            );
+        }
+        self.font_faces = font_faces;
+        self.active_font_faces = active_font_faces;
+        self.next_font_face_source_order = source_order;
+    }
+
+    fn register_latest_stylesheet_font_faces(&mut self) {
+        let position = self.stylesheets.len() - 1;
+        let input = &self.stylesheets[position];
+        let scope = &self.stylesheet_scopes[position];
+        let layer_context = LayerContextKey {
+            origin: input.origin,
+            scope_root: scope.root.as_ref().map(NodeHandle::identity),
+        };
+        let layer_order = self
+            .layer_orders
+            .get(&layer_context)
+            .expect("stylesheet layer order should be registered");
+        collect_font_faces(
+            &input.stylesheet.rules,
+            input.origin,
+            self.stylesheet_ids[position],
+            layer_context.scope_root,
+            layer_order,
+            None,
+            &mut self.next_font_face_source_order,
+            &mut self.font_faces,
+            &mut self.active_font_faces,
+            self.viewport_width,
+            self.viewport_height,
+            self.color_scheme_dark,
+        );
+    }
+
+    /// Returns the active `@font-face` winner for each supported variant and
+    /// tree scope in stable source order.
+    pub(crate) fn resolved_font_face_rules(&self) -> Vec<(Option<usize>, super::FontFaceRule)> {
+        let mut definitions = self
+            .font_faces
+            .iter()
+            .flat_map(|(scope_root, rules)| {
+                rules.values().map(|definition| (*scope_root, definition))
+            })
+            .collect::<Vec<_>>();
+        definitions.sort_by_key(|(_, definition)| definition.source_order);
+        definitions
+            .into_iter()
+            .map(|(scope_root, definition)| (scope_root, definition.rule.clone()))
+            .collect()
+    }
+
+    /// Returns every conditionally active `@font-face` rule for CSS FontFaceSet
+    /// enumeration, including lower-precedence rules that do not win drawing.
+    pub(crate) fn active_font_face_rules(&self) -> &[(Option<usize>, super::FontFaceRule)] {
+        &self.active_font_faces
     }
 
     /// Resolves computed style for `node`, using the cache when possible.
@@ -1044,6 +1165,8 @@ impl StyleResolver {
 
         let mut important_properties = HashSet::new();
         let mut animation_name_scope_root = None;
+        let mut font_family_scope_root =
+            parent_style.and_then(ComputedStyle::font_family_scope_root);
 
         // Process font-size first so that em units in other properties
         // resolve against the element's own computed font-size.
@@ -1116,6 +1239,13 @@ impl StyleResolver {
                             parent_style,
                         );
                     }
+                    if candidate.name.eq_ignore_ascii_case("font-family") {
+                        font_family_scope_root = font_reference_scope_root(
+                            &resolved_value,
+                            candidate.layer_context.scope_root,
+                            parent_style,
+                        );
+                    }
                     insert_computed_property(
                         &mut properties,
                         &candidate.name.to_ascii_lowercase(),
@@ -1168,6 +1298,13 @@ impl StyleResolver {
                     parent_style,
                 );
             }
+            if candidate.name.eq_ignore_ascii_case("font-family") {
+                font_family_scope_root = font_reference_scope_root(
+                    &resolved_value,
+                    candidate.layer_context.scope_root,
+                    parent_style,
+                );
+            }
             insert_computed_property(&mut properties, &candidate.name, computed);
             if candidate.important {
                 important_properties.insert(candidate.name.to_ascii_lowercase());
@@ -1205,6 +1342,7 @@ impl StyleResolver {
             properties,
             custom_properties,
             animation_name_scope_root,
+            font_family_scope_root,
         }
     }
 
@@ -1415,6 +1553,18 @@ fn animation_reference_scope_root(
 ) -> Option<usize> {
     if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("inherit")) {
         return parent_style.and_then(|style| style.animation_name_scope_root);
+    }
+    declaration_scope_root
+}
+
+fn font_reference_scope_root(
+    value: &Value,
+    declaration_scope_root: Option<usize>,
+    parent_style: Option<&ComputedStyle>,
+) -> Option<usize> {
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("inherit") || keyword.eq_ignore_ascii_case("unset"))
+    {
+        return parent_style.and_then(ComputedStyle::font_family_scope_root);
     }
     declaration_scope_root
 }
@@ -3796,6 +3946,120 @@ fn collect_keyframes(
 fn compare_keyframes_priority(
     left: &KeyframesDefinition,
     right: &KeyframesDefinition,
+) -> std::cmp::Ordering {
+    left.origin
+        .cmp(&right.origin)
+        .then(left.layer_order.cmp(&right.layer_order))
+        .then(left.source_order.cmp(&right.source_order))
+}
+
+/// Collects `@font-face` definitions and resolves collisions between the
+/// family/weight/style variants currently supported by the font registry.
+#[allow(clippy::too_many_arguments)]
+fn collect_font_faces(
+    rules: &[Rule],
+    origin: Origin,
+    stylesheet_id: usize,
+    scope_root: Option<usize>,
+    layer_order: &CascadeLayerOrder,
+    active_layer: Option<&LayerPath>,
+    source_order: &mut usize,
+    font_faces: &mut HashMap<Option<usize>, HashMap<FontFaceKey, FontFaceDefinition>>,
+    active_font_faces: &mut Vec<(Option<usize>, super::FontFaceRule)>,
+    viewport_width: f32,
+    viewport_height: f32,
+    color_scheme_dark: bool,
+) {
+    for rule in rules {
+        match rule {
+            Rule::FontFace(rule) => {
+                active_font_faces.push((scope_root, rule.clone()));
+                let candidate = FontFaceDefinition {
+                    origin,
+                    layer_order: layer_order.rank(active_layer),
+                    source_order: *source_order,
+                    rule: rule.clone(),
+                };
+                let key = FontFaceKey {
+                    family: rule.font_family.to_ascii_lowercase(),
+                    weight: crate::font::FontWeight::parse(
+                        rule.font_weight.as_deref().unwrap_or("normal"),
+                    ),
+                    style: crate::font::FontStyle::parse(
+                        rule.font_style.as_deref().unwrap_or("normal"),
+                    ),
+                };
+                let definitions = font_faces.entry(scope_root).or_default();
+                match definitions.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(mut entry)
+                        if compare_font_face_priority(&candidate, entry.get()).is_gt() =>
+                    {
+                        entry.insert(candidate);
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(candidate);
+                    }
+                    _ => {}
+                }
+                *source_order += 1;
+            }
+            Rule::At(at_rule) if at_rule.block.is_some() => {
+                if !layer_group_rule_is_active(
+                    at_rule,
+                    viewport_width,
+                    viewport_height,
+                    color_scheme_dark,
+                ) {
+                    continue;
+                }
+                let block = at_rule.block.as_deref().unwrap();
+                if at_rule.name.eq_ignore_ascii_case("layer") {
+                    let Some(path) = layer_block_path(
+                        at_rule,
+                        stylesheet_id,
+                        active_layer.map(Vec::as_slice).unwrap_or(&[]),
+                    ) else {
+                        continue;
+                    };
+                    collect_font_faces(
+                        block,
+                        origin,
+                        stylesheet_id,
+                        scope_root,
+                        layer_order,
+                        Some(&path),
+                        source_order,
+                        font_faces,
+                        active_font_faces,
+                        viewport_width,
+                        viewport_height,
+                        color_scheme_dark,
+                    );
+                } else {
+                    collect_font_faces(
+                        block,
+                        origin,
+                        stylesheet_id,
+                        scope_root,
+                        layer_order,
+                        active_layer,
+                        source_order,
+                        font_faces,
+                        active_font_faces,
+                        viewport_width,
+                        viewport_height,
+                        color_scheme_dark,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn compare_font_face_priority(
+    left: &FontFaceDefinition,
+    right: &FontFaceDefinition,
 ) -> std::cmp::Ordering {
     left.origin
         .cmp(&right.origin)

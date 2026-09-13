@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::css::{Stylesheet, extract_font_face_rules, parse_stylesheet};
+#[cfg(test)]
+use crate::css::extract_font_face_rules;
+use crate::css::{FontFaceRule, Stylesheet, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::Font;
 use crate::http::url::resolve_url;
@@ -1217,6 +1219,7 @@ pub(crate) fn rewrite_local_asset_attribute(
 
 /// A loaded web font together with its `@font-face` variant descriptors.
 pub(crate) struct WebFont {
+    pub scope_root: Option<usize>,
     pub family: String,
     pub weight: crate::font::FontWeight,
     pub style: crate::font::FontStyle,
@@ -1229,88 +1232,100 @@ pub(crate) struct WebFont {
 /// Unlike the previous implementation, the same family can appear multiple
 /// times with different weight/style variants (e.g. regular + bold + italic).
 /// Fonts that fail to fetch or parse are silently skipped (fallback to system fonts).
+#[cfg(test)]
 pub(crate) fn fetch_font_face_fonts(
     stylesheets: &[Stylesheet],
     base_url: Option<&crate::http::Url>,
 ) -> Vec<WebFont> {
+    let rules = stylesheets
+        .iter()
+        .flat_map(extract_font_face_rules)
+        .map(|rule| (None, rule))
+        .collect::<Vec<_>>();
+    fetch_resolved_font_face_fonts(&rules, base_url)
+}
+
+pub(crate) fn fetch_resolved_font_face_fonts(
+    rules: &[(Option<usize>, FontFaceRule)],
+    base_url: Option<&crate::http::Url>,
+) -> Vec<WebFont> {
     let mut web_fonts = Vec::new();
     let mut client: Option<crate::http::Client> = None;
-    // Deduplicate by (family, weight, style) tuple so we don't re-fetch the same variant
-    let mut seen_variants: HashSet<(String, u16, u8)> = HashSet::new();
+    // Deduplicate each supported variant within its tree scope so a shadow
+    // definition cannot suppress the document or an ancestor shadow tree.
+    let mut seen_variants: HashSet<(Option<usize>, String, u16, u8)> = HashSet::new();
 
-    for sheet in stylesheets {
-        for ff_rule in extract_font_face_rules(sheet) {
-            let family_lower = ff_rule.font_family.to_lowercase();
+    for (scope_root, ff_rule) in rules {
+        let family_lower = ff_rule.font_family.to_lowercase();
 
-            // Skip WOFF2 when format hint says so (not supported yet)
-            if let Some(ref fmt) = ff_rule.format
-                && fmt.eq_ignore_ascii_case("woff2")
-            {
-                continue;
+        // Skip WOFF2 when format hint says so (not supported yet)
+        if let Some(ref fmt) = ff_rule.format
+            && fmt.eq_ignore_ascii_case("woff2")
+        {
+            continue;
+        }
+
+        let url_str = &ff_rule.src_url;
+
+        // Parse variant descriptors
+        let weight =
+            crate::font::FontWeight::parse(ff_rule.font_weight.as_deref().unwrap_or("normal"));
+        let style =
+            crate::font::FontStyle::parse(ff_rule.font_style.as_deref().unwrap_or("normal"));
+
+        // Deduplicate: encode style as u8 (0=normal, 1=italic, 2=oblique)
+        let style_ord: u8 = match style {
+            crate::font::FontStyle::Normal => 0,
+            crate::font::FontStyle::Italic => 1,
+            crate::font::FontStyle::Oblique => 2,
+        };
+        let variant_key = (*scope_root, family_lower.clone(), weight.0, style_ord);
+        if seen_variants.contains(&variant_key) {
+            continue;
+        }
+
+        // Embedded fonts do not need a network URL or a document base.
+        // Use the shared data-URL decoder and the same decoded size limit.
+        let data = if url_str
+            .get(..5)
+            .is_some_and(|s| s.eq_ignore_ascii_case("data:"))
+        {
+            match crate::http::parse_data_uri(url_str) {
+                Some(uri) if uri.data.len() <= MAX_FONT_BYTES => uri.data,
+                _ => continue,
             }
-
-            let url_str = &ff_rule.src_url;
-
-            // Parse variant descriptors
-            let weight =
-                crate::font::FontWeight::parse(ff_rule.font_weight.as_deref().unwrap_or("normal"));
-            let style =
-                crate::font::FontStyle::parse(ff_rule.font_style.as_deref().unwrap_or("normal"));
-
-            // Deduplicate: encode style as u8 (0=normal, 1=italic, 2=oblique)
-            let style_ord: u8 = match style {
-                crate::font::FontStyle::Normal => 0,
-                crate::font::FontStyle::Italic => 1,
-                crate::font::FontStyle::Oblique => 2,
+        } else {
+            // Keep the existing destination policy for network fonts.
+            let Some(base) = base_url else { continue };
+            let resolved = match resolve_url(base, url_str) {
+                Ok(url)
+                    if same_origin(&url, base) || is_public_cross_origin_stylesheet_url(&url) =>
+                {
+                    url
+                }
+                _ => continue,
             };
-            let variant_key = (family_lower.clone(), weight.0, style_ord);
-            if seen_variants.contains(&variant_key) {
-                continue;
+            let cross_origin = !same_origin(&resolved, base);
+            match fetch_font_bytes(&resolved.to_string(), &mut client, cross_origin) {
+                Some(data) => data,
+                None => continue,
             }
+        };
 
-            // Embedded fonts do not need a network URL or a document base.
-            // Use the shared data-URL decoder and the same decoded size limit.
-            let data = if url_str
-                .get(..5)
-                .is_some_and(|s| s.eq_ignore_ascii_case("data:"))
-            {
-                match crate::http::parse_data_uri(url_str) {
-                    Some(uri) if uri.data.len() <= MAX_FONT_BYTES => uri.data,
-                    _ => continue,
-                }
-            } else {
-                // Keep the existing destination policy for network fonts.
-                let Some(base) = base_url else { continue };
-                let resolved = match resolve_url(base, url_str) {
-                    Ok(url)
-                        if same_origin(&url, base)
-                            || is_public_cross_origin_stylesheet_url(&url) =>
-                    {
-                        url
-                    }
-                    _ => continue,
-                };
-                let cross_origin = !same_origin(&resolved, base);
-                match fetch_font_bytes(&resolved.to_string(), &mut client, cross_origin) {
-                    Some(data) => data,
-                    None => continue,
-                }
-            };
-
-            // Load font — insert into seen_variants only on success to allow
-            // retrying with a different src URL if this one fails to parse.
-            match Font::load_from_bytes(data) {
-                Ok(font) => {
-                    seen_variants.insert(variant_key);
-                    web_fonts.push(WebFont {
-                        family: ff_rule.font_family.clone(),
-                        weight,
-                        style,
-                        font: Arc::new(font),
-                    });
-                }
-                Err(_) => continue,
+        // Load font — insert into seen_variants only on success to allow
+        // retrying with a different src URL if this one fails to parse.
+        match Font::load_from_bytes(data) {
+            Ok(font) => {
+                seen_variants.insert(variant_key);
+                web_fonts.push(WebFont {
+                    scope_root: *scope_root,
+                    family: ff_rule.font_family.clone(),
+                    weight,
+                    style,
+                    font: Arc::new(font),
+                });
             }
+            Err(_) => continue,
         }
     }
 

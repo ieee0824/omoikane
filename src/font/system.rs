@@ -342,11 +342,12 @@ impl AsRef<Font> for SelectedFont<'_> {
 pub(crate) fn select_text_font<'a>(
     phase: &str,
     family: Option<FontFamilyKey>,
+    scope_root: Option<usize>,
     variant: FontVariantKey,
     web_fonts: Option<&'a super::WebFontRegistry>,
     fallbacks: &[Arc<Font>],
 ) -> Option<SelectedFont<'a>> {
-    let selected = select_text_font_impl(family, variant, web_fonts, fallbacks);
+    let selected = select_text_font_impl(family, scope_root, variant, web_fonts, fallbacks);
     let font = selected
         .as_ref()
         .map(AsRef::as_ref)
@@ -363,6 +364,7 @@ pub(crate) fn select_text_font<'a>(
 
 fn select_text_font_impl<'a>(
     family: Option<FontFamilyKey>,
+    scope_root: Option<usize>,
     variant: FontVariantKey,
     web_fonts: Option<&'a super::WebFontRegistry>,
     fallbacks: &[Arc<Font>],
@@ -372,9 +374,14 @@ fn select_text_font_impl<'a>(
     let use_system = fallbacks.iter().any(|font| font.system_face.is_some());
     if let Some(family) = family {
         for name in family.families().iter() {
-            if let Some(font) = web_fonts
-                .and_then(|registry| registry.select_best(name, variant.weight, variant.style))
-            {
+            if let Some(font) = web_fonts.and_then(|registry| {
+                registry.select_best_scoped_by_key(
+                    scope_root,
+                    FontFamilyKey::new(name),
+                    variant.weight,
+                    variant.style,
+                )
+            }) {
                 return Some(SelectedFont::Web(font));
             }
             if use_system && let Ok(font) = system_font_database().load(name, variant) {

@@ -1,6 +1,6 @@
 //! Document-owned Font Loading API data, shared by style, layout and paint.
 use super::*;
-use crate::font::{Font, FontStyle, FontWeight, WebFontRegistry};
+use crate::font::{Font, FontFamilyKey, FontStyle, FontWeight, WebFontRegistry};
 
 #[derive(Default)]
 pub(super) struct FontStore {
@@ -8,11 +8,12 @@ pub(super) struct FontStore {
     next_id: u64,
     faces: HashMap<u64, Face>,
     members: HashMap<usize, Vec<u64>>,
-    css: HashMap<usize, Vec<(String, u64)>>,
+    css: HashMap<usize, Vec<((Option<usize>, String), u64)>>,
 }
 
 struct Face {
     owner: usize,
+    scope_root: Option<usize>,
     family: String,
     weight: FontWeight,
     style: FontStyle,
@@ -25,24 +26,63 @@ struct Face {
 }
 
 impl FontStore {
-    pub(super) fn append_to(&self, document: usize, fonts: &mut WebFontRegistry) {
+    pub(super) fn append_to(
+        &self,
+        document: usize,
+        fonts: &mut WebFontRegistry,
+        css_winners: &[(Option<usize>, crate::css::FontFaceRule)],
+    ) {
         if let Some(members) = self.members.get(&document) {
             for id in members {
-                if let Some(face) = self.faces.get(id)
-                    && let Some(font) = &face.font
+                self.append_face(*id, fonts);
+            }
+        }
+        let winner_sources = css_winners
+            .iter()
+            .map(|(scope_root, rule)| {
+                (
+                    (
+                        *scope_root,
+                        FontFamilyKey::new(&rule.font_family),
+                        FontWeight::parse(rule.font_weight.as_deref().unwrap_or("normal")),
+                        FontStyle::parse(rule.font_style.as_deref().unwrap_or("normal")),
+                    ),
+                    rule.src_url.as_str(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        if let Some(members) = self.css.get(&document) {
+            for ((scope_root, source), id) in members {
+                let Some(face) = self.faces.get(id) else {
+                    continue;
+                };
+                let key = (
+                    *scope_root,
+                    FontFamilyKey::new(&face.family),
+                    face.weight,
+                    face.style,
+                );
+                if winner_sources
+                    .get(&key)
+                    .is_some_and(|winner| *winner == source)
                 {
-                    fonts.push_shared(&face.family, face.weight, face.style, font.clone());
+                    self.append_face(*id, fonts);
                 }
             }
         }
-        if let Some(members) = self.css.get(&document) {
-            for (_, id) in members {
-                if let Some(face) = self.faces.get(id)
-                    && let Some(font) = &face.font
-                {
-                    fonts.push_shared(&face.family, face.weight, face.style, font.clone());
-                }
-            }
+    }
+
+    fn append_face(&self, id: u64, fonts: &mut WebFontRegistry) {
+        if let Some(face) = self.faces.get(&id)
+            && let Some(font) = &face.font
+        {
+            fonts.push_shared_scoped(
+                face.scope_root,
+                &face.family,
+                face.weight,
+                face.style,
+                font.clone(),
+            );
         }
     }
 
@@ -59,7 +99,7 @@ impl FontStore {
 pub(super) fn sync_stylesheets(
     state: &mut HostState,
     document: &NodeHandle,
-    rules: Vec<crate::css::FontFaceRule>,
+    rules: &[(Option<usize>, crate::css::FontFaceRule)],
 ) {
     let previous = state
         .font_loading
@@ -72,12 +112,13 @@ pub(super) fn sync_stylesheets(
         document,
         state.base_url_for_document(document.identity()).as_ref(),
     );
-    for rule in rules {
+    for (scope_root, rule) in rules {
+        let scope_root = *scope_root;
         // A CSS-connected FontFace survives descriptor edits. The source is
         // the identity boundary: changing or removing `src` disconnects the
         // old face and creates a new one. Searching the remaining ordered list
         // also keeps distinct rules with the same source distinct.
-        let key = rule.src_url.clone();
+        let key = (scope_root, rule.src_url.clone());
         let reused = remaining
             .iter()
             .position(|(candidate, _)| candidate == &key)
@@ -89,6 +130,7 @@ pub(super) fn sync_stylesheets(
                 id,
                 Face {
                     owner: document.identity(),
+                    scope_root,
                     family: rule.font_family.clone(),
                     weight: FontWeight::parse(rule.font_weight.as_deref().unwrap_or("normal")),
                     style: FontStyle::parse(rule.font_style.as_deref().unwrap_or("normal")),
@@ -103,7 +145,8 @@ pub(super) fn sync_stylesheets(
             id
         });
         if let Some(face) = state.font_loading.faces.get_mut(&id) {
-            face.family = rule.font_family;
+            face.scope_root = scope_root;
+            face.family.clone_from(&rule.font_family);
             face.weight = FontWeight::parse(rule.font_weight.as_deref().unwrap_or("normal"));
             face.style = FontStyle::parse(rule.font_style.as_deref().unwrap_or("normal"));
             face.base = base.clone();
@@ -546,6 +589,7 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
                 id,
                 Face {
                     owner: document_id,
+                    scope_root: None,
                     family: payload["family"].as_str().unwrap_or_default().to_owned(),
                     weight: FontWeight::parse(payload["weight"].as_str().unwrap_or("normal")),
                     style: FontStyle::parse(payload["style"].as_str().unwrap_or("normal")),

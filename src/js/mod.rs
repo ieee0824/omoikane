@@ -2625,14 +2625,13 @@ impl HostState {
             .map(|entry| std::mem::take(&mut entry.resources))
             .unwrap_or_default();
         let mut web_fonts = crate::font::WebFontRegistry::new();
-        let mut font_rules = Vec::new();
-        for (style_node, scope, implicit_scope_root) in collect_stylesheet_nodes(document) {
+        let (stylesheet_nodes, font_scope_parents) = collect_stylesheet_nodes(document);
+        for (style_node, scope, implicit_scope_root) in stylesheet_nodes {
             let (css, blocked) = resources.load_node(&style_node, base.as_ref(), &policy);
             for blocked_uri in blocked {
                 self.record_csp_violation(document, ResourceType::Style, blocked_uri);
             }
             let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
-            font_rules.extend(crate::css::extract_font_face_rules(&sheet));
             if let Some((scope, order)) = scope {
                 resolver.add_scoped_stylesheet_in_order_with_implicit_scope_root(
                     Origin::Author,
@@ -2659,7 +2658,6 @@ impl HostState {
         } else {
             for (scope, css) in adopted_stylesheets {
                 let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
-                font_rules.extend(crate::css::extract_font_face_rules(&sheet));
                 if let Some((scope_root, order)) = scope {
                     resolver.add_scoped_stylesheet_in_order(
                         Origin::Author,
@@ -2672,8 +2670,14 @@ impl HostState {
                 }
             }
         }
-        font_loading::sync_stylesheets(self, document, font_rules);
-        self.font_loading.append_to(document_id, &mut web_fonts);
+        let active_font_rules = resolver.active_font_face_rules();
+        let font_winners = resolver.resolved_font_face_rules();
+        font_loading::sync_stylesheets(self, document, active_font_rules);
+        self.font_loading
+            .append_to(document_id, &mut web_fonts, &font_winners);
+        for (scope_root, parent_scope_root) in font_scope_parents {
+            web_fonts.register_scope_parent(scope_root, parent_scope_root);
+        }
         let blocked_inline_styles = if policy.allows_inline(ResourceType::Style) {
             HashSet::new()
         } else {
@@ -9442,14 +9446,18 @@ fn cache_storage_native(
 // ---------------------------------------------------------------------------
 
 /// Collects author stylesheet owners in tree order, preserving shadow scopes.
+type StylesheetNodeEntry = (NodeHandle, Option<(NodeHandle, usize)>, Option<NodeHandle>);
+type FontScopeParent = (usize, Option<usize>);
+
 fn collect_stylesheet_nodes(
     document: &NodeHandle,
-) -> Vec<(NodeHandle, Option<(NodeHandle, usize)>, Option<NodeHandle>)> {
+) -> (Vec<StylesheetNodeEntry>, Vec<FontScopeParent>) {
     fn walk(
         node: &NodeHandle,
         scope: Option<&(NodeHandle, usize)>,
         next_scope_order: &mut usize,
-        out: &mut Vec<(NodeHandle, Option<(NodeHandle, usize)>, Option<NodeHandle>)>,
+        out: &mut Vec<StylesheetNodeEntry>,
+        font_scope_parents: &mut Vec<FontScopeParent>,
     ) {
         if node.tag_name().as_deref() == Some("noscript") {
             return;
@@ -9467,15 +9475,26 @@ fn collect_stylesheet_nodes(
         if let Some(root) = node.shadow_root() {
             *next_scope_order += 1;
             let root_scope = (root.clone(), *next_scope_order);
-            walk(&root, Some(&root_scope), next_scope_order, out);
+            font_scope_parents.push((
+                root.identity(),
+                scope.map(|(parent_root, _)| parent_root.identity()),
+            ));
+            walk(
+                &root,
+                Some(&root_scope),
+                next_scope_order,
+                out,
+                font_scope_parents,
+            );
         }
         for child in node.child_nodes() {
-            walk(&child, scope, next_scope_order, out);
+            walk(&child, scope, next_scope_order, out, font_scope_parents);
         }
     }
     let mut out = Vec::new();
-    walk(document, None, &mut 0, &mut out);
-    out
+    let mut font_scope_parents = Vec::new();
+    walk(document, None, &mut 0, &mut out, &mut font_scope_parents);
+    (out, font_scope_parents)
 }
 
 /// Collects constructed stylesheets adopted by `document` and its shadow
@@ -33922,6 +33941,32 @@ b</textarea></form>"#,
             runtime.eval("globalThis.ticks").unwrap().as_number(),
             Some(50.0),
             "infinite interval must stop at the task-count cap"
+        );
+    }
+
+    #[test]
+    fn stylesheet_collection_records_shadow_font_scope_parent_chain() {
+        let document = NodeHandle::document();
+        let outer_host = NodeHandle::element("x-outer");
+        let outer_root = outer_host
+            .attach_shadow(crate::dom::ShadowRootMode::Open)
+            .unwrap();
+        let inner_host = NodeHandle::element("x-inner");
+        let inner_root = inner_host
+            .attach_shadow(crate::dom::ShadowRootMode::Open)
+            .unwrap();
+        document.append_child(outer_host);
+        outer_root.append_child(inner_host);
+
+        let (stylesheets, scope_parents) = collect_stylesheet_nodes(&document);
+
+        assert!(stylesheets.is_empty());
+        assert_eq!(
+            scope_parents,
+            [
+                (outer_root.identity(), None),
+                (inner_root.identity(), Some(outer_root.identity())),
+            ]
         );
     }
 

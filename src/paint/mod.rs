@@ -167,10 +167,10 @@ pub(crate) use image::{
 pub(crate) use stylesheet::{
     WebFont, at_import_starts_at, collect_author_stylesheets, collect_stylesheet_with_imports,
     collect_text_contents, extract_author_stylesheets, extract_document_base_url,
-    fetch_font_face_fonts, fetch_relative_stylesheet, fetch_stylesheet_by_url, find_base_elements,
-    matches_screen_media, materialize_local_assets, non_empty_token, normalize_unquoted_urls,
-    parse_stylesheet_forgiving, resolve_relative_stylesheet_url, rewrite_local_asset_attribute,
-    salvage_style_rule, same_origin, split_declarations_forgiving, unquote_css_token,
+    fetch_relative_stylesheet, fetch_stylesheet_by_url, find_base_elements, matches_screen_media,
+    materialize_local_assets, non_empty_token, normalize_unquoted_urls, parse_stylesheet_forgiving,
+    resolve_relative_stylesheet_url, rewrite_local_asset_attribute, salvage_style_rule,
+    same_origin, split_declarations_forgiving, unquote_css_token,
 };
 #[allow(unused_imports)]
 pub(crate) use text::{
@@ -1251,14 +1251,33 @@ fn render_document_with_url_internal(
     }
     let stylesheet_parse_elapsed = stylesheets_start.elapsed();
 
-    // Collect @font-face rules from the same final stylesheet set used for
-    // layout, including rules injected by page scripts.
+    // Move each stylesheet into the resolver before font discovery so the
+    // loaded faces use the same conditional, layer, and tree-scope winners as
+    // computed style and layout.
+    let resolver_index_start = Instant::now();
+    for sheet in parsed_sheets {
+        resolver.add_stylesheet(Origin::Author, sheet);
+    }
+    let stylesheet_elapsed = stylesheet_parse_elapsed + resolver_index_start.elapsed();
+    if execute_javascript {
+        timings.style_refresh = stylesheet_elapsed;
+    } else {
+        timings.stylesheets = stylesheet_elapsed;
+    }
+
     let fonts_start = Instant::now();
+    let font_rules = resolver.resolved_font_face_rules();
     let fetched_web_fonts =
-        stylesheet::fetch_font_face_fonts(&parsed_sheets, effective_base.as_ref());
+        stylesheet::fetch_resolved_font_face_fonts(&font_rules, effective_base.as_ref());
     let mut web_font_registry = WebFontRegistry::new();
     for wf in fetched_web_fonts {
-        web_font_registry.push_shared(&wf.family, wf.weight, wf.style, wf.font);
+        web_font_registry.push_shared_scoped(
+            wf.scope_root,
+            &wf.family,
+            wf.weight,
+            wf.style,
+            wf.font,
+        );
     }
     let all_fonts = text::load_text_fonts();
     let layout_fonts = all_fonts.clone();
@@ -1270,20 +1289,6 @@ fn render_document_with_url_internal(
     };
     let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
     timings.fonts = fonts_start.elapsed();
-
-    // Font discovery only borrows the parsed ASTs. Once it is complete, move
-    // each stylesheet into the resolver instead of deep-cloning its complete
-    // rule/declaration/selector tree.
-    let resolver_index_start = Instant::now();
-    for sheet in parsed_sheets {
-        resolver.add_stylesheet(Origin::Author, sheet);
-    }
-    let stylesheet_elapsed = stylesheet_parse_elapsed + resolver_index_start.elapsed();
-    if execute_javascript {
-        timings.style_refresh = stylesheet_elapsed;
-    } else {
-        timings.stylesheets = stylesheet_elapsed;
-    }
 
     let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
         crate::layout::with_image_base_url(effective_base, || {

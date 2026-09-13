@@ -31,6 +31,7 @@
     { "path": "css/css-cascade/scope-media.html" },
     { "path": "css/css-cascade/scope-supports.html" },
     { "path": "css/css-cascade/layer-basic.html" },
+    { "path": "css/css-cascade/layer-font-face-override.html" },
     { "path": "css/css-cascade/layer-important.html" },
     { "path": "css/css-cascade/layer-keyframes-override.html" },
     { "path": "css/css-cascade/layer-vs-inline-style.html" },

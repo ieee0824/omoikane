@@ -88,7 +88,8 @@ struct LayoutFontContext {
     system_fonts: Vec<Arc<Font>>,
     web_fonts: Option<Arc<WebFontRegistry>>,
     exact_metrics: bool,
-    metrics_cache: HashMap<(Option<FontFamilyKey>, FontVariantKey, u32), LayoutFontMetrics>,
+    metrics_cache:
+        HashMap<(Option<FontFamilyKey>, Option<usize>, FontVariantKey, u32), LayoutFontMetrics>,
 }
 
 /// Runs `f` with the given fonts installed as the thread-local layout font
@@ -493,6 +494,8 @@ pub struct FragmentStyle {
     /// CSS `font-family` value (raw string, first family in list).
     /// Used by the paint stage to look up web font variants.
     pub font_family: Option<String>,
+    /// Tree scope captured by the `font-family` declaration.
+    pub(crate) font_scope_root: Option<usize>,
     /// Resolved writing mode for the inline fragment.  Keeping this small
     /// inherited value on the fragment lets paint use the same flow direction
     /// as layout even when a nested inline overrides its ancestor.
@@ -541,6 +544,7 @@ impl FragmentStyle {
             font_weight: normalize_lower("font-weight"),
             font_style: normalize_lower("font-style"),
             font_family,
+            font_scope_root: style.font_family_scope_root(),
             writing_mode: normalize_lower("writing-mode"),
             direction: normalize_lower("direction"),
             unicode_bidi: normalize_lower("unicode-bidi"),
@@ -617,6 +621,7 @@ pub struct FontMetrics {
     /// Extra spacing to add between each character (CSS `letter-spacing`).
     pub letter_spacing: f32,
     pub(crate) font_family: Option<FontFamilyKey>,
+    pub(crate) font_scope_root: Option<usize>,
     pub(crate) font_weight: FontWeight,
     pub(crate) font_style: FontStyle,
 }
@@ -632,6 +637,7 @@ impl FontMetrics {
             average_advance: font_size * 0.6,
             letter_spacing: 0.0,
             font_family: None,
+            font_scope_root: None,
             font_weight: FontWeight::default(),
             font_style: FontStyle::default(),
         }

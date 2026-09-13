@@ -210,6 +210,114 @@ fn stylesheet_faces_are_stable_and_cannot_be_removed_by_clear() {
 }
 
 #[test]
+fn layered_css_faces_remain_enumerable_while_layout_uses_the_winner() {
+    let encode = |bytes: &[u8]| {
+        format!(
+            "data:font/ttf;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    };
+    let lower = encode(include_bytes!(
+        "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"
+    ));
+    let winner = encode(include_bytes!(
+        "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Italic.ttf"
+    ));
+    let face = |url: &str| format!("@font-face{{font-family:LayerSet;src:url({url})}}");
+    let lower_face = face(&lower);
+    let winner_face = face(&winner);
+    let measure = |rules: &str| {
+        let document = TreeBuilder::parse(&format!(
+            "<!doctype html><style>{rules}#sample{{font:20px LayerSet}}</style>\
+             <span id=sample>ABBA</span>"
+        ))
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        let result = eval_json(
+            &mut runtime,
+            "[document.getElementById('sample').getBoundingClientRect().width,\
+              document.fonts.size,Array.from(document.fonts).length]",
+        );
+        (result[0].clone(), result[1].clone(), result[2].clone())
+    };
+
+    let layered = measure(&format!(
+        "@layer base,override;\
+         @layer override{{{winner_face}}}\
+         @layer base{{{lower_face}}}"
+    ));
+    let winner_only = measure(&winner_face);
+    let lower_only = measure(&lower_face);
+
+    assert_eq!((layered.1, layered.2), (json!(2), json!(2)));
+    assert_eq!(
+        layered.0, winner_only.0,
+        "the higher-precedence face must be the only registry entry used by layout"
+    );
+    assert_ne!(
+        layered.0, lower_only.0,
+        "the fixture faces must have distinct advances so the winner assertion is meaningful"
+    );
+}
+
+#[test]
+fn shadow_font_faces_are_scoped_and_nested_shadow_lookup_uses_the_parent_scope() {
+    let encode = |bytes: &[u8]| {
+        format!(
+            "data:font/ttf;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    };
+    let document_face = encode(include_bytes!(
+        "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"
+    ));
+    let shadow_face = encode(include_bytes!(
+        "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Italic.ttf"
+    ));
+    let document = TreeBuilder::parse(&format!(
+        "<!doctype html><style>\
+         @font-face{{font-family:ScopeFace;src:url({document_face})}}\
+         #document-target{{font:20px ScopeFace}}\
+         </style><span id=document-target>ABBA</span>"
+    ))
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let result = eval_json(
+        &mut runtime,
+        &format!(
+            "(()=>{{\
+               const outerHost=document.createElement('x-outer');\
+               document.body.appendChild(outerHost);\
+               const outer=outerHost.attachShadow({{mode:'open'}});\
+               outer.innerHTML=`<style>\
+                 @font-face{{font-family:ScopeFace;src:url({shadow_face})}}\
+                 #outer-target,x-inner{{font:20px ScopeFace}}\
+                 </style><span id=outer-target>ABBA</span><x-inner></x-inner>`;\
+               const innerHost=outer.querySelector('x-inner');\
+               const inner=innerHost.attachShadow({{mode:'open'}});\
+               inner.innerHTML='<style>#inner-target{{font:20px ScopeFace}}</style>' +\
+                 '<span id=inner-target>ABBA</span>';\
+               const width=id=>id.getBoundingClientRect().width;\
+               return [width(document.getElementById('document-target')),\
+                       width(outer.querySelector('#outer-target')),\
+                       width(inner.querySelector('#inner-target')),\
+                       document.fonts.size];\
+             }})()"
+        ),
+    );
+
+    assert_eq!(
+        result[1], result[2],
+        "nested lookup must use the outer face"
+    );
+    assert_ne!(
+        result[0], result[1],
+        "document and shadow scopes must keep distinct same-name faces"
+    );
+    assert_eq!(result[3], 2);
+}
+
+#[test]
 fn font_set_load_starts_in_a_task_and_only_loads_the_matching_weight() {
     let mut runtime = runtime();
     runtime.eval(&format!("globalThis.regular=new FontFace('Variants',{},{{weight:'400'}});globalThis.bold=new FontFace('Variants','url(missing.ttf)',{{weight:'700'}});document.fonts.add(regular).add(bold);globalThis.variantResult=null;document.fonts.load('16px Variants','x').then(value=>variantResult=[value.length,value[0]===regular],e=>variantResult=e.name);",serde_json::to_string(&format!("url({})",font_url())).unwrap())).unwrap();

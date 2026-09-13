@@ -36,6 +36,7 @@ fn face_metrics(metrics: FontMetrics) -> (f32, f32) {
         let selected = select_text_font(
             "layout",
             metrics.font_family,
+            metrics.font_scope_root,
             crate::font::FontVariantKey::new(metrics.font_weight, metrics.font_style),
             context.web_fonts.as_deref(),
             &context.system_fonts,
@@ -79,6 +80,7 @@ pub(super) fn finish(
         *face_cache
             .entry((
                 m.font_family,
+                m.font_scope_root,
                 m.font_weight,
                 m.font_style,
                 m.font_size.to_bits(),

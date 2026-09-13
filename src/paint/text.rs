@@ -1900,6 +1900,7 @@ fn select_fragment_font<'a>(
     select_text_font(
         "paint",
         family,
+        style.font_scope_root,
         FontVariantKey::new(weight, font_style),
         web_fonts,
         fonts,

@@ -77,3 +77,62 @@ fn embedded_arabic_face_is_used_by_layout_and_paint_without_system_fonts() {
         );
     });
 }
+
+#[test]
+fn cascade_layer_font_face_winner_is_used_by_static_layout_and_paint() {
+    let encode = |bytes: &[u8]| {
+        format!(
+            "data:font/ttf;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    };
+    let lower = encode(include_bytes!(
+        "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"
+    ));
+    let winner = encode(include_bytes!(
+        "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Italic.ttf"
+    ));
+    let face = |url: &str| format!("@font-face{{font-family:LayerAudit;src:url({url})}}");
+    let lower_face = face(&lower);
+    let winner_face = face(&winner);
+    let render = |font_rules: &str| {
+        let html = format!(
+            "<!doctype html><html><head><style>{font_rules}\
+             html,body{{margin:0;background:white}}\
+             p{{margin:0;color:black;font:20px/30px LayerAudit}}\
+             </style></head><body><p>ABBA</p></body></html>"
+        );
+        let document = TreeBuilder::parse(&html).document();
+        super::render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 160.0,
+                height: 50.0,
+            },
+        )
+        .unwrap()
+    };
+
+    crate::font::with_test_font_database(SystemFontDatabase::from_directories(&[]), || {
+        let layered = render(&format!(
+            "@layer base,override;\
+             @layer override{{{winner_face}}}\
+             @layer base{{{lower_face}}}"
+        ));
+        let winner_only = render(&winner_face);
+        let lower_only = render(&lower_face);
+
+        assert_eq!(
+            layered.pixels(),
+            winner_only.pixels(),
+            "the higher-precedence layer must select the same fixed face as an unlayered rule"
+        );
+        assert_ne!(
+            layered.pixels(),
+            lower_only.pixels(),
+            "the fixture faces must produce distinct pixels so the winner assertion is meaningful"
+        );
+    });
+}
