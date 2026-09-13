@@ -3454,6 +3454,48 @@ fn expands_text_decoration_shorthand_none() {
     );
 }
 
+#[test]
+fn invalid_text_decoration_shorthand_does_not_partially_override_longhands() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("span");
+    let duplicate = NodeHandle::element("span");
+    target.set_attribute("id", "target");
+    duplicate.set_attribute("id", "duplicate");
+    document.append_child(target.clone());
+    document.append_child(duplicate.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#target { text-decoration: underline 4px red; \
+                        text-decoration: underline thin blue; } \
+             #duplicate { text-decoration: underline underline 8px; }",
+        )
+        .unwrap(),
+    );
+
+    let target_style = resolver.computed_style(&target);
+    assert_eq!(
+        target_style.get("text-decoration-line"),
+        Some(&ComputedValue::Keyword("underline".to_string()))
+    );
+    assert_eq!(
+        target_style.get("text-decoration-color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
+    assert_eq!(
+        target_style.get("text-decoration-thickness"),
+        Some(&ComputedValue::Px(4.0))
+    );
+    assert_eq!(
+        resolver
+            .computed_style(&duplicate)
+            .get("text-decoration-line"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+}
+
 // ===== text-transform compute tests =====
 
 #[test]
@@ -5428,7 +5470,7 @@ fn inherits_text_indent_from_parent() {
 }
 
 #[test]
-fn inherits_text_decoration_line_from_parent() {
+fn text_decoration_longhands_do_not_inherit_from_parent() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
     let body = NodeHandle::element("body");
@@ -5445,8 +5487,151 @@ fn inherits_text_decoration_line_from_parent() {
     let style = resolver.computed_style(&child);
     assert_eq!(
         style.get("text-decoration-line"),
-        Some(&ComputedValue::Keyword("underline".to_string())),
-        "text-decoration-line should inherit from parent"
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+    assert_eq!(
+        style.get("text-decoration-thickness"),
+        Some(&ComputedValue::Keyword("auto".to_string()))
+    );
+}
+
+#[test]
+fn text_decoration_thickness_computes_and_validates_supported_values() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let length = NodeHandle::element("span");
+    let percent = NodeHandle::element("span");
+    let inherited = NodeHandle::element("span");
+    length.set_attribute("id", "length");
+    percent.set_attribute("id", "percent");
+    inherited.set_attribute("id", "inherited");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(length.clone());
+    body.append_child(percent.clone());
+    body.append_child(inherited.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { font-size: 20px; text-decoration-thickness: 7px; } \
+             #length { text-decoration: underline 2em red; } \
+             #percent { text-decoration-thickness: 25%; } \
+             #inherited { text-decoration-thickness: 3px; \
+                          text-decoration-thickness: invalid; }",
+        )
+        .unwrap(),
+    );
+
+    let length_style = resolver.computed_style(&length);
+    assert_eq!(
+        length_style.get("text-decoration-thickness"),
+        Some(&ComputedValue::Px(40.0))
+    );
+    assert_eq!(
+        length_style.get("text-decoration-line"),
+        Some(&ComputedValue::Keyword("underline".to_string()))
+    );
+    assert_eq!(
+        length_style.get("text-decoration-style"),
+        Some(&ComputedValue::Keyword("solid".to_string()))
+    );
+    assert_eq!(
+        resolver
+            .computed_style(&percent)
+            .get("text-decoration-thickness"),
+        Some(&ComputedValue::Percentage(25.0))
+    );
+    assert_eq!(
+        resolver
+            .computed_style(&inherited)
+            .get("text-decoration-thickness"),
+        Some(&ComputedValue::Px(3.0)),
+        "an invalid later declaration must not hide the valid thickness"
+    );
+}
+
+#[test]
+fn text_decorations_propagate_with_the_originating_box_appearance() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let passive = NodeHandle::element("span");
+    let own = NodeHandle::element("span");
+    let atomic = NodeHandle::element("span");
+    let floated = NodeHandle::element("span");
+    passive.set_attribute("id", "passive");
+    own.set_attribute("id", "own");
+    atomic.set_attribute("id", "atomic");
+    floated.set_attribute("id", "floated");
+    document.append_child(body.clone());
+    body.append_child(passive.clone());
+    body.append_child(own.clone());
+    body.append_child(atomic.clone());
+    body.append_child(floated.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { font-family: 'Origin Face'; font-weight: 700; font-style: italic; \
+                    text-decoration: underline 7px red; } \
+             #passive { color: blue; font-family: 'Child Face'; font-weight: 100; \
+                        font-style: normal; text-decoration-thickness: 1px; } \
+             #own { text-decoration: line-through 2px blue; } \
+             #atomic { display: inline-block; } \
+             #floated { float: left; }",
+        )
+        .unwrap(),
+    );
+
+    let body_style = resolver.computed_style(&body);
+    let passive_style = resolver.computed_style(&passive);
+    assert!(std::sync::Arc::ptr_eq(
+        body_style.text_decorations(),
+        passive_style.text_decorations()
+    ));
+    assert_eq!(passive_style.text_decorations().len(), 1);
+    assert_eq!(passive_style.text_decorations()[0].color, "red");
+    assert_eq!(
+        passive_style.text_decorations()[0].thickness,
+        ComputedValue::Px(7.0)
+    );
+    assert_eq!(
+        passive_style.text_decorations()[0].font_family,
+        Some(crate::font::FontFamilyKey::new("Origin Face"))
+    );
+    assert_eq!(
+        passive_style.text_decorations()[0].font_weight,
+        crate::font::FontWeight::parse("700")
+    );
+    assert_eq!(
+        passive_style.text_decorations()[0].font_style,
+        crate::font::FontStyle::Italic
+    );
+
+    let own_style = resolver.computed_style(&own);
+    assert_eq!(own_style.text_decorations().len(), 2);
+    assert_eq!(own_style.text_decorations()[0].line, "underline");
+    assert_eq!(own_style.text_decorations()[1].line, "line-through");
+    assert_eq!(own_style.text_decorations()[1].color, "blue");
+    assert_eq!(
+        own_style.text_decorations()[1].thickness,
+        ComputedValue::Px(2.0)
+    );
+
+    assert!(
+        resolver
+            .computed_style(&atomic)
+            .text_decorations()
+            .is_empty()
+    );
+    assert!(
+        resolver
+            .computed_style(&floated)
+            .text_decorations()
+            .is_empty()
     );
 }
 

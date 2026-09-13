@@ -237,6 +237,7 @@ fn expand_css_wide_shorthand(
             "text-decoration-line",
             "text-decoration-style",
             "text-decoration-color",
+            "text-decoration-thickness",
         ]
         .into_iter()
         .map(str::to_string)
@@ -1854,15 +1855,16 @@ fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {
 /// Expand `text-decoration` shorthand into its longhands.
 ///
 /// CSS spec: `text-decoration` is a shorthand for `text-decoration-line`,
-/// `text-decoration-style`, and `text-decoration-color`. The values can appear
-/// in any order. Unknown values are left as-is.
+/// `text-decoration-style`, `text-decoration-color`, and
+/// `text-decoration-thickness`. The values can appear in any order; one invalid
+/// component invalidates the complete shorthand.
 fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     let values = match value {
         Value::List(values) => values,
         single => vec![single],
     };
 
-    // CSS-wide keywords: propagate to all three longhands
+    // CSS-wide keywords: propagate to all four longhands.
     if let [Value::Keyword(kw)] = values.as_slice() {
         let lower = kw.to_ascii_lowercase();
         if matches!(lower.as_str(), "inherit" | "initial" | "unset" | "revert") {
@@ -1879,6 +1881,11 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
                 },
                 Declaration {
                     name: "text-decoration-color".to_string(),
+                    value: Value::Keyword(lower.clone()),
+                    important,
+                },
+                Declaration {
+                    name: "text-decoration-thickness".to_string(),
                     value: Value::Keyword(lower),
                     important,
                 },
@@ -1889,70 +1896,84 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
     let mut line_parts: Vec<String> = Vec::new();
     let mut style: Option<Value> = None;
     let mut color: Option<Value> = None;
+    let mut thickness: Option<Value> = None;
 
     for item in &values {
         match item {
             Value::Keyword(kw) => {
                 let lower = kw.to_ascii_lowercase();
                 match lower.as_str() {
-                    "none" | "underline" | "overline" | "line-through" | "blink" => {
+                    "none" | "underline" | "overline" | "line-through" | "blink"
+                        if !line_parts.iter().any(|part| part == &lower)
+                            && (lower != "none" || line_parts.is_empty())
+                            && (line_parts.is_empty() || line_parts[0] != "none") =>
+                    {
                         line_parts.push(lower);
                     }
                     "solid" | "dashed" | "dotted" | "double" | "wavy" => {
-                        if style.is_none() {
-                            style = Some(Value::Keyword(lower));
+                        if style.is_some() {
+                            return Vec::new();
                         }
+                        style = Some(Value::Keyword(lower));
+                    }
+                    "auto" | "from-font" if thickness.is_none() => {
+                        thickness = Some(Value::Keyword(lower));
                     }
                     _ if crate::css::style::is_color_keyword(&lower) && color.is_none() => {
                         color = Some(Value::Keyword(lower));
                     }
-                    _ => {}
+                    _ => return Vec::new(),
                 }
             }
-            Value::Color(_) | Value::Function { .. } if color.is_none() => {
-                color = Some(item.clone());
+            Value::Length(..) | Value::Percentage(_) | Value::Number(_)
+                if thickness.is_none()
+                    && crate::css::style::is_valid_text_decoration_thickness(item) =>
+            {
+                thickness = Some(item.clone())
             }
-            _ => {}
+            Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => {
+                if thickness.is_some()
+                    || !crate::css::style::is_valid_text_decoration_thickness(item)
+                {
+                    return Vec::new();
+                }
+                thickness = Some(item.clone())
+            }
+            Value::Color(_) | Value::Function { .. }
+                if color.is_none() && crate::css::style::is_valid_color_value(item) =>
+            {
+                color = Some(item.clone())
+            }
+            _ => return Vec::new(),
         }
     }
 
-    let mut decls = Vec::new();
-    if !line_parts.is_empty() {
-        let line_value = line_parts.join(" ");
-        decls.push(Declaration {
+    let decls = vec![
+        Declaration {
             name: "text-decoration-line".to_string(),
-            value: Value::Keyword(line_value),
+            value: Value::Keyword(if line_parts.is_empty() {
+                "none".to_string()
+            } else {
+                line_parts.join(" ")
+            }),
             important,
-        });
-    }
-    if let Some(v) = style {
-        decls.push(Declaration {
+        },
+        Declaration {
             name: "text-decoration-style".to_string(),
-            value: v,
+            value: style.unwrap_or_else(|| Value::Keyword("solid".to_string())),
             important,
-        });
-    }
-    if let Some(v) = color {
-        decls.push(Declaration {
+        },
+        Declaration {
             name: "text-decoration-color".to_string(),
-            value: v,
+            value: color.unwrap_or_else(|| Value::Keyword("currentcolor".to_string())),
             important,
-        });
-    }
-
-    // Fallback: preserve original if nothing matched
-    if decls.is_empty() {
-        let fallback_value = if values.len() == 1 {
-            values.into_iter().next().unwrap()
-        } else {
-            Value::List(values)
-        };
-        return vec![Declaration {
-            name: "text-decoration".to_string(),
-            value: fallback_value,
+        },
+        Declaration {
+            name: "text-decoration-thickness".to_string(),
+            value: thickness.unwrap_or_else(|| Value::Keyword("auto".to_string())),
             important,
-        }];
-    }
+        },
+    ];
 
     decls
 }

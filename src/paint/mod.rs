@@ -178,8 +178,7 @@ pub(crate) use text::{
     is_cjk_preferred_character, load_text_fonts, paint_inline_image_fragment, paint_list_marker,
     paint_text_decoration, paint_text_placeholder, paint_text_placeholder_with_mode,
     paint_text_with_font, paint_text_with_font_refs, paint_text_with_registry,
-    rasterize_with_fallback, rasterize_with_fallback_refs, text_color, text_decoration_color,
-    text_decoration_line, with_render_glyph_cache,
+    rasterize_with_fallback, rasterize_with_fallback_refs, text_color, with_render_glyph_cache,
 };
 
 #[cfg(test)]

@@ -190,14 +190,6 @@ pub(crate) fn paint_text_with_registry(
     // Fallback color from the containing block's style (used when fragment
     // style has no explicit color).
     let fallback_color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
-    // Containing-block decoration: `text-decoration-*` is NOT a CSS inherited
-    // property, but decorations set on an ancestor box visually propagate to
-    // descendant inline content.  We use the box-level style as a fallback so
-    // that existing cases like `<p style="text-decoration:underline"><span>…</span></p>`
-    // continue to work when the span itself has no explicit decoration.
-    let block_decoration_line = text_decoration_line(style);
-    let block_decoration_color = text_decoration_color(style, fallback_color);
-
     for line in &layout.lines {
         let fragments = line
             .text_overflow
@@ -216,20 +208,6 @@ pub(crate) fn paint_text_with_registry(
                     // independent styling.
                     let frag_color = fragment_text_color(&fragment.style).unwrap_or(fallback_color);
                     let text_transform = fragment_text_transform(&fragment.style);
-
-                    // For text-decoration, distinguish "property not present" from
-                    // "present but none". If the fragment has an explicit
-                    // text-decoration-line (even none), use it; otherwise fall back
-                    // to the containing block's decoration.
-                    let has_frag_decoration = fragment.style.text_decoration_line.is_some();
-                    let (decoration_line, decoration_color) = if has_frag_decoration {
-                        (
-                            fragment_decoration_line(&fragment.style),
-                            fragment_decoration_color(&fragment.style, frag_color),
-                        )
-                    } else {
-                        (block_decoration_line, block_decoration_color)
-                    };
 
                     let transformed = apply_text_transform(text, text_transform);
                     let transformed_text = transformed.as_deref().unwrap_or(text.as_str());
@@ -344,28 +322,58 @@ pub(crate) fn paint_text_with_registry(
                         );
                     }
 
-                    // Draw text decorations after text
-                    if let Some((vertical_rl, _)) = vertical_mode {
-                        paint_text_decoration_vertical(
-                            canvas,
-                            fragment_rect,
-                            font_size,
-                            decoration_line,
-                            decoration_color,
-                            clip,
-                            vertical_rl,
+                    // Draw every decoration captured at its originating box.
+                    // Descendant longhands therefore cannot restyle or cancel it.
+                    for decoration in fragment.style.text_decorations.iter() {
+                        let lines = decoration_lines(&decoration.line);
+                        let color = parse_color(&decoration.color).unwrap_or(frag_color);
+                        let decoration_selected = matches!(
+                            &decoration.thickness,
+                            ComputedValue::Keyword(value)
+                                if value.eq_ignore_ascii_case("from-font")
+                        )
+                        .then(|| {
+                            select_text_font(
+                                "paint decoration",
+                                decoration.font_family,
+                                decoration.font_scope_root,
+                                FontVariantKey::new(decoration.font_weight, decoration.font_style),
+                                web_fonts,
+                                fonts,
+                            )
+                        })
+                        .flatten();
+                        let decoration_font = decoration_selected
+                            .as_ref()
+                            .map(AsRef::as_ref)
+                            .or_else(|| fonts.first().map(AsRef::as_ref));
+                        let thickness = used_text_decoration_thickness(
+                            &decoration.thickness,
+                            decoration.font_size,
+                            decoration_font,
                         );
-                    } else {
-                        paint_text_decoration(
-                            canvas,
-                            fragment_rect,
-                            fragment.metrics.ascent,
-                            fragment.metrics.descent,
-                            font_size,
-                            decoration_line,
-                            decoration_color,
-                            clip,
-                        );
+                        if let Some((vertical_rl, _)) = vertical_mode {
+                            paint_text_decoration_vertical(
+                                canvas,
+                                fragment_rect,
+                                thickness,
+                                lines,
+                                color,
+                                clip,
+                                vertical_rl,
+                            );
+                        } else {
+                            paint_text_decoration(
+                                canvas,
+                                fragment_rect,
+                                fragment.metrics.ascent,
+                                fragment.metrics.descent,
+                                thickness,
+                                lines,
+                                color,
+                                clip,
+                            );
+                        }
                     }
                 }
                 InlineFragmentContent::AtomicInline(_) => {
@@ -573,31 +581,6 @@ fn fragment_text_transform(style: &FragmentStyle) -> &'static str {
     }
 }
 
-/// Returns `text-decoration-line` flags from a `FragmentStyle`.
-/// The value is pre-normalized to lowercase in `FragmentStyle::from_computed`.
-fn fragment_decoration_line(style: &FragmentStyle) -> TextDecorationLines {
-    let mut lines = TextDecorationLines::default();
-    if let Some(ref kw) = style.text_decoration_line {
-        for part in kw.split_whitespace() {
-            match part {
-                "underline" => lines.underline = true,
-                "overline" => lines.overline = true,
-                "line-through" => lines.line_through = true,
-                _ => {}
-            }
-        }
-    }
-    lines
-}
-
-/// Returns the `text-decoration-color` from a `FragmentStyle`, falling back to `fallback`.
-fn fragment_decoration_color(style: &FragmentStyle, fallback: Color) -> Color {
-    match &style.text_decoration_color {
-        Some(s) => parse_color(s).unwrap_or(fallback),
-        None => fallback,
-    }
-}
-
 /// Apply text-transform to the given text, returning Some(transformed) or None if no change.
 pub(crate) fn apply_text_transform(text: &str, transform: &str) -> Option<String> {
     match transform {
@@ -639,26 +622,40 @@ impl TextDecorationLines {
     }
 }
 
-/// Returns the text-decoration-line flags from style.
-pub(crate) fn text_decoration_line(style: &ComputedStyle) -> TextDecorationLines {
+fn decoration_lines(value: &str) -> TextDecorationLines {
     let mut lines = TextDecorationLines::default();
-    if let Some(ComputedValue::Keyword(kw)) = style.get("text-decoration-line") {
-        for part in kw.split_whitespace() {
-            match part.to_ascii_lowercase().as_str() {
-                "underline" => lines.underline = true,
-                "overline" => lines.overline = true,
-                "line-through" => lines.line_through = true,
-                _ => {}
-            }
+    for part in value.split_whitespace() {
+        match part.to_ascii_lowercase().as_str() {
+            "underline" => lines.underline = true,
+            "overline" => lines.overline = true,
+            "line-through" => lines.line_through = true,
+            _ => {}
         }
     }
     lines
 }
 
-/// Returns the text-decoration-color, falling back to the text color.
-pub(crate) fn text_decoration_color(style: &ComputedStyle, fallback: Color) -> Color {
-    use super::resolve_color_value;
-    resolve_color_value(style.get("text-decoration-color"), style).unwrap_or(fallback)
+pub(crate) fn used_text_decoration_thickness(
+    value: &ComputedValue,
+    font_size: f32,
+    font: Option<&Font>,
+) -> f32 {
+    let thickness = match value {
+        ComputedValue::Px(value) => *value,
+        ComputedValue::Percentage(value) => font_size * value / 100.0,
+        ComputedValue::CalcPxPercent(px, percentage) => px + font_size * percentage / 100.0,
+        ComputedValue::Keyword(value) if value.eq_ignore_ascii_case("from-font") => font
+            .and_then(|font| font.underline_thickness(font_size))
+            .unwrap_or(font_size * 0.075),
+        _ => font_size * 0.075,
+    };
+    // CSS Text Decoration rounds the actual thickness to the nearest device
+    // pixel and keeps a visible decoration at least one device pixel wide.
+    if thickness.is_finite() {
+        thickness.round().max(1.0)
+    } else {
+        1.0
+    }
 }
 
 /// Draw text decoration lines (underline, overline, line-through) for a fragment.
@@ -667,7 +664,7 @@ pub(crate) fn paint_text_decoration(
     rect: Rect,
     ascent: f32,
     descent: f32,
-    font_size: f32,
+    line_thickness: f32,
     decoration: TextDecorationLines,
     color: Color,
     clip: Option<Rect>,
@@ -676,12 +673,10 @@ pub(crate) fn paint_text_decoration(
         return;
     }
 
-    let line_thickness = (font_size * 0.075).max(1.0);
-
     let mut draw_line = |line_y: f32| {
         let line_rect = Rect {
             x: rect.x,
-            y: line_y,
+            y: line_y.round(),
             width: rect.width,
             height: line_thickness,
         };
@@ -1640,7 +1635,7 @@ pub(crate) fn paint_text_placeholder_with_mode(
 fn paint_text_decoration_vertical(
     canvas: &mut Canvas,
     rect: Rect,
-    font_size: f32,
+    thickness: f32,
     decoration: TextDecorationLines,
     color: Color,
     clip: Option<Rect>,
@@ -1649,11 +1644,10 @@ fn paint_text_decoration_vertical(
     if decoration.is_none() {
         return;
     }
-    let thickness = (font_size * 0.075).max(1.0);
     let draw = |canvas: &mut Canvas, x: f32| {
         canvas.fill_rect_clipped(
             Rect {
-                x,
+                x: x.round(),
                 y: rect.y,
                 width: thickness,
                 height: rect.height,

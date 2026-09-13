@@ -485,6 +485,8 @@ pub struct FragmentStyle {
     pub text_decoration_line: Option<String>,
     /// CSS `text-decoration-color` value (raw string) from the computed style.
     pub text_decoration_color: Option<String>,
+    /// Decorations originating on this box or propagated through its ancestors.
+    pub(crate) text_decorations: Arc<[crate::css::style::PropagatedTextDecoration]>,
     /// CSS `font-weight` value (raw string, e.g. `"bold"`, `"400"`), pre-normalized to lowercase.
     /// Used by the paint stage to select the appropriate web font variant.
     pub font_weight: Option<String>,
@@ -541,6 +543,7 @@ impl FragmentStyle {
             text_transform: normalize_lower("text-transform"),
             text_decoration_line: normalize_lower("text-decoration-line"),
             text_decoration_color: extract_str("text-decoration-color"),
+            text_decorations: Arc::clone(style.text_decorations()),
             font_weight: normalize_lower("font-weight"),
             font_style: normalize_lower("font-style"),
             font_family,

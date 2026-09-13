@@ -6024,6 +6024,242 @@ fn text_decoration_underline_draws_pixels_below_text() {
     );
 }
 
+#[test]
+fn text_decoration_length_changes_the_painted_line_thickness() {
+    let none = render_text_with_decoration("none");
+    let thin = render_text_with_decoration("underline 2px");
+    let thick = render_text_with_decoration("underline 8px");
+    let changed_rows = |canvas: &Canvas| {
+        (0..canvas.height())
+            .filter(|&y| (0..canvas.width()).any(|x| canvas.pixel(x, y) != none.pixel(x, y)))
+            .count()
+    };
+
+    assert!(changed_rows(&thin) >= 2);
+    assert!(
+        changed_rows(&thick) >= changed_rows(&thin) + 5,
+        "8px must paint substantially more rows than 2px"
+    );
+}
+
+#[test]
+fn text_decoration_thickness_applies_to_every_line_position() {
+    for line in ["underline", "overline", "line-through"] {
+        let canvas = render_text_with_decoration(&format!("{line} 6px blue"));
+        let blue_rows = (0..canvas.height())
+            .filter(|&y| {
+                (0..canvas.width()).any(|x| {
+                    canvas
+                        .pixel(x, y)
+                        .is_some_and(|pixel| pixel.b > 200 && pixel.r < 30 && pixel.g < 30)
+                })
+            })
+            .count();
+        assert!(
+            blue_rows >= 6,
+            "{line} must paint the complete authored 6px thickness; got {blue_rows} rows"
+        );
+    }
+}
+
+#[test]
+fn text_decoration_percentage_calc_and_from_font_resolve_used_thickness() {
+    use crate::css::ComputedValue;
+
+    let font = Font::load_from_bytes(
+        std::fs::read("tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        super::text::used_text_decoration_thickness(
+            &ComputedValue::Percentage(25.0),
+            20.0,
+            Some(&font),
+        ),
+        5.0
+    );
+    assert_eq!(
+        super::text::used_text_decoration_thickness(
+            &ComputedValue::CalcPxPercent(2.0, 10.0),
+            20.0,
+            Some(&font),
+        ),
+        4.0
+    );
+    assert_eq!(
+        super::text::used_text_decoration_thickness(&ComputedValue::Px(2.7), 20.0, None),
+        3.0
+    );
+    assert_eq!(
+        super::text::used_text_decoration_thickness(&ComputedValue::Px(0.3), 20.0, None),
+        1.0
+    );
+    assert_eq!(
+        super::text::used_text_decoration_thickness(
+            &ComputedValue::Keyword("from-font".to_string()),
+            20.0,
+            Some(&font),
+        ),
+        font.underline_thickness(20.0).unwrap().round().max(1.0)
+    );
+}
+
+#[test]
+fn propagated_from_font_thickness_uses_the_originating_box_font() {
+    let origin_font =
+        Font::load_from_bytes(std::fs::read("tests/fixtures/acid3/font.ttf").unwrap()).unwrap();
+    let child_font = Font::load_from_bytes(
+        std::fs::read("tests/fixtures/acid2/LiberationSans-Regular.ttf").unwrap(),
+    )
+    .unwrap();
+    let origin_thickness = origin_font.underline_thickness(100.0).unwrap();
+    let child_thickness = child_font.underline_thickness(100.0).unwrap();
+    assert!(child_thickness >= origin_thickness + 4.0);
+
+    let mut registry = crate::font::WebFontRegistry::new();
+    registry.push(
+        "origin-face",
+        crate::font::FontWeight::default(),
+        crate::font::FontStyle::default(),
+        origin_font,
+    );
+    registry.push(
+        "child-face",
+        crate::font::FontWeight::default(),
+        crate::font::FontStyle::default(),
+        child_font,
+    );
+
+    let render = |decoration_on_child: bool| {
+        let declaration = if decoration_on_child {
+            "#child { text-decoration: underline from-font blue; }"
+        } else {
+            "#origin { text-decoration: underline from-font blue; }"
+        };
+        let document = TreeBuilder::parse(&format!(
+            "<style>html,body{{margin:0}} #origin{{font:100px/1 origin-face;color:transparent}} \
+             #child{{font-family:child-face}} {declaration}</style>\
+             <div id='origin'><span id='child'>MMMM</span></div>"
+        ))
+        .document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+            resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+        }
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 130.0,
+        };
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        paint_layout_with_web_fonts(&layout, &mut resolver, viewport, vec![], Some(&registry))
+    };
+    let propagated = render(false);
+    let child_owned = render(true);
+    let blue_rows = |canvas: &Canvas| {
+        (0..canvas.height())
+            .filter(|&y| {
+                (0..canvas.width()).any(|x| {
+                    canvas
+                        .pixel(x, y)
+                        .is_some_and(|pixel| pixel.b > 200 && pixel.r < 30 && pixel.g < 30)
+                })
+            })
+            .count()
+    };
+    assert!(
+        blue_rows(&child_owned) >= blue_rows(&propagated) + 4,
+        "the propagated decoration must keep the thinner metric of its originating font"
+    );
+}
+
+#[test]
+fn text_decoration_thickness_fixed_fixture_covers_nested_vertical_and_scale() {
+    let html = include_str!("../../tests/fixtures/anonymized-text-decoration-thickness/fixed.html");
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 240.0,
+    };
+    let render = |source: &str| {
+        let document = TreeBuilder::parse(source).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+            resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+        }
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        paint_layout(&layout, &mut resolver, viewport)
+    };
+    let canvas = render(html);
+    let unscaled = render(&html.replace("transform: scale(2);", "transform: none;"));
+
+    let color_bounds = |canvas: &Canvas, matches: fn(Color) -> bool| {
+        let mut bounds: Option<(u32, u32, u32, u32)> = None;
+        for y in 0..canvas.height() {
+            for x in 0..canvas.width() {
+                let Some(pixel) = canvas.pixel(x, y) else {
+                    continue;
+                };
+                if !matches(pixel) {
+                    continue;
+                }
+                bounds = Some(match bounds {
+                    None => (x, y, x, y),
+                    Some((left, top, right, bottom)) => {
+                        (left.min(x), top.min(y), right.max(x), bottom.max(y))
+                    }
+                });
+            }
+        }
+        bounds.expect("fixture decoration color must be painted")
+    };
+    let green = color_bounds(&canvas, |pixel| {
+        pixel.g > 140 && pixel.r < 30 && pixel.b < 30
+    });
+    let blue = color_bounds(&canvas, |pixel| {
+        pixel.b > 200 && pixel.r < 30 && pixel.g < 30
+    });
+    let red = color_bounds(&canvas, |pixel| {
+        pixel.r > 200 && pixel.g < 30 && pixel.b < 30
+    });
+    let unscaled_red = color_bounds(&unscaled, |pixel| {
+        pixel.r > 200 && pixel.g < 30 && pixel.b < 30
+    });
+    let height = |bounds: (u32, u32, u32, u32)| bounds.3 - bounds.1 + 1;
+    let width = |bounds: (u32, u32, u32, u32)| bounds.2 - bounds.0 + 1;
+
+    if let Some(directory) = std::env::var_os("OMOIKANE_BROWSER_REPORT_DIR") {
+        let directory = PathBuf::from(directory);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("anonymized-text-decoration-thickness.fixed.actual.png"),
+            canvas.encode_png(),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("anonymized-text-decoration-thickness.fixed-unscaled.actual.png"),
+            unscaled.encode_png(),
+        )
+        .unwrap();
+    }
+
+    assert!((3..=5).contains(&height(green)), "green={green:?}");
+    assert!((5..=7).contains(&width(blue)), "blue={blue:?}");
+    assert!(
+        (3..=4).contains(&height(unscaled_red)),
+        "unscaled_red={unscaled_red:?}"
+    );
+    assert_eq!(
+        height(red),
+        height(unscaled_red) * 2,
+        "scale(2) must double the rasterized decoration thickness; red={red:?}, \
+         unscaled_red={unscaled_red:?}"
+    );
+}
+
 // --- border-radius 描画テスト ---
 
 #[test]

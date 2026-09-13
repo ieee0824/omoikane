@@ -786,6 +786,14 @@
       "setup": "globalThis.__textOverflowStyle = document.createElement('style'); __textOverflowStyle.textContent = '#surface-text-overflow { text-overflow:ellipsis; text-overflow:auto; }'; document.head.appendChild(__textOverflowStyle); globalThis.__textOverflow = document.createElement('div'); __textOverflow.id = 'surface-text-overflow'; __textOverflow.style.cssText = 'width:40px;overflow:hidden;white-space:nowrap'; __textOverflow.textContent = 'a deliberately overflowing line'; document.body.appendChild(__textOverflow)",
       "probe": "getComputedStyle(__textOverflow).textOverflow === 'ellipsis' && __textOverflow.scrollWidth > __textOverflow.clientWidth",
       "baseline_supported": true
+    },
+    {
+      "id": "css.text-decoration-thickness",
+      "area": "cssom",
+      "description": "Text decoration thickness validates, computes relative values, participates in the shorthand, and remains non-inherited",
+      "setup": "globalThis.__decorationParent = document.createElement('div'); __decorationParent.style.cssText = 'font-size:20px;color:rgb(1,2,3);text-decoration-thickness:9px'; globalThis.__decorationTarget = document.createElement('span'); __decorationTarget.style.textDecoration = 'underline calc(25% + 2px) red'; __decorationTarget.style.textDecorationThickness = 'thin'; globalThis.__decorationInitial = document.createElement('span'); __decorationParent.appendChild(__decorationTarget); __decorationParent.appendChild(__decorationInitial); document.body.appendChild(__decorationParent)",
+      "probe": "CSS.supports('text-decoration-thickness', 'from-font') && CSS.supports('text-decoration-thickness', '-2px') && !CSS.supports('text-decoration-thickness', 'thin') && !CSS.supports('text-decoration', 'underline thin blue') && getComputedStyle(__decorationTarget).textDecorationLine === 'underline' && getComputedStyle(__decorationTarget).textDecorationStyle === 'solid' && getComputedStyle(__decorationTarget).textDecorationThickness === 'calc(25% + 2px)' && getComputedStyle(__decorationInitial).textDecorationThickness === 'auto' && getComputedStyle(__decorationInitial).textDecorationColor === 'rgb(1, 2, 3)'",
+      "baseline_supported": true
     }
   ]
 }

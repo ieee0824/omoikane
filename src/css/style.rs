@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use super::matcher::{
@@ -41,6 +41,19 @@ pub enum ComputedValue {
     CalcPxPercent(f32, f32),
 }
 
+/// Paint data captured from a box that originates a text decoration.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PropagatedTextDecoration {
+    pub(crate) line: String,
+    pub(crate) color: String,
+    pub(crate) thickness: ComputedValue,
+    pub(crate) font_size: f32,
+    pub(crate) font_family: Option<crate::font::FontFamilyKey>,
+    pub(crate) font_weight: crate::font::FontWeight,
+    pub(crate) font_style: crate::font::FontStyle,
+    pub(crate) font_scope_root: Option<usize>,
+}
+
 /// Resolved computed style for a node.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ComputedStyle {
@@ -50,6 +63,8 @@ pub struct ComputedStyle {
     animation_name_scope_root: Option<usize>,
     /// Tree scope captured by the declaration that supplied `font-family`.
     font_family_scope_root: Option<usize>,
+    /// Decorations propagated through the box tree, separate from inheritance.
+    text_decorations: Arc<[PropagatedTextDecoration]>,
 }
 
 impl ComputedStyle {
@@ -109,6 +124,10 @@ impl ComputedStyle {
 
     pub(crate) fn font_family_scope_root(&self) -> Option<usize> {
         self.font_family_scope_root
+    }
+
+    pub(crate) fn text_decorations(&self) -> &Arc<[PropagatedTextDecoration]> {
+        &self.text_decorations
     }
 }
 
@@ -1338,11 +1357,14 @@ impl StyleResolver {
                 .sample(node.identity(), &mut properties);
         }
 
+        let text_decorations =
+            propagated_text_decorations(&properties, parent_style, font_family_scope_root);
         ComputedStyle {
             properties,
             custom_properties,
             animation_name_scope_root,
             font_family_scope_root,
+            text_decorations,
         }
     }
 
@@ -1569,6 +1591,110 @@ fn font_reference_scope_root(
     declaration_scope_root
 }
 
+fn propagated_text_decorations(
+    properties: &BTreeMap<String, ComputedValue>,
+    parent_style: Option<&ComputedStyle>,
+    font_family_scope_root: Option<usize>,
+) -> Arc<[PropagatedTextDecoration]> {
+    let interrupts_parent = matches!(
+        properties.get("position"),
+        Some(ComputedValue::Keyword(value))
+            if value.eq_ignore_ascii_case("absolute") || value.eq_ignore_ascii_case("fixed")
+    ) || matches!(
+        properties.get("float"),
+        Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none")
+    ) || matches!(
+        properties.get("display"),
+        Some(ComputedValue::Keyword(value))
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "inline-block" | "inline-table" | "inline-flex" | "inline-grid"
+            )
+    );
+    let decorations = if interrupts_parent {
+        Arc::default()
+    } else {
+        parent_style
+            .map(|style| Arc::clone(&style.text_decorations))
+            .unwrap_or_default()
+    };
+    if matches!(
+        properties.get("display"),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("contents")
+    ) {
+        return decorations;
+    }
+    let Some(ComputedValue::Keyword(line)) = properties.get("text-decoration-line") else {
+        return decorations;
+    };
+    if !line.split_whitespace().any(|part| {
+        matches!(
+            part.to_ascii_lowercase().as_str(),
+            "underline" | "overline" | "line-through"
+        )
+    }) {
+        return decorations;
+    }
+    let color_value = properties
+        .get("text-decoration-color")
+        .map(computed_value_css_text)
+        .unwrap_or_else(|| "currentcolor".to_string());
+    let color = if color_value.eq_ignore_ascii_case("currentcolor") {
+        properties
+            .get("color")
+            .map(computed_value_css_text)
+            .unwrap_or_else(|| "black".to_string())
+    } else {
+        color_value
+    };
+    let mut extended = Vec::with_capacity(decorations.len() + 1);
+    extended.extend(decorations.iter().cloned());
+    extended.push(PropagatedTextDecoration {
+        line: line.clone(),
+        color,
+        thickness: properties
+            .get("text-decoration-thickness")
+            .cloned()
+            .unwrap_or_else(|| ComputedValue::Keyword("auto".to_string())),
+        font_size: properties
+            .get("font-size")
+            .and_then(|value| match value {
+                ComputedValue::Px(value) => Some(*value),
+                _ => None,
+            })
+            .unwrap_or(16.0),
+        font_family: properties.get("font-family").and_then(|value| match value {
+            ComputedValue::Keyword(value) | ComputedValue::String(value) => {
+                Some(crate::font::FontFamilyKey::new(value))
+            }
+            _ => None,
+        }),
+        font_weight: properties
+            .get("font-weight")
+            .and_then(|value| match value {
+                ComputedValue::Keyword(value) | ComputedValue::String(value) => {
+                    Some(crate::font::FontWeight::parse(value))
+                }
+                ComputedValue::Number(value) if value.is_finite() => Some(crate::font::FontWeight(
+                    value.round().clamp(1.0, 1000.0) as u16,
+                )),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        font_style: properties
+            .get("font-style")
+            .and_then(|value| match value {
+                ComputedValue::Keyword(value) | ComputedValue::String(value) => {
+                    Some(crate::font::FontStyle::parse(value))
+                }
+                _ => None,
+            })
+            .unwrap_or_default(),
+        font_scope_root: font_family_scope_root,
+    });
+    extended.into()
+}
+
 fn compute_gap_shorthand(
     value: &Value,
     ctx: ResolutionContext,
@@ -1756,6 +1882,10 @@ fn validate_color_value(value: &Value) -> DeclarationValidation {
     }
 }
 
+pub(super) fn is_valid_color_value(value: &Value) -> bool {
+    !matches!(validate_color_value(value), DeclarationValidation::Invalid)
+}
+
 /// Validates a resolved declaration value against the property's grammar.
 ///
 /// This is the single extension point for per-property value validation.
@@ -1771,6 +1901,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // never accepts a top-level comma-separated list.
     if is_color_property(name) {
         return validate_color_value(value);
+    }
+    if name.eq_ignore_ascii_case("text-decoration-thickness") {
+        return validate_text_decoration_thickness(value);
     }
     if let Value::CommaList(values) = value {
         let is_mask_layer_property = matches!(
@@ -2405,6 +2538,45 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn validate_text_decoration_thickness(value: &Value) -> DeclarationValidation {
+    match value {
+        Value::Keyword(keyword)
+            if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                || matches!(keyword.to_ascii_lowercase().as_str(), "auto" | "from-font") =>
+        {
+            DeclarationValidation::Unvalidated
+        }
+        Value::Length(number, unit)
+            if number.is_finite()
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some() =>
+        {
+            DeclarationValidation::Unvalidated
+        }
+        Value::Percentage(number) if number.is_finite() => DeclarationValidation::Unvalidated,
+        Value::Number(number) if *number == 0.0 => DeclarationValidation::Unvalidated,
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => {
+            match compute_value(
+                value,
+                "text-decoration-thickness",
+                ResolutionContext::default(),
+            ) {
+                ComputedValue::Px(_)
+                | ComputedValue::Percentage(_)
+                | ComputedValue::CalcPxPercent(_, _) => DeclarationValidation::Unvalidated,
+                _ => DeclarationValidation::Invalid,
+            }
+        }
+        _ => DeclarationValidation::Invalid,
+    }
+}
+
+pub(super) fn is_valid_text_decoration_thickness(value: &Value) -> bool {
+    !matches!(
+        validate_text_decoration_thickness(value),
+        DeclarationValidation::Invalid
+    )
 }
 
 fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
@@ -4884,6 +5056,7 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "text-decoration-line",
     "text-decoration-color",
     "text-decoration-style",
+    "text-decoration-thickness",
     "text-indent",
     "text-overflow",
     "text-transform",
@@ -6775,6 +6948,22 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("text-overflow".to_string())
         .or_insert_with(|| ComputedValue::Keyword("clip".to_string()));
+    properties
+        .entry("text-decoration-line".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("text-decoration-style".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("solid".to_string()));
+    let current_color = properties
+        .get("color")
+        .cloned()
+        .unwrap_or_else(|| ComputedValue::Color("black".to_string()));
+    properties
+        .entry("text-decoration-color".to_string())
+        .or_insert(current_color);
+    properties
+        .entry("text-decoration-thickness".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
     // `cursor` initial value is `auto` (CSS UI). Ensuring it is always present
     // lets a dropped/absent `cursor` declaration serialize as `auto` in
     // getComputedStyle (Acid3 test 47).
@@ -7071,9 +7260,6 @@ const INHERITED_PROPERTIES: &[&str] = &[
     "overflow-wrap",
     "pointer-events",
     "text-align",
-    "text-decoration-color",
-    "text-decoration-line",
-    "text-decoration-style",
     "text-indent",
     "text-transform",
     "visibility",
