@@ -3,6 +3,43 @@ use crate::{JsObject, JsSymbol, object::shape::slot::SlotAttributes, property::P
 use super::{SharedShape, TransitionKey};
 
 #[test]
+fn old_shape_keeps_new_property_transition_cache_valid() {
+    use boa_gc::{Rooted, force_collect, force_minor_collect};
+
+    let parent = SharedShape::root();
+    force_minor_collect();
+    force_minor_collect();
+
+    for round in 0..8 {
+        let key = TransitionKey {
+            property_key: PropertyKey::Symbol(JsSymbol::new(None).unwrap()),
+            attributes: SlotAttributes::all(),
+        };
+        let child = parent.insert_property_transition(key.clone());
+        for _ in 0..4 {
+            if round % 2 == 0 {
+                force_collect();
+            }
+            force_minor_collect();
+            let cached = parent.insert_property_transition(key.clone());
+            assert!(Rooted::ptr_eq(&child.inner, &cached.inner));
+        }
+        drop(child);
+        force_collect();
+        assert!(
+            parent
+                .forward_transitions()
+                .get_property(&key)
+                .unwrap()
+                .upgrade()
+                .is_none()
+        );
+        let recreated = parent.insert_property_transition(key);
+        assert_eq!(recreated.property_count(), 1);
+    }
+}
+
+#[test]
 fn test_prune_property_on_counter_limit() {
     let shape = SharedShape::root();
 
