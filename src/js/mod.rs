@@ -8334,6 +8334,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(create_text_node_native),
         ),
         (
+            js_string!("__omoikane_create_cdata_section"),
+            1,
+            NativeFunction::from_copy_closure(create_cdata_section_native),
+        ),
+        (
             js_string!("__omoikane_create_document_fragment"),
             0,
             NativeFunction::from_copy_closure(create_document_fragment_native),
@@ -8387,6 +8392,11 @@ fn register_host_bindings(
             js_string!("__omoikane_parse_xml"),
             1,
             NativeFunction::from_copy_closure(parse_xml_native),
+        ),
+        (
+            js_string!("__omoikane_serialize_xml"),
+            1,
+            NativeFunction::from_copy_closure(serialize_xml_native),
         ),
         (
             js_string!("__omoikane_create_document_type"),
@@ -11153,11 +11163,11 @@ fn attribute_names_native(
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let names: Vec<JsValue> = node
-            .and_then(|node| node.attributes())
-            .map(|attributes| {
-                attributes
-                    .keys()
-                    .map(|key| js_string!(key.as_str()).into())
+            .and_then(|node| node.attribute_records())
+            .map(|records| {
+                records
+                    .into_iter()
+                    .map(|(name, _, _, _)| js_string!(name.as_str()).into())
                     .collect()
             })
             .unwrap_or_default();
@@ -14545,6 +14555,7 @@ fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         let node_type = match node.node_type() {
             crate::dom::NodeType::Element => 1,
+            crate::dom::NodeType::Text if node.is_cdata_section() => 4,
             crate::dom::NodeType::Text => 3,
             crate::dom::NodeType::ProcessingInstruction => 7,
             crate::dom::NodeType::Comment => 8,
@@ -14593,6 +14604,9 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
                 }
             }
             el
+        }
+        crate::dom::NodeType::Text if node.is_cdata_section() => {
+            NodeHandle::cdata_section(node.data().unwrap_or_default())
         }
         crate::dom::NodeType::Text => NodeHandle::text(node.data().unwrap_or_default()),
         crate::dom::NodeType::Comment => NodeHandle::comment(node.data().unwrap_or_default()),
@@ -14762,6 +14776,25 @@ fn create_text_node_native(
         .to_string(context)?
         .to_std_string_escaped();
     let node = NodeHandle::text(&text);
+    let id = node.identity() as f64;
+    with_host_state(|state| {
+        state.borrow_mut().nodes.insert(node.identity(), node);
+        Ok(JsValue::from(id))
+    })
+}
+
+fn create_cdata_section_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let node = NodeHandle::cdata_section(text);
     let id = node.identity() as f64;
     with_host_state(|state| {
         state.borrow_mut().nodes.insert(node.identity(), node);
@@ -14972,6 +15005,20 @@ fn parse_xml_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             },
         );
         Ok(JsValue::from(id as f64))
+    })
+}
+
+/// Serializes a live native DOM node without invoking replaceable JavaScript
+/// accessors on the node or any of its descendants.
+fn serialize_xml_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state
+            .borrow()
+            .get_node(id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let serialized = crate::xml::serialize(&node);
+        Ok(js_string!(serialized.as_str()).into())
     })
 }
 
@@ -25191,10 +25238,12 @@ b</textarea></form>"#,
                 const xml = new DOMParser().parseFromString("<root/>", "text/xml");
                 const cdata = xml.documentElement.appendChild(xml.createCDATASection(""));
                 xml.documentElement.normalize();
+                cdata.nodeValue = "section";
                 const directClone = cdata.cloneNode();
                 const deepClone = xml.documentElement.cloneNode(true).lastChild;
-                let invalidCdata, missingArgs, unsupportedMime;
+                let invalidCdata, htmlCdata, missingArgs, unsupportedMime;
                 try { xml.createCDATASection("bad]]>data"); } catch (error) { invalidCdata = error.name; }
+                try { document.createCDATASection("data"); } catch (error) { htmlCdata = error.name; }
                 try { new DOMParser().parseFromString("<x/>"); } catch (error) { missingArgs = error.name; }
                 try { new DOMParser().parseFromString("<x/>", "text/plain"); } catch (error) { unsupportedMime = error.name; }
                 const html = new DOMParser().parseFromString("<p>parsed</p>", "text/html");
@@ -25204,17 +25253,18 @@ b</textarea></form>"#,
                     range.endContainer === first, range.endOffset,
                     document.textContent === null,
                     cdata.nodeType, cdata instanceof Text,
+                    cdata.nodeName, cdata.nodeValue,
                     xml.documentElement.lastChild === cdata,
-                    invalidCdata, missingArgs, unsupportedMime,
-                    directClone.nodeType, directClone instanceof CDATASection,
-                    deepClone.nodeType, deepClone instanceof CDATASection,
+                    invalidCdata, htmlCdata, missingArgs, unsupportedMime,
+                    directClone.nodeType, directClone instanceof CDATASection, directClone.nodeValue,
+                    deepClone.nodeType, deepClone instanceof CDATASection, deepClone.nodeValue,
                     html !== document, html.body.textContent
                 ].join("|");
             })()"#,
         );
         assert_eq!(
             actual,
-            "1|abcd|true|3|true|4|true|4|true|true|InvalidCharacterError|TypeError|TypeError|4|true|4|true|true|parsed"
+            "1|abcd|true|3|true|4|true|4|true|#cdata-section|section|true|InvalidCharacterError|NotSupportedError|TypeError|TypeError|4|true|section|4|true|section|true|parsed"
         );
     }
 
@@ -25246,7 +25296,129 @@ b</textarea></form>"#,
         );
         assert_eq!(
             actual,
-            "true|svg|http://www.w3.org/2000/svg|group|hello|rect|4|http://www.w3.org/2000/svg|3,1,8,3,7|7|note|parsererror|true"
+            "true|svg|http://www.w3.org/2000/svg|group|hello|rect|4|http://www.w3.org/2000/svg|3,1,8,4,7|7|note|parsererror|true"
+        );
+    }
+
+    #[test]
+    fn xml_serializer_serializes_node_kinds_and_round_trips_cdata() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const source = '<!DOCTYPE root SYSTEM "urn:test"><root><!--note--><![CDATA[<raw>&data]]><?target value?></root>';
+                const parsed = new DOMParser().parseFromString(source, 'text/xml');
+                const serializer = new XMLSerializer();
+                const serialized = serializer.serializeToString(parsed);
+                const reparsed = new DOMParser().parseFromString(serialized, 'text/xml');
+                const fragment = new DocumentFragment();
+                fragment.append(document.createElement('div'), document.createTextNode('<&>'));
+                return [
+                    serialized,
+                    reparsed.documentElement.childNodes[1].nodeType,
+                    reparsed.documentElement.childNodes[1] instanceof CDATASection,
+                    serializer.serializeToString(fragment)
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "<!DOCTYPE root SYSTEM \"urn:test\"><root><!--note--><![CDATA[<raw>&data]]><?target value?></root>|4|true|<div xmlns=\"http://www.w3.org/1999/xhtml\"></div>&lt;&amp;&gt;"
+        );
+    }
+
+    #[test]
+    fn xml_serializer_preserves_namespaces_and_escapes_attributes() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const XMLNS = 'http://www.w3.org/2000/xmlns/';
+                const parsed = new DOMParser().parseFromString(
+                    '<root xmlns="urn:root" xmlns:p="urn:item"><plain xmlns=""><p:item/></plain></root>',
+                    'text/xml'
+                );
+                const root = parsed.documentElement;
+                root.firstChild.setAttributeNS('urn:generated', 'g:value', '\t\n\r<&"');
+                const conflict = parsed.createElementNS('urn:other', 'p:conflict');
+                conflict.setAttributeNS(XMLNS, 'xmlns:p', 'urn:shadow');
+                root.appendChild(conflict);
+                const emptyPrefix = new DOMParser().parseFromString(
+                    '<root xmlns="" xmlns:foo="urn:item"/>',
+                    'text/xml'
+                ).documentElement;
+                emptyPrefix.setAttributeNS(XMLNS, 'xmlns:foo', '');
+                const siblingScope = new Document();
+                const siblingRoot = siblingScope.createElement('root');
+                siblingScope.appendChild(siblingRoot);
+                siblingRoot.appendChild(siblingScope.createElementNS('urn:sibling', 'p:first'));
+                siblingRoot.appendChild(siblingScope.createElementNS('urn:sibling', 'second'));
+                return [
+                    new XMLSerializer().serializeToString(root),
+                    new XMLSerializer().serializeToString(emptyPrefix),
+                    new XMLSerializer().serializeToString(siblingRoot)
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "<root xmlns=\"urn:root\" xmlns:p=\"urn:item\"><plain xmlns=\"\" xmlns:ns1=\"urn:generated\" ns1:value=\"&#9;&#xA;&#xD;&lt;&amp;&quot;\"><p:item/></plain><ns2:conflict xmlns:ns2=\"urn:other\" xmlns:p=\"urn:shadow\"/></root>|<root xmlns=\"\" xmlns:foo=\"\"/>|<root><p:first xmlns:p=\"urn:sibling\"/><second xmlns=\"urn:sibling\"/></root>"
+        );
+    }
+
+    #[test]
+    fn xml_serializer_validates_input_and_uses_native_dom_data() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const serializer = new XMLSerializer();
+                const root = new DOMParser().parseFromString('<root a="1"><child>safe</child></root>', 'text/xml').documentElement;
+                Object.defineProperties(root, {
+                    nodeName: { get() { throw new Error('poisoned nodeName'); } },
+                    attributes: { get() { throw new Error('poisoned attributes'); } },
+                    childNodes: { get() { throw new Error('poisoned childNodes'); } }
+                });
+                const errors = [];
+                try { serializer.serializeToString(); } catch (error) { errors.push(error.name); }
+                try { serializer.serializeToString({ __id: root.__id }); } catch (error) { errors.push(error.name); }
+                try { serializer.serializeToString.call({}, root); } catch (error) { errors.push(error.name); }
+                return [serializer.serializeToString(root), errors.join(',')].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "<root a=\"1\"><child>safe</child></root>|TypeError,TypeError,TypeError"
+        );
+    }
+
+    #[test]
+    fn xml_serializer_accepts_detached_attribute_nodes() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const htmlAttr = document.createAttribute('MiXeD');
+                const xmlDocument = new Document();
+                const xmlAttr = xmlDocument.createAttributeNS('urn:test', 'p:MiXeD');
+                xmlAttr.value = 'value';
+                const extraDocument = new Document(document.__id);
+                const extraFragment = new DocumentFragment(document.body.__id);
+                return [
+                    new XMLSerializer().serializeToString(htmlAttr),
+                    htmlAttr instanceof Node, htmlAttr instanceof Attr,
+                    htmlAttr.nodeType, htmlAttr.name, htmlAttr.ownerDocument === document,
+                    xmlAttr.name, xmlAttr.localName, xmlAttr.prefix,
+                    xmlAttr.namespaceURI, xmlAttr.nodeValue,
+                    xmlAttr.cloneNode().isEqualNode(xmlAttr),
+                    extraDocument !== document, extraDocument.nodeType,
+                    extraFragment !== document.body, extraFragment.nodeType
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            "|true|true|2|mixed|true|p:MiXeD|MiXeD|p|urn:test|value|true|true|9|true|11"
         );
     }
 
@@ -27304,6 +27476,7 @@ b</textarea></form>"#,
             firstDetached.ownerDocument !== secondDetached.ownerDocument &&
             firstDetached.isEqualNode(secondDetached) &&
             cdata.isEqualNode(xml.createCDATASection("data")) &&
+            !cdata.isEqualNode(xml.createCDATASection("other")) &&
             !cdata.isEqualNode(xml.createTextNode("data")) &&
             !shadow.isEqualNode(document.createDocumentFragment()) &&
             parsed.isEqualNode(new DOMParser().parseFromString("<same/>", "text/xml").documentElement) &&

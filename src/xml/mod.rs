@@ -5,6 +5,10 @@ use std::fmt;
 
 use crate::dom::{Node, NodeHandle};
 
+mod serializer;
+
+pub use serializer::serialize;
+
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
@@ -229,7 +233,10 @@ impl<'a> Parser<'a> {
         }
         let empty = self.input[..self.pos].ends_with("/>");
         let prefix = name.split_once(':').map(|(p, _)| p).unwrap_or("");
-        let namespace = namespaces.get(prefix).cloned();
+        let namespace = namespaces
+            .get(prefix)
+            .filter(|namespace| !namespace.is_empty())
+            .cloned();
         if !prefix.is_empty() && namespace.is_none() {
             return self.err("undeclared namespace prefix");
         }
@@ -333,7 +340,7 @@ impl<'a> Parser<'a> {
         }
         self.pos += 9;
         let text = self.take_until("]]>")?.to_string();
-        self.parent().append_child(NodeHandle::text(text));
+        self.parent().append_child(NodeHandle::cdata_section(text));
         Ok(())
     }
     fn parse_doctype(&mut self, root_seen: bool) -> Result<(), XmlParseError> {
