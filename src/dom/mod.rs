@@ -223,6 +223,7 @@ pub struct Element {
     html: bool,
     attributes: BTreeMap<String, String>,
     attribute_names: BTreeMap<String, AttributeName>,
+    attribute_order: Vec<String>,
     checked: bool,
     dirty_checkedness: bool,
     selected: bool,
@@ -266,6 +267,7 @@ impl Element {
             html: true,
             attributes: BTreeMap::new(),
             attribute_names: BTreeMap::new(),
+            attribute_order: Vec::new(),
             checked: false,
             dirty_checkedness: false,
             selected: false,
@@ -291,6 +293,7 @@ impl Element {
             html: false,
             attributes: BTreeMap::new(),
             attribute_names: BTreeMap::new(),
+            attribute_order: Vec::new(),
             checked: false,
             dirty_checkedness: false,
             selected: false,
@@ -357,12 +360,24 @@ pub(crate) struct TextControlState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Text {
     data: String,
+    cdata_section: bool,
 }
 
 impl Text {
     /// Creates a new text payload.
     pub fn new(data: impl Into<String>) -> Self {
-        Self { data: data.into() }
+        Self {
+            data: data.into(),
+            cdata_section: false,
+        }
+    }
+
+    /// Creates a CDATA section payload, which participates in layout as text.
+    pub fn new_cdata_section(data: impl Into<String>) -> Self {
+        Self {
+            data: data.into(),
+            cdata_section: true,
+        }
     }
 
     /// Returns the text contents.
@@ -503,6 +518,11 @@ impl NodeHandle {
     /// Creates a text node.
     pub fn text(data: impl Into<String>) -> Self {
         Self::new(NodeData::Text(Text::new(data)))
+    }
+
+    /// Creates a CDATA section backed by the text payload used by rendering.
+    pub fn cdata_section(data: impl Into<String>) -> Self {
+        Self::new(NodeData::Text(Text::new_cdata_section(data)))
     }
 
     /// Creates a comment node.
@@ -827,18 +847,19 @@ impl NodeHandle {
         match &self.0.borrow().data {
             NodeData::Element(element) => Some(
                 element
-                    .attributes
+                    .attribute_order
                     .iter()
-                    .map(|(name, value)| {
+                    .filter_map(|name| {
+                        let value = element.attributes.get(name)?;
                         let metadata = element.attribute_names.get(name);
-                        (
+                        Some((
                             name.clone(),
                             metadata.and_then(|entry| entry.namespace_uri.clone()),
                             metadata
                                 .map(|entry| entry.local_name.clone())
                                 .unwrap_or_else(|| name.clone()),
                             value.clone(),
-                        )
+                        ))
                     })
                     .collect(),
             ),
@@ -884,6 +905,9 @@ impl NodeHandle {
             if name == "selected" && !element.dirty_selectedness {
                 element.selected = true;
             }
+            if !element.attributes.contains_key(&name) {
+                element.attribute_order.push(name.clone());
+            }
             element.attributes.insert(name.clone(), value.into());
             element
                 .attribute_names
@@ -913,6 +937,9 @@ impl NodeHandle {
             let qualified_name = qualified_name.into();
             if matches!(qualified_name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
+            }
+            if !element.attributes.contains_key(&qualified_name) {
+                element.attribute_order.push(qualified_name.clone());
             }
             element
                 .attributes
@@ -966,6 +993,7 @@ impl NodeHandle {
             }
             element.attributes.remove(&name);
             element.attribute_names.remove(&name);
+            element.attribute_order.retain(|entry| entry != &name);
             if name == "checked" && !element.dirty_checkedness {
                 element.checked = false;
             }
@@ -983,6 +1011,9 @@ impl NodeHandle {
             }
             element.attributes.remove(qualified_name);
             element.attribute_names.remove(qualified_name);
+            element
+                .attribute_order
+                .retain(|entry| entry != qualified_name);
         }
     }
 
@@ -1130,6 +1161,11 @@ impl NodeHandle {
         }
     }
 
+    /// Returns whether this text-like node is a CDATA section.
+    pub fn is_cdata_section(&self) -> bool {
+        matches!(&self.0.borrow().data, NodeData::Text(text) if text.cdata_section)
+    }
+
     /// Returns the public identifier for a document type node.
     pub fn public_id(&self) -> Option<String> {
         match &self.0.borrow().data {
@@ -1189,6 +1225,7 @@ impl Node for NodeHandle {
                 element.tag_name.to_ascii_uppercase()
             }
             NodeData::Element(element) => element.tag_name.clone(),
+            NodeData::Text(text) if text.cdata_section => "#cdata-section".to_string(),
             NodeData::Text(_) => "#text".to_string(),
             NodeData::Comment(_) => "#comment".to_string(),
             NodeData::ProcessingInstruction(pi) => pi.target.clone(),

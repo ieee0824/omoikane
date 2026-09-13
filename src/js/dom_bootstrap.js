@@ -55,6 +55,8 @@
   const nativeGetTextContent = globalThis.__omoikane_get_text_content;
   const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
   const nativeCreateElementNS = globalThis.__omoikane_create_element_ns;
+  const nativeCreateCdataSection = globalThis.__omoikane_create_cdata_section;
+  const nativeSerializeXml = globalThis.__omoikane_serialize_xml;
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
@@ -87,6 +89,8 @@
   delete globalThis.__omoikane_node_is_html_element;
   delete globalThis.__omoikane_attribute_records;
   delete globalThis.__omoikane_create_element_ns;
+  delete globalThis.__omoikane_create_cdata_section;
+  delete globalThis.__omoikane_serialize_xml;
   delete globalThis.__omoikane_set_attribute_ns;
   delete globalThis.__omoikane_remove_attribute_ns;
   delete globalThis.__omoikane_iframe_content_document;
@@ -161,6 +165,7 @@
   const canonicalNodeIds = new WeakMap();
   const wrapperNodeIds = canonicalNodeIds;
   const canonicalCdataNodes = new WeakMap();
+  const attributeNodeStates = new WeakMap();
   const canonicalCharacterDataOverrides = new WeakMap();
   const wrapperLocalNames = new WeakMap();
   const ownerDocumentIds = new WeakMap();
@@ -436,6 +441,7 @@
       return nativeShadowHost(id) === null ? DocumentFragment : ShadowRoot;
     }
     if (nodeType === 7) return ProcessingInstruction;
+    if (nodeType === 4) return CDATASection;
     if (nodeType === 3) return Text;
     if (nodeType === 8) return Comment;
     if (nodeType === 10) return DocumentType;
@@ -468,6 +474,10 @@
     let node;
     if (interfaceType === ShadowRoot) {
       node = new ShadowRoot(id, SHADOW_ROOT_CONSTRUCTION);
+    } else if (interfaceType === Document) {
+      node = new Document(id, DOCUMENT_CONSTRUCTION);
+    } else if (interfaceType === DocumentFragment) {
+      node = new DocumentFragment(id, DOCUMENT_FRAGMENT_CONSTRUCTION);
     } else {
       node = new interfaceType(id);
     }
@@ -702,7 +712,7 @@
             canonicalCharacterData(rightId, rightNode)) {
         return false;
       }
-    } else if ((nodeType === 3 || nodeType === 8) &&
+    } else if ((nodeType === 3 || nodeType === 4 || nodeType === 8) &&
                canonicalCharacterData(leftId, leftNode) !==
                  canonicalCharacterData(rightId, rightNode)) {
       return false;
@@ -958,6 +968,9 @@
   const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
   const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
   const SHADOW_ROOT_CONSTRUCTION = {};
+  const DOCUMENT_CONSTRUCTION = {};
+  const DOCUMENT_FRAGMENT_CONSTRUCTION = {};
+  const ATTR_CONSTRUCTION = {};
 
   class Event {
     constructor(type, init = {}) {
@@ -2367,7 +2380,7 @@
       __omoikane_set_text_content(this.__id, text);
       const canonicalId = canonicalNodeId(this);
       const canonicalType = canonicalId === undefined ? undefined : nativeNodeType(canonicalId);
-      if (canonicalType === 3 || canonicalType === 7 || canonicalType === 8) {
+      if (canonicalType === 3 || canonicalType === 4 || canonicalType === 7 || canonicalType === 8) {
         // Keep the private WTF-16 override coherent even when callers invoke
         // this base-class descriptor setter directly on CharacterData.
         safeWeakMapSet(canonicalCharacterDataOverrides, this, text);
@@ -2762,13 +2775,13 @@
 
     get nodeValue() {
       const t = this.nodeType;
-      if (t === 3 || t === 7 || t === 8) return this.textContent;
+      if (t === 3 || t === 4 || t === 7 || t === 8) return this.textContent;
       return null;
     }
 
     set nodeValue(value) {
       const t = this.nodeType;
-      if (t === 3 || t === 7 || t === 8) this.data = value;
+      if (t === 3 || t === 4 || t === 7 || t === 8) this.data = value;
     }
 
     replaceChild(newChild, oldChild) {
@@ -3773,6 +3786,50 @@
   class ProcessingInstruction extends CharacterData {
     get target() { return this.nodeName; }
   }
+  class Attr extends Node {
+    constructor(construction, state) {
+      if (construction !== ATTR_CONSTRUCTION) {
+        throw new TypeError("Illegal constructor");
+      }
+      super(null);
+      safeWeakMapSet(attributeNodeStates, this, state);
+    }
+
+    get name() { return safeWeakMapGet(attributeNodeStates, this).name; }
+    get nodeName() { return this.name; }
+    get nodeType() { return 2; }
+    get localName() { return safeWeakMapGet(attributeNodeStates, this).localName; }
+    get namespaceURI() { return safeWeakMapGet(attributeNodeStates, this).namespace; }
+    get prefix() { return safeWeakMapGet(attributeNodeStates, this).prefix; }
+    get ownerDocument() { return safeWeakMapGet(attributeNodeStates, this).ownerDocument; }
+    get ownerElement() { return null; }
+    get specified() { return true; }
+    get value() { return safeWeakMapGet(attributeNodeStates, this).value; }
+    set value(value) { safeWeakMapGet(attributeNodeStates, this).value = String(value); }
+    get nodeValue() { return this.value; }
+    set nodeValue(value) { this.value = value == null ? "" : value; }
+    get textContent() { return this.value; }
+    set textContent(value) { this.nodeValue = value; }
+    get parentNode() { return null; }
+    get parentElement() { return null; }
+    get childNodes() { return makeNodeList([]); }
+    get firstChild() { return null; }
+    get lastChild() { return null; }
+    get nextSibling() { return null; }
+    get previousSibling() { return null; }
+    get isConnected() { return false; }
+    cloneNode() {
+      const state = safeWeakMapGet(attributeNodeStates, this);
+      return new Attr(ATTR_CONSTRUCTION, { ...state });
+    }
+    isSameNode(other) { return this === other; }
+    isEqualNode(other) {
+      return safeWeakMapHas(attributeNodeStates, other)
+        && other.namespaceURI === this.namespaceURI
+        && other.localName === this.localName
+        && other.value === this.value;
+    }
+  }
 
   distributePrototypeMembers(Node.prototype, [Element.prototype, Text.prototype], [
     "assignedSlot",
@@ -4616,6 +4673,17 @@
   }
 
   class Document extends Node {
+    constructor(id, construction) {
+      if (construction === DOCUMENT_CONSTRUCTION) {
+        super(id);
+        return;
+      }
+      const created = wrapNode(__omoikane_create_document());
+      created.__contentType = "application/xml";
+      created.__documentURL = "about:blank";
+      return created;
+    }
+
     // Stamps a freshly created node with this document as its owner so
     // `node.ownerDocument` resolves to this document even while the node is
     // detached (before it is inserted into any tree). Once the node is inserted,
@@ -4648,7 +4716,10 @@
           "InvalidCharacterError"
         );
       }
-      const element = this.__own(wrapNode(__omoikane_create_element(name)));
+      const nativeId = this.contentType === "text/html"
+        ? __omoikane_create_element(name)
+        : nativeCreateElementNS(null, name);
+      const element = this.__own(wrapNode(nativeId));
       if (element.localName.toLowerCase() === "script") {
         __omoikane_mark_inserted_script(element.__id);
       }
@@ -4672,6 +4743,41 @@
         if (registry) considerCustomElement(registry, node);
       }
       return node;
+    }
+
+    createAttribute(localName) {
+      if (arguments.length < 1) throw new TypeError("createAttribute requires 1 argument");
+      let name = String(localName);
+      if (!isValidXmlName(name)) {
+        throw new DOMException(
+          "The attribute name provided ('" + name + "') is not a valid name.",
+          "InvalidCharacterError"
+        );
+      }
+      if (this.contentType === "text/html") name = asciiLowercase(name);
+      return new Attr(ATTR_CONSTRUCTION, {
+        name,
+        namespace: null,
+        prefix: null,
+        localName: name,
+        value: "",
+        ownerDocument: this,
+      });
+    }
+
+    createAttributeNS(namespace, qualifiedName) {
+      if (arguments.length < 2) throw new TypeError("createAttributeNS requires 2 arguments");
+      const ns = namespace == null || namespace === "" ? null : String(namespace);
+      const name = String(qualifiedName);
+      const info = validateAndExtractNS(ns, name);
+      return new Attr(ATTR_CONSTRUCTION, {
+        name,
+        namespace: info.namespace,
+        prefix: info.prefix,
+        localName: info.localName,
+        value: "",
+        ownerDocument: this,
+      });
     }
 
     importNode(node, deep = false) {
@@ -4769,14 +4875,16 @@
     createCDATASection(data) {
       if (arguments.length < 1) throw new TypeError("createCDATASection requires 1 argument");
       const text = String(data);
+      if (this.contentType === "text/html") {
+        throw new DOMException(
+          "CDATA sections are not supported in HTML documents.",
+          "NotSupportedError"
+        );
+      }
       if (text.includes("]]>")) {
         throw new DOMException("CDATA data must not contain ]]>", "InvalidCharacterError");
       }
-      const node = this.createTextNode(text);
-      Object.setPrototypeOf(node, CDATASection.prototype);
-      Object.defineProperty(node, "__cdataSection", { value: true, configurable: true });
-      markCanonicalCdata(node);
-      return node;
+      return this.__own(wrapNode(nativeCreateCdataSection(text)));
     }
 
     createProcessingInstruction(target, data) {
@@ -5071,6 +5179,14 @@
   }
 
   class DocumentFragment extends Node {
+    constructor(id, construction) {
+      if (construction === DOCUMENT_FRAGMENT_CONSTRUCTION) {
+        super(id);
+        return;
+      }
+      return wrapNode(__omoikane_create_document_fragment());
+    }
+
     getElementById(id) { return findElementById(this, id); }
   }
 
@@ -5079,7 +5195,7 @@
       if (construction !== SHADOW_ROOT_CONSTRUCTION) {
         throw new TypeError("Illegal constructor");
       }
-      super(id);
+      super(id, DOCUMENT_FRAGMENT_CONSTRUCTION);
     }
     get host() { return wrapNode(__omoikane_shadow_host(this.__id)); }
     get mode() { return __omoikane_shadow_mode(this.__id); }
@@ -11206,6 +11322,7 @@
   globalThis.CDATASection = CDATASection;
   globalThis.Comment = Comment;
   globalThis.ProcessingInstruction = ProcessingInstruction;
+  globalThis.Attr = Attr;
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.ShadowRoot = ShadowRoot;
@@ -14812,6 +14929,30 @@
       error.__documentURL = "about:blank";
       error.documentElement.textContent = "XML parse error";
       return error;
+    }
+  };
+
+  const xmlSerializerInstances = new WeakSet();
+  globalThis.XMLSerializer = class XMLSerializer {
+    constructor() {
+      safeWeakSetAdd(xmlSerializerInstances, this);
+    }
+
+    serializeToString(root) {
+      if (!safeWeakSetHas(xmlSerializerInstances, this)) {
+        throw new TypeError("Illegal invocation");
+      }
+      if (arguments.length < 1) {
+        throw new TypeError("serializeToString requires 1 argument");
+      }
+      if (safeWeakMapHas(attributeNodeStates, root)) {
+        return "";
+      }
+      const id = canonicalNodeId(root);
+      if (id === undefined) {
+        throw new TypeError("serializeToString requires a Node");
+      }
+      return nativeSerializeXml(id);
     }
   };
 

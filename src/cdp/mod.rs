@@ -3384,6 +3384,9 @@ fn percent_decode(input: &str) -> String {
 }
 
 fn cdp_node_type(node: &NodeHandle) -> u8 {
+    if node.is_cdata_section() {
+        return 4;
+    }
     match node.node_type() {
         NodeType::Element => 1,
         NodeType::Text => 3,
@@ -3419,6 +3422,9 @@ fn serialize_outer_html(node: &NodeHandle) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!("<{tag_name}{attributes}>{children}</{tag_name}>")
+        }
+        NodeType::Text if node.is_cdata_section() => {
+            format!("<![CDATA[{}]]>", node.data().unwrap_or_default())
         }
         NodeType::Text => escape_html(&node.data().unwrap_or_default()),
         NodeType::Comment => format!("<!--{}-->", node.data().unwrap_or_default()),
@@ -5405,6 +5411,15 @@ mod tests {
             ])
         );
         assert_eq!(html["outerHTML"], "<main id=\"app\"><p>Hello</p></main>");
+    }
+
+    #[test]
+    fn cdp_preserves_cdata_identity_and_markup() {
+        let cdata = NodeHandle::cdata_section("<raw>&data");
+
+        assert_eq!(cdp_node_type(&cdata), 4);
+        assert_eq!(cdata.node_name(), "#cdata-section");
+        assert_eq!(serialize_outer_html(&cdata), "<![CDATA[<raw>&data]]>");
     }
 
     #[test]
