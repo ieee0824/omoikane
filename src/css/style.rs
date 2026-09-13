@@ -61,6 +61,12 @@ impl ComputedStyle {
         &self.properties
     }
 
+    /// Replaces a computed property with a layout-resolved CSS pixel value.
+    pub(crate) fn set_resolved_px(&mut self, name: &str, value: f32) {
+        self.properties
+            .insert(name.to_string(), ComputedValue::Px(value));
+    }
+
     pub(crate) fn set_paint_value(&mut self, name: &str, value: String) {
         if name.starts_with("background-position-") {
             let computed = super::parse_style_attribute(&format!("{name}: {value}"))

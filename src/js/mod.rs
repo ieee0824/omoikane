@@ -9981,6 +9981,127 @@ fn compute_replaced_fragment_metrics(fragments: Vec<InlineFragmentGeometry>) -> 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LayoutUsedSize {
+    content_width: f32,
+    content_height: f32,
+    border_width: f32,
+    border_height: f32,
+}
+
+/// Returns the untransformed used box size for CSSOM resolved values. Ordinary
+/// block boxes store it directly in the layout tree. Inline replaced elements
+/// store it in an inline fragment; non-replaced inline fragments are excluded
+/// because the CSS `width` and `height` properties do not apply to them.
+fn layout_used_size(root: &LayoutBox, node: &NodeHandle) -> Option<LayoutUsedSize> {
+    let mut fragments = Vec::new();
+    if let Some((layout, _)) =
+        find_layout_box_with_transform(root, node, AffineTransform::identity(), &mut fragments)
+    {
+        let content = layout.dimensions.content;
+        let padding = layout.dimensions.padding;
+        let border = layout.dimensions.border;
+        return Some(LayoutUsedSize {
+            content_width: content.width,
+            content_height: content.height,
+            border_width: content.width + padding.left + padding.right + border.left + border.right,
+            border_height: content.height
+                + padding.top
+                + padding.bottom
+                + border.top
+                + border.bottom,
+        });
+    }
+
+    let first = fragments.first()?;
+    if first.non_replaced {
+        return None;
+    }
+    let padding = edge_sizes(&first.style, "padding");
+    let border = edge_sizes(&first.style, "border");
+    Some(LayoutUsedSize {
+        content_width: (first.rect.width
+            - padding.left
+            - padding.right
+            - border.left
+            - border.right)
+            .max(0.0),
+        content_height: (first.rect.height
+            - padding.top
+            - padding.bottom
+            - border.top
+            - border.bottom)
+            .max(0.0),
+        border_width: first.rect.width,
+        border_height: first.rect.height,
+    })
+}
+
+/// Resolves the layout tree belonging to `document` and returns `node`'s used
+/// size. The top-level document reuses its cached layout. A child browsing
+/// context is laid out against its own viewport, stylesheet resolver, resource
+/// base and web-font registry instead of reading the main tree.
+fn resolved_layout_size(
+    state: &mut HostState,
+    document: &NodeHandle,
+    node: &NodeHandle,
+) -> Option<LayoutUsedSize> {
+    let document_id = document.identity();
+    if document_id == state.document.identity() {
+        state.ensure_layout();
+        return state
+            .layout_root
+            .as_ref()
+            .and_then(|root| layout_used_size(root, node));
+    }
+
+    let viewport = state.viewport_for_document(document);
+    state.ensure_style_resolver(document);
+    let base = crate::paint::stylesheet::extract_document_base_url(
+        document,
+        state.base_url_for_document(document_id).as_ref(),
+    );
+    let animation_time = state.event_loop.rendering_time_ms() as u64;
+    let layout = state
+        .document_styles
+        .get_mut(&document_id)
+        .and_then(|entry| {
+            let resolver = entry.resolver.as_mut()?;
+            crate::layout::with_layout_fonts(
+                crate::paint::text::load_text_fonts(),
+                Some(entry.web_fonts.clone()),
+                || {
+                    crate::layout::with_image_base_url(base, || {
+                        crate::layout::with_image_animation_time(animation_time, || {
+                            crate::layout::layout_tree(document, resolver, viewport)
+                        })
+                    })
+                },
+            )
+        });
+    layout
+        .as_ref()
+        .and_then(|root| layout_used_size(root, node))
+}
+
+fn resolved_width_applies(style: &ComputedStyle) -> bool {
+    !matches!(
+        style.get("display"),
+        Some(ComputedValue::Keyword(display))
+            if display.eq_ignore_ascii_case("table-row")
+                || display.eq_ignore_ascii_case("table-row-group")
+    )
+}
+
+fn resolved_height_applies(style: &ComputedStyle) -> bool {
+    !matches!(
+        style.get("display"),
+        Some(ComputedValue::Keyword(display))
+            if display.eq_ignore_ascii_case("table-column")
+                || display.eq_ignore_ascii_case("table-column-group")
+    )
+}
+
 /// `__omoikane_computed_style(nodeId)` -> JSON string of computed CSS
 /// properties (kebab-case name to CSS string value). Forces a synchronous
 /// style recompute if the DOM changed since the last query.
@@ -10008,32 +10129,39 @@ fn computed_style_native(
         let document_id = document.identity();
         let json = {
             let mut state = state.borrow_mut();
-            state.ensure_style_resolver(&document);
-            let needs_container_layout = state
-                .document_styles
-                .get(&document_id)
-                .and_then(|entry| entry.resolver.as_ref())
-                .is_some_and(StyleResolver::has_container_queries);
-            if needs_container_layout {
-                if document_id == state.document.identity() {
-                    state.ensure_layout();
-                } else {
-                    let viewport = state.viewport_for_document(&document);
-                    let _ = state
-                        .document_styles
-                        .get_mut(&document_id)
-                        .and_then(|entry| entry.resolver.as_mut())
-                        .and_then(|resolver| {
-                            crate::layout::layout_tree(&document, resolver, viewport)
-                        });
-                }
-            }
+            let used_size = resolved_layout_size(&mut state, &document, &node);
             match state
                 .document_styles
                 .get_mut(&document_id)
                 .and_then(|entry| entry.resolver.as_mut())
             {
-                Some(resolver) => serialize_computed_style(&resolver.computed_style(&node)),
+                Some(resolver) => {
+                    let mut style = resolver.computed_style(&node);
+                    if let Some(used_size) = used_size {
+                        let border_box = crate::layout::is_border_box(&style);
+                        if resolved_width_applies(&style) {
+                            style.set_resolved_px(
+                                "width",
+                                if border_box {
+                                    used_size.border_width
+                                } else {
+                                    used_size.content_width
+                                },
+                            );
+                        }
+                        if resolved_height_applies(&style) {
+                            style.set_resolved_px(
+                                "height",
+                                if border_box {
+                                    used_size.border_height
+                                } else {
+                                    used_size.content_height
+                                },
+                            );
+                        }
+                    }
+                    serialize_computed_style(&style)
+                }
                 None => "{}".to_string(),
             }
         };
@@ -31484,7 +31612,8 @@ b</textarea></form>"#,
         assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(target).width"),
-            "calc(5px + 25%)"
+            "55px",
+            "CSSOM resolves the interpolated calc() width against the 200px containing block"
         );
         assert_eq!(
             runtime.eval("target.offsetWidth").unwrap().as_number(),
@@ -34132,6 +34261,135 @@ b</textarea></form>"#,
             result,
             r#"{"before":["10px","11px"],"afterInline":["20px","20px","ready",true,"--live-token","--live-token",true,true],"afterRule":"22px","afterWrite":"22px","writeAccepted":false}"#,
             "a retained computed-style declaration must expose every later style mutation"
+        );
+    }
+
+    #[test]
+    fn get_computed_style_resolves_layout_used_width_and_height() {
+        let html = r#"<html><head><style>
+            * { margin: 0; }
+            #content-parent { width: 120px; }
+            #content {
+                width: auto;
+                height: auto;
+                padding: 5px 7px;
+                border: 2px solid black;
+                transform: scale(2);
+            }
+            #content > div { width: 80px; height: 30px; }
+            #border-parent { width: 150px; }
+            #border {
+                box-sizing: border-box;
+                width: auto;
+                height: auto;
+                padding: 5px 7px;
+                border: 2px solid black;
+            }
+            #border > div { height: 30px; }
+            #inline { display: inline; width: min-content; height: auto; }
+            #gone { display: none; width: min-content; height: auto; }
+        </style></head><body>
+            <div id="content-parent"><div id="content"><div id="content-child"></div></div></div>
+            <div id="border-parent"><div id="border"><div></div></div></div>
+            <span id="inline">text</span>
+            <div id="gone"></div>
+        </body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const content = document.getElementById("content");
+                const parent = document.getElementById("content-parent");
+                const child = document.getElementById("content-child");
+                const live = getComputedStyle(content);
+                const before = [live.width, live.height];
+                const rectWidth = content.getBoundingClientRect().width;
+                parent.style.width = "130px";
+                child.style.height = "40px";
+                const after = [live.width, live.height];
+                const border = getComputedStyle(document.getElementById("border"));
+                const inline = getComputedStyle(document.getElementById("inline"));
+                const gone = getComputedStyle(document.getElementById("gone"));
+                return JSON.stringify({
+                    before,
+                    rectWidth,
+                    after,
+                    border: [border.width, border.height],
+                    inline: [inline.width, inline.height],
+                    gone: [gone.width, gone.height],
+                });
+            })()"#,
+        );
+
+        assert_eq!(
+            result,
+            r#"{"before":["102px","30px"],"rectWidth":240,"after":["112px","40px"],"border":["150px","44px"],"inline":["min-content","auto"],"gone":["min-content","auto"]}"#,
+        );
+    }
+
+    #[test]
+    fn get_computed_style_uses_replaced_shadow_and_iframe_layout_sizes() {
+        let html = r#"<html><head><style>
+            * { margin: 0; }
+            #image {
+                box-sizing: border-box;
+                width: auto;
+                height: auto;
+                padding: 10px;
+                border: 5px solid black;
+            }
+            #host { width: 90px; }
+            iframe { width: 120px; height: 80px; }
+        </style></head><body>
+            <img id="image" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AP8AAP8FAAH/+lyI0QAAAABJRU5ErkJggg==">
+            <div id="host"></div>
+            <iframe id="frame"></iframe>
+        </body></html>"#;
+        let mut runtime = runtime_from_html(html);
+
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const imageStyle = getComputedStyle(document.getElementById("image"));
+
+                const host = document.getElementById("host");
+                const root = host.attachShadow({ mode: "open" });
+                const shadowTarget = document.createElement("div");
+                shadowTarget.style.cssText = "width: auto; height: auto";
+                const shadowChild = document.createElement("div");
+                shadowChild.style.height = "17px";
+                shadowTarget.appendChild(shadowChild);
+                root.appendChild(shadowTarget);
+                const shadowStyle = getComputedStyle(shadowTarget);
+
+                const sub = document.getElementById("frame").contentDocument;
+                const subStyle = sub.createElement("style");
+                subStyle.textContent = "* { margin: 0 } #target { width: auto; height: auto; padding: 3px; border: 2px solid black } #child { height: 20px }";
+                sub.head.appendChild(subStyle);
+                const target = sub.createElement("div");
+                target.id = "target";
+                const child = sub.createElement("div");
+                child.id = "child";
+                target.appendChild(child);
+                sub.body.appendChild(target);
+                const liveSubStyle = getComputedStyle(target);
+                const subBefore = [liveSubStyle.width, liveSubStyle.height];
+                child.style.height = "25px";
+                const subAfter = [liveSubStyle.width, liveSubStyle.height];
+
+                return JSON.stringify({
+                    image: [imageStyle.width, imageStyle.height],
+                    shadow: [shadowStyle.width, shadowStyle.height],
+                    subBefore,
+                    subAfter,
+                });
+            })()"#,
+        );
+
+        assert_eq!(
+            result,
+            r#"{"image":["31px","31px"],"shadow":["90px","17px"],"subBefore":["110px","20px"],"subAfter":["110px","25px"]}"#,
         );
     }
 
