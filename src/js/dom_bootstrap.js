@@ -29,6 +29,10 @@
   const nativeCryptoRandom = globalThis.__omoikane_crypto_random;
   const nativeCryptoDigest = globalThis.__omoikane_crypto_digest;
   const nativeCryptoHmac = globalThis.__omoikane_crypto_hmac;
+  const nativeCompressionCreate = globalThis.__omoikane_compression_create;
+  const nativeCompressionWrite = globalThis.__omoikane_compression_write;
+  const nativeCompressionFinish = globalThis.__omoikane_compression_finish;
+  const nativeCompressionAbort = globalThis.__omoikane_compression_abort;
   const nativeNodeIsHtmlElement = globalThis.__omoikane_node_is_html_element;
   // Node equality is a platform operation. Capture every host hook it needs
   // before page code can replace the public bootstrap globals.
@@ -86,6 +90,10 @@
   delete globalThis.__omoikane_crypto_random;
   delete globalThis.__omoikane_crypto_digest;
   delete globalThis.__omoikane_crypto_hmac;
+  delete globalThis.__omoikane_compression_create;
+  delete globalThis.__omoikane_compression_write;
+  delete globalThis.__omoikane_compression_finish;
+  delete globalThis.__omoikane_compression_abort;
   delete globalThis.__omoikane_node_is_html_element;
   delete globalThis.__omoikane_attribute_records;
   delete globalThis.__omoikane_create_element_ns;
@@ -15480,7 +15488,10 @@
       const stream = this._stream;
       if (stream._closed || stream._errorSet) throw new TypeError("ReadableStream is closed");
       const waiter = stream._waiters.shift();
-      if (waiter) waiter.resolve({ value: chunk, done: false });
+      if (waiter) {
+        waiter.resolve({ value: chunk, done: false });
+        if (typeof stream._onDequeue === "function") stream._onDequeue();
+      }
       else stream._queue.push(chunk);
     }
     close() {
@@ -15510,7 +15521,9 @@
       }
       for (const waiter of stream._waiters.splice(0)) waiter.reject(reason);
     }
-    get desiredSize() { return this._stream._closed || this._stream._errorSet ? 0 : 1; }
+    get desiredSize() {
+      return this._stream._closed || this._stream._errorSet ? 0 : 1 - this._stream._queue.length;
+    }
   }
   class ReadableStreamDefaultReader {
     constructor(stream) {
@@ -15528,7 +15541,11 @@
       const stream = this._stream;
       if (!stream) return Promise.reject(new TypeError("Reader has no stream"));
       stream._markDisturbed();
-      if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
+      if (stream._queue.length) {
+        const value = stream._queue.shift();
+        if (typeof stream._onDequeue === "function") stream._onDequeue();
+        return Promise.resolve({ value, done: false });
+      }
       if (stream._errorSet) return Promise.reject(stream._error);
       if (stream._closed) return Promise.resolve({ value: undefined, done: true });
       return new Promise((resolve, reject) => stream._waiters.push({ resolve, reject }));
@@ -15556,6 +15573,7 @@
       this._source = underlyingSource || {};
       this._closedResolve = null; this._closedReject = null;
       this._disturbed = false; this._onDisturb = null; this._cancelled = false;
+      this._onDequeue = null;
       this._controller = new ReadableStreamDefaultController(this);
       if (typeof this._source.start === "function") {
         try {
@@ -15600,7 +15618,12 @@
     pipeThrough(pair) { this.pipeTo(pair.writable); return pair.readable; }
   }
   class WritableStreamDefaultWriter {
-    constructor(stream) { this._stream = stream; this.closed = stream._closedPromise; this.ready = Promise.resolve(); }
+    constructor(stream) { this._stream = stream; this.closed = stream._closedPromise; }
+    get ready() {
+      return this._stream
+        ? this._stream._tail.then(() => undefined)
+        : Promise.reject(new TypeError("Writer has no stream"));
+    }
     write(chunk) { return this._stream._write(chunk); }
     close() { return this._stream._close(); }
     abort(reason) { return this._stream.abort(reason); }
@@ -15608,43 +15631,157 @@
   }
   class WritableStream {
     constructor(underlyingSink = {}) {
-      this._sink = underlyingSink || {}; this._writer = null; this._closed = false;
-      this._closedPromise = new Promise(resolve => { this._closedResolve = resolve; });
-      if (typeof this._sink.start === "function") Promise.resolve(this._sink.start(this));
+      this._sink = underlyingSink || {}; this._writer = null; this._state = "writable";
+      this._closed = false;
+      this._storedError = undefined; this._tail = Promise.resolve();
+      this._closedPromise = new Promise((resolve, reject) => {
+        this._closedResolve = resolve; this._closedReject = reject;
+      });
+      if (typeof this._sink.start === "function") {
+        this._tail = Promise.resolve().then(() => this._sink.start(this));
+        this._tail.catch(error => this._fail(error));
+      }
     }
     get locked() { return this._writer !== null; }
     getWriter() { if (this.locked) throw new TypeError("WritableStream is locked"); this._writer = new WritableStreamDefaultWriter(this); return this._writer; }
-    _write(chunk) { if (this._closed) return Promise.reject(new TypeError("WritableStream is closed")); return Promise.resolve(typeof this._sink.write === "function" ? this._sink.write(chunk, this) : undefined); }
-    _close() { this._closed = true; const result = typeof this._sink.close === "function" ? this._sink.close() : undefined; this._closedResolve(); return Promise.resolve(result); }
-    abort(reason) { this._closed = true; this._closedResolve(); return Promise.resolve(typeof this._sink.abort === "function" ? this._sink.abort(reason) : undefined); }
+    _fail(reason) {
+      if (this._state === "closed" || this._state === "errored") return;
+      this._state = "errored"; this._storedError = reason; this._closed = true;
+      this._closedReject(reason);
+    }
+    _write(chunk) {
+      if (this._state !== "writable") {
+        return Promise.reject(this._state === "errored" ? this._storedError : new TypeError("WritableStream is closing"));
+      }
+      const operation = this._tail.then(() => {
+        if (this._state === "errored") throw this._storedError;
+        return typeof this._sink.write === "function" ? this._sink.write(chunk, this) : undefined;
+      });
+      this._tail = operation;
+      operation.catch(error => this._fail(error));
+      return operation;
+    }
+    _close() {
+      if (this._state !== "writable") {
+        return Promise.reject(this._state === "errored" ? this._storedError : new TypeError("WritableStream is not writable"));
+      }
+      this._state = "closing";
+      this._closed = true;
+      const operation = this._tail.then(() => typeof this._sink.close === "function" ? this._sink.close() : undefined);
+      this._tail = operation;
+      operation.then(() => {
+        if (this._state !== "closing") return;
+        this._state = "closed";
+        this._closedResolve();
+      }, error => this._fail(error));
+      return operation;
+    }
+    abort(reason) {
+      if (this._state === "closed") return Promise.resolve();
+      if (this._state === "errored") return Promise.resolve();
+      this._fail(reason);
+      return Promise.resolve().then(() => typeof this._sink.abort === "function" ? this._sink.abort(reason) : undefined);
+    }
   }
   class TransformStreamSource {
     constructor(owner) { this._owner = owner; }
-    start(controller) { this._owner._readableController = controller; }
+    start(controller) {
+      this._owner._readableController = controller;
+      controller._stream._onDequeue = () => this._owner._releaseBackpressure();
+    }
+    cancel(reason) { return this._owner._cancel(reason); }
   }
   class TransformStreamSink {
     constructor(owner) { this._owner = owner; }
     write(chunk) {
       const owner = this._owner;
-      if (typeof owner._transformer.transform === "function") {
-        return owner._transformer.transform(chunk, owner._readableController);
+      if (owner._cancelled) return Promise.reject(owner._cancelReason);
+      let result;
+      try {
+        if (typeof owner._transformer.transform === "function") {
+          result = owner._transformer.transform(chunk, owner._readableController);
+        } else {
+          owner._readableController.enqueue(chunk);
+        }
+      } catch (error) {
+        owner._readableController.error(error);
+        throw error;
       }
-      owner._readableController.enqueue(chunk);
+      return Promise.resolve(result)
+        .then(() => owner._waitForBackpressure())
+        .catch(error => {
+          owner._readableController.error(error);
+          throw error;
+        });
     }
     close() {
       const owner = this._owner;
-      if (typeof owner._transformer.flush === "function") {
-        owner._transformer.flush(owner._readableController);
+      if (owner._cancelled) return Promise.reject(owner._cancelReason);
+      let result;
+      try {
+        result = typeof owner._transformer.flush === "function"
+          ? owner._transformer.flush(owner._readableController)
+          : undefined;
+      } catch (error) {
+        owner._readableController.error(error);
+        throw error;
       }
-      owner._readableController.close();
+      return Promise.resolve(result)
+        .then(() => owner._waitForBackpressure())
+        .then(() => owner._readableController.close())
+        .catch(error => {
+          owner._readableController.error(error);
+          throw error;
+        });
+    }
+    abort(reason) {
+      const owner = this._owner;
+      owner._cancelled = true;
+      owner._cancelReason = reason;
+      owner._releaseBackpressure();
+      owner._readableController.error(reason);
+      return typeof owner._transformer.abort === "function"
+        ? owner._transformer.abort(reason)
+        : undefined;
     }
   }
   class TransformStream {
     constructor(transformer = {}) {
       this._transformer = transformer || {};
       this._readableController = null;
+      this._backpressureResolve = null;
+      this._cancelled = false;
+      this._cancelReason = undefined;
       this.readable = new ReadableStream(new TransformStreamSource(this));
       this.writable = new WritableStream(new TransformStreamSink(this));
+    }
+    _waitForBackpressure() {
+      if (!this.readable._queue.length || this._cancelled) return undefined;
+      return new Promise(resolve => { this._backpressureResolve = resolve; });
+    }
+    _releaseBackpressure() {
+      if (!this._backpressureResolve) return;
+      const resolve = this._backpressureResolve;
+      this._backpressureResolve = null;
+      resolve();
+    }
+    _cancel(reason) {
+      this._cancelled = true;
+      this._cancelReason = reason === undefined
+        ? new TypeError("TransformStream readable was cancelled")
+        : reason;
+      this._releaseBackpressure();
+      this.writable._fail(this._cancelReason);
+      try {
+        if (typeof this._transformer.cancel === "function") {
+          return this._transformer.cancel(reason);
+        }
+        if (typeof this._transformer.abort === "function") {
+          return this._transformer.abort(reason);
+        }
+      } catch (error) {
+        return Promise.reject(error);
+      }
     }
   }
   globalThis.ReadableStream = ReadableStream;
@@ -15653,6 +15790,119 @@
   globalThis.WritableStream = WritableStream;
   globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
   globalThis.TransformStream = TransformStream;
+
+  const compressionStreamSlots = new WeakMap();
+  const decompressionStreamSlots = new WeakMap();
+
+  function compressionFormat(value) {
+    const format = String(value);
+    if (format !== "gzip" && format !== "deflate") {
+      throw new TypeError("Unsupported compression format");
+    }
+    return format;
+  }
+
+  function compressionChunkView(chunk) {
+    let view;
+    if (chunk instanceof ArrayBuffer) {
+      view = new Uint8Array(chunk);
+    } else if (ArrayBuffer.isView(chunk)) {
+      view = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    } else {
+      throw new TypeError("Compression stream chunks must be BufferSource values");
+    }
+    return view;
+  }
+
+  function createCompressionTransform(operation, format) {
+    const id = nativeCompressionCreate(operation, format);
+    let active = true;
+    const release = () => {
+      if (!active) return;
+      active = false;
+      nativeCompressionAbort(id);
+    };
+    return new TransformStream({
+      transform(chunk, controller) {
+        try {
+          const result = nativeCompressionWrite(id, compressionChunkView(chunk));
+          const output = result[0];
+          if (output.byteLength) controller.enqueue(output);
+          if (result[1] !== null) {
+            active = false;
+            throw new TypeError(String(result[1]));
+          }
+        } catch (error) {
+          release();
+          throw error;
+        }
+      },
+      flush(controller) {
+        try {
+          const output = nativeCompressionFinish(id);
+          active = false;
+          if (output.byteLength) controller.enqueue(output);
+        } catch (error) {
+          release();
+          throw error;
+        }
+      },
+      abort() { release(); },
+      cancel() { release(); },
+    });
+  }
+
+  class CompressionStream {
+    constructor(format) {
+      const stream = createCompressionTransform("compress", compressionFormat(format));
+      compressionStreamSlots.set(this, stream);
+    }
+    get readable() {
+      const stream = compressionStreamSlots.get(this);
+      if (!stream) throw new TypeError("Invalid CompressionStream receiver");
+      return stream.readable;
+    }
+    get writable() {
+      const stream = compressionStreamSlots.get(this);
+      if (!stream) throw new TypeError("Invalid CompressionStream receiver");
+      return stream.writable;
+    }
+    get [Symbol.toStringTag]() { return "CompressionStream"; }
+  }
+
+  class DecompressionStream {
+    constructor(format) {
+      const stream = createCompressionTransform("decompress", compressionFormat(format));
+      decompressionStreamSlots.set(this, stream);
+    }
+    get readable() {
+      const stream = decompressionStreamSlots.get(this);
+      if (!stream) throw new TypeError("Invalid DecompressionStream receiver");
+      return stream.readable;
+    }
+    get writable() {
+      const stream = decompressionStreamSlots.get(this);
+      if (!stream) throw new TypeError("Invalid DecompressionStream receiver");
+      return stream.writable;
+    }
+    get [Symbol.toStringTag]() { return "DecompressionStream"; }
+  }
+
+  for (const constructor of [CompressionStream, DecompressionStream]) {
+    for (const attribute of ["readable", "writable"]) {
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, attribute);
+      Object.defineProperty(constructor.prototype, attribute, { ...descriptor, enumerable: true });
+    }
+  }
+  Object.defineProperty(CompressionStream.prototype, Symbol.toStringTag, {
+    value: "CompressionStream", configurable: true,
+  });
+  Object.defineProperty(DecompressionStream.prototype, Symbol.toStringTag, {
+    value: "DecompressionStream", configurable: true,
+  });
+
+  globalThis.CompressionStream = CompressionStream;
+  globalThis.DecompressionStream = DecompressionStream;
 
   // Body streams are byte streams in the Fetch/File APIs.  The current host
   // keeps response bytes in memory, so one immutable chunk is sufficient while

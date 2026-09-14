@@ -42,6 +42,9 @@ use crate::http::cors::{
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
+mod compression_stream;
+#[cfg(test)]
+mod compression_stream_tests;
 mod document_write;
 #[cfg(test)]
 mod document_write_tests;
@@ -1030,6 +1033,7 @@ struct HostState {
     geolocation_position: Option<GeolocationPositionData>,
     next_geolocation_request_id: u64,
     geolocation_requests: HashMap<u64, GeolocationRequest>,
+    compression_streams: compression_stream::Store,
     http_client: Client,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
@@ -1648,6 +1652,7 @@ impl HostState {
             geolocation_position: None,
             next_geolocation_request_id: 1,
             geolocation_requests: HashMap::new(),
+            compression_streams: compression_stream::Store::new(),
             http_client: Client::new(),
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
@@ -7782,6 +7787,26 @@ fn register_host_bindings(
             js_string!("__omoikane_crypto_digest"),
             2,
             NativeFunction::from_copy_closure(crypto_digest_native),
+        ),
+        (
+            js_string!("__omoikane_compression_create"),
+            2,
+            NativeFunction::from_copy_closure(compression_stream::create_native),
+        ),
+        (
+            js_string!("__omoikane_compression_write"),
+            2,
+            NativeFunction::from_copy_closure(compression_stream::write_native),
+        ),
+        (
+            js_string!("__omoikane_compression_finish"),
+            1,
+            NativeFunction::from_copy_closure(compression_stream::finish_native),
+        ),
+        (
+            js_string!("__omoikane_compression_abort"),
+            1,
+            NativeFunction::from_copy_closure(compression_stream::abort_native),
         ),
         (
             js_string!("__omoikane_crypto_hmac"),
