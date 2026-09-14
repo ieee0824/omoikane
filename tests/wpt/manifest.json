@@ -122,6 +122,8 @@
     { "path": "dom/nodes/MutationObserver-attributes.html" },
     { "path": "dom/nodes/MutationObserver-characterData.html", "known_failure": {
       "status": "TIMEOUT", "reason": "MutationObserver characterData delivery does not complete this WPT", "issue": "#173"
-    } }
+    } },
+    { "path": "html/semantics/popovers/toggleevent-interface.html" },
+    { "path": "html/semantics/popovers/togglePopover.html" }
   ]
 }

@@ -51,11 +51,17 @@
   const nativeNodeIsConnected = globalThis.__omoikane_node_is_connected;
   const nativeNodeIsInclusiveDescendant = globalThis.__omoikane_node_is_inclusive_descendant;
   const nativeNodeHasSlotAncestor = globalThis.__omoikane_node_has_slot_ancestor;
+  const nativeGetPopoverOpen = globalThis.__omoikane_get_popover_open;
+  const nativeSetPopoverOpen = globalThis.__omoikane_set_popover_open;
+  const nativeSetModalDialog = globalThis.__omoikane_set_modal_dialog;
   delete globalThis.__omoikane_get_element_by_id;
   delete globalThis.__omoikane_node_index;
   delete globalThis.__omoikane_node_is_connected;
   delete globalThis.__omoikane_node_is_inclusive_descendant;
   delete globalThis.__omoikane_node_has_slot_ancestor;
+  delete globalThis.__omoikane_get_popover_open;
+  delete globalThis.__omoikane_set_popover_open;
+  delete globalThis.__omoikane_set_modal_dialog;
   const nativeGetTextContent = globalThis.__omoikane_get_text_content;
   const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
   const nativeCreateElementNS = globalThis.__omoikane_create_element_ns;
@@ -1062,6 +1068,21 @@
     }
   }
 
+  class ToggleEvent extends Event {
+    constructor(type, init = {}) {
+      if (arguments.length === 0) throw new TypeError("ToggleEvent requires an event type");
+      init = init ?? {};
+      super(type, init);
+      this.__oldState = init.oldState === undefined ? "" : String(init.oldState);
+      this.__newState = init.newState === undefined ? "" : String(init.newState);
+      this.__source = init.source ?? null;
+    }
+    get oldState() { return this.__oldState; }
+    get newState() { return this.__newState; }
+    get source() { return this.__source; }
+    get [Symbol.toStringTag]() { return "ToggleEvent"; }
+  }
+
   class MessageEvent extends Event {
     constructor(type, init = {}) {
       init = init ?? {};
@@ -1411,7 +1432,7 @@
     if (!node.isConnected) return false;
     if (node.__isDisabledControl && node.__isDisabledControl()) return false;
     if (!isRenderedForFocus(node)) return false;
-    return Boolean(node.__dialogFocusFallback) || hasIntegerTabindex(node) ||
+    return Boolean(node.__dialogFocusFallback || node.__popoverFocusFallback) || hasIntegerTabindex(node) ||
       isInherentlyFocusable(node) || isEditingHost(node);
   }
 
@@ -1656,6 +1677,7 @@
 
   function notifyImplicitRemoval(node) {
     if (!node) return;
+    popoverSubtreeWillBeRemoved(node);
     const parent = internalParentNode(node);
     if (!parent) return;
     const previousSibling = internalPreviousSibling(node);
@@ -2130,6 +2152,8 @@
         ? attr.replace(/[A-Z]/g, letter => letter.toLowerCase())
         : attr;
       notifyCustomElementAttributeChanged(this, callbackName, oldValue, newValue, null);
+      if (callbackName === "popover") popoverAttributeChanged(this, oldValue, newValue);
+      if (callbackName === "popovertarget") clearPopoverTargetOverride(this);
       if (callbackName === "slot" ||
           (callbackName === "name" && this instanceof HTMLSlotElement)) {
         refreshSlotAssignments();
@@ -2470,6 +2494,7 @@
     removeChild(child) {
       const previousSibling = child.previousSibling;
       const nextSibling = child.nextSibling;
+      popoverSubtreeWillBeRemoved(child);
       preRemove(this, child);
       const wasConnected = child.isConnected;
       __omoikane_remove_child(this.__id, child.__id);
@@ -2615,6 +2640,8 @@
           ? attr.replace(/[A-Z]/g, letter => letter.toLowerCase())
           : attr;
         notifyCustomElementAttributeChanged(this, callbackName, oldValue, null, null);
+        if (callbackName === "popover") popoverAttributeChanged(this, oldValue, null);
+        if (callbackName === "popovertarget") clearPopoverTargetOverride(this);
         if (callbackName === "slot" ||
             (callbackName === "name" && this instanceof HTMLSlotElement)) {
           refreshSlotAssignments();
@@ -3143,6 +3170,15 @@
       } catch (_e) {
         type = "";
       }
+      const popoverTarget = popoverTargetElementFor(this);
+      const isPopoverInvoker = isPopoverInvokerControl(this);
+      if (isPopoverInvoker && popoverTarget) {
+        const action = popoverTargetActionFor(this);
+        if (action === "show") popoverTarget.showPopover({ source: this });
+        else if (action === "hide") popoverTarget.hidePopover();
+        else popoverTarget.togglePopover({ source: this });
+        return;
+      }
       const isSubmit =
         (tag === "INPUT" && (type === "submit" || type === "image")) ||
         (tag === "BUTTON" && (type === "submit" || type === ""));
@@ -3537,6 +3573,324 @@
     set draggable(value) {
       this.setAttribute("draggable", value ? "true" : "false");
     }
+
+    get popover() {
+      return popoverType(this);
+    }
+
+    set popover(value) {
+      if (value === null || value === undefined) this.removeAttribute("popover");
+      else this.setAttribute("popover", String(value));
+    }
+
+    showPopover(options = {}) {
+      showPopoverElement(this, options);
+    }
+
+    hidePopover() {
+      hidePopoverElement(this);
+    }
+
+    togglePopover(options = {}) {
+      return togglePopoverElement(this, options);
+    }
+  }
+
+  const popoverData = new WeakMap();
+  const autoPopoversByDocument = new WeakMap();
+  const popoverTargetOverrides = new WeakMap();
+  let lightDismissPointerDown = null;
+
+  function popoverType(element) {
+    if (!(element instanceof HTMLElement) || !element.hasAttribute("popover")) return null;
+    const value = (element.getAttribute("popover") || "").trim().toLowerCase();
+    return value === "" || value === "auto" ? "auto" : "manual";
+  }
+
+  function popoverDataFor(element) {
+    let data = popoverData.get(element);
+    if (!data) {
+      data = {
+        source: null,
+        previouslyFocused: null,
+        topLayerOrder: -1,
+        transition: null,
+        pendingToggle: null,
+      };
+      popoverData.set(element, data);
+    }
+    return data;
+  }
+
+  function isPopoverOpen(element) {
+    return element instanceof HTMLElement && nativeGetPopoverOpen(element.__id);
+  }
+
+  function autoPopoverStack(doc) {
+    let stack = autoPopoversByDocument.get(doc);
+    if (!stack) {
+      stack = [];
+      autoPopoversByDocument.set(doc, stack);
+    }
+    for (let index = stack.length - 1; index >= 0; index--) {
+      const popover = stack[index];
+      if (!popover.isConnected || !isPopoverOpen(popover) || popoverType(popover) !== "auto") {
+        stack.splice(index, 1);
+      }
+    }
+    return stack;
+  }
+
+  function queuePopoverToggle(element, oldState, newState, source) {
+    const data = popoverDataFor(element);
+    if (data.pendingToggle) {
+      data.pendingToggle.newState = newState;
+      data.pendingToggle.source = source;
+      return;
+    }
+    const pending = { oldState, newState, source };
+    data.pendingToggle = pending;
+    setTimeout(() => {
+      if (data.pendingToggle !== pending) return;
+      data.pendingToggle = null;
+      element.dispatchEvent(new ToggleEvent("toggle", {
+        oldState: pending.oldState,
+        newState: pending.newState,
+        source: pending.source,
+      }));
+    }, 0);
+  }
+
+  function validatePopoverForShow(element) {
+    if (popoverType(element) === null) {
+      throw new DOMException("The element does not have a popover attribute", "NotSupportedError");
+    }
+    if (!element.isConnected || (element instanceof HTMLDialogElement && element.__dialogModal)) {
+      throw new DOMException("The popover is not in a valid document state", "InvalidStateError");
+    }
+  }
+
+  function popoverContainsCandidate(popover, element, source) {
+    if (popover === element || popover.contains(element)) return true;
+    if (source && (popover === source || popover.contains(source))) return true;
+    let invoker = source;
+    const seen = new Set();
+    while (invoker && !seen.has(invoker)) {
+      seen.add(invoker);
+      const owner = autoPopoverStack(popover.ownerDocument).find(candidate =>
+        candidate === invoker || candidate.contains(invoker)
+      );
+      if (!owner) break;
+      if (owner === popover) return true;
+      invoker = popoverDataFor(owner).source;
+    }
+    return false;
+  }
+
+  function closeUnrelatedAutoPopovers(element, source) {
+    const stack = autoPopoverStack(element.ownerDocument);
+    let keepThrough = -1;
+    for (let index = 0; index < stack.length; index++) {
+      if (popoverContainsCandidate(stack[index], element, source)) keepThrough = index;
+    }
+    for (let index = stack.length - 1; index > keepThrough; index--) {
+      hidePopoverInternal(stack[index], { restoreFocus: true });
+    }
+  }
+
+  function hideAutoDescendants(element) {
+    const doc = element.ownerDocument;
+    if (!doc) return;
+    const stack = autoPopoverStack(doc);
+    for (let index = stack.length - 1; index >= 0; index--) {
+      const candidate = stack[index];
+      if (candidate === element) continue;
+      const source = popoverDataFor(candidate).source;
+      if (element.contains(candidate) || (source && element.contains(source))) {
+        hidePopoverInternal(candidate, { restoreFocus: true });
+      }
+    }
+  }
+
+  function hideAllAutoPopovers(doc) {
+    const stack = autoPopoverStack(doc);
+    for (let index = stack.length - 1; index >= 0; index--) {
+      hidePopoverInternal(stack[index], { restoreFocus: true });
+    }
+  }
+
+  function nearestInclusiveAutoPopover(node, doc) {
+    const stack = autoPopoverStack(doc);
+    let invoked = null;
+    for (let candidate = node; candidate instanceof Element; candidate = candidate.parentElement) {
+      if (!isPopoverInvokerControl(candidate)) continue;
+      invoked = popoverTargetElementFor(candidate);
+      if (invoked) break;
+    }
+    for (let index = stack.length - 1; index >= 0; index--) {
+      const popover = stack[index];
+      const source = popoverDataFor(popover).source;
+      if ((node instanceof Node && (popover === node || popover.contains(node))) ||
+          invoked === popover || (source && (source === node || source.contains(node)))) {
+        return popover;
+      }
+    }
+    return null;
+  }
+
+  function lightDismissAutoPopovers(doc, boundary) {
+    const stack = autoPopoverStack(doc);
+    const boundaryIndex = boundary ? stack.indexOf(boundary) : -1;
+    for (let index = stack.length - 1; index > boundaryIndex; index--) {
+      hidePopoverInternal(stack[index], { restoreFocus: true });
+    }
+  }
+
+  function focusPopover(element) {
+    let target = element.hasAttribute("autofocus") ? element : null;
+    function visit(node) {
+      for (const child of node.childNodes || []) {
+        if (target) return;
+        if (!(child instanceof Element)) continue;
+        if (child.hasAttribute("autofocus") && canBeFocused(child)) {
+          target = child;
+          return;
+        }
+        if (popoverType(child) === null) visit(child);
+      }
+    }
+    if (!target) visit(element);
+    if (!target) return;
+    if (target === element && !canBeFocused(element)) {
+      element.__popoverFocusFallback = true;
+      try { element.focus(); }
+      finally { element.__popoverFocusFallback = false; }
+    } else {
+      target.focus();
+    }
+  }
+
+  function showPopoverElement(element, options = {}) {
+    validatePopoverForShow(element);
+    if (isPopoverOpen(element)) return;
+    const data = popoverDataFor(element);
+    if (data.transition) return;
+    const source = options && options.source instanceof Element ? options.source : null;
+    data.transition = "show";
+    try {
+      const before = new ToggleEvent("beforetoggle", {
+        cancelable: true,
+        oldState: "closed",
+        newState: "open",
+        source,
+      });
+      if (!element.dispatchEvent(before)) return;
+      validatePopoverForShow(element);
+      if (isPopoverOpen(element)) return;
+      if (popoverType(element) === "auto") closeUnrelatedAutoPopovers(element, source);
+      data.source = source;
+      data.previouslyFocused = focusedElementOf(element.ownerDocument);
+      data.topLayerOrder = nativeSetPopoverOpen(element.__id, true);
+      if (popoverType(element) === "auto") autoPopoverStack(element.ownerDocument).push(element);
+      focusPopover(element);
+      queuePopoverToggle(element, "closed", "open", source);
+    } finally {
+      data.transition = null;
+    }
+  }
+
+  function hidePopoverInternal(element, options = {}) {
+    if (!isPopoverOpen(element)) return;
+    const data = popoverDataFor(element);
+    if (data.transition === "hide") return;
+    hideAutoDescendants(element);
+    data.transition = "hide";
+    try {
+      if (options.fireBeforeToggle !== false) {
+        element.dispatchEvent(new ToggleEvent("beforetoggle", {
+          oldState: "open",
+          newState: "closed",
+          source: null,
+        }));
+      }
+      const doc = element.ownerDocument;
+      const focused = doc ? focusedElementOf(doc) : null;
+      nativeSetPopoverOpen(element.__id, false);
+      const stack = doc ? autoPopoverStack(doc) : [];
+      const index = stack.indexOf(element);
+      if (index >= 0) stack.splice(index, 1);
+      queuePopoverToggle(element, "open", "closed", null);
+      const previous = data.previouslyFocused;
+      data.previouslyFocused = null;
+      data.source = null;
+      data.topLayerOrder = -1;
+      if (options.restoreFocus !== false && focused && element.contains(focused) &&
+          previous && canBeFocused(previous)) {
+        previous.focus();
+      }
+    } finally {
+      data.transition = null;
+    }
+  }
+
+  function hidePopoverElement(element) {
+    if (popoverType(element) === null) {
+      throw new DOMException("The element does not have a popover attribute", "NotSupportedError");
+    }
+    if (!isPopoverOpen(element)) return;
+    if (!element.isConnected) {
+      throw new DOMException("The popover is disconnected", "InvalidStateError");
+    }
+    hidePopoverInternal(element, { restoreFocus: true });
+  }
+
+  function togglePopoverElement(element, options = {}) {
+    if (popoverType(element) === null) {
+      throw new DOMException("The element does not have a popover attribute", "NotSupportedError");
+    }
+    if (!element.isConnected) {
+      throw new DOMException("The popover is disconnected", "InvalidStateError");
+    }
+    const dictionary = typeof options === "boolean" ? { force: options } : (options ?? {});
+    const force = Object.prototype.hasOwnProperty.call(dictionary, "force")
+      ? Boolean(dictionary.force) : undefined;
+    if (force === false) {
+      if (isPopoverOpen(element)) hidePopoverElement(element);
+      return false;
+    }
+    if (force === true || !isPopoverOpen(element)) {
+      showPopoverElement(element, dictionary);
+      return isPopoverOpen(element);
+    }
+    hidePopoverElement(element);
+    return false;
+  }
+
+  function popoverAttributeChanged(element, oldValue, newValue) {
+    if (!(element instanceof HTMLElement) || !isPopoverOpen(element)) return;
+    const normalize = value => value === null ? null :
+      ((String(value).trim().toLowerCase() === "" || String(value).trim().toLowerCase() === "auto")
+        ? "auto" : "manual");
+    if (normalize(oldValue) !== normalize(newValue)) {
+      hidePopoverInternal(element, { restoreFocus: true });
+    }
+  }
+
+  function popoverSubtreeWillBeRemoved(node) {
+    if (!node || node.nodeType !== 1) return;
+    for (const child of node.childNodes || []) popoverSubtreeWillBeRemoved(child);
+    if (isPopoverOpen(node)) {
+      hidePopoverInternal(node, { restoreFocus: true, fireBeforeToggle: false });
+    }
+    if (node instanceof HTMLDialogElement && node.__dialogModal) {
+      nativeSetModalDialog(node.__id, false);
+      node.__dialogModal = false;
+      node.__dialogTopLayerOrder = -1;
+    }
+  }
+
+  function clearPopoverTargetOverride(control) {
+    popoverTargetOverrides.delete(control);
   }
   class HTMLHtmlElement extends HTMLElement {}
   class HTMLHeadElement extends HTMLElement {}
@@ -3594,6 +3948,20 @@
     return true;
   }
 
+  function performTopLayerEscapeDefault(doc) {
+    const popoverStack = autoPopoverStack(doc);
+    const popover = popoverStack[popoverStack.length - 1] || null;
+    const dialogs = modalDialogStack(doc);
+    const dialog = dialogs[dialogs.length - 1] || null;
+    const popoverOrder = popover ? popoverDataFor(popover).topLayerOrder : -1;
+    const dialogOrder = dialog ? Number(dialog.__dialogTopLayerOrder ?? -1) : -1;
+    if (popover && popoverOrder > dialogOrder) {
+      hidePopoverInternal(popover, { restoreFocus: true });
+      return true;
+    }
+    return performDialogEscapeDefault(doc);
+  }
+
   class HTMLDialogElement extends HTMLElement {
     get open() { return this.hasAttribute("open"); }
     set open(value) {
@@ -3613,6 +3981,7 @@
         return;
       }
       this.__dialogModal = false;
+      nativeSetModalDialog(this.__id, false);
       this.__dialogPreviouslyFocused = focusedElementOf(this.ownerDocument);
       this.open = true;
       focusDialog(this);
@@ -3627,9 +3996,11 @@
         }
         return;
       }
+      hideAllAutoPopovers(this.ownerDocument);
       this.__dialogPreviouslyFocused = focusedElementOf(this.ownerDocument);
       this.__dialogModal = true;
       this.open = true;
+      this.__dialogTopLayerOrder = nativeSetModalDialog(this.__id, true);
       modalDialogStack(this.ownerDocument).push(this);
       focusDialog(this);
     }
@@ -3642,8 +4013,10 @@
       if (index >= 0) stack.splice(index, 1);
       const wasModal = Boolean(this.__dialogModal);
       const focused = focusedElementOf(doc);
+      nativeSetModalDialog(this.__id, false);
       this.open = false;
       this.__dialogModal = false;
+      this.__dialogTopLayerOrder = -1;
       const previous = this.__dialogPreviouslyFocused;
       this.__dialogPreviouslyFocused = null;
       if (previous && canBeFocused(previous) &&
@@ -8434,6 +8807,65 @@
     );
   }
 
+  function findElementByIdInRoot(root, id) {
+    const pending = Array.from(root && root.childNodes || []);
+    while (pending.length) {
+      const node = pending.shift();
+      if (node instanceof Element && node.id === id) return node;
+      for (const child of node.childNodes || []) pending.push(child);
+    }
+    return null;
+  }
+
+  function popoverTargetElementFor(control) {
+    const override = popoverTargetOverrides.get(control);
+    if (override && nodeRoot(override) === nodeRoot(control)) return override;
+    const id = control.getAttribute("popovertarget");
+    if (!id) return null;
+    return findElementByIdInRoot(nodeRoot(control), id);
+  }
+
+  function setPopoverTargetElement(control, target) {
+    if (target === null) {
+      popoverTargetOverrides.delete(control);
+      control.removeAttribute("popovertarget");
+      return;
+    }
+    if (!(target instanceof Element)) throw new TypeError("popoverTargetElement must be an Element or null");
+    control.setAttribute("popovertarget", "");
+    popoverTargetOverrides.set(control, target);
+  }
+
+  function popoverTargetActionFor(control) {
+    const value = (control.getAttribute("popovertargetaction") || "").trim().toLowerCase();
+    return value === "show" || value === "hide" ? value : "toggle";
+  }
+
+  function isPopoverInvokerControl(control) {
+    if (!(control instanceof Element)) return false;
+    if (control.nodeName === "BUTTON") return true;
+    if (control.nodeName !== "INPUT") return false;
+    const type = String(control.type || "").toLowerCase();
+    return ["button", "reset", "submit", "image"].includes(type);
+  }
+
+  function installPopoverTargetMixin(prototype) {
+    Object.defineProperties(prototype, {
+      popoverTargetElement: {
+        configurable: true,
+        enumerable: true,
+        get() { return popoverTargetElementFor(this); },
+        set(value) { setPopoverTargetElement(this, value); },
+      },
+      popoverTargetAction: {
+        configurable: true,
+        enumerable: true,
+        get() { return popoverTargetActionFor(this); },
+        set(value) { this.setAttribute("popovertargetaction", String(value)); },
+      },
+    });
+  }
+
   class HTMLInputElement extends HTMLElement {
     get type() {
       const t = (this.getAttribute("type") || "").toLowerCase();
@@ -8639,6 +9071,8 @@
       else this.removeAttribute("formnovalidate");
     }
   }
+  installPopoverTargetMixin(HTMLInputElement.prototype);
+  installPopoverTargetMixin(HTMLButtonElement.prototype);
 
   class HTMLLabelElement extends HTMLElement {
     get htmlFor() {
@@ -11290,7 +11724,7 @@
     "compositionstart", "compositionupdate", "compositionend",
     "contextmenu", "wheel", "drag", "dragstart", "dragend", "dragenter",
     "dragleave", "dragover", "drop", "error", "abort", "slotchange", "scroll",
-    "cancel", "close",
+    "cancel", "close", "beforetoggle", "toggle",
   ];
   for (const type of EVENT_HANDLER_TYPES) {
     const key = "__on_" + type;
@@ -11336,6 +11770,7 @@
   globalThis.ShadowRoot = ShadowRoot;
   globalThis.DocumentType = DocumentType;
   globalThis.DOMException = DOMException;
+  globalThis.ToggleEvent = ToggleEvent;
   globalThis.ValidityState = ValidityState;
   const INTEGER_TYPED_ARRAY_TAGS = new Set([
     "[object Int8Array]", "[object Uint8Array]", "[object Uint8ClampedArray]",
@@ -12178,6 +12613,20 @@
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
+    const targetDocument = target instanceof Document ? target : (target.ownerDocument || document);
+    if (type === "mousedown" || type === "pointerdown") {
+      lightDismissPointerDown = {
+        documentId: targetDocument.__id,
+        popoverId: nearestInclusiveAutoPopover(target, targetDocument)?.__id ?? null,
+      };
+    } else if (type === "mouseup" || type === "pointerup") {
+      const upPopover = nearestInclusiveAutoPopover(target, targetDocument);
+      if (lightDismissPointerDown && lightDismissPointerDown.documentId === targetDocument.__id &&
+          lightDismissPointerDown.popoverId === (upPopover?.__id ?? null)) {
+        lightDismissAutoPopovers(targetDocument, upPopover);
+      }
+      lightDismissPointerDown = null;
+    }
     if (notCanceled && focusTarget && target && typeof target.focus === "function") {
       target.focus();
     }
@@ -12219,8 +12668,8 @@
     }));
     if (notCanceled && type === "keydown") {
       if (String(init && init.key || "") === "Escape" &&
-          performDialogEscapeDefault(focusedDocument)) {
-        // The top-most modal dialog consumes Escape as its cancel action.
+          performTopLayerEscapeDefault(focusedDocument)) {
+        // The latest dismissible top-layer element consumes Escape.
       } else if (String(init && init.key || "") === "Tab") {
         performSequentialFocusNavigation(focusedDocument, Boolean(init && init.shiftKey));
       } else {

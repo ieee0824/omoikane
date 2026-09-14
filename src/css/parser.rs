@@ -136,6 +136,8 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                         | "enabled"
                         | "disabled"
                         | "checked"
+                        | "popover-open"
+                        | "modal"
                         | "before"
                         | "after"
                 );
@@ -148,7 +150,9 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                             .is_some())
             }
             SimpleSelector::PseudoElement(name) => {
-                name.eq_ignore_ascii_case("before") || name.eq_ignore_ascii_case("after")
+                name.eq_ignore_ascii_case("before")
+                    || name.eq_ignore_ascii_case("after")
+                    || name.eq_ignore_ascii_case("backdrop")
             }
             // :is() and :where() use forgiving selector lists. Unsupported
             // branches remain non-matching but do not invalidate the outer

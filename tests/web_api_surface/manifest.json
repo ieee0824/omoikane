@@ -235,6 +235,14 @@
       "baseline_supported": true
     },
     {
+      "id": "html.popover",
+      "area": "html",
+      "description": "Popover API implements state, events, invokers, Escape dismissal, and manual coexistence",
+      "setup": "globalThis.__surfacePopover = document.createElement('div'); __surfacePopover.id = 'surface-popover'; __surfacePopover.popover = 'auto'; globalThis.__surfaceManualPopover = document.createElement('div'); __surfaceManualPopover.popover = 'manual'; globalThis.__surfacePopoverButton = document.createElement('button'); __surfacePopoverButton.type = 'button'; __surfacePopoverButton.setAttribute('popovertarget', __surfacePopover.id); document.body.appendChild(__surfacePopoverButton); document.body.appendChild(__surfacePopover); document.body.appendChild(__surfaceManualPopover)",
+      "probe": "(() => { const events = []; __surfacePopover.addEventListener('beforetoggle', event => events.push([event.oldState, event.newState, event.source === __surfacePopoverButton, event.cancelable].join(':'))); __surfacePopoverButton.click(); const invoked = __surfacePopover.matches(':popover-open') && events.join(',') === 'closed:open:true:true'; __surfaceManualPopover.showPopover(); __omoikane_dispatch_keyboard_input('keydown', {key:'Escape',code:'Escape'}); const escaped = !__surfacePopover.matches(':popover-open') && __surfaceManualPopover.matches(':popover-open'); __surfaceManualPopover.hidePopover(); __surfacePopoverButton.popoverTargetAction = 'show'; __surfacePopoverButton.click(); const shown = __surfacePopover.matches(':popover-open'); __surfacePopoverButton.popoverTargetAction = 'hide'; __surfacePopoverButton.click(); const hidden = !__surfacePopover.matches(':popover-open'); const event = new ToggleEvent('toggle', {oldState:'closed',newState:'open',source:__surfacePopoverButton}); return invoked && escaped && shown && hidden && event instanceof Event && event.oldState === 'closed' && event.newState === 'open' && event.source === __surfacePopoverButton && typeof __omoikane_get_popover_open === 'undefined'; })()",
+      "baseline_supported": true
+    },
+    {
       "id": "scheduling.queue-microtask",
       "area": "scheduling",
       "description": "queueMicrotask shares one FIFO microtask queue with promise reactions",
