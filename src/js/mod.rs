@@ -61,6 +61,8 @@ mod node_lifetime;
 #[cfg(test)]
 mod node_lifetime_tests;
 #[cfg(test)]
+mod popover_tests;
+#[cfg(test)]
 mod query_tests;
 use module_fetch::{ModuleFetch, ModuleFetchPool};
 
@@ -7899,6 +7901,21 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(node_is_connected_native),
         ),
         (
+            js_string!("__omoikane_get_popover_open"),
+            1,
+            NativeFunction::from_copy_closure(get_popover_open_native),
+        ),
+        (
+            js_string!("__omoikane_set_popover_open"),
+            2,
+            NativeFunction::from_copy_closure(set_popover_open_native),
+        ),
+        (
+            js_string!("__omoikane_set_modal_dialog"),
+            2,
+            NativeFunction::from_copy_closure(set_modal_dialog_native),
+        ),
+        (
             js_string!("__omoikane_node_is_inclusive_descendant"),
             2,
             NativeFunction::from_copy_closure(node_is_inclusive_descendant_native),
@@ -10796,6 +10813,55 @@ fn node_is_connected_native(
             .get_node(node_id)
             .is_some_and(|node| document_root_for_node(&node).is_some());
         Ok(JsValue::from(connected))
+    })
+}
+
+fn get_popover_open_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let open = state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| node.is_popover_open());
+        Ok(JsValue::from(open))
+    })
+}
+
+fn set_popover_open_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let open = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
+        let order = node.set_popover_open(open);
+        state.borrow_mut().invalidate_style_cache_for_node(&node);
+        Ok(JsValue::from(order.map_or(-1.0, |value| value as f64)))
+    })
+}
+
+fn set_modal_dialog_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let modal = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
+        let order = node.set_modal_dialog(modal);
+        state.borrow_mut().invalidate_style_cache_for_node(&node);
+        Ok(JsValue::from(order.map_or(-1.0, |value| value as f64)))
     })
 }
 

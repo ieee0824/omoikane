@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Monotonic source of per-node identities. A fresh value is minted for every
 /// node and never reused, so [`NodeHandle::identity`] cannot alias a released
@@ -16,6 +16,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// by identity to resolve a newly created node to a stale wrapper — see the
 /// iframe-reload lifetime hazard in issue 049.)
 static NEXT_NODE_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Monotonic order assigned when an element enters the top layer.
+static NEXT_TOP_LAYER_ORDER: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 mod slot_cache_tests;
@@ -246,6 +249,12 @@ pub struct Element {
     /// The element's shadow tree. It is deliberately not part of `children`:
     /// light DOM traversal and document selectors must not cross this boundary.
     shadow_root: Option<NodeHandle>,
+    /// Whether this element is an open HTML popover.
+    popover_open: bool,
+    /// Whether this element is an open modal dialog.
+    modal_dialog: bool,
+    /// Stable ordering among elements currently rendered in the top layer.
+    top_layer_order: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +285,9 @@ impl Element {
             scroll_offset: (0.0, 0.0),
             template_content,
             shadow_root: None,
+            popover_open: false,
+            modal_dialog: false,
+            top_layer_order: None,
         }
     }
 
@@ -302,6 +314,9 @@ impl Element {
             scroll_offset: (0.0, 0.0),
             template_content: None,
             shadow_root: None,
+            popover_open: false,
+            modal_dialog: false,
+            top_layer_order: None,
         }
     }
 
@@ -814,6 +829,7 @@ impl NodeHandle {
 
         let removed = self.0.borrow_mut().children.remove(index);
         removed.0.borrow_mut().parent = None;
+        clear_top_layer_state(&removed);
         invalidate_slot_assignments();
         // Detaching destroys the subtree's boxes, and with them their scroll
         // offsets: re-inserting the node starts from the top of its content.
@@ -1066,6 +1082,54 @@ impl NodeHandle {
         }
     }
 
+    /// Returns whether this element is an open HTML popover.
+    pub(crate) fn is_popover_open(&self) -> bool {
+        matches!(&self.0.borrow().data, NodeData::Element(element) if element.popover_open)
+    }
+
+    /// Returns whether this element is an open modal dialog.
+    pub(crate) fn is_modal_dialog(&self) -> bool {
+        matches!(&self.0.borrow().data, NodeData::Element(element) if element.modal_dialog)
+    }
+
+    /// Returns this element's top-layer insertion order, if it is present.
+    pub(crate) fn top_layer_order(&self) -> Option<u64> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.top_layer_order,
+            _ => None,
+        }
+    }
+
+    /// Updates the element's popover-open state and returns its top-layer order.
+    pub(crate) fn set_popover_open(&self, open: bool) -> Option<u64> {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return None;
+        };
+        element.popover_open = open;
+        if open && element.top_layer_order.is_none() {
+            element.top_layer_order = Some(NEXT_TOP_LAYER_ORDER.fetch_add(1, Ordering::Relaxed));
+        } else if !open && !element.modal_dialog {
+            element.top_layer_order = None;
+        }
+        element.top_layer_order
+    }
+
+    /// Updates the element's modal-dialog state and returns its top-layer order.
+    pub(crate) fn set_modal_dialog(&self, modal: bool) -> Option<u64> {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return None;
+        };
+        element.modal_dialog = modal;
+        if modal && element.top_layer_order.is_none() {
+            element.top_layer_order = Some(NEXT_TOP_LAYER_ORDER.fetch_add(1, Ordering::Relaxed));
+        } else if !modal && !element.popover_open {
+            element.top_layer_order = None;
+        }
+        element.top_layer_order
+    }
+
     /// Updates an option element's live selectedness independently of its
     /// `selected` content attribute.
     pub(crate) fn set_selected(&self, selected: bool) {
@@ -1261,6 +1325,21 @@ fn clear_scroll_offsets(node: &NodeHandle) {
     }
     for child in node.child_nodes() {
         clear_scroll_offsets(&child);
+    }
+}
+
+/// Removes a detached subtree from the top layer.
+fn clear_top_layer_state(node: &NodeHandle) {
+    node.set_popover_open(false);
+    node.set_modal_dialog(false);
+    if let Some(content) = node.template_content() {
+        clear_top_layer_state(&content);
+    }
+    if let Some(root) = node.shadow_root() {
+        clear_top_layer_state(&root);
+    }
+    for child in node.child_nodes() {
+        clear_top_layer_state(&child);
     }
 }
 
@@ -1888,5 +1967,26 @@ mod tests {
             scrolled_before,
             "clearing the offset must undo the tracking increment"
         );
+    }
+
+    #[test]
+    fn top_layer_state_is_ordered_and_cleared_with_a_detached_subtree() {
+        let document = NodeHandle::document();
+        let parent = NodeHandle::element("div");
+        let child = NodeHandle::element("div");
+        document.append_child(parent.clone());
+        parent.append_child(child.clone());
+
+        let parent_order = parent.set_popover_open(true).unwrap();
+        let child_order = child.set_popover_open(true).unwrap();
+        assert!(child_order > parent_order);
+        assert!(parent.is_popover_open());
+        assert!(child.is_popover_open());
+
+        document.remove_child(&parent).unwrap();
+        assert!(!parent.is_popover_open());
+        assert!(!child.is_popover_open());
+        assert_eq!(parent.top_layer_order(), None);
+        assert_eq!(child.top_layer_order(), None);
     }
 }

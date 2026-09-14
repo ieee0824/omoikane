@@ -1424,6 +1424,12 @@ fn paint_box_internal(
     web_fonts: Option<&WebFontRegistry>,
     offset: PaintOffset,
 ) {
+    if layout.node.top_layer_order().is_some()
+        && let Some(backdrop) =
+            resolver.computed_pseudo_style(&layout.node, PseudoElement::Backdrop)
+    {
+        paint_generated_box(canvas, viewport, &backdrop, Some(viewport), viewport);
+    }
     if layout.visibility == Visibility::Hidden {
         return;
     }
@@ -3267,6 +3273,7 @@ fn paint_block_generated_pseudo_box(
         PseudoElement::After => {
             layout.dimensions.content.y + layout.dimensions.content.height - total_height
         }
+        PseudoElement::Backdrop => return,
     };
     paint_generated_box(
         canvas,

@@ -6447,6 +6447,31 @@ fn apply_ua_defaults(
     };
     let parent_font_size = inherited_font_size(parent_style, properties);
 
+    if node.get_attribute("popover").is_some() {
+        if !node.is_popover_open() {
+            properties.insert(
+                "display".to_string(),
+                ComputedValue::Keyword("none".to_string()),
+            );
+            return;
+        }
+        properties
+            .entry("display".to_string())
+            .or_insert(ComputedValue::Keyword("block".to_string()));
+        properties
+            .entry("position".to_string())
+            .or_insert(ComputedValue::Keyword("fixed".to_string()));
+        properties
+            .entry("left".to_string())
+            .or_insert(ComputedValue::Percentage(50.0));
+        properties
+            .entry("top".to_string())
+            .or_insert(ComputedValue::Percentage(50.0));
+        properties
+            .entry("transform".to_string())
+            .or_insert(ComputedValue::Keyword("translate(-50%, -50%)".to_string()));
+    }
+
     if tag != "summary"
         && node.parent_node().is_some_and(|parent| {
             parent.tag_name().as_deref() == Some("details")

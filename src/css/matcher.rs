@@ -13,6 +13,7 @@ use super::{
 pub enum PseudoElement {
     Before,
     After,
+    Backdrop,
 }
 
 impl PseudoElement {
@@ -21,6 +22,7 @@ impl PseudoElement {
         match self {
             Self::Before => "before",
             Self::After => "after",
+            Self::Backdrop => "backdrop",
         }
     }
 }
@@ -177,6 +179,7 @@ pub fn selector_pseudo_element(selector: &Selector) -> Option<PseudoElement> {
                 let current = match name {
                     "before" => PseudoElement::Before,
                     "after" => PseudoElement::After,
+                    "backdrop" => PseudoElement::Backdrop,
                     _ => return None,
                 };
                 if pseudo.is_some() {
@@ -672,6 +675,8 @@ fn matches_pseudo_class(
     match name.as_str() {
         "before" => pseudo == Some(PseudoElement::Before),
         "after" => pseudo == Some(PseudoElement::After),
+        "popover-open" => pseudo.is_none() && node.is_popover_open(),
+        "modal" => pseudo.is_none() && node.is_modal_dialog(),
         "root" => node
             .parent_node()
             .is_some_and(|parent| parent.node_type() == NodeType::Document),
@@ -742,6 +747,7 @@ fn matches_pseudo_element(name: &str, pseudo: Option<PseudoElement>) -> bool {
     match name.to_ascii_lowercase().as_str() {
         "before" => pseudo == Some(PseudoElement::Before),
         "after" => pseudo == Some(PseudoElement::After),
+        "backdrop" => pseudo == Some(PseudoElement::Backdrop),
         _ => false,
     }
 }
@@ -994,7 +1000,7 @@ mod tests {
 
     #[test]
     fn matches_pseudo_classes() {
-        let (_document, html, _body, _main, lead, title, cta) = sample_tree();
+        let (_document, html, _body, main, lead, title, cta) = sample_tree();
         let first_child = selector(":first-child {}");
         assert_eq!(
             first_child.parts[0].simples,
@@ -1008,6 +1014,21 @@ mod tests {
         assert!(matches_selector(&title, &selector(":nth-child(odd) {}")));
         assert!(matches_selector(&lead, &selector(":nth-child(even) {}")));
         assert!(!matches_selector(&lead, &selector(":first-child {}")));
+
+        assert!(!matches_selector(&main, &selector(":popover-open {}")));
+        main.set_popover_open(true);
+        assert!(matches_selector(&main, &selector(":popover-open {}")));
+        assert!(matches_selector_with_pseudo(
+            &main,
+            &selector("#app::backdrop {}"),
+            Some(PseudoElement::Backdrop)
+        ));
+        main.set_popover_open(false);
+
+        assert!(!matches_selector(&main, &selector(":modal {}")));
+        main.set_modal_dialog(true);
+        assert!(matches_selector(&main, &selector(":modal {}")));
+        main.set_modal_dialog(false);
     }
 
     #[test]

@@ -65,6 +65,9 @@ git_wpt sparse-checkout add \
   "/domparsing/XMLSerializer-serializeToString.html" \
   "/domparsing/xml-parse-serialize-roundtrip.html"
 git_wpt sparse-checkout add \
+  "/html/semantics/popovers/toggleevent-interface.html" \
+  "/html/semantics/popovers/togglePopover.html"
+git_wpt sparse-checkout add \
   "/html/semantics/forms/constraints/support/validator.js" \
   "/html/semantics/forms/constraints/form-validation-checkValidity.html" \
   "/html/semantics/forms/constraints/form-validation-reportValidity.html" \

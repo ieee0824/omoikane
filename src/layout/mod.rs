@@ -1192,6 +1192,9 @@ fn layout_node_with_subgrid(
     positioned_ancestor: Option<BoxDimensions>,
     subgrid: Option<grid::SubgridContext>,
 ) -> Option<LayoutBox> {
+    if node.top_layer_order().is_some() {
+        return None;
+    }
     match node.node_type() {
         NodeType::Document => layout_document(
             node,
@@ -1293,6 +1296,25 @@ fn layout_document(
     }
     sort_children_by_z_index(&mut children);
 
+    let mut top_layer = Vec::new();
+    collect_top_layer_nodes(node, &mut top_layer);
+    top_layer.sort_by_key(|element| element.top_layer_order().unwrap_or_default());
+    for element in top_layer {
+        let style = resolver.computed_style(&element);
+        if let Some(mut layout) = layout_positioned_child_mode(
+            &element,
+            resolver,
+            &style,
+            initial_containing_block,
+            viewport,
+            viewport,
+            true,
+        ) {
+            layout.z_index = i32::MAX;
+            children.push(layout);
+        }
+    }
+
     Some(LayoutBox {
         node: node.clone(),
         dimensions,
@@ -1306,6 +1328,18 @@ fn layout_document(
         children,
         marker: None,
     })
+}
+
+fn collect_top_layer_nodes(node: &NodeHandle, result: &mut Vec<NodeHandle>) {
+    if node.top_layer_order().is_some() {
+        result.push(node.clone());
+    }
+    for child in node.child_nodes() {
+        collect_top_layer_nodes(&child, result);
+    }
+    if let Some(shadow_root) = node.shadow_root() {
+        collect_top_layer_nodes(&shadow_root, result);
+    }
 }
 
 /// Returns `true` when all nodes are whitespace-only text.
@@ -3211,6 +3245,26 @@ fn layout_positioned_child(
     containing_block: Rect,
     viewport: Rect,
 ) -> Option<LayoutBox> {
+    layout_positioned_child_mode(
+        child,
+        resolver,
+        style,
+        parent_box,
+        containing_block,
+        viewport,
+        false,
+    )
+}
+
+fn layout_positioned_child_mode(
+    child: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    parent_box: BoxDimensions,
+    containing_block: Rect,
+    viewport: Rect,
+    top_layer_root: bool,
+) -> Option<LayoutBox> {
     let position = position_scheme(style);
     let origin = match position {
         PositionScheme::Fixed => viewport,
@@ -3272,13 +3326,25 @@ fn layout_positioned_child(
         width: child_width,
         height: origin.height,
     };
-    let mut layout_child = layout_node(
-        child,
-        resolver,
-        child_containing,
-        viewport,
-        Some(parent_box),
-    )?;
+    let mut layout_child = if top_layer_root {
+        layout_element(
+            child,
+            resolver,
+            child_containing,
+            viewport,
+            Some(parent_box),
+            None,
+            None,
+        )?
+    } else {
+        layout_node(
+            child,
+            resolver,
+            child_containing,
+            viewport,
+            Some(parent_box),
+        )?
+    };
     if specified_width.is_none() {
         let auto_width = auto_width_from_layout(&layout_child, child, resolver, origin.width);
         if (auto_width - layout_child.dimensions.content.width).abs() > 0.5 {
@@ -3286,13 +3352,25 @@ fn layout_positioned_child(
                 width: auto_width,
                 ..child_containing
             };
-            layout_child = layout_node(
-                child,
-                resolver,
-                relayout_containing,
-                viewport,
-                Some(parent_box),
-            )?;
+            layout_child = if top_layer_root {
+                layout_element(
+                    child,
+                    resolver,
+                    relayout_containing,
+                    viewport,
+                    Some(parent_box),
+                    None,
+                    None,
+                )?
+            } else {
+                layout_node(
+                    child,
+                    resolver,
+                    relayout_containing,
+                    viewport,
+                    Some(parent_box),
+                )?
+            };
         }
         layout_child.dimensions.content.width =
             auto_width_from_layout(&layout_child, child, resolver, origin.width);

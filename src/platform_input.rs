@@ -293,6 +293,68 @@ mod tests {
     }
 
     #[test]
+    fn mouse_light_dismiss_closes_only_auto_popovers_above_the_clicked_boundary() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>body{margin:0}#parent{position:fixed;left:20px;top:20px;transform:none;width:120px;height:100px;background:red}\
+             #child{position:fixed;left:50px;top:50px;transform:none;width:40px;height:40px;background:blue}\
+             #outside{position:fixed;left:200px;top:140px;width:80px;height:40px;background:green}\
+             #source{position:absolute;left:0;top:0;width:40px;height:20px;background:orange}\
+             #sourceChild{position:absolute;left:4px;top:4px;width:24px;height:12px;background:yellow}</style>\
+             <div id='parent' popover><div id='source'><div id='sourceChild'></div></div><div id='child' popover></div></div>\
+             <div id='outside' popovertarget='parent'></div><script>globalThis.parentPopover=document.getElementById('parent');\
+             globalThis.childPopover=document.getElementById('child');globalThis.sourceButton=document.getElementById('source');\
+             globalThis.inputTargets=[];for(const type of ['mousedown','mouseup'])document.addEventListener(type,event=>inputTargets.push(event.target.id));\
+             parentPopover.showPopover();childPopover.showPopover({source:sourceButton})</script>",
+        );
+        let mut input = PlatformInput::new();
+
+        input.cursor_moved(&mut session, 30.0, 30.0).unwrap();
+        input
+            .mouse_button(&mut session, PlatformMouseButton::Left, true)
+            .unwrap();
+        input
+            .mouse_button(&mut session, PlatformMouseButton::Left, false)
+            .unwrap();
+        assert_eq!(
+            evaluate(
+                &mut session,
+                "parentPopover.matches(':popover-open') + ':' + childPopover.matches(':popover-open') + ':' + inputTargets.join(',')"
+            ),
+            json!("true:true:sourceChild,sourceChild")
+        );
+        evaluate(&mut session, "inputTargets.length = 0");
+
+        input.cursor_moved(&mut session, 130.0, 110.0).unwrap();
+        input
+            .mouse_button(&mut session, PlatformMouseButton::Left, true)
+            .unwrap();
+        input
+            .mouse_button(&mut session, PlatformMouseButton::Left, false)
+            .unwrap();
+        assert_eq!(
+            evaluate(
+                &mut session,
+                "parentPopover.matches(':popover-open') + ':' + childPopover.matches(':popover-open') + ':' + inputTargets.join(',')"
+            ),
+            json!("true:false:parent,parent")
+        );
+
+        input.cursor_moved(&mut session, 220.0, 160.0).unwrap();
+        input
+            .mouse_button(&mut session, PlatformMouseButton::Left, true)
+            .unwrap();
+        input
+            .mouse_button(&mut session, PlatformMouseButton::Left, false)
+            .unwrap();
+        assert_eq!(
+            evaluate(&mut session, "parentPopover.matches(':popover-open')"),
+            json!(false)
+        );
+    }
+
+    #[test]
     fn key_transitions_edit_the_focused_control_and_preserve_modifiers() {
         let mut session = CdpSession::new().unwrap();
         navigate(
