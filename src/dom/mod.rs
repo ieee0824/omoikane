@@ -253,6 +253,8 @@ pub struct Element {
     popover_open: bool,
     /// Whether this element is an open modal dialog.
     modal_dialog: bool,
+    /// Whether this element participates in the active fullscreen chain.
+    fullscreen: bool,
     /// Stable ordering among elements currently rendered in the top layer.
     top_layer_order: Option<u64>,
 }
@@ -287,6 +289,7 @@ impl Element {
             shadow_root: None,
             popover_open: false,
             modal_dialog: false,
+            fullscreen: false,
             top_layer_order: None,
         }
     }
@@ -316,6 +319,7 @@ impl Element {
             shadow_root: None,
             popover_open: false,
             modal_dialog: false,
+            fullscreen: false,
             top_layer_order: None,
         }
     }
@@ -1092,6 +1096,11 @@ impl NodeHandle {
         matches!(&self.0.borrow().data, NodeData::Element(element) if element.modal_dialog)
     }
 
+    /// Returns whether this element has its Fullscreen API flag set.
+    pub(crate) fn is_fullscreen(&self) -> bool {
+        matches!(&self.0.borrow().data, NodeData::Element(element) if element.fullscreen)
+    }
+
     /// Returns this element's top-layer insertion order, if it is present.
     pub(crate) fn top_layer_order(&self) -> Option<u64> {
         match &self.0.borrow().data {
@@ -1109,7 +1118,7 @@ impl NodeHandle {
         element.popover_open = open;
         if open && element.top_layer_order.is_none() {
             element.top_layer_order = Some(NEXT_TOP_LAYER_ORDER.fetch_add(1, Ordering::Relaxed));
-        } else if !open && !element.modal_dialog {
+        } else if !open && !element.modal_dialog && !element.fullscreen {
             element.top_layer_order = None;
         }
         element.top_layer_order
@@ -1124,7 +1133,22 @@ impl NodeHandle {
         element.modal_dialog = modal;
         if modal && element.top_layer_order.is_none() {
             element.top_layer_order = Some(NEXT_TOP_LAYER_ORDER.fetch_add(1, Ordering::Relaxed));
-        } else if !modal && !element.popover_open {
+        } else if !modal && !element.popover_open && !element.fullscreen {
+            element.top_layer_order = None;
+        }
+        element.top_layer_order
+    }
+
+    /// Updates the element's fullscreen flag and returns its top-layer order.
+    pub(crate) fn set_fullscreen(&self, fullscreen: bool) -> Option<u64> {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return None;
+        };
+        element.fullscreen = fullscreen;
+        if fullscreen && element.top_layer_order.is_none() {
+            element.top_layer_order = Some(NEXT_TOP_LAYER_ORDER.fetch_add(1, Ordering::Relaxed));
+        } else if !fullscreen && !element.popover_open && !element.modal_dialog {
             element.top_layer_order = None;
         }
         element.top_layer_order
@@ -1332,6 +1356,7 @@ fn clear_scroll_offsets(node: &NodeHandle) {
 fn clear_top_layer_state(node: &NodeHandle) {
     node.set_popover_open(false);
     node.set_modal_dialog(false);
+    node.set_fullscreen(false);
     if let Some(content) = node.template_content() {
         clear_top_layer_state(&content);
     }

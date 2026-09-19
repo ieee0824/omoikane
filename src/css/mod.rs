@@ -1939,6 +1939,15 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_is_supported_by_dom_selector_apis() {
+        let selectors = parse_selector_list(":fullscreen").unwrap();
+        assert_eq!(
+            selectors[0].parts[0].simples,
+            vec![SimpleSelector::PseudoClass("fullscreen".to_string())]
+        );
+    }
+
+    #[test]
     fn parses_pseudo_class_with_arguments() {
         let stylesheet = parse_stylesheet("li:nth-child(2n+1) { color: red; }").unwrap();
         let Rule::Style(rule) = &stylesheet.rules[0] else {

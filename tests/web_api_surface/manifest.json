@@ -243,6 +243,14 @@
       "baseline_supported": true
     },
     {
+      "id": "html.fullscreen",
+      "area": "html",
+      "description": "Fullscreen API enforces activation and exposes document state, events, promises, and iframe reflection",
+      "setup": "globalThis.__surfaceFullscreen = document.createElement('main'); globalThis.__surfaceFullscreenLog = []; document.body.appendChild(__surfaceFullscreen); __surfaceFullscreen.onfullscreenchange = () => __surfaceFullscreenLog.push('change'); __surfaceFullscreen.onfullscreenerror = () => __surfaceFullscreenLog.push('error'); document.addEventListener('keydown', () => __surfaceFullscreen.requestFullscreen().then(() => __surfaceFullscreenLog.push('resolved')), {once:true}); __omoikane_dispatch_keyboard_input('keydown', {key:'Enter',code:'Enter'})",
+      "probe": "document.fullscreenEnabled && document.fullscreenElement === __surfaceFullscreen && __surfaceFullscreen.matches(':fullscreen') && __surfaceFullscreenLog.join(',') === 'change,resolved' && typeof document.exitFullscreen === 'function' && 'allowFullscreen' in document.createElement('iframe') && typeof __omoikane_request_fullscreen === 'undefined'",
+      "baseline_supported": true
+    },
+    {
       "id": "scheduling.queue-microtask",
       "area": "scheduling",
       "description": "queueMicrotask shares one FIFO microtask queue with promise reactions",

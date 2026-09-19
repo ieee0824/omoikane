@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use omoikane::cdp::CdpSession;
 use omoikane::frame::{PlatformFrameScheduler, render_browser_frame};
+use omoikane::js::FullscreenTransition;
 use omoikane::platform_input::{
     InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
 };
@@ -15,7 +16,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
@@ -28,6 +29,7 @@ struct BrowserApp {
     frame_scheduler: PlatformFrameScheduler,
     input: PlatformInput,
     window_title: String,
+    native_fullscreen: bool,
 }
 
 impl BrowserApp {
@@ -43,7 +45,24 @@ impl BrowserApp {
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
             input: PlatformInput::new(),
             window_title: DEFAULT_WINDOW_TITLE.to_string(),
+            native_fullscreen: false,
         })
+    }
+
+    fn sync_fullscreen(&mut self) {
+        let Some(window) = &self.window else { return };
+        if let Some(transition) = self.session.take_fullscreen_transition() {
+            match transition {
+                FullscreenTransition::Enter => {
+                    window.set_fullscreen(Some(WindowFullscreen::Borderless(None)));
+                    self.native_fullscreen = true;
+                }
+                FullscreenTransition::Exit => {
+                    window.set_fullscreen(None);
+                    self.native_fullscreen = false;
+                }
+            }
+        }
     }
 
     fn draw(&mut self, elapsed_ms: u64) -> Result<(), Box<dyn Error>> {
@@ -130,6 +149,7 @@ impl BrowserApp {
         if let Err(error) = result {
             eprintln!("input event failed: {error}");
         }
+        self.sync_fullscreen();
         true
     }
 }
@@ -280,6 +300,16 @@ impl ApplicationHandler for BrowserApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => {
+                if self.native_fullscreen
+                    && self
+                        .window
+                        .as_ref()
+                        .is_some_and(|window| window.fullscreen().is_none())
+                {
+                    let _ = self.session.fullscreen_exited_by_host();
+                    self.native_fullscreen = false;
+                    self.sync_fullscreen();
+                }
                 self.frame_scheduler
                     .request_rendering_opportunity(Instant::now());
             }
@@ -299,6 +329,7 @@ impl ApplicationHandler for BrowserApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.sync_fullscreen();
         if let Some(window) = &self.window {
             let now = Instant::now();
             if self.frame_scheduler.queue_redraw_if_due(now) {

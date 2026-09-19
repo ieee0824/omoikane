@@ -68,6 +68,13 @@ failures in that file.
 
 The initial job is intentionally a small PR smoke gate. Expansion toward the full WPT suite and official `wpt run` integration is tracked in GitHub issue #150.
 
+The Fullscreen subset checks `fullscreenEnabled`, rejection and
+`fullscreenerror` without user activation, removal of legacy prefixed APIs,
+and `:fullscreen` selector support. Interactive entry, host acceptance,
+iframe policy, exit paths, and top-layer rendering are covered by the native
+Fullscreen regression tests and the fixed
+`anonymized-fullscreen-top-layer` fixture.
+
 The encoding-stream subset covers chunk boundaries, BOM handling, encoding labels,
 fatal errors, BufferSource conversion and backpressure. These `.any.js` cases run
 in the smoke runner's document realm; `src/js/text_stream_tests.rs` additionally

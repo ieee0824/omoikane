@@ -57,6 +57,11 @@
   const nativeGetPopoverOpen = globalThis.__omoikane_get_popover_open;
   const nativeSetPopoverOpen = globalThis.__omoikane_set_popover_open;
   const nativeSetModalDialog = globalThis.__omoikane_set_modal_dialog;
+  const nativeFullscreenElement = globalThis.__omoikane_fullscreen_element;
+  const nativeFullscreenEnabled = globalThis.__omoikane_fullscreen_enabled;
+  const nativeRequestFullscreen = globalThis.__omoikane_request_fullscreen;
+  const nativeExitFullscreen = globalThis.__omoikane_exit_fullscreen;
+  const nativeFullscreenSubtreeRemoved = globalThis.__omoikane_fullscreen_subtree_removed;
   delete globalThis.__omoikane_get_element_by_id;
   delete globalThis.__omoikane_node_index;
   delete globalThis.__omoikane_node_is_connected;
@@ -65,6 +70,11 @@
   delete globalThis.__omoikane_get_popover_open;
   delete globalThis.__omoikane_set_popover_open;
   delete globalThis.__omoikane_set_modal_dialog;
+  delete globalThis.__omoikane_fullscreen_element;
+  delete globalThis.__omoikane_fullscreen_enabled;
+  delete globalThis.__omoikane_request_fullscreen;
+  delete globalThis.__omoikane_exit_fullscreen;
+  delete globalThis.__omoikane_fullscreen_subtree_removed;
   const nativeGetTextContent = globalThis.__omoikane_get_text_content;
   const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
   const nativeCreateElementNS = globalThis.__omoikane_create_element_ns;
@@ -987,6 +997,7 @@
 
   const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
   const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+  const MATHML_NAMESPACE = "http://www.w3.org/1998/Math/MathML";
   const SHADOW_ROOT_CONSTRUCTION = {};
   const DOCUMENT_CONSTRUCTION = {};
   const DOCUMENT_FRAGMENT_CONSTRUCTION = {};
@@ -1683,6 +1694,7 @@
 
   function notifyImplicitRemoval(node) {
     if (!node) return;
+    fullscreenSubtreeWillBeRemoved(node);
     popoverSubtreeWillBeRemoved(node);
     const parent = internalParentNode(node);
     if (!parent) return;
@@ -2500,6 +2512,7 @@
     removeChild(child) {
       const previousSibling = child.previousSibling;
       const nextSibling = child.nextSibling;
+      fullscreenSubtreeWillBeRemoved(child);
       popoverSubtreeWillBeRemoved(child);
       preRemove(this, child);
       const wasConnected = child.isConnected;
@@ -3469,6 +3482,10 @@
       return pointerCaptureTarget(this.ownerDocument, normalizePointerId(pointerId)) === this;
     }
 
+    requestFullscreen(options = {}) {
+      return requestFullscreenElement(this, options);
+    }
+
     get slot() { return this.getAttribute("slot") || ""; }
     set slot(value) { this.setAttribute("slot", String(value)); }
 
@@ -3954,7 +3971,110 @@
     return true;
   }
 
+  let fullscreenTransientActivation = false;
+  let fullscreenActivationGeneration = 0;
+  const scheduleFullscreenActivationExpiry = globalThis.setTimeout.bind(globalThis);
+
+  function grantFullscreenTransientActivation() {
+    fullscreenTransientActivation = true;
+    const generation = ++fullscreenActivationGeneration;
+    scheduleFullscreenActivationExpiry(() => {
+      if (fullscreenActivationGeneration === generation) {
+        fullscreenTransientActivation = false;
+      }
+    }, 0);
+  }
+
+  function rawFullscreenElementForDocument(doc) {
+    if (!(doc instanceof Document)) return null;
+    const documentId = internalNodeId(doc);
+    return documentId === undefined ? null : wrapNode(nativeFullscreenElement(documentId));
+  }
+
+  function fullscreenElementForDocument(doc) {
+    const element = rawFullscreenElementForDocument(doc);
+    return element ? retargetNode(element, doc) : null;
+  }
+
+  function dispatchFullscreenEvent(type, target, doc) {
+    const receiver = target && internalIsConnected(target) ? target : doc;
+    receiver.dispatchEvent(new Event(type, { bubbles: true, composed: true }));
+  }
+
+  function requestFullscreenElement(element, options) {
+    const dictionary = options === undefined ? {} : Object(options);
+    const navigationUI = dictionary.navigationUI === undefined
+      ? "auto" : String(dictionary.navigationUI);
+    if (!["auto", "hide", "show"].includes(navigationUI)) {
+      return Promise.reject(new TypeError("Invalid FullscreenNavigationUI value"));
+    }
+    const elementId = internalNodeId(element);
+    const doc = internalOwnerDocument(element);
+    const namespace = elementId === undefined ? undefined : nativeNodeNamespaceURI(elementId);
+    const localName = internalNodeLocalName(element);
+    const htmlElement = elementId !== undefined &&
+      (namespace === HTML_NAMESPACE || nativeNodeIsHtmlElement(elementId));
+    const supportedNamespace = htmlElement ||
+      (namespace === SVG_NAMESPACE && localName === "svg") ||
+      (namespace === MATHML_NAMESPACE && localName === "math");
+    const invalidElement = !supportedNamespace ||
+      (htmlElement && localName === "dialog") ||
+      (htmlElement && isPopoverOpen(element));
+    const documentId = internalNodeId(doc);
+    const initiallyAllowed = elementId !== undefined && documentId !== undefined &&
+      internalIsConnected(element) && !invalidElement &&
+      nativeFullscreenEnabled(documentId) && fullscreenTransientActivation;
+    if (initiallyAllowed) fullscreenTransientActivation = false;
+    return new Promise((resolve, reject) => queueMicrotask(() => {
+      if (!initiallyAllowed || internalOwnerDocument(element) !== doc ||
+          !internalIsConnected(element) ||
+          (htmlElement && isPopoverOpen(element)) ||
+          !nativeRequestFullscreen(elementId)) {
+        dispatchFullscreenEvent("fullscreenerror", element, doc || document);
+        reject(new TypeError("Fullscreen request was denied"));
+        return;
+      }
+      dispatchFullscreenEvent("fullscreenchange", element, doc);
+      resolve(undefined);
+    }));
+  }
+
+  function exitFullscreenDocument(doc, requireHostApproval = true) {
+    const element = rawFullscreenElementForDocument(doc);
+    const documentId = internalNodeId(doc);
+    return new Promise((resolve, reject) => queueMicrotask(() => {
+      if (!element || documentId === undefined ||
+          !nativeExitFullscreen(documentId, requireHostApproval)) {
+        reject(new TypeError("The document is not fullscreen or the host denied exit"));
+        return;
+      }
+      dispatchFullscreenEvent("fullscreenchange", element, doc);
+      resolve(undefined);
+    }));
+  }
+
+  function fullyExitFullscreenForUser(doc) {
+    const element = rawFullscreenElementForDocument(doc);
+    const documentId = internalNodeId(doc);
+    if (!element || documentId === undefined || !nativeExitFullscreen(documentId, false)) {
+      return false;
+    }
+    dispatchFullscreenEvent("fullscreenchange", element, doc);
+    return true;
+  }
+
+  function fullscreenSubtreeWillBeRemoved(node) {
+    if (!node || internalNodeType(node) !== 1) return;
+    const nodeId = internalNodeId(node);
+    const doc = internalOwnerDocument(node);
+    const element = doc && rawFullscreenElementForDocument(doc);
+    if (nodeId !== undefined && element && nativeFullscreenSubtreeRemoved(nodeId)) {
+      dispatchFullscreenEvent("fullscreenchange", element, doc);
+    }
+  }
+
   function performTopLayerEscapeDefault(doc) {
+    if (fullyExitFullscreenForUser(doc)) return true;
     const popoverStack = autoPopoverStack(doc);
     const popover = popoverStack[popoverStack.length - 1] || null;
     const dialogs = modalDialogStack(doc);
@@ -5248,6 +5368,19 @@
       return this.__styleSheets;
     }
 
+    get fullscreenElement() {
+      return fullscreenElementForDocument(this);
+    }
+
+    get fullscreenEnabled() {
+      const documentId = internalNodeId(this);
+      return documentId !== undefined && Boolean(nativeFullscreenEnabled(documentId));
+    }
+
+    exitFullscreen() {
+      return exitFullscreenDocument(this);
+    }
+
     get adoptedStyleSheets() {
       return adoptedStyleSheetsForRoot(this);
     }
@@ -5587,6 +5720,10 @@
     get host() { return wrapNode(__omoikane_shadow_host(this.__id)); }
     get mode() { return __omoikane_shadow_mode(this.__id); }
     get delegatesFocus() { return false; }
+    get fullscreenElement() {
+      const candidate = rawFullscreenElementForDocument(internalOwnerDocument(this.host));
+      return candidate ? retargetNode(candidate, this) : null;
+    }
     get adoptedStyleSheets() {
       return adoptedStyleSheetsForRoot(this);
     }
@@ -6695,6 +6832,12 @@
     // TypeError so the reflected DOMTokenList remains readonly.
     set sandbox(_value) {
       throw new TypeError("HTMLIFrameElement.sandbox is readonly");
+    }
+
+    get allowFullscreen() { return this.hasAttribute("allowfullscreen"); }
+    set allowFullscreen(value) {
+      if (value) this.setAttribute("allowfullscreen", "");
+      else this.removeAttribute("allowfullscreen");
     }
 
     get contentDocument() {
@@ -11730,7 +11873,7 @@
     "compositionstart", "compositionupdate", "compositionend",
     "contextmenu", "wheel", "drag", "dragstart", "dragend", "dragenter",
     "dragleave", "dragover", "drop", "error", "abort", "slotchange", "scroll",
-    "cancel", "close", "beforetoggle", "toggle",
+    "cancel", "close", "beforetoggle", "toggle", "fullscreenchange", "fullscreenerror",
   ];
   for (const type of EVENT_HANDLER_TYPES) {
     const key = "__on_" + type;
@@ -12616,6 +12759,8 @@
 
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
     const target = capturedInputTarget(wrapNode(id) || document, init && init.pointerId || 1) || document;
+    const activationEvent = type === "mousedown" || type === "pointerdown" || type === "click";
+    if (activationEvent) grantFullscreenTransientActivation();
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
@@ -12669,6 +12814,8 @@
     const focusedDocument = focusChainDocuments()[0] || document;
     const target = focusedElementOf(focusedDocument) || focusedDocument.body ||
       focusedDocument.documentElement || focusedDocument;
+    const activationEvent = type === "keydown" && String(init && init.key || "") !== "Escape";
+    if (activationEvent) grantFullscreenTransientActivation();
     const notCanceled = target.dispatchEvent(new KeyboardEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));

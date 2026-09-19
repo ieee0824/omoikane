@@ -23,9 +23,9 @@ use crate::http::{Client, HttpRequest, Method};
 #[cfg(test)]
 use crate::js::PageTaskSource;
 use crate::js::{
-    CompletedPageTask, JavaScriptDialog, JavaScriptDialogController, JavaScriptDialogError,
-    JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask, PageTaskError,
-    StorageManager,
+    CompletedPageTask, FullscreenTransition, JavaScriptDialog, JavaScriptDialogController,
+    JavaScriptDialogError, JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask,
+    PageTaskError, StorageManager,
 };
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -693,6 +693,9 @@ pub struct CdpSession {
     history_index: usize,
     document_generation: u64,
     accessibility_enabled: bool,
+    fullscreen_supported: bool,
+    fullscreen_transition_allowed: bool,
+    pending_fullscreen_transition: Option<FullscreenTransition>,
 }
 
 /// Declared after the runtime so workers and child realms finish dropping
@@ -793,6 +796,9 @@ impl CdpSession {
             history_index: 0,
             document_generation: 0,
             accessibility_enabled: false,
+            fullscreen_supported: true,
+            fullscreen_transition_allowed: true,
+            pending_fullscreen_transition: None,
         };
         session
             .install_runtime_helpers()
@@ -933,8 +939,42 @@ impl CdpSession {
         self.http_client.set_insecure(insecure);
     }
 
+    /// Enables or disables fullscreen support for this tab's presentation host.
+    pub fn set_fullscreen_supported(&mut self, supported: bool) {
+        self.fullscreen_supported = supported;
+        self.runtime.set_fullscreen_supported(supported);
+        if let Some(transition) = self.runtime.take_fullscreen_transition() {
+            self.pending_fullscreen_transition = Some(transition);
+        }
+    }
+
+    /// Controls whether the presentation host accepts fullscreen transitions.
+    pub fn set_fullscreen_transition_allowed(&mut self, allowed: bool) {
+        self.fullscreen_transition_allowed = allowed;
+        self.runtime.set_fullscreen_transition_allowed(allowed);
+    }
+
+    /// Takes the next native window-state transition requested by the page.
+    pub fn take_fullscreen_transition(&mut self) -> Option<FullscreenTransition> {
+        self.pending_fullscreen_transition
+            .take()
+            .or_else(|| self.runtime.take_fullscreen_transition())
+    }
+
+    /// Notifies the DOM that the native host left fullscreen independently.
+    pub fn fullscreen_exited_by_host(&mut self) -> Result<bool, JsonRpcError> {
+        self.runtime.exit_fullscreen_from_host().map_err(js_error)
+    }
+
     pub(crate) fn http_client_mut(&mut self) -> &mut Client {
         &mut self.http_client
+    }
+
+    fn leave_fullscreen_for_navigation(&mut self) {
+        let _ = self.runtime.exit_fullscreen_from_host();
+        if let Some(transition) = self.runtime.take_fullscreen_transition() {
+            self.pending_fullscreen_transition = Some(transition);
+        }
     }
 
     fn page_navigate(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
@@ -2335,6 +2375,8 @@ impl CdpSession {
         )
         .map_err(|error| error.to_string())?;
         runtime.set_user_agent(self.http_client.user_agent().to_string());
+        runtime.set_fullscreen_supported(self.fullscreen_supported);
+        runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
         Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
         runtime.install_csp_policy(csp_headers);
         runtime
@@ -2350,6 +2392,7 @@ impl CdpSession {
         // are reported like browser event-handler errors and do not cancel the
         // commit; cancellation policy for beforeunload dialogs belongs to the
         // future GUI integration.
+        self.leave_fullscreen_for_navigation();
         self.runtime.terminate_workers();
         let _ = self.runtime.eval(
             "window.dispatchEvent(new Event('beforeunload')); \
@@ -2403,6 +2446,8 @@ impl CdpSession {
         )
         .map_err(|error| error.to_string())?;
         runtime.set_user_agent(self.http_client.user_agent().to_string());
+        runtime.set_fullscreen_supported(self.fullscreen_supported);
+        runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
         Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
         runtime.install_csp_policy(csp_headers);
         runtime
@@ -2462,6 +2507,7 @@ impl CdpSession {
         // Teardown is delayed until the replacement runtime has completed its
         // startup work, so cancellation or startup setup failure keeps the old
         // document intact.
+        self.leave_fullscreen_for_navigation();
         self.runtime.terminate_workers();
         let _ = self.runtime.eval(
             "window.dispatchEvent(new Event('beforeunload')); \
