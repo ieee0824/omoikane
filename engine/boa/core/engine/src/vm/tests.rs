@@ -36,6 +36,160 @@ fn suspending_function(slot: Gc<GcRefCell<Option<NativeCallSuspension>>>) -> Nat
 }
 
 #[test]
+fn native_call_continuations_preserve_callback_and_caller_realms() {
+    fn install(context: &mut Context) {
+        context
+            .register_global_builtin_callable(
+                js_string!("hasBytecodeCaller"),
+                0,
+                NativeFunction::from_copy_closure(|_, _, context| {
+                    Ok(matches!(
+                        context.vm.shadow_stack.caller_position(),
+                        Some(super::shadow_stack::ShadowEntry::Bytecode { .. })
+                    )
+                    .into())
+                }),
+            )
+            .unwrap();
+        context
+            .register_global_builtin_callable(
+                js_string!("invoke"),
+                1,
+                NativeFunction::from_copy_closure(|_, args, context| {
+                    let callback = args[0].as_callable().unwrap();
+                    context.call_with_native_continuation(
+                        &callback,
+                        &JsValue::undefined(),
+                        &[],
+                        NativeCallContinuation::from_copy_closure_with_captures(
+                            |result, (), _| result,
+                            (),
+                        ),
+                    )
+                }),
+            )
+            .unwrap();
+    }
+    let mut context = Context::default();
+    install(&mut context);
+    let parent_invoke = context.eval(Source::from_bytes("invoke")).unwrap();
+    context
+        .eval(Source::from_bytes("globalThis.label='parent'"))
+        .unwrap();
+    let parent = context.eval(Source::from_bytes("()=>label")).unwrap();
+    let call_child = context
+        .eval(Source::from_bytes("child=>invoke(()=>child())+'@'+label"))
+        .unwrap();
+    let throw_parent = context
+        .eval(Source::from_bytes("()=>{throw new Error(label)}"))
+        .unwrap();
+    let child = context.create_realm().unwrap();
+    context.enter_realm(child.clone());
+    install(&mut context);
+    for (name, value) in [
+        ("parentCallback", parent),
+        ("callChild", call_child),
+        ("throwParent", throw_parent),
+        ("parentInvoke", parent_invoke),
+    ] {
+        context
+            .register_global_property(JsString::from(name), value, Attribute::all())
+            .unwrap();
+    }
+    context
+        .eval(Source::from_bytes("globalThis.label='child'"))
+        .unwrap();
+    for (source, expected) in [
+        ("invoke(parentCallback)+'|'+label", "parent|child"),
+        ("parentInvoke(()=>label)+'|'+label", "child|child"),
+        ("parentInvoke(parentCallback)+'|'+label", "parent|child"),
+        ("String(invoke(()=>hasBytecodeCaller()))", "true"),
+        (
+            "invoke(()=>callChild(()=>label))+'|'+label",
+            "child@parent|child",
+        ),
+        (
+            "(()=>{try {invoke(throwParent)} catch(e){return e.message+'|'+label}})()",
+            "parent|child",
+        ),
+    ] {
+        assert_eq!(
+            context
+                .eval(Source::from_bytes(source))
+                .unwrap()
+                .as_string()
+                .unwrap(),
+            JsString::from(expected)
+        );
+        assert_eq!(context.realm(), &child);
+    }
+    assert!(context.vm.native_call_continuations.is_empty());
+}
+
+#[test]
+fn suspended_cross_realm_continuation_restores_the_caller() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let callback = context
+        .eval(Source::from_bytes(
+            "globalThis.label='parent'; ()=>label+':'+suspend()+':'+label",
+        ))
+        .unwrap()
+        .as_callable()
+        .unwrap();
+    let callback_root = Rooted::new(callback);
+    let child = context.create_realm().unwrap();
+    context.enter_realm(child.clone());
+    context
+        .register_global_builtin_callable(
+            js_string!("invoke"),
+            0,
+            NativeFunction::from_copy_closure_with_captures(
+                |_, _, callback, context| {
+                    context.call_with_native_continuation(
+                        callback,
+                        &JsValue::undefined(),
+                        &[],
+                        NativeCallContinuation::from_copy_closure_with_captures(
+                            |result, (), _| result,
+                            (),
+                        ),
+                    )
+                },
+                (*callback_root).clone(),
+            ),
+        )
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("globalThis.label='child'; invoke()+'|'+label"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    boa_gc::force_collect();
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(js_string!("resumed").into()))
+        .unwrap();
+    assert_eq!(
+        future::block_on(evaluation).unwrap(),
+        JsValue::from(js_string!("parent:resumed:parent|child"))
+    );
+    assert_eq!(context.realm(), &child);
+    assert!(context.vm.native_call_continuations.is_empty());
+    assert!(context.vm.frames.is_empty());
+}
+
+#[test]
 fn deadline_scope_restores_nested_limits_and_cancelled_async_evaluation() {
     use std::time::{Duration, Instant};
     let mut context = Context::default();
