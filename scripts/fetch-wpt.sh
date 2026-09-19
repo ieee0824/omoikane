@@ -73,6 +73,7 @@ git_wpt sparse-checkout add \
   "/fullscreen/api/document-onfullscreenerror.html" \
   "/fullscreen/api/historical.html" \
   "/fullscreen/rendering/fullscreen-pseudo-class-support.html"
+git_wpt sparse-checkout add "/pointerlock/constructor.html" "/pointerlock/pointerlock_without_gesture.html"
 git_wpt sparse-checkout add \
   "/html/semantics/forms/constraints/support/validator.js" \
   "/html/semantics/forms/constraints/form-validation-checkValidity.html" \

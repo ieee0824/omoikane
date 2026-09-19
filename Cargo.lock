@@ -1961,6 +1961,7 @@ dependencies = [
  "unicode-segmentation",
  "webpki-roots",
  "winit",
+ "x11-dl",
 ]
 
 [[package]]

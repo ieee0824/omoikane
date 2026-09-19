@@ -177,6 +177,12 @@ cargo run --features gui --bin omoikane -- "https://example.com/"
 ウィンドウサイズはそのままページの viewport に反映され、基本的な keyboard/mouse と
 wheel/touchpad 入力は active document に届きます。touch gesture、IME、ブラウザ UI は未実装です。
 
+Pointer Lockはユーザー操作からの `element.requestPointerLock()` で取得し、
+`document.exitPointerLock()`、Escape、フォーカス喪失、画面遷移で解除します。
+GUIはOSのカーソル拘束に成功してから取得を通知し、相対移動を `movementX/Y` に渡します。
+ヘッドレス実行は仮想ホストで検証します。`unadjustedMovement: true` は現在
+`NotSupportedError` で拒否します。実ウィンドウでの確認項目は [tests/README.md](tests/README.md) を参照してください。
+
 レンダリング性能のbaseline取得（外部通信なし）:
 
 ```bash

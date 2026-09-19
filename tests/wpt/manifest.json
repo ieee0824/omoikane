@@ -123,6 +123,8 @@
     { "path": "fullscreen/api/document-onfullscreenerror.html" },
     { "path": "fullscreen/api/historical.html" },
     { "path": "fullscreen/rendering/fullscreen-pseudo-class-support.html" },
+    { "path": "pointerlock/constructor.html" },
+    { "path": "pointerlock/pointerlock_without_gesture.html" },
     { "path": "encoding/streams/backpressure.any.js" },
     { "path": "encoding/streams/decode-attributes.any.js" },
     { "path": "encoding/streams/decode-bad-chunks.any.js" },

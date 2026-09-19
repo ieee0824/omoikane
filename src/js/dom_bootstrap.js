@@ -62,6 +62,27 @@
   const nativeRequestFullscreen = globalThis.__omoikane_request_fullscreen;
   const nativeExitFullscreen = globalThis.__omoikane_exit_fullscreen;
   const nativeFullscreenSubtreeRemoved = globalThis.__omoikane_fullscreen_subtree_removed;
+  const nativePointerLockTarget = globalThis.__omoikane_pointer_lock_target;
+  const nativePointerLockActivation = globalThis.__omoikane_pointer_lock_activation;
+  const nativeRequestPointerLock = globalThis.__omoikane_request_pointer_lock;
+  const nativeExitPointerLock = globalThis.__omoikane_exit_pointer_lock;
+  const nativePointerLockRemoving = globalThis.__omoikane_pointer_lock_removing;
+  const nativeForwardInput = globalThis.__omoikane_forward_input;
+  const nativeRegisterInputDispatcher = globalThis.__omoikane_register_input_dispatcher;
+  const browsingInput = globalThis.__omoikane_input_state();
+  if (browsingInput.topDocumentId === undefined) {
+    browsingInput.topDocumentId = __omoikane_document_id;
+    browsingInput.focusedDocumentId = null;
+    browsingInput.captures = new Map();
+  }
+  delete globalThis.__omoikane_input_state;
+  delete globalThis.__omoikane_forward_input;
+  delete globalThis.__omoikane_register_input_dispatcher;
+  delete globalThis.__omoikane_pointer_lock_target;
+  delete globalThis.__omoikane_pointer_lock_activation;
+  delete globalThis.__omoikane_request_pointer_lock;
+  delete globalThis.__omoikane_exit_pointer_lock;
+  delete globalThis.__omoikane_pointer_lock_removing;
   delete globalThis.__omoikane_get_element_by_id;
   delete globalThis.__omoikane_node_index;
   delete globalThis.__omoikane_node_is_connected;
@@ -249,6 +270,7 @@
     return id !== undefined && hasCanonicalElementId(ids, id);
   }
   const nativeNodeIds = new WeakMap();
+  const nodeEventStates = new WeakMap();
   const layoutMetricsCache = new WeakMap();
   const retiredNodeWrappers = new WeakSet();
   // Same-document history state is browser-owned. Keeping it off the public
@@ -266,7 +288,11 @@
       // If teardown retired the browsing context which currently owns focus,
       // hand focus back to the top Document before any later hasFocus() walk
       // attempts to wrap the now-unregistered Document identity.
-      if (focusedDocumentId === id) focusedDocumentId = null;
+      if (browsingInput.focusedDocumentId === id) browsingInput.focusedDocumentId = null;
+      const capturePrefix = String(id) + ":";
+      for (const key of browsingInput.captures.keys()) {
+        if (key.startsWith(capturePrefix)) browsingInput.captures.delete(key);
+      }
       const wrapper = cachedNode(id);
       if (wrapper) {
         // Navigation retires browsing-context behavior; the immutable native
@@ -529,7 +555,9 @@
       const committed = nativeDocumentURL(id);
       if (committed !== null) node.__documentURL = String(committed);
     }
-    safeWeakMapSet(nodeLeases, node, nativeRetainNode(id, node));
+    const retained = nativeRetainNode(id, node, safeWeakMapGet(nodeEventStates, node));
+    safeWeakMapSet(nodeLeases, node, retained[0]);
+    safeWeakMapSet(nodeEventStates, node, retained[1]);
     safeMapSet(cache, id, new IntrinsicWeakRef(node));
     return node;
   }
@@ -1059,6 +1087,13 @@
     }
   }
 
+  for (const [name, value] of Object.entries({
+    NONE: 0, CAPTURING_PHASE: 1, AT_TARGET: 2, BUBBLING_PHASE: 3,
+  })) {
+    Object.defineProperty(Event, name, { value, enumerable: true });
+    Object.defineProperty(Event.prototype, name, { value, enumerable: true });
+  }
+
   class UIEvent extends Event {
     constructor(type, init = {}) {
       init = init ?? {};
@@ -1127,6 +1162,7 @@
     }
   }
 
+  const mouseMovement = new WeakMap();
   class MouseEvent extends Event {
     constructor(type, init = {}) {
       init = init ?? {};
@@ -1144,6 +1180,22 @@
       this.shiftKey = init.shiftKey ?? false;
       this.metaKey = init.metaKey ?? false;
       this.relatedTarget = init.relatedTarget ?? null;
+      const movementX = Number(init.movementX ?? 0);
+      const movementY = Number(init.movementY ?? 0);
+      if (!Number.isFinite(movementX) || !Number.isFinite(movementY)) {
+        throw new TypeError("Mouse movement must be finite");
+      }
+      safeWeakMapSet(mouseMovement, this, { x: movementX, y: movementY });
+    }
+    get movementX() {
+      const movement = safeWeakMapGet(mouseMovement, this);
+      if (!movement) throw new TypeError("Illegal invocation");
+      return movement.x;
+    }
+    get movementY() {
+      const movement = safeWeakMapGet(mouseMovement, this);
+      if (!movement) throw new TypeError("Illegal invocation");
+      return movement.y;
     }
   }
 
@@ -1387,14 +1439,13 @@
   //
   // The focused element is stored per Document, on the document wrapper itself
   // (`__focusedElementId`), so an iframe's sub-document keeps its own active
-  // element. `focusedDocumentId` is the document whose browsing context holds
+  // element. `browsingInput.focusedDocumentId` is the document whose browsing context holds
   // focus; `null` means the top-level document, which is focused on load.
   //
   // While focus moves between browsing contexts it is `NO_FOCUSED_DOCUMENT`: no
   // document reports focus for the duration of the `blur` pair announcing the
   // context being left, matching Firefox 152.
-  const NO_FOCUSED_DOCUMENT = Symbol("no focused document");
-  let focusedDocumentId = null;
+  const NO_FOCUSED_DOCUMENT = -1;
 
   // HTML's rules for parsing integers: optional whitespace, an optional sign,
   // then at least one digit. Trailing junk is ignored, so `tabindex="1.5"` is
@@ -1523,7 +1574,7 @@
     const chain = [];
     let current = doc;
     while (current instanceof Document) {
-      if (current.__id === __omoikane_document_id) {
+      if (current.__id === browsingInput.topDocumentId) {
         chain.push({ document: current, frame: null });
         return chain;
       }
@@ -1540,14 +1591,14 @@
   // top-level one. A focused document that is no longer reachable (its iframe
   // was reloaded or removed) hands focus back to the top-level document.
   function focusChainDocuments() {
-    if (focusedDocumentId === NO_FOCUSED_DOCUMENT) return [];
-    const top = wrapNode(__omoikane_document_id);
-    if (focusedDocumentId === null || focusedDocumentId === __omoikane_document_id) {
+    if (browsingInput.focusedDocumentId === NO_FOCUSED_DOCUMENT) return [];
+    const top = wrapNode(browsingInput.topDocumentId);
+    if (browsingInput.focusedDocumentId === null || browsingInput.focusedDocumentId === browsingInput.topDocumentId) {
       return [top];
     }
-    const chain = documentChain(wrapNode(focusedDocumentId));
+    const chain = documentChain(wrapNode(browsingInput.focusedDocumentId));
     if (!chain) {
-      focusedDocumentId = null;
+      browsingInput.focusedDocumentId = null;
       return [top];
     }
     return chain.map(entry => entry.document);
@@ -1681,6 +1732,10 @@
   }
 
   function preRemove(parent, removed) {
+    if (internalParentNode(removed) === parent) {
+      const id = internalNodeId(removed);
+      if (id !== undefined) nativePointerLockRemoving(id);
+    }
     const doc = nodeDocument(parent);
     const state = traversalByDocument.get(traversalDocumentKey(doc));
     if (!state) return;
@@ -1961,9 +2016,12 @@
           return safeWeakMapGet(nativeNodeIds, this);
         },
       });
-      this.__listeners = new Map();
-      this.__onload = null;
+      safeWeakMapSet(nodeEventStates, this, { listeners: new Map(), handlers: new Map(), focusedElementId: null });
     }
+
+    get __listeners() { return safeWeakMapGet(nodeEventStates, this).listeners; }
+    get __onload() { return safeWeakMapGet(nodeEventStates, this).handlers.get("load") || null; }
+    set __onload(value) { safeWeakMapGet(nodeEventStates, this).handlers.set("load", value); }
 
     get onload() {
       return this.__onload;
@@ -3105,7 +3163,7 @@
         // leaves the old context before its `blur` pair and the new chain is
         // installed before the `focus` pair. Neither pair has a bubbling
         // counterpart, unlike the element events.
-        focusedDocumentId = NO_FOCUSED_DOCUMENT;
+        browsingInput.focusedDocumentId = NO_FOCUSED_DOCUMENT;
         fireFocusEvent(previousDocument, "blur", null, false);
         const previousWindow = previousDocument.defaultView;
         if (previousWindow) fireFocusEvent(previousWindow, "blur", null, false);
@@ -3115,14 +3173,14 @@
             entry.frame.ownerDocument.__focusedElementId = entry.frame.__id;
           }
         }
-        focusedDocumentId = doc.__id;
+        browsingInput.focusedDocumentId = doc.__id;
         fireFocusEvent(doc, "focus", null, false);
         const nextWindow = doc.defaultView;
         if (nextWindow) fireFocusEvent(nextWindow, "focus", null, false);
       }
 
       doc.__focusedElementId = this.__id;
-      focusedDocumentId = doc.__id;
+      browsingInput.focusedDocumentId = doc.__id;
       beginTextControlFocus(this);
       fireFocusEvent(this, "focus", crossesDocuments ? null : previous, false);
       fireFocusEvent(this, "focusin", crossesDocuments ? null : previous, true);
@@ -3484,6 +3542,32 @@
 
     requestFullscreen(options = {}) {
       return requestFullscreenElement(this, options);
+    }
+
+    requestPointerLock(options = {}) {
+      const element = this;
+      const id = internalNodeId(element);
+      if (id === undefined || internalNodeType(element) !== 1) {
+        return Promise.reject(new TypeError("Illegal invocation"));
+      }
+      if (options !== null && typeof options !== "object" && typeof options !== "function") {
+        return Promise.reject(new TypeError("PointerLockOptions must be a dictionary"));
+      }
+      const doc = internalOwnerDocument(element);
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        nativeRequestPointerLock(id, internalNodeId(doc), Boolean(options?.unadjustedMovement), error => {
+          // Retain the canonical element wrapper and its native lifetime lease
+          // until the acquisition and any subsequent release are delivered.
+          if (!settled && !error) releaseCapturesForPointerLock(element);
+          safeApply(pointerLockDispatchEvent, doc, [new Event(error ? "pointerlockerror" : "pointerlockchange")]);
+          if (!settled) {
+            settled = true;
+            if (error) reject(new DOMException("Pointer lock request was denied", error));
+            else resolve(undefined);
+          }
+        });
+      });
     }
 
     get slot() { return this.getAttribute("slot") || ""; }
@@ -3978,11 +4062,23 @@
   function grantFullscreenTransientActivation() {
     fullscreenTransientActivation = true;
     const generation = ++fullscreenActivationGeneration;
+    const pointerGeneration = nativePointerLockActivation(true, 0);
     scheduleFullscreenActivationExpiry(() => {
+      nativePointerLockActivation(false, pointerGeneration);
       if (fullscreenActivationGeneration === generation) {
         fullscreenTransientActivation = false;
       }
     }, 0);
+  }
+
+  function pointerLockElementForRoot(root) {
+    const doc = internalNodeType(root) === 9 ? root : internalOwnerDocument(root);
+    const id = internalNodeId(doc);
+    const raw = id === undefined ? null : wrapNode(nativePointerLockTarget(id));
+    const candidate = raw ? retargetNode(raw, root) : null;
+    let tree = candidate;
+    while (tree && internalParentNode(tree)) tree = internalParentNode(tree);
+    return tree === root ? candidate : null;
   }
 
   function rawFullscreenElementForDocument(doc) {
@@ -4024,7 +4120,10 @@
     const initiallyAllowed = elementId !== undefined && documentId !== undefined &&
       internalIsConnected(element) && !invalidElement &&
       nativeFullscreenEnabled(documentId) && fullscreenTransientActivation;
-    if (initiallyAllowed) fullscreenTransientActivation = false;
+    if (initiallyAllowed) {
+      fullscreenTransientActivation = false;
+      nativePointerLockActivation(false, 0);
+    }
     return new Promise((resolve, reject) => queueMicrotask(() => {
       if (!initiallyAllowed || internalOwnerDocument(element) !== doc ||
           !internalIsConnected(element) ||
@@ -5368,6 +5467,18 @@
       return this.__styleSheets;
     }
 
+    get pointerLockElement() {
+      return pointerLockElementForRoot(this);
+    }
+
+    get __focusedElementId() { return safeWeakMapGet(nodeEventStates, this).focusedElementId; }
+    set __focusedElementId(value) { safeWeakMapGet(nodeEventStates, this).focusedElementId = value; }
+
+    exitPointerLock() {
+      if (internalNodeType(this) !== 9) throw new TypeError("Illegal invocation");
+      nativeExitPointerLock(internalNodeId(this), true);
+    }
+
     get fullscreenElement() {
       return fullscreenElementForDocument(this);
     }
@@ -5720,6 +5831,7 @@
     get host() { return wrapNode(__omoikane_shadow_host(this.__id)); }
     get mode() { return __omoikane_shadow_mode(this.__id); }
     get delegatesFocus() { return false; }
+    get pointerLockElement() { return pointerLockElementForRoot(this); }
     get fullscreenElement() {
       const candidate = rawFullscreenElementForDocument(internalOwnerDocument(this.host));
       return candidate ? retargetNode(candidate, this) : null;
@@ -11861,6 +11973,17 @@
     Node.prototype[constName] = value;
   }
 
+  // Editing state belongs to the native control, not to a particular Realm's
+  // wrapper. This also preserves UTF-16 values without a native string roundtrip.
+  for (const name of ["__value", "__selectionStart", "__selectionEnd",
+      "__selectionDirection", "__focusValue", "__textEditChanged", "__lastValueChangeWasUser"]) {
+    Object.defineProperty(Node.prototype, name, {
+      configurable: true,
+      get() { return safeWeakMapGet(nodeEventStates, this)[name]; },
+      set(value) { safeWeakMapGet(nodeEventStates, this)[name] = value; },
+    });
+  }
+
   // Event handler IDL attributes (onclick, onsubmit, ...). Assigning a function
   // registers a single event listener for the matching type and replaces any
   // previously assigned handler, so `form.onsubmit = fn` behaves like
@@ -11874,6 +11997,7 @@
     "contextmenu", "wheel", "drag", "dragstart", "dragend", "dragenter",
     "dragleave", "dragover", "drop", "error", "abort", "slotchange", "scroll",
     "cancel", "close", "beforetoggle", "toggle", "fullscreenchange", "fullscreenerror",
+    "lostpointercapture",
   ];
   for (const type of EVENT_HANDLER_TYPES) {
     const key = "__on_" + type;
@@ -11881,16 +12005,35 @@
       configurable: true,
       enumerable: false,
       get() {
-        return this[key] || null;
+        return safeWeakMapGet(nodeEventStates, this).handlers.get(key) || null;
       },
       set(handler) {
-        if (this[key]) this.removeEventListener(type, this[key]);
-        this[key] = typeof handler === "function" ? handler : null;
-        if (this[key]) this.addEventListener(type, this[key]);
+        const handlers = safeWeakMapGet(nodeEventStates, this).handlers;
+        const previous = handlers.get(key);
+        if (previous) this.removeEventListener(type, previous);
+        const next = typeof handler === "function" ? handler : null;
+        handlers.set(key, next);
+        if (next) this.addEventListener(type, next);
       },
     });
   }
 
+  for (const type of ["pointerlockchange", "pointerlockerror"]) {
+    Object.defineProperty(Document.prototype, "on" + type, {
+      configurable: true, enumerable: true,
+      get() { return safeWeakMapGet(nodeEventStates, this).handlers.get(type) || null; },
+      set(handler) {
+        const handlers = safeWeakMapGet(nodeEventStates, this).handlers;
+        const previous = handlers.get(type);
+        if (previous) this.removeEventListener(type, previous);
+        const next = typeof handler === "function" ? handler : null;
+        handlers.set(type, next);
+        if (next) this.addEventListener(type, next);
+      },
+    });
+  }
+
+  const pointerLockDispatchEvent = Node.prototype.dispatchEvent;
   globalThis.Node = Node;
   globalThis.NodeList = NodeList;
   globalThis.Window = Window;
@@ -12581,7 +12724,7 @@
   // document so a pointer captured in an iframe cannot leak an event path into
   // an unrelated browsing context. The native mouse bridge releases a pointer
   // across all documents when the button is released.
-  const pointerCaptureTargets = new Map();
+  const pointerCaptureTargets = browsingInput.captures;
   function normalizePointerId(pointerId) {
     const value = Number(pointerId);
     const integer = Math.trunc(value);
@@ -12597,7 +12740,7 @@
   }
   function pointerCaptureTarget(doc, pointerId) {
     const key = pointerCaptureKey(doc, pointerId);
-    const target = pointerCaptureTargets.get(key);
+    const target = wrapNode(pointerCaptureTargets.get(key));
     if (target && target.isConnected) {
       return target;
     }
@@ -12605,19 +12748,24 @@
     return null;
   }
   function setPointerCaptureTarget(target, pointerId) {
+    if (nativePointerLockTarget() !== null) {
+      throw new DOMException("Pointer lock is active", "InvalidStateError");
+    }
     if (!(target instanceof Element) || !target.isConnected) {
       throw new DOMException("The pointer capture target is not connected.", "NotFoundError");
     }
     const doc = target.ownerDocument;
     if (!doc) throw new DOMException("The pointer has no owner document.", "NotFoundError");
-    pointerCaptureTargets.set(pointerCaptureKey(doc, pointerId), target);
+    pointerCaptureTargets.set(pointerCaptureKey(doc, pointerId), internalNodeId(target));
   }
   function releasePointerCaptureTarget(target, pointerId) {
     const doc = target && target.ownerDocument;
     const key = pointerCaptureKey(doc, pointerId);
-    if (pointerCaptureTargets.get(key) === target) pointerCaptureTargets.delete(key);
+    if (pointerCaptureTargets.get(key) === internalNodeId(target)) pointerCaptureTargets.delete(key);
   }
   function capturedInputTarget(target, pointerId = 1) {
+    const locked = wrapNode(nativePointerLockTarget());
+    if (locked) return locked;
     const doc = target && target.nodeType === 9 ? target : target && target.ownerDocument;
     return pointerCaptureTarget(doc || document, normalizePointerId(pointerId)) || target;
   }
@@ -12628,6 +12776,25 @@
       if (key.endsWith(suffix)) pointerCaptureTargets.delete(key);
     }
   };
+
+  function releaseCapturesForPointerLock(element) {
+    for (const [key, targetId] of pointerCaptureTargets) {
+      pointerCaptureTargets.delete(key);
+      dispatchLostPointerCapture(targetId, Number(key.slice(key.lastIndexOf(":") + 1)));
+    }
+    resetDragInputState();
+  }
+
+  function dispatchLostPointerCapture(id, pointerId) {
+    const target = wrapNode(id);
+    if (!target) return true;
+    const doc = internalOwnerDocument(target);
+    const forwarded = nativeForwardInput(internalNodeId(doc), "capture", [id, pointerId]);
+    if (forwarded !== undefined) return forwarded;
+    const event = new MouseEvent("lostpointercapture", { bubbles: true, composed: true });
+    Object.defineProperty(event, "pointerId", { value: pointerId });
+    return safeApply(pointerLockDispatchEvent, target, [event]);
+  }
 
   function draggableAncestor(target) {
     for (let current = target; current && current.nodeType === 1; current = current.parentNode) {
@@ -12758,14 +12925,21 @@
   };
 
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
+    const locked = nativePointerLockTarget() !== null;
+    if (locked && ["mouseover", "mouseout", "mouseenter", "mouseleave"].includes(type)) return true;
     const target = capturedInputTarget(wrapNode(id) || document, init && init.pointerId || 1) || document;
+    const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
+    const forwarded = nativeForwardInput(internalNodeId(inputDocument), "mouse", [internalNodeId(target), type, init, focusTarget]);
+    if (forwarded !== undefined) return forwarded;
     const activationEvent = type === "mousedown" || type === "pointerdown" || type === "click";
     if (activationEvent) grantFullscreenTransientActivation();
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
     const targetDocument = target instanceof Document ? target : (target.ownerDocument || document);
-    if (type === "mousedown" || type === "pointerdown") {
+    if (locked) {
+      lightDismissPointerDown = null;
+    } else if (type === "mousedown" || type === "pointerdown") {
       lightDismissPointerDown = {
         documentId: targetDocument.__id,
         popoverId: nearestInclusiveAutoPopover(target, targetDocument)?.__id ?? null,
@@ -12778,17 +12952,22 @@
       }
       lightDismissPointerDown = null;
     }
-    if (notCanceled && focusTarget && target && typeof target.focus === "function") {
+    if (!locked && notCanceled && focusTarget && target && typeof target.focus === "function") {
       target.focus();
     }
     return notCanceled;
   };
   globalThis.__omoikane_dispatch_wheel_input = function(id, init) {
-    const target = wrapNode(id) || document;
+    const locked = wrapNode(nativePointerLockTarget());
+    const target = locked || wrapNode(id) || document;
+    const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
+    const forwarded = nativeForwardInput(internalNodeId(inputDocument), "wheel", [internalNodeId(target), init]);
+    if (forwarded !== undefined) return forwarded;
     const notCanceled = target.dispatchEvent(new WheelEvent("wheel", {
       ...init, bubbles: true, cancelable: true, composed: true, deltaMode: 0,
     }));
     if (!notCanceled) return false;
+    if (locked) return true;
 
     let element = target && target.nodeType === 1 ? target : target.parentNode;
     while (element && element.nodeType === 1) {
@@ -12812,10 +12991,17 @@
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
     const focusedDocument = focusChainDocuments()[0] || document;
+    const forwarded = nativeForwardInput(internalNodeId(focusedDocument), "keyboard", [type, init]);
+    if (forwarded !== undefined) return forwarded;
     const target = focusedElementOf(focusedDocument) || focusedDocument.body ||
       focusedDocument.documentElement || focusedDocument;
     const activationEvent = type === "keydown" && String(init && init.key || "") !== "Escape";
     if (activationEvent) grantFullscreenTransientActivation();
+    if (type === "keydown" && String(init && init.key || "") === "Escape") {
+      const locked = nativePointerLockTarget() !== null;
+      nativeExitPointerLock(null, false);
+      if (locked) fullyExitFullscreenForUser(focusedDocument);
+    }
     const notCanceled = target.dispatchEvent(new KeyboardEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
@@ -12835,6 +13021,8 @@
     action, text, selectionStart = 0, selectionEnd = selectionStart,
   ) {
     const focusedDocument = focusChainDocuments()[0] || document;
+    const forwarded = nativeForwardInput(internalNodeId(focusedDocument), "composition", [action, text, selectionStart, selectionEnd]);
+    if (forwarded !== undefined) return forwarded;
     const target = focusedElementOf(focusedDocument);
     const control = isTextControl(target) && !target.readOnly && !target.__isDisabledControl()
       ? target : null;
@@ -22026,4 +22214,12 @@
   globalThis.ResizeObserverSize = ResizeObserverSize;
   globalThis.IntersectionObserver = IntersectionObserver;
   globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
+  const inputDispatchers = {
+    mouse: globalThis.__omoikane_dispatch_mouse_input,
+    wheel: globalThis.__omoikane_dispatch_wheel_input,
+    keyboard: globalThis.__omoikane_dispatch_keyboard_input,
+    composition: globalThis.__omoikane_dispatch_composition_input,
+    capture: dispatchLostPointerCapture,
+  };
+  nativeRegisterInputDispatcher((kind, args) => safeApply(inputDispatchers[kind], undefined, args));
 })();

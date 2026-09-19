@@ -1,0 +1,56 @@
+name: GUI Pointer Lock
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', '.github/workflows/gui-pointer-lock.yml']
+  push:
+    branches: [main]
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', '.github/workflows/gui-pointer-lock.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gui-pointer-lock-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  x11:
+    name: Pointer Lock X11 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gui-pointer-lock-${{ runner.arch }}
+          cache-workspace-crates: true
+      - name: Install virtual desktop and input tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xdotool x11-utils openbox libxkbcommon-x11-0 python3-pil fonts-dejavu
+      - name: Build and test GUI bridge
+        run: |
+          cargo build --locked --features gui --bin omoikane
+          cargo test --locked --features gui --bin omoikane
+      - name: Verify native X11 input and cursor lifecycle
+        run: /usr/bin/python3 scripts/test-pointer-lock-x11.py --binary target/debug/omoikane --artifacts .artifacts/gui-pointer-lock
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui-pointer-lock-${{ runner.arch }}
+          path: .artifacts/gui-pointer-lock/
+          if-no-files-found: warn

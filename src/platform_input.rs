@@ -101,6 +101,11 @@ impl PlatformInput {
         x: f64,
         y: f64,
     ) -> Result<(), JsonRpcError> {
+        // Locked movement arrives as device deltas. Processing absolute
+        // notifications as well would duplicate motion and undo frozen coords.
+        if session.is_pointer_locked() {
+            return Ok(());
+        }
         self.cursor = (x, y);
         session.dispatch(
             "Input.dispatchMouseEvent",
@@ -114,6 +119,51 @@ impl PlatformInput {
             }),
         )?;
         Ok(())
+    }
+
+    /// Last unlocked cursor position, in CSS pixels, for native restoration.
+    pub fn cursor_position(&self) -> (f64, f64) {
+        self.cursor
+    }
+
+    /// Delivers device movement without clipping it to the window bounds.
+    pub fn relative_motion(
+        &mut self,
+        session: &mut CdpSession,
+        dx: f64,
+        dy: f64,
+    ) -> Result<(), JsonRpcError> {
+        if !session.is_pointer_locked() {
+            return Ok(());
+        }
+        session.dispatch(
+            "Input.dispatchMouseEvent",
+            json!({
+                "type": "mouseMoved", "x": self.cursor.0, "y": self.cursor.1,
+                "movementX": dx, "movementY": dy,
+                "button": "none", "buttons": self.buttons,
+                "modifiers": self.modifiers.cdp_bits(),
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// Starts a new movement sequence when the pointer re-enters the surface.
+    pub fn cursor_left(&mut self, session: &mut CdpSession) {
+        session.reset_pointer_movement();
+    }
+
+    /// Releases cursor lock and stale button/modifier state when focus is lost.
+    pub fn focus_changed(
+        &mut self,
+        session: &mut CdpSession,
+        focused: bool,
+    ) -> Result<(), JsonRpcError> {
+        if !focused {
+            self.buttons = 0;
+            self.modifiers = InputModifiers::default();
+        }
+        session.set_pointer_lock_focus(focused)
     }
 
     /// Dispatches a mouse press or release at the last cursor position.

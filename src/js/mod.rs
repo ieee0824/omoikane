@@ -54,12 +54,15 @@ mod font_loading;
 mod font_loading_tests;
 #[cfg(test)]
 mod fullscreen_tests;
+mod input_bridge;
 #[cfg(test)]
 mod layout_metrics_tests;
 mod module_fetch;
 #[cfg(test)]
 mod module_loading_tests;
 mod node_lifetime;
+mod pointer_lock;
+pub use pointer_lock::PointerLockTransition;
 #[cfg(test)]
 mod node_lifetime_tests;
 #[cfg(test)]
@@ -1019,6 +1022,8 @@ struct HostState {
     document: NodeHandle,
     nodes: HashMap<usize, NodeHandle>,
     node_lifetimes: node_lifetime::NodeLifetimes,
+    pointer_lock: pointer_lock::State,
+    input_bridge: input_bridge::State,
     /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
     /// returns their native node identity.
     canonical_node_identity_resolver: Option<JsValue>,
@@ -1235,6 +1240,8 @@ unsafe impl Trace for HostState {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.event_loop.trace(tracer) };
         unsafe { self.node_lifetimes.trace(tracer) };
+        unsafe { self.pointer_lock.trace(tracer) };
+        unsafe { self.input_bridge.trace(tracer) };
         if let Some(maps) = &self.font_loading.maps {
             unsafe { maps.trace(tracer) };
         }
@@ -1509,6 +1516,7 @@ struct IframeSandboxPolicy {
     active: bool,
     allow_scripts: bool,
     allow_same_origin: bool,
+    allow_pointer_lock: bool,
 }
 
 impl Default for IframeSandboxPolicy {
@@ -1517,6 +1525,7 @@ impl Default for IframeSandboxPolicy {
             active: false,
             allow_scripts: true,
             allow_same_origin: true,
+            allow_pointer_lock: true,
         }
     }
 }
@@ -1534,6 +1543,7 @@ impl IframeSandboxPolicy {
             active: true,
             allow_scripts: tokens.contains("allow-scripts"),
             allow_same_origin: tokens.contains("allow-same-origin"),
+            allow_pointer_lock: tokens.contains("allow-pointer-lock"),
         }
     }
 
@@ -1661,6 +1671,8 @@ impl HostState {
             document: document.clone(),
             nodes: HashMap::new(),
             node_lifetimes: node_lifetime::NodeLifetimes::default(),
+            pointer_lock: pointer_lock::State::default(),
+            input_bridge: input_bridge::State::default(),
             canonical_node_identity_resolver: None,
             remote_objects: HashMap::new(),
             console_logs: Vec::new(),
@@ -2224,6 +2236,10 @@ impl HostState {
         let Some(previous) = self.iframe_documents.remove(&iframe_id) else {
             return;
         };
+        self.pointer_lock
+            .retire_document(previous.document.identity());
+        self.input_bridge
+            .retire_document(previous.document.identity());
         if self
             .fullscreen_elements
             .contains_key(&previous.document.identity())
@@ -2290,6 +2306,7 @@ impl HostState {
     /// Destroys every nested browsing context owned by iframe elements in a
     /// subtree that has left its owner Document.
     fn destroy_iframe_contexts_in_subtree(&mut self, root: &NodeHandle) {
+        self.pointer_lock.subtree_removed(root);
         let mut subtree_ids = HashSet::new();
         Self::collect_tree_ids(root, &mut subtree_ids);
         let iframe_ids: Vec<_> = self
@@ -4906,6 +4923,7 @@ impl JsRuntime {
             self.run_written_scripts(false)?;
         }
         self.sync_module_csp_violations();
+        self.flush_pointer_lock_notifications()?;
         result
     }
 
@@ -7922,7 +7940,13 @@ fn ensure_iframe_realm(
     })();
     context.enter_realm(old_realm);
     host_state.borrow_mut().canonical_node_identity_resolver = previous_resolver;
-    setup?;
+    if let Err(error) = setup {
+        host_state
+            .borrow_mut()
+            .input_bridge
+            .retire_document(document_id);
+        return Err(error);
+    }
 
     let mut state = host_state.borrow_mut();
     let entry = state
@@ -7939,6 +7963,8 @@ fn register_host_bindings(
     host_state: &Rc<RefCell<HostState>>,
 ) -> JsResult<()> {
     font_loading::register(context, host_state)?;
+    pointer_lock::register(context)?;
+    input_bridge::register(context)?;
     let state = host_state.borrow();
     context.register_global_property(
         js_string!("__omoikane_document_id"),
