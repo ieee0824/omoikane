@@ -313,6 +313,17 @@ impl EventLoop {
         );
     }
 
+    /// Queues an input-related callback owned by a live Document.
+    pub(crate) fn enqueue_user_interaction(&mut self, payload: TimerPayload, document_id: usize) {
+        self.enqueue(
+            TaskSource::UserInteraction,
+            Task::Timer {
+                payload,
+                owner_document_id: Some(document_id),
+            },
+        );
+    }
+
     /// Queues a callback on the DOM manipulation task source.
     pub(crate) fn enqueue_dom_manipulation(&mut self, payload: TimerPayload) {
         self.enqueue(

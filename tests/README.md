@@ -75,6 +75,38 @@ iframe policy, exit paths, and top-layer rendering are covered by the native
 Fullscreen regression tests and the fixed
 `anonymized-fullscreen-top-layer` fixture.
 
+The Pointer Lock subset checks `MouseEvent.movementX/Y` construction and
+`NotAllowedError` without user activation. `cargo test --locked --test pointer_lock`
+additionally exercises the host acquisition handshake, refusal, queued requests,
+relative input, pointer capture, sandbox inheritance, Shadow DOM, removal,
+Escape, focus loss, and navigation. The `input.pointer-lock` surface probe checks
+the acquisition/release events and Promise result through the headless host.
+The input regressions use same-origin HTTP documents with child-realm listeners
+to check cross-frame ordering, cancellation, text/IME input, and nested focus.
+Child scripts are inserted dynamically; initial HTML iframe inline scripts are
+tracked separately in [#766](https://github.com/ieee0824/omoikane/issues/766).
+The Rust tests emulate presentation-host responses. The actual Linux GUI is also
+tested in a dedicated Xvfb/Openbox display by `scripts/test-pointer-lock-x11.py`.
+It sends XTEST input, checks exact relative deltas (including identical successive
+events), frozen page coordinates, cursor confinement/hiding/restoration, button
+and wheel delivery, explicit exit, Escape with `preventDefault()`, focus loss,
+and navigation. It preserves logs, JSON results, original screenshots and
+losslessly compressed copies in a new artifact directory. The script never
+attaches to an existing display. Its CI job runs on Linux x86_64 and aarch64.
+
+```sh
+sudo apt-get install --no-install-recommends xvfb xdotool x11-utils openbox libxkbcommon-x11-0 python3-pil fonts-dejavu
+cargo build --locked --features gui --bin omoikane
+/usr/bin/python3 scripts/test-pointer-lock-x11.py --binary target/debug/omoikane --artifacts .artifacts/gui-pointer-lock
+```
+
+Xvfb validates the X11 path with synthetic device input; physical devices,
+Wayland and macOS still need desktop validation. `cargo check --locked --features
+gui` only checks compilation. `unadjustedMovement: true` is currently rejected
+with `NotSupportedError` by the built-in hosts. The Linux GUI directly uses the
+already-resolved `x11-dl` crate for an exclusive grab: Winit's X11 confinement
+uses `owner_events=true`, which duplicates raw events during pointer lock.
+
 The encoding-stream subset covers chunk boundaries, BOM handling, encoding labels,
 fatal errors, BufferSource conversion and backpressure. These `.any.js` cases run
 in the smoke runner's document realm; `src/js/text_stream_tests.rs` additionally

@@ -16,6 +16,35 @@ fn collect(runtime: &mut JsRuntime) {
 }
 
 #[test]
+fn shared_listener_state_survives_retirement_only_while_referenced() {
+    let mut runtime = runtime();
+    runtime.eval(r#"
+        var frame=document.getElementById('f');
+        var oldDoc=frame.contentDocument; var oldNode=oldDoc.getElementById('old');
+        frame.contentWindow.eval("var target=document.getElementById('old'); target.addEventListener('probe',()=>target.setAttribute('data-seen','yes'));");
+        frame.srcdoc='<p>replacement</p>'; void frame.contentDocument;
+    "#).unwrap();
+    collect(&mut runtime);
+    runtime
+        .eval("oldNode.dispatchEvent(new Event('probe'))")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("oldNode.getAttribute('data-seen')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "yes"
+    );
+    runtime.eval("oldNode=null; oldDoc=null").unwrap();
+    collect(&mut runtime);
+    let state = runtime.host_state.borrow();
+    assert!(state.node_lifetimes.document_count() <= 2);
+    assert!(state.node_lifetimes.node_count() < 30);
+}
+
+#[test]
 fn parent_element_tracks_reparenting_without_crossing_document_or_shadow_roots() {
     let mut runtime = runtime();
     runtime

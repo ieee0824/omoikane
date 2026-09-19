@@ -84,7 +84,7 @@ impl ShadowStack {
         last_pc: u32,
         function_name: JsString,
         native_source_info: NativeSourceInfo,
-    ) {
+    ) -> usize {
         // NOTE: pc points to the next opcode, so we offset by -1 to put it within range.
         let last_pc = last_pc.saturating_sub(1);
 
@@ -97,6 +97,13 @@ impl ShadowStack {
             function_name: Some(function_name),
             source_info: native_source_info,
         });
+        self.stack.len() - 1
+    }
+
+    /// Removes a completed native call while retaining callback frames it pushed.
+    pub(crate) fn remove_native(&mut self, index: usize) {
+        debug_assert!(matches!(self.stack[index], ShadowEntry::Native { .. }));
+        self.stack.remove(index);
     }
 
     pub(crate) fn push_bytecode(&mut self, last_pc: u32, source_info: SourceInfo) {

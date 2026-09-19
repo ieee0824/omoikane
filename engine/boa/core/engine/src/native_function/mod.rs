@@ -418,7 +418,7 @@ pub(crate) fn native_function_call(
 
     let pc = context.vm.frame.pc;
     let native_source_info = context.native_source_info();
-    context
+    let shadow_index = context
         .vm
         .shadow_stack
         .push_native(pc, name, native_source_info);
@@ -436,6 +436,7 @@ pub(crate) fn native_function_call(
     );
 
     let continuation_depth = context.vm.native_call_continuations.len();
+    let frame_depth = context.vm.frames.len();
     let result = if constructor.is_some() {
         function.call(&JsValue::undefined(), &native_roots.args, context)
     } else {
@@ -445,9 +446,21 @@ pub(crate) fn native_function_call(
 
     context.vm.native_active_function = previous_active_function;
     context.vm.native_active_function_is_constructor_call = previous_is_constructor_call;
-    context.swap_realm(&mut realm);
+    if context.vm.frames.len() > frame_depth {
+        // A native continuation can leave a callback frame ready to execute.
+        // Preserve its active realm and restore the caller when that frame
+        // returns, rather than replacing the callback's realm here.
+        let callback_frame = if context.vm.frames.len() == frame_depth + 1 {
+            &mut context.vm.frame
+        } else {
+            &mut context.vm.frames[frame_depth + 1]
+        };
+        std::mem::swap(&mut callback_frame.realm, &mut realm);
+    } else {
+        context.swap_realm(&mut realm);
+    }
 
-    context.vm.shadow_stack.pop();
+    context.vm.shadow_stack.remove_native(shadow_index);
 
     if result.is_err()
         && let Some(suspension) = context.vm.pending_native_call.take()

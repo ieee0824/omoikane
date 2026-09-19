@@ -251,6 +251,15 @@
       "baseline_supported": true
     },
     {
+      "id": "input.pointer-lock",
+      "area": "input",
+      "description": "Pointer Lock rejects missing activation, acquires on host input, and releases with document events",
+      "setup": "globalThis.__plLog=[]; globalThis.__pl=document.createElement('div'); document.body.appendChild(__pl); document.onpointerlockerror=()=>__plLog.push('error'); document.onpointerlockchange=()=>__plLog.push(document.pointerLockElement===__pl?'locked':'unlocked'); __pl.requestPointerLock().catch(e=>{__plLog.push(e.name); document.addEventListener('keydown',()=>__pl.requestPointerLock().then(()=>{__plLog.push('resolved');document.exitPointerLock()}),{once:true}); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter'})});",
+      "run_tasks": true,
+      "probe": "document.pointerLockElement===null && __plLog.join(',')==='error,NotAllowedError,locked,resolved,unlocked' && new MouseEvent('mousemove',{movementX:2.5}).movementX===2.5 && typeof __omoikane_request_pointer_lock==='undefined'",
+      "baseline_supported": true
+    },
+    {
       "id": "scheduling.queue-microtask",
       "area": "scheduling",
       "description": "queueMicrotask shares one FIFO microtask queue with promise reactions",

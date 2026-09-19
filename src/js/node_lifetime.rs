@@ -8,6 +8,7 @@
 use super::*;
 use crate::dom::WeakNodeHandle;
 use boa_engine::JsData;
+use boa_engine::object::builtins::JsArray;
 use boa_gc::{GcRefCell, Rooted};
 
 type DocumentNodes = Rc<RefCell<HashMap<usize, NodeHandle>>>;
@@ -24,6 +25,7 @@ struct WrapperGroup {
 struct WrapperEntry {
     wrapper: JsObject,
     lease: Lease,
+    events: Rc<JsObject>,
 }
 
 #[derive(Finalize, JsData)]
@@ -41,6 +43,7 @@ unsafe impl Trace for WrapperGroup {
             // JS object may install the lease cell's write-barrier owner;
             // tracing the same cell here would overwrite it during adoption.
             unsafe { entry.wrapper.trace(tracer) };
+            unsafe { entry.events.as_ref().trace(tracer) };
         }
     }
     fn run_finalizer(&self) {}
@@ -78,6 +81,7 @@ pub(super) struct NodeLifetimes {
     active: HashMap<GroupKey, Group>,
     nodes: HashMap<usize, WeakNodeHandle>,
     owners: HashMap<usize, usize>,
+    event_states: HashMap<usize, Weak<JsObject>>,
     #[cfg(test)]
     pub(super) enrollment_visits: usize,
 }
@@ -287,7 +291,21 @@ impl HostState {
         node: NodeHandle,
         wrapper: JsObject,
         realm_id: usize,
-    ) -> JsObject {
+        event_state: JsObject,
+    ) -> (JsObject, JsObject) {
+        // One native EventTarget has one listener list even when several
+        // Realms hold wrappers. The existing wrapper groups own this state;
+        // the weak index must not keep a retired document alive on its own.
+        let events = self
+            .node_lifetimes
+            .event_states
+            .get(&node.identity())
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| Rc::new(event_state));
+        self.node_lifetimes
+            .event_states
+            .insert(node.identity(), Rc::downgrade(&events));
+        let event_root = Rooted::new(events.as_ref().clone());
         let owner = document_root_for_node(&node)
             .or_else(|| {
                 self.node_lifetimes
@@ -309,9 +327,13 @@ impl HostState {
             WrapperEntry {
                 wrapper,
                 lease: lease.clone(),
+                events,
             },
         );
-        JsObject::from_proto_and_data(None, LeaseData(lease))
+        (
+            JsObject::from_proto_and_data(None, LeaseData(lease)),
+            (*event_root).clone(),
+        )
     }
 
     pub(super) fn set_node_lifetime_owner(&mut self, node: &NodeHandle, document: &NodeHandle) {
@@ -347,6 +369,9 @@ impl HostState {
     /// Style resolvers can own native DOM handles. A document record's death,
     /// not the DOM Rc count, determines cache reclamation after JS collection.
     pub(super) fn sweep_node_lifetimes(&mut self) {
+        self.node_lifetimes
+            .event_states
+            .retain(|_, state| state.strong_count() != 0);
         self.node_lifetimes
             .groups
             .retain(|_, group| group.strong_count() != 0);
@@ -396,14 +421,20 @@ pub(super) fn retain_node_native(
         .host_defined()
         .get::<ModuleDocumentId>()
         .map(|owner| owner.0);
-    with_host_state(|state| {
+    let events = args
+        .get(2)
+        .and_then(JsValue::as_object)
+        .ok_or_else(|| JsNativeError::typ().with_message("node event state required"))?;
+    let (lease, events) = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let node = state
             .get_node(id)
             .ok_or_else(|| JsNativeError::reference().with_message("node not found"))?;
         let realm_id = realm_id.unwrap_or_else(|| state.document.identity());
-        Ok(state.retain_node_wrapper(node, wrapper, realm_id).into())
-    })
+        Ok(state.retain_node_wrapper(node, wrapper, realm_id, events))
+    })?;
+    let values = Rooted::new(vec![JsValue::from(lease), JsValue::from(events)]);
+    Ok(JsArray::from_iter(values.iter().cloned(), context).into())
 }
 
 pub(super) fn set_owner_native(

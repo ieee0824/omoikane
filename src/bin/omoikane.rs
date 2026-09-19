@@ -5,18 +5,23 @@ use std::time::{Duration, Instant};
 
 use omoikane::cdp::CdpSession;
 use omoikane::frame::{PlatformFrameScheduler, render_browser_frame};
-use omoikane::js::FullscreenTransition;
+use omoikane::js::{FullscreenTransition, PointerLockTransition};
 use omoikane::platform_input::{
     InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
 };
 use serde_json::json;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
+
+#[path = "omoikane/pointer_lock_host.rs"]
+mod pointer_lock_host;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
@@ -30,11 +35,15 @@ struct BrowserApp {
     input: PlatformInput,
     window_title: String,
     native_fullscreen: bool,
+    native_pointer_lock: bool,
+    native_pointer_lock_raw_buttons: bool,
+    pointer_restore: (f64, f64),
 }
 
 impl BrowserApp {
     fn new(url: &str) -> Result<Self, Box<dyn Error>> {
         let mut session = CdpSession::new().map_err(std::io::Error::other)?;
+        session.set_pointer_lock_deferred(true);
         session.dispatch("Page.navigate", json!({ "url": url }))?;
         let started_at = Instant::now();
         Ok(Self {
@@ -46,6 +55,9 @@ impl BrowserApp {
             input: PlatformInput::new(),
             window_title: DEFAULT_WINDOW_TITLE.to_string(),
             native_fullscreen: false,
+            native_pointer_lock: false,
+            native_pointer_lock_raw_buttons: false,
+            pointer_restore: (0.0, 0.0),
         })
     }
 
@@ -60,6 +72,68 @@ impl BrowserApp {
                 FullscreenTransition::Exit => {
                     window.set_fullscreen(None);
                     self.native_fullscreen = false;
+                }
+            }
+        }
+    }
+
+    fn unlock_native_pointer(&mut self) {
+        if let Some(window) = &self.window {
+            if let Err(error) = pointer_lock_host::set_grab(window, false) {
+                eprintln!("cursor release failed: {error}");
+            }
+            window.set_cursor_visible(true);
+            if self.native_pointer_lock {
+                let _ = window.set_cursor_position(LogicalPosition::new(
+                    self.pointer_restore.0,
+                    self.pointer_restore.1,
+                ));
+            }
+        }
+        self.native_pointer_lock = false;
+        self.native_pointer_lock_raw_buttons = false;
+        self.session.reset_pointer_movement();
+    }
+
+    fn sync_pointer_lock(&mut self) {
+        if self.window.is_none() {
+            return;
+        }
+        // Page callbacks run on the event loop, not inside this native handshake.
+        while let Some(transition) = self.session.take_pointer_lock_transition() {
+            match transition {
+                PointerLockTransition::Release => self.unlock_native_pointer(),
+                PointerLockTransition::Acquire {
+                    request_id,
+                    unadjusted_movement,
+                } => {
+                    let window = self.window.as_ref().unwrap();
+                    // Unaccelerated delivery is optional. Do not promise it on
+                    // platforms whose device-event capabilities are unverified.
+                    let accepted =
+                        !unadjusted_movement && pointer_lock_host::set_grab(window, true).is_ok();
+                    if accepted {
+                        if !self.native_pointer_lock {
+                            self.pointer_restore = self.input.cursor_position();
+                        }
+                        window.set_cursor_visible(false);
+                        self.native_pointer_lock = true;
+                        self.native_pointer_lock_raw_buttons =
+                            pointer_lock_host::uses_raw_buttons(window);
+                    }
+                    match self
+                        .session
+                        .complete_pointer_lock_request(request_id, accepted)
+                    {
+                        Ok(true) => {}
+                        Ok(false) if accepted => self.unlock_native_pointer(),
+                        Err(error) => {
+                            eprintln!("pointer lock completion failed: {error}");
+                            let _ = self.session.release_pointer_lock_from_host();
+                            self.unlock_native_pointer();
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -103,7 +177,15 @@ impl BrowserApp {
                 let (x, y) = physical_position_css_pixels(position, scale_factor);
                 self.input.cursor_moved(&mut self.session, x, y)
             }
+            WindowEvent::CursorLeft { .. } => {
+                self.input.cursor_left(&mut self.session);
+                Ok(())
+            }
+            WindowEvent::Focused(focused) => self.input.focus_changed(&mut self.session, focused),
             WindowEvent::MouseInput { state, button, .. } => {
+                if self.native_pointer_lock_raw_buttons {
+                    return false;
+                }
                 let Some(button) = platform_mouse_button(button) else {
                     return false;
                 };
@@ -111,6 +193,9 @@ impl BrowserApp {
                     .mouse_button(&mut self.session, button, state == ElementState::Pressed)
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.native_pointer_lock_raw_buttons {
+                    return false;
+                }
                 let (delta_x, delta_y) = wheel_delta_css_pixels(delta, scale_factor);
                 self.input.wheel(&mut self.session, delta_x, delta_y)
             }
@@ -150,6 +235,7 @@ impl BrowserApp {
             eprintln!("input event failed: {error}");
         }
         self.sync_fullscreen();
+        self.sync_pointer_lock();
         true
     }
 }
@@ -298,7 +384,11 @@ impl ApplicationHandler for BrowserApp {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                let _ = self.session.release_pointer_lock_from_host();
+                self.unlock_native_pointer();
+                event_loop.exit();
+            }
             WindowEvent::Resized(_) => {
                 if self.native_fullscreen
                     && self
@@ -328,8 +418,74 @@ impl ApplicationHandler for BrowserApp {
         }
     }
 
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if !self.native_pointer_lock {
+            return;
+        }
+        let result = match event {
+            DeviceEvent::MouseMotion { delta } => {
+                self.input
+                    .relative_motion(&mut self.session, delta.0, delta.1)
+            }
+            DeviceEvent::Button { button, state } if self.native_pointer_lock_raw_buttons => {
+                let pressed = state == ElementState::Pressed;
+                let button = match button {
+                    1 => PlatformMouseButton::Left,
+                    2 => PlatformMouseButton::Middle,
+                    3 => PlatformMouseButton::Right,
+                    8 => PlatformMouseButton::Back,
+                    9 => PlatformMouseButton::Forward,
+                    4..=7 if pressed => {
+                        // X11 wheel buttons encode one 40-CSS-pixel line step.
+                        let (dx, dy) = match button {
+                            4 => (0.0, -40.0),
+                            5 => (0.0, 40.0),
+                            6 => (-40.0, 0.0),
+                            _ => (40.0, 0.0),
+                        };
+                        if let Err(error) = self.input.wheel(&mut self.session, dx, dy) {
+                            eprintln!("relative wheel input failed: {error}");
+                        }
+                        self.sync_pointer_lock();
+                        self.frame_scheduler
+                            .request_rendering_opportunity(Instant::now());
+                        return;
+                    }
+                    _ => return,
+                };
+                self.input.mouse_button(&mut self.session, button, pressed)
+            }
+            DeviceEvent::MouseWheel { delta } if self.native_pointer_lock_raw_buttons => {
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map_or(1.0, |window| window.scale_factor());
+                let (dx, dy) = wheel_delta_css_pixels(delta, scale);
+                self.input.wheel(&mut self.session, dx, dy)
+            }
+            _ => return,
+        };
+        if let Err(error) = result {
+            eprintln!("relative input failed: {error}");
+        }
+        self.sync_pointer_lock();
+        self.frame_scheduler
+            .request_rendering_opportunity(Instant::now());
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        let _ = self.input.focus_changed(&mut self.session, false);
+        self.unlock_native_pointer();
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.sync_fullscreen();
+        self.sync_pointer_lock();
         if let Some(window) = &self.window {
             let now = Instant::now();
             if self.frame_scheduler.queue_redraw_if_due(now) {

@@ -9,7 +9,7 @@ build = "build.rs"
 crate-type = ["rlib", "cdylib"]
 
 [features]
-gui = ["dep:softbuffer", "dep:winit"]
+gui = ["dep:softbuffer", "dep:winit", "dep:x11-dl"]
 # Test-only Gate 2 comparison harness. This never selects a production
 # JavaScript engine; it compares the existing Boa embedding with a standalone
 # Boa interpreter context over the same source programs.
@@ -85,6 +85,10 @@ webpki-roots = "1.0"
 image-webp = "0.2.4"
 softbuffer = { version = "0.4.8", optional = true }
 winit = { version = "0.30.12", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Use an exclusive X11 grab so raw input is delivered exactly once while locked.
+x11-dl = { version = "2.21.0", optional = true }
 
 [[bin]]
 name = "omoikane"

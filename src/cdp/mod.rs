@@ -25,7 +25,7 @@ use crate::js::PageTaskSource;
 use crate::js::{
     CompletedPageTask, FullscreenTransition, JavaScriptDialog, JavaScriptDialogController,
     JavaScriptDialogError, JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask,
-    PageTaskError, StorageManager,
+    PageTaskError, PointerLockTransition, StorageManager,
 };
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -696,6 +696,11 @@ pub struct CdpSession {
     fullscreen_supported: bool,
     fullscreen_transition_allowed: bool,
     pending_fullscreen_transition: Option<FullscreenTransition>,
+    pointer_lock_deferred: bool,
+    pointer_lock_focused: bool,
+    pending_pointer_release: bool,
+    last_pointer_position: Option<(f64, f64)>,
+    previous_input_locked: bool,
 }
 
 /// Declared after the runtime so workers and child realms finish dropping
@@ -799,6 +804,11 @@ impl CdpSession {
             fullscreen_supported: true,
             fullscreen_transition_allowed: true,
             pending_fullscreen_transition: None,
+            pointer_lock_deferred: false,
+            pointer_lock_focused: true,
+            pending_pointer_release: false,
+            last_pointer_position: None,
+            previous_input_locked: false,
         };
         session
             .install_runtime_helpers()
@@ -966,11 +976,69 @@ impl CdpSession {
         self.runtime.exit_fullscreen_from_host().map_err(js_error)
     }
 
+    /// Configures an external pointer-lock host, including after navigation.
+    pub fn set_pointer_lock_deferred(&mut self, deferred: bool) {
+        self.pointer_lock_deferred = deferred;
+        self.runtime.set_pointer_lock_deferred(deferred);
+    }
+
+    /// Takes the next cursor operation requested by the page.
+    pub fn take_pointer_lock_transition(&mut self) -> Option<PointerLockTransition> {
+        if std::mem::take(&mut self.pending_pointer_release) {
+            Some(PointerLockTransition::Release)
+        } else {
+            self.runtime.take_pointer_lock_transition()
+        }
+    }
+
+    /// Acknowledges an actual native cursor-grab attempt.
+    pub fn complete_pointer_lock_request(
+        &mut self,
+        id: u64,
+        accepted: bool,
+    ) -> Result<bool, JsonRpcError> {
+        self.runtime
+            .complete_pointer_lock_request(id, accepted)
+            .map_err(js_error)
+    }
+
+    /// Releases pointer lock and pending requests on a host-originated exit.
+    pub fn release_pointer_lock_from_host(&mut self) -> Result<(), JsonRpcError> {
+        self.last_pointer_position = None;
+        self.runtime
+            .release_pointer_lock_from_host()
+            .map_err(js_error)
+    }
+
+    /// Updates the native window focus and releases lock when focus is lost.
+    pub fn set_pointer_lock_focus(&mut self, focused: bool) -> Result<(), JsonRpcError> {
+        self.pointer_lock_focused = focused;
+        self.last_pointer_position = None;
+        self.runtime
+            .set_pointer_lock_focus(focused)
+            .map_err(js_error)
+    }
+
+    /// Whether native relative movement should currently be delivered.
+    pub fn is_pointer_locked(&self) -> bool {
+        self.runtime.pointer_lock_target().is_some()
+    }
+
+    /// Resets movement deltas after the cursor leaves the surface.
+    pub fn reset_pointer_movement(&mut self) {
+        self.last_pointer_position = None;
+    }
+
     pub(crate) fn http_client_mut(&mut self) -> &mut Client {
         &mut self.http_client
     }
 
     fn leave_fullscreen_for_navigation(&mut self) {
+        let _ = self.release_pointer_lock_from_host();
+        self.pending_pointer_release |= matches!(
+            self.runtime.take_pointer_lock_transition(),
+            Some(PointerLockTransition::Release)
+        );
         let _ = self.runtime.exit_fullscreen_from_host();
         if let Some(transition) = self.runtime.take_fullscreen_transition() {
             self.pending_fullscreen_transition = Some(transition);
@@ -2047,7 +2115,26 @@ impl CdpSession {
         };
         let x = optional_f64(params, "x", 0.0)?;
         let y = optional_f64(params, "y", 0.0)?;
-        let target = self.runtime.hit_test(x as f32, y as f32);
+        let locked_target = self.runtime.pointer_lock_target();
+        let locked = locked_target.is_some();
+        if self.previous_input_locked && !locked {
+            self.last_pointer_position = None;
+        }
+        self.previous_input_locked = locked;
+        let (movement_x, movement_y) = if dom_type == "mousemove" {
+            let previous = self.last_pointer_position.unwrap_or((x, y));
+            let delta = (
+                optional_f64(params, "movementX", x - previous.0)?,
+                optional_f64(params, "movementY", y - previous.1)?,
+            );
+            self.last_pointer_position = Some((x, y));
+            delta
+        } else {
+            (0.0, 0.0)
+        };
+        self.runtime.update_pointer_position(x, y);
+        let (x, y) = self.runtime.pointer_lock_position().unwrap_or((x, y));
+        let target = locked_target.or_else(|| self.runtime.hit_test(x as f32, y as f32));
         let target_node = target.clone().unwrap_or_else(|| self.runtime.document());
         let target_id = target_node.identity();
         let target_node_id = self.ensure_node_id(&target_node);
@@ -2072,6 +2159,7 @@ impl CdpSession {
             "clientX": x, "clientY": y,
             "pageX": x + scroll_x as f64, "pageY": y + scroll_y as f64,
             "screenX": x, "screenY": y,
+            "movementX": movement_x, "movementY": movement_y,
             // CDP uses -1/"none" when no button changed, while MouseEvent.button
             // is a non-negative button index and defaults to the primary button.
             "button": button.max(0), "buttons": buttons,
@@ -2099,7 +2187,11 @@ impl CdpSession {
             "__omoikane_dispatch_mouse_input({target_id}, {dom_type:?}, {init}, {})",
             dom_type == "mousedown"
         ))?;
-        if dom_type == "mousedown" {
+        if locked {
+            self.drag_active = false;
+            self.drag_candidate = false;
+        }
+        if dom_type == "mousedown" && !locked {
             if self.drag_active {
                 let _ = self.eval_input_bool(&format!(
                     "__omoikane_dispatch_drag_input(0, \"cancel\", {init})"
@@ -2376,6 +2468,10 @@ impl CdpSession {
         .map_err(|error| error.to_string())?;
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         runtime.set_fullscreen_supported(self.fullscreen_supported);
+        runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
+        runtime
+            .set_pointer_lock_focus(self.pointer_lock_focused)
+            .map_err(js_error_message)?;
         runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
         Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
         runtime.install_csp_policy(csp_headers);
@@ -2447,6 +2543,10 @@ impl CdpSession {
         .map_err(|error| error.to_string())?;
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         runtime.set_fullscreen_supported(self.fullscreen_supported);
+        runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
+        runtime
+            .set_pointer_lock_focus(self.pointer_lock_focused)
+            .map_err(js_error_message)?;
         runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
         Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
         runtime.install_csp_policy(csp_headers);

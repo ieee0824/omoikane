@@ -252,7 +252,7 @@ fn fullscreen_iframe_permission_boundary_and_reflection() {
              globalThis.child=frame.contentWindow; \
              child.eval(\"globalThis.result=''; document.addEventListener('keydown',()=> \
                document.getElementById('target').requestFullscreen().then(()=>result='ok',e=>result=e.name),{once:true}); \
-               __omoikane_dispatch_keyboard_input('keydown',{key:'Enter',code:'Enter'});\");",
+               document.getElementById('target').focus(); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter',code:'Enter'});\");",
         )
         .unwrap();
     runtime.run_jobs().unwrap();
@@ -272,7 +272,7 @@ fn fullscreen_iframe_permission_boundary_and_reflection() {
             "frame.setAttribute('allow', \"fullscreen 'none'\"); frame.srcdoc='<button id=blocked>no</button>'; \
              globalThis.child=frame.contentWindow; child.eval(\"globalThis.result=''; \
                document.addEventListener('keydown',()=>document.getElementById('blocked').requestFullscreen().then(()=>result='ok',e=>result=e.name),{once:true}); \
-               __omoikane_dispatch_keyboard_input('keydown',{key:'Enter',code:'Enter'});\");",
+               document.getElementById('blocked').focus(); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter',code:'Enter'});\");",
         )
         .unwrap();
     runtime.run_jobs().unwrap();

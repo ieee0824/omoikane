@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Pointer Lock host test</title>
+<style>
+body { margin: 24px; font: 18px sans-serif; background: #edf1f5; color: #17202b; }
+#target { width: 800px; height: 400px; padding: 24px; background: #ccd9e8; }
+#state { white-space: pre-wrap; }
+</style>
+<h1>Pointer Lock host test</h1>
+<p>Click the panel or press L to lock. E exits, Escape unlocks, N navigates.</p>
+<div id="target" tabindex="0">Move the mouse past the window edges while locked.</div>
+<pre id="state"></pre>
+<script>
+const target = document.getElementById('target');
+const state = { locked: false, moves: 0, dx: 0, dy: 0, x: 0, y: 0,
+  down: 0, wheel: 0, changes: 0, resolved: 0, error: '' };
+function report() {
+  const text = JSON.stringify(state);
+  document.title = 'PLTEST:' + text;
+  document.getElementById('state').textContent = text;
+  target.style.backgroundColor = state.locked ? '#80c99b' : '#ccd9e8';
+}
+function lock() {
+  target.requestPointerLock().then(() => { state.resolved++; report(); },
+    error => { state.error = error.name; report(); });
+}
+target.onclick = () => { if (!document.pointerLockElement) lock(); };
+target.onmousemove = event => {
+  if (!document.pointerLockElement) return;
+  state.moves++; state.dx += event.movementX; state.dy += event.movementY;
+  state.x = event.clientX; state.y = event.clientY; report();
+};
+target.onmousedown = () => { if (document.pointerLockElement) { state.down++; report(); } };
+target.onwheel = event => { event.preventDefault(); state.wheel++; report(); };
+document.onpointerlockchange = () => {
+  state.locked = document.pointerLockElement === target;
+  state.changes++; report();
+};
+document.onpointerlockerror = () => { state.error = 'pointerlockerror'; report(); };
+document.onkeydown = event => {
+  if (event.key === 'l') lock();
+  if (event.key === 'e') document.exitPointerLock();
+  if (event.key === 'Escape') event.preventDefault();
+  if (event.key === 'n') location.href = '/next';
+};
+report();
+</script>
+</html>
