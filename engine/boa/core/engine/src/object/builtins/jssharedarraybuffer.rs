@@ -84,6 +84,31 @@ impl JsSharedArrayBuffer {
         self.borrow().data().len(Ordering::SeqCst)
     }
 
+    /// Returns whether this buffer cannot grow, using its internal slots.
+    #[inline]
+    #[must_use]
+    pub fn is_fixed_length(&self) -> bool {
+        self.borrow().data().is_fixed_len()
+    }
+
+    /// Copies a byte range using atomic, unordered reads.
+    ///
+    /// Returns `None` if the range exceeds the current buffer length. Concurrent
+    /// writes may be observed between bytes; this is not an atomic snapshot.
+    #[must_use]
+    pub fn copy_bytes(&self, offset: usize, length: usize) -> Option<Vec<u8>> {
+        let buffer = self.borrow();
+        let bytes = buffer.data().bytes(Ordering::SeqCst);
+        Some(
+            bytes
+                .get(offset..)?
+                .get(..length)?
+                .iter()
+                .map(|byte| byte.load(Ordering::Relaxed))
+                .collect(),
+        )
+    }
+
     /// Gets the raw buffer of this `JsSharedArrayBuffer`.
     #[inline]
     #[must_use]

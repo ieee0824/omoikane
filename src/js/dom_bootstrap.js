@@ -29,6 +29,9 @@
   const nativeCryptoRandom = globalThis.__omoikane_crypto_random;
   const nativeCryptoDigest = globalThis.__omoikane_crypto_digest;
   const nativeCryptoHmac = globalThis.__omoikane_crypto_hmac;
+  const nativeTextEncoderEncode = globalThis.__omoikane_text_encoder_encode;
+  const nativeTextDecoderCreate = globalThis.__omoikane_text_decoder_create;
+  const nativeTextDecoderDecode = globalThis.__omoikane_text_decoder_decode;
   const nativeCompressionCreate = globalThis.__omoikane_compression_create;
   const nativeCompressionWrite = globalThis.__omoikane_compression_write;
   const nativeCompressionFinish = globalThis.__omoikane_compression_finish;
@@ -96,6 +99,9 @@
   delete globalThis.__omoikane_crypto_random;
   delete globalThis.__omoikane_crypto_digest;
   delete globalThis.__omoikane_crypto_hmac;
+  delete globalThis.__omoikane_text_encoder_encode;
+  delete globalThis.__omoikane_text_decoder_create;
+  delete globalThis.__omoikane_text_decoder_decode;
   delete globalThis.__omoikane_compression_create;
   delete globalThis.__omoikane_compression_write;
   delete globalThis.__omoikane_compression_finish;
@@ -15935,7 +15941,7 @@
     constructor(stream) { this._stream = stream; }
     enqueue(chunk) {
       const stream = this._stream;
-      if (stream._closed || stream._errorSet) throw new TypeError("ReadableStream is closed");
+      if (stream._closeRequested || stream._closed || stream._errorSet) throw new TypeError("ReadableStream is closed");
       const waiter = stream._waiters.shift();
       if (waiter) {
         waiter.resolve({ value: chunk, done: false });
@@ -15946,6 +15952,8 @@
     close() {
       const stream = this._stream;
       if (stream._closed || stream._errorSet) return;
+      stream._closeRequested = true;
+      if (stream._queue.length) return;
       stream._closed = true;
       if (stream._closedResolve) {
         stream._closedResolve();
@@ -15993,11 +16001,15 @@
       if (stream._queue.length) {
         const value = stream._queue.shift();
         if (typeof stream._onDequeue === "function") stream._onDequeue();
+        if (stream._closeRequested && !stream._queue.length) stream._controller.close();
         return Promise.resolve({ value, done: false });
       }
       if (stream._errorSet) return Promise.reject(stream._error);
       if (stream._closed) return Promise.resolve({ value: undefined, done: true });
-      return new Promise((resolve, reject) => stream._waiters.push({ resolve, reject }));
+      return new Promise((resolve, reject) => {
+        stream._waiters.push({ resolve, reject });
+        if (typeof stream._onRead === "function") stream._onRead();
+      });
     }
     cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(new TypeError("Reader has no stream")); }
     releaseLock() {
@@ -16018,11 +16030,12 @@
   class ReadableStream {
     constructor(underlyingSource = {}) {
       this._queue = []; this._waiters = []; this._reader = null;
+      this._closeRequested = false;
       this._closed = false; this._error = undefined; this._errorSet = false;
       this._source = underlyingSource || {};
       this._closedResolve = null; this._closedReject = null;
       this._disturbed = false; this._onDisturb = null; this._cancelled = false;
-      this._onDequeue = null;
+      this._onDequeue = null; this._onRead = null;
       this._controller = new ReadableStreamDefaultController(this);
       if (typeof this._source.start === "function") {
         try {
@@ -16045,8 +16058,9 @@
       return this._cancel(reason);
     }
     _cancel(reason) {
-      if (this._cancelled) return Promise.resolve();
       this._markDisturbed();
+      if (this._errorSet) return Promise.reject(this._error);
+      if (this._closed || this._cancelled) return Promise.resolve();
       this._cancelled = true;
       this._queue.length = 0;
       if (!this._closed && !this._errorSet) this._controller.close();
@@ -16116,7 +16130,10 @@
       }
       this._state = "closing";
       this._closed = true;
-      const operation = this._tail.then(() => typeof this._sink.close === "function" ? this._sink.close() : undefined);
+      const operation = this._tail.then(() => {
+        if (this._state === "errored") throw this._storedError;
+        return typeof this._sink.close === "function" ? this._sink.close() : undefined;
+      });
       this._tail = operation;
       operation.then(() => {
         if (this._state !== "closing") return;
@@ -16136,19 +16153,21 @@
     constructor(owner) { this._owner = owner; }
     start(controller) {
       this._owner._readableController = controller;
-      controller._stream._onDequeue = () => this._owner._releaseBackpressure();
+      controller._stream._onRead = () => this._owner._releaseBackpressure();
     }
     cancel(reason) { return this._owner._cancel(reason); }
   }
   class TransformStreamSink {
     constructor(owner) { this._owner = owner; }
-    write(chunk) {
+    async write(chunk) {
       const owner = this._owner;
-      if (owner._cancelled) return Promise.reject(owner._cancelReason);
-      let result;
+      // TransformStream's default readable high-water mark is zero. Wait for
+      // demand before converting the chunk, including chunks with no output.
+      await owner._waitForBackpressure();
+      if (owner._cancelled) throw owner._cancelReason;
       try {
         if (typeof owner._transformer.transform === "function") {
-          result = owner._transformer.transform(chunk, owner._readableController);
+          await owner._transformer.transform(chunk, owner._readableController);
         } else {
           owner._readableController.enqueue(chunk);
         }
@@ -16156,12 +16175,6 @@
         owner._readableController.error(error);
         throw error;
       }
-      return Promise.resolve(result)
-        .then(() => owner._waitForBackpressure())
-        .catch(error => {
-          owner._readableController.error(error);
-          throw error;
-        });
     }
     close() {
       const owner = this._owner;
@@ -16176,7 +16189,6 @@
         throw error;
       }
       return Promise.resolve(result)
-        .then(() => owner._waitForBackpressure())
         .then(() => owner._readableController.close())
         .catch(error => {
           owner._readableController.error(error);
@@ -16205,7 +16217,7 @@
       this.writable = new WritableStream(new TransformStreamSink(this));
     }
     _waitForBackpressure() {
-      if (!this.readable._queue.length || this._cancelled) return undefined;
+      if (this.readable._waiters.length || this._cancelled) return undefined;
       return new Promise(resolve => { this._backpressureResolve = resolve; });
     }
     _releaseBackpressure() {
@@ -16216,9 +16228,7 @@
     }
     _cancel(reason) {
       this._cancelled = true;
-      this._cancelReason = reason === undefined
-        ? new TypeError("TransformStream readable was cancelled")
-        : reason;
+      this._cancelReason = reason;
       this._releaseBackpressure();
       this.writable._fail(this._cancelReason);
       try {
@@ -16239,6 +16249,113 @@
   globalThis.WritableStream = WritableStream;
   globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
   globalThis.TransformStream = TransformStream;
+
+  const textEncoderStreamSlots = new WeakMap();
+  const textDecoderStreamSlots = new WeakMap();
+  const textStreamCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
+  const textStreamSlice = Function.prototype.call.bind(String.prototype.slice);
+
+  class TextEncoderStream {
+    constructor() {
+      let leading = "";
+      const stream = new TransformStream({
+        transform(chunk, controller) {
+          const input = toDOMString(chunk);
+          if (!input.length) return;
+          let text = leading + input;
+          leading = "";
+          const last = textStreamCharCodeAt(text, text.length - 1);
+          if (last >= 0xD800 && last <= 0xDBFF) {
+            leading = textStreamSlice(text, -1);
+            text = textStreamSlice(text, 0, -1);
+          }
+          if (text.length) controller.enqueue(nativeTextEncoderEncode(text));
+        },
+        flush(controller) {
+          if (leading) controller.enqueue(nativeTextEncoderEncode(leading));
+          leading = "";
+        },
+        cancel() { leading = ""; },
+        abort() { leading = ""; },
+      });
+      textEncoderStreamSlots.set(this, stream);
+    }
+    get encoding() {
+      if (!textEncoderStreamSlots.has(this)) throw new TypeError("Invalid TextEncoderStream receiver");
+      return "utf-8";
+    }
+    get readable() {
+      const stream = textEncoderStreamSlots.get(this);
+      if (!stream) throw new TypeError("Invalid TextEncoderStream receiver");
+      return stream.readable;
+    }
+    get writable() {
+      const stream = textEncoderStreamSlots.get(this);
+      if (!stream) throw new TypeError("Invalid TextEncoderStream receiver");
+      return stream.writable;
+    }
+  }
+
+  class TextDecoderStream {
+    constructor(label = "utf-8", options = {}) {
+      label = toDOMString(label);
+      if (options != null && typeof options !== "object" && typeof options !== "function") {
+        throw new TypeError("TextDecoderStream options must be a dictionary");
+      }
+      const fatal = Boolean(options?.fatal);
+      const ignoreBOM = Boolean(options?.ignoreBOM);
+      // Avoid invoking a page-defined Array iterator on the private result.
+      let initialized = nativeTextDecoderCreate(label, fatal, ignoreBOM);
+      let handle = initialized[0];
+      const encoding = initialized[1];
+      initialized = null;
+      const release = () => { handle = null; };
+      const stream = new TransformStream({
+        transform(chunk, controller) {
+          try {
+            const output = nativeTextDecoderDecode(handle, chunk, false);
+            if (output.length) controller.enqueue(output);
+          } catch (error) {
+            release();
+            throw error;
+          }
+        },
+        flush(controller) {
+          try {
+            const output = nativeTextDecoderDecode(handle, undefined, true);
+            if (output.length) controller.enqueue(output);
+          } finally { release(); }
+        },
+        cancel: release,
+        abort: release,
+      });
+      textDecoderStreamSlots.set(this, { stream, encoding, fatal, ignoreBOM });
+    }
+    get encoding() { return textDecoderStreamState(this).encoding; }
+    get fatal() { return textDecoderStreamState(this).fatal; }
+    get ignoreBOM() { return textDecoderStreamState(this).ignoreBOM; }
+    get readable() { return textDecoderStreamState(this).stream.readable; }
+    get writable() { return textDecoderStreamState(this).stream.writable; }
+  }
+
+  function textDecoderStreamState(receiver) {
+    const state = textDecoderStreamSlots.get(receiver);
+    if (!state) throw new TypeError("Invalid TextDecoderStream receiver");
+    return state;
+  }
+
+  for (const constructor of [TextEncoderStream, TextDecoderStream]) {
+    for (const attribute of Object.getOwnPropertyNames(constructor.prototype)) {
+      if (attribute === "constructor") continue;
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, attribute);
+      Object.defineProperty(constructor.prototype, attribute, { ...descriptor, enumerable: true });
+    }
+    Object.defineProperty(constructor.prototype, Symbol.toStringTag, {
+      value: constructor.name, configurable: true,
+    });
+  }
+  globalThis.TextEncoderStream = TextEncoderStream;
+  globalThis.TextDecoderStream = TextDecoderStream;
 
   const compressionStreamSlots = new WeakMap();
   const decompressionStreamSlots = new WeakMap();
@@ -18546,12 +18663,12 @@
       this.__closeInfo = closeInfo;
       this.draining = false;
       this.__readyReject(webTransportInvalidState("The WebTransport was closed before it became ready."));
-      this.__datagramReadable.__webTransportClose();
-      this.__incomingBidirectional.__webTransportClose();
-      this.__incomingUnidirectional.__webTransportClose();
       this.__datagramReadable._queue.length = 0;
       this.__incomingBidirectional._queue.length = 0;
       this.__incomingUnidirectional._queue.length = 0;
+      this.__datagramReadable.__webTransportClose();
+      this.__incomingBidirectional.__webTransportClose();
+      this.__incomingUnidirectional.__webTransportClose();
       if (this.datagrams && this.datagrams.writable && !this.datagrams.writable._closed) {
         this.datagrams.writable._close();
       }
@@ -18575,12 +18692,12 @@
       this.__state = "closed";
       this.__closeInfo = new WebTransportCloseInfo(closeInfo);
       this.__readyReject(webTransportInvalidState("The peer WebTransport was closed before this transport became ready."));
-      this.__datagramReadable.__webTransportClose();
-      this.__incomingBidirectional.__webTransportClose();
-      this.__incomingUnidirectional.__webTransportClose();
       this.__datagramReadable._queue.length = 0;
       this.__incomingBidirectional._queue.length = 0;
       this.__incomingUnidirectional._queue.length = 0;
+      this.__datagramReadable.__webTransportClose();
+      this.__incomingBidirectional.__webTransportClose();
+      this.__incomingUnidirectional.__webTransportClose();
       if (this.datagrams && this.datagrams.writable && !this.datagrams.writable._closed) {
         this.datagrams.writable._close();
       }
@@ -20109,9 +20226,10 @@
       // The host keeps Fetch bodies as immutable snapshots.  A stream whose
       // producer has not closed yet cannot be synchronously extracted without
       // dropping future chunks, so reject it instead of silently truncating it.
-      if (!source._closed) throw new TypeError("ReadableStream body is not ready");
+      if (!source._closed && !source._closeRequested) throw new TypeError("ReadableStream body is not ready");
       const chunks = source._queue.splice(0);
       source._markDisturbed();
+      source._controller.close();
       return bodyRecord(null, blobPartsToBytes(chunks), null);
     }
     if (source instanceof Blob) {
@@ -20170,6 +20288,7 @@
         owner.__stream._markDisturbed();
         owner.__stream._queue.length = 0;
         owner.__stream._cancelled = true;
+        owner.__stream._controller.close();
       }
     }
     return owner.__stream;

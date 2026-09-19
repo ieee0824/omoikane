@@ -817,6 +817,14 @@
       "setup": "globalThis.__decorationParent = document.createElement('div'); __decorationParent.style.cssText = 'font-size:20px;color:rgb(1,2,3);text-decoration-thickness:9px'; globalThis.__decorationTarget = document.createElement('span'); __decorationTarget.style.textDecoration = 'underline calc(25% + 2px) red'; __decorationTarget.style.textDecorationThickness = 'thin'; globalThis.__decorationInitial = document.createElement('span'); __decorationParent.appendChild(__decorationTarget); __decorationParent.appendChild(__decorationInitial); document.body.appendChild(__decorationParent)",
       "probe": "CSS.supports('text-decoration-thickness', 'from-font') && CSS.supports('text-decoration-thickness', '-2px') && !CSS.supports('text-decoration-thickness', 'thin') && !CSS.supports('text-decoration', 'underline thin blue') && getComputedStyle(__decorationTarget).textDecorationLine === 'underline' && getComputedStyle(__decorationTarget).textDecorationStyle === 'solid' && getComputedStyle(__decorationTarget).textDecorationThickness === 'calc(25% + 2px)' && getComputedStyle(__decorationInitial).textDecorationThickness === 'auto' && getComputedStyle(__decorationInitial).textDecorationColor === 'rgb(1, 2, 3)'",
       "baseline_supported": true
+    },
+    {
+      "id": "network.text-streams",
+      "area": "network",
+      "description": "TextEncoderStream and TextDecoderStream preserve split Unicode characters through a pipeline",
+      "setup": "globalThis.__textStreamProbe = { done: false, ok: false }; (async () => { const encoder = new TextEncoderStream(); const decoder = new TextDecoderStream('unicode-1-1-utf-8', {fatal: true}); const reader = encoder.readable.pipeThrough(decoder).getReader(); const reading = (async () => { let text = ''; for (;;) { const next = await reader.read(); if (next.done) return text; text += next.value; } })(); const writer = encoder.writable.getWriter(); await writer.write('水\\uD83D'); await writer.write('\\uDE00'); await writer.close(); __textStreamProbe = { done: true, ok: (await reading) === '水😀' && decoder.encoding === 'utf-8' && decoder.fatal === true }; })().catch(error => { __textStreamProbe = { done: true, ok: false, error: String(error) }; })",
+      "probe": "__textStreamProbe.done && __textStreamProbe.ok",
+      "baseline_supported": true
     }
   ]
 }
