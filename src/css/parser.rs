@@ -136,6 +136,7 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                         | "enabled"
                         | "disabled"
                         | "checked"
+                        | "fullscreen"
                         | "popover-open"
                         | "modal"
                         | "before"

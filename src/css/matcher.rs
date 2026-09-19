@@ -677,6 +677,7 @@ fn matches_pseudo_class(
         "after" => pseudo == Some(PseudoElement::After),
         "popover-open" => pseudo.is_none() && node.is_popover_open(),
         "modal" => pseudo.is_none() && node.is_modal_dialog(),
+        "fullscreen" => pseudo.is_none() && node.is_fullscreen(),
         "root" => node
             .parent_node()
             .is_some_and(|parent| parent.node_type() == NodeType::Document),

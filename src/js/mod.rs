@@ -53,6 +53,8 @@ mod font_loading;
 #[cfg(test)]
 mod font_loading_tests;
 #[cfg(test)]
+mod fullscreen_tests;
+#[cfg(test)]
 mod layout_metrics_tests;
 mod module_fetch;
 #[cfg(test)]
@@ -986,6 +988,15 @@ pub struct RenderGenerations {
     pub paint: u64,
 }
 
+/// A native window-state change requested by the page's Fullscreen API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullscreenTransition {
+    /// Enter a native fullscreen presentation.
+    Enter,
+    /// Leave the native fullscreen presentation.
+    Exit,
+}
+
 impl TimerPayload {
     fn kind(&self) -> &'static str {
         match self {
@@ -1133,6 +1144,14 @@ struct HostState {
     /// move within one connected document from producing duplicate events.
     pending_resource_loads: HashSet<usize>,
     navigation_requests: VecDeque<NavigationRequest>,
+    /// Per-document fullscreen stacks, with the current element last.
+    fullscreen_elements: HashMap<usize, Vec<usize>>,
+    /// Whether this embedder exposes a fullscreen-capable presentation host.
+    fullscreen_supported: bool,
+    /// Deterministic host response used by embedders and rejection tests.
+    fullscreen_transition_allowed: bool,
+    fullscreen_host_active: bool,
+    pending_fullscreen_transition: Option<FullscreenTransition>,
     pending_javascript_dialog: Option<PendingJavaScriptDialog>,
     next_javascript_dialog_id: u64,
     storage_manager: StorageManager,
@@ -1701,6 +1720,11 @@ impl HostState {
             discarded_node_ids: Vec::new(),
             pending_resource_loads: HashSet::new(),
             navigation_requests: VecDeque::new(),
+            fullscreen_elements: HashMap::new(),
+            fullscreen_supported: true,
+            fullscreen_transition_allowed: true,
+            fullscreen_host_active: false,
+            pending_fullscreen_transition: None,
             pending_javascript_dialog: None,
             next_javascript_dialog_id: 1,
             storage_manager,
@@ -2200,6 +2224,12 @@ impl HostState {
         let Some(previous) = self.iframe_documents.remove(&iframe_id) else {
             return;
         };
+        if self
+            .fullscreen_elements
+            .contains_key(&previous.document.identity())
+        {
+            self.fully_exit_fullscreen(false);
+        }
         self.invalidate_layout_metrics_cache();
 
         let mut tree_ids = HashSet::new();
@@ -2375,6 +2405,166 @@ impl HostState {
         document_root_for_node(node)
             .map(|document| self.sandbox_policy_for_document(&document).allow_scripts)
             .unwrap_or(true)
+    }
+
+    fn iframe_allows_fullscreen(&self, iframe: &NodeHandle, child_document: usize) -> bool {
+        let owner_document = owner_document_for_node(iframe);
+        let same_origin = owner_document.as_ref().is_some_and(|owner| {
+            self.document_security_origins.get(&owner.identity())
+                == self.document_security_origins.get(&child_document)
+        });
+        let allow = iframe.get_attribute("allow");
+        if let Some(policy) = allow {
+            if let Some(directive) = policy.split(';').find(|directive| {
+                directive
+                    .split_ascii_whitespace()
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("fullscreen"))
+            }) {
+                let tokens = directive
+                    .split_ascii_whitespace()
+                    .skip(1)
+                    .collect::<Vec<_>>();
+                if tokens
+                    .iter()
+                    .any(|token| token.eq_ignore_ascii_case("'none'"))
+                {
+                    return false;
+                }
+                return tokens.is_empty()
+                    || tokens.iter().any(|token| {
+                        *token == "*"
+                            || token.eq_ignore_ascii_case("'src'")
+                            || (same_origin && token.eq_ignore_ascii_case("'self'"))
+                    });
+            }
+        }
+        same_origin || iframe.get_attribute("allowfullscreen").is_some()
+    }
+
+    fn fullscreen_allowed_for_document(&self, document_id: usize) -> bool {
+        if !self.fullscreen_supported || !self.document_is_active(document_id) {
+            return false;
+        }
+        let mut current = document_id;
+        let mut seen = HashSet::new();
+        while current != self.document.identity() {
+            if !seen.insert(current) {
+                return false;
+            }
+            let Some((&iframe_id, _)) = self
+                .iframe_documents
+                .iter()
+                .find(|(_, entry)| entry.document.identity() == current)
+            else {
+                return false;
+            };
+            let Some(iframe) = self.get_node(iframe_id) else {
+                return false;
+            };
+            if !self.iframe_allows_fullscreen(&iframe, current) {
+                return false;
+            }
+            let Some(owner) = owner_document_for_node(&iframe) else {
+                return false;
+            };
+            current = owner.identity();
+        }
+        true
+    }
+
+    fn fullscreen_element(&self, document_id: usize) -> Option<NodeHandle> {
+        self.fullscreen_elements
+            .get(&document_id)
+            .and_then(|stack| stack.last())
+            .and_then(|id| self.get_node(*id))
+            .filter(|node| node.is_fullscreen())
+    }
+
+    fn fullscreen_chain(&self, element: &NodeHandle) -> Option<Vec<(usize, NodeHandle)>> {
+        let mut document = document_root_for_node(element)?;
+        let mut chain = vec![(document.identity(), element.clone())];
+        let mut seen = HashSet::new();
+        while document.identity() != self.document.identity() {
+            if !seen.insert(document.identity()) {
+                return None;
+            }
+            let (&iframe_id, _) = self
+                .iframe_documents
+                .iter()
+                .find(|(_, entry)| entry.document == document)?;
+            let iframe = self.get_node(iframe_id)?;
+            document = owner_document_for_node(&iframe)?;
+            chain.push((document.identity(), iframe));
+        }
+        Some(chain)
+    }
+
+    fn request_fullscreen(&mut self, element: &NodeHandle) -> bool {
+        let Some(document) = document_root_for_node(element) else {
+            return false;
+        };
+        if !self.document_is_active(document.identity())
+            || !self.fullscreen_allowed_for_document(document.identity())
+            || (!self.fullscreen_host_active && !self.fullscreen_transition_allowed)
+        {
+            return false;
+        }
+        let Some(chain) = self.fullscreen_chain(element) else {
+            return false;
+        };
+        for (document_id, node) in chain {
+            let stack = self.fullscreen_elements.entry(document_id).or_default();
+            stack.retain(|id| *id != node.identity());
+            stack.push(node.identity());
+            node.set_fullscreen(true);
+            self.invalidate_style_cache_for_node(&node);
+        }
+        if !self.fullscreen_host_active {
+            self.fullscreen_host_active = true;
+            self.pending_fullscreen_transition = Some(FullscreenTransition::Enter);
+        }
+        true
+    }
+
+    fn fully_exit_fullscreen(&mut self, require_host_approval: bool) -> bool {
+        if self.fullscreen_elements.is_empty() {
+            return false;
+        }
+        if require_host_approval && !self.fullscreen_transition_allowed {
+            return false;
+        }
+        let stacks = std::mem::take(&mut self.fullscreen_elements);
+        for node_id in stacks.into_values().flatten() {
+            if let Some(node) = self.get_node(node_id) {
+                node.set_fullscreen(false);
+                self.invalidate_style_cache_for_node(&node);
+            }
+        }
+        if self.fullscreen_host_active {
+            self.fullscreen_host_active = false;
+            self.pending_fullscreen_transition = Some(FullscreenTransition::Exit);
+        }
+        true
+    }
+
+    fn fullscreen_subtree_will_be_removed(&mut self, root: &NodeHandle) -> bool {
+        let contains_fullscreen = self
+            .fullscreen_elements
+            .values()
+            .flatten()
+            .filter_map(|id| self.get_node(*id))
+            .any(|node| {
+                let mut current = Some(node);
+                while let Some(candidate) = current {
+                    if candidate == *root {
+                        return true;
+                    }
+                    current = candidate.parent_node().or_else(|| candidate.shadow_host());
+                }
+                false
+            });
+        contains_fullscreen && self.fully_exit_fullscreen(false)
     }
 
     fn record_csp_violation(
@@ -4078,6 +4268,48 @@ impl JsRuntime {
             .navigation_requests
             .drain(..)
             .collect()
+    }
+
+    /// Enables or disables Fullscreen API support for this presentation host.
+    pub fn set_fullscreen_supported(&mut self, supported: bool) {
+        let mut state = self.host_state.borrow_mut();
+        state.fullscreen_supported = supported;
+        if !supported {
+            state.fully_exit_fullscreen(false);
+        }
+    }
+
+    /// Controls whether the host accepts subsequent fullscreen transitions.
+    ///
+    /// Native frontends normally leave this enabled. Tests and embedders that
+    /// cannot enter fullscreen can reject the request without exposing a
+    /// private page-script hook.
+    pub fn set_fullscreen_transition_allowed(&mut self, allowed: bool) {
+        self.host_state.borrow_mut().fullscreen_transition_allowed = allowed;
+    }
+
+    /// Takes the most recent fullscreen window-state transition requested by
+    /// page script or a browser close request.
+    pub fn take_fullscreen_transition(&mut self) -> Option<FullscreenTransition> {
+        self.host_state
+            .borrow_mut()
+            .pending_fullscreen_transition
+            .take()
+    }
+
+    /// Fully exits fullscreen because the host ended the native presentation.
+    pub fn exit_fullscreen_from_host(&mut self) -> JsResult<bool> {
+        let target = self.eval("document.fullscreenElement")?;
+        let exited = self.host_state.borrow_mut().fully_exit_fullscreen(false);
+        if exited {
+            self.call_function_with_value(
+                "target => (target || document).dispatchEvent(\
+                  new Event('fullscreenchange', { bubbles: true, composed: true }))",
+                target,
+            )?;
+            self.run_jobs()?;
+        }
+        Ok(exited)
     }
 
     /// Returns metadata for the Window modal dialog currently blocking script.
@@ -7934,6 +8166,31 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_modal_dialog_native),
         ),
         (
+            js_string!("__omoikane_fullscreen_element"),
+            1,
+            NativeFunction::from_copy_closure(fullscreen_element_native),
+        ),
+        (
+            js_string!("__omoikane_fullscreen_enabled"),
+            1,
+            NativeFunction::from_copy_closure(fullscreen_enabled_native),
+        ),
+        (
+            js_string!("__omoikane_request_fullscreen"),
+            1,
+            NativeFunction::from_copy_closure(request_fullscreen_native),
+        ),
+        (
+            js_string!("__omoikane_exit_fullscreen"),
+            2,
+            NativeFunction::from_copy_closure(exit_fullscreen_native),
+        ),
+        (
+            js_string!("__omoikane_fullscreen_subtree_removed"),
+            1,
+            NativeFunction::from_copy_closure(fullscreen_subtree_removed_native),
+        ),
+        (
             js_string!("__omoikane_node_is_inclusive_descendant"),
             2,
             NativeFunction::from_copy_closure(node_is_inclusive_descendant_native),
@@ -10880,6 +11137,84 @@ fn set_modal_dialog_native(
         let order = node.set_modal_dialog(modal);
         state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::from(order.map_or(-1.0, |value| value as f64)))
+    })
+}
+
+fn fullscreen_element_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .fullscreen_element(document_id)
+            .map_or(
+                JsValue::null(),
+                |node| JsValue::from(node.identity() as f64),
+            ))
+    })
+}
+
+fn fullscreen_enabled_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        Ok(JsValue::from(
+            state.borrow().fullscreen_allowed_for_document(document_id),
+        ))
+    })
+}
+
+fn request_fullscreen_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
+        Ok(JsValue::from(state.borrow_mut().request_fullscreen(&node)))
+    })
+}
+
+fn exit_fullscreen_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    let require_host_approval = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if state.fullscreen_element(document_id).is_none() {
+            return Ok(JsValue::from(false));
+        }
+        Ok(JsValue::from(
+            state.fully_exit_fullscreen(require_host_approval),
+        ))
+    })
+}
+
+fn fullscreen_subtree_removed_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
+        Ok(JsValue::from(
+            state.borrow_mut().fullscreen_subtree_will_be_removed(&node),
+        ))
     })
 }
 

@@ -6438,7 +6438,18 @@ fn apply_ua_defaults(
     pseudo: Option<PseudoElement>,
     parent_style: Option<&ComputedStyle>,
 ) {
-    if pseudo.is_some() || node.node_type() != NodeType::Element {
+    if node.node_type() != NodeType::Element {
+        return;
+    }
+    if pseudo == Some(PseudoElement::Backdrop) {
+        if node.is_fullscreen() {
+            properties
+                .entry("background-color".to_string())
+                .or_insert(ComputedValue::Keyword("black".to_string()));
+        }
+        return;
+    }
+    if pseudo.is_some() {
         return;
     }
     let tag = match node.tag_name() {
@@ -6446,6 +6457,35 @@ fn apply_ua_defaults(
         None => return,
     };
     let parent_font_size = inherited_font_size(parent_style, properties);
+
+    // Fullscreen's UA rules fill the viewport and suppress transforms. These
+    // declarations are mandatory overrides in the Fullscreen specification.
+    if node.is_fullscreen() {
+        for (name, value) in [
+            ("position", ComputedValue::Keyword("fixed".to_string())),
+            (
+                "box-sizing",
+                ComputedValue::Keyword("border-box".to_string()),
+            ),
+            ("left", ComputedValue::Px(0.0)),
+            ("right", ComputedValue::Px(0.0)),
+            ("top", ComputedValue::Px(0.0)),
+            ("bottom", ComputedValue::Px(0.0)),
+            ("margin-top", ComputedValue::Px(0.0)),
+            ("margin-right", ComputedValue::Px(0.0)),
+            ("margin-bottom", ComputedValue::Px(0.0)),
+            ("margin-left", ComputedValue::Px(0.0)),
+            ("width", ComputedValue::Percentage(100.0)),
+            ("height", ComputedValue::Percentage(100.0)),
+            ("min-width", ComputedValue::Px(0.0)),
+            ("min-height", ComputedValue::Px(0.0)),
+            ("max-width", ComputedValue::Keyword("none".to_string())),
+            ("max-height", ComputedValue::Keyword("none".to_string())),
+            ("transform", ComputedValue::Keyword("none".to_string())),
+        ] {
+            properties.insert(name.to_string(), value);
+        }
+    }
 
     if node.get_attribute("popover").is_some() {
         if !node.is_popover_open() {
