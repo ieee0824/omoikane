@@ -132,6 +132,13 @@ impl JsArrayBuffer {
         Ok(Self { inner: obj })
     }
 
+    /// Returns whether this buffer has a fixed length, using its internal slots.
+    #[inline]
+    #[must_use]
+    pub fn is_fixed_length(&self) -> bool {
+        self.inner.borrow().data().is_fixed_len()
+    }
+
     /// Set a maximum length for the underlying array buffer.
     #[inline]
     #[must_use]

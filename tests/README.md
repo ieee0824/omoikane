@@ -61,7 +61,25 @@ CI automatically writes to `.artifacts/wpt/results` and uploads both these
 revision-scoped files and the flat `WPT_REPORT`, matching the
 `report.json` convention used by the Web API surface probe.
 
+For a known `FAIL` that affects only specific subtests, set
+`known_failure.failed_subtests` to their exact names. The runner then rejects any
+additional failure, missing expected failure, or timeout instead of accepting all
+failures in that file.
+
 The initial job is intentionally a small PR smoke gate. Expansion toward the full WPT suite and official `wpt run` integration is tracked in GitHub issue #150.
+
+The encoding-stream subset covers chunk boundaries, BOM handling, encoding labels,
+fatal errors, BufferSource conversion and backpressure. These `.any.js` cases run
+in the smoke runner's document realm; `src/js/text_stream_tests.rs` additionally
+checks a Worker round trip, cancellation/abort, readonly attributes, shared buffers
+and large chunks. The `network.text-streams` surface probe verifies a split
+surrogate pair through an encoder/decoder pipeline.
+For `/common/sab.js`, this smoke runner uses the exposed native
+`SharedArrayBuffer` constructor directly: upstream discovers it through
+`WebAssembly.Memory`, which Omoikane does not implement. The test inputs remain
+real shared buffers and all assertions are retained. This adapter does not test
+WebAssembly compatibility. ArrayBuffer transfer via MessagePort is tracked in
+#763; decoder regressions use the engine's detach API independently of it.
 
 # Web API surface probe
 

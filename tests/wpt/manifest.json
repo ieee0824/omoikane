@@ -111,19 +111,32 @@
     { "path": "dom/nodes/Node-nodeValue.html" },
     { "path": "dom/nodes/Node-normalize.html" },
     { "path": "dom/nodes/Node-textContent.html" },
-    { "path": "dom/nodes/MutationObserver-sanity.html", "known_failure": {
-      "status": "TIMEOUT", "reason": "MutationObserver delivery does not complete this WPT", "issue": "#173"
-    } },
+    { "path": "dom/nodes/MutationObserver-sanity.html" },
     { "path": "dom/nodes/MutationObserver-callback-arguments.html" },
-    { "path": "dom/nodes/MutationObserver-takeRecords.html", "known_failure": {
-      "status": "TIMEOUT", "reason": "MutationObserver takeRecords semantics do not complete this WPT", "issue": "#173"
-    } },
+    { "path": "dom/nodes/MutationObserver-takeRecords.html" },
     { "path": "dom/nodes/MutationObserver-disconnect.html" },
     { "path": "dom/nodes/MutationObserver-attributes.html" },
-    { "path": "dom/nodes/MutationObserver-characterData.html", "known_failure": {
-      "status": "TIMEOUT", "reason": "MutationObserver characterData delivery does not complete this WPT", "issue": "#173"
-    } },
+    { "path": "dom/nodes/MutationObserver-characterData.html" },
     { "path": "html/semantics/popovers/toggleevent-interface.html" },
-    { "path": "html/semantics/popovers/togglePopover.html" }
+    { "path": "html/semantics/popovers/togglePopover.html" },
+    { "path": "encoding/streams/backpressure.any.js" },
+    { "path": "encoding/streams/decode-attributes.any.js" },
+    { "path": "encoding/streams/decode-bad-chunks.any.js" },
+    { "path": "encoding/streams/decode-ignore-bom.any.js" },
+    { "path": "encoding/streams/decode-incomplete-input.any.js" },
+    { "path": "encoding/streams/decode-non-utf8.any.js" },
+    { "path": "encoding/streams/decode-split-character.any.js" },
+    { "path": "encoding/streams/decode-utf8.any.js", "known_failure": {
+      "status": "FAIL",
+      "reason": "MessagePort ignores ArrayBuffer transfer lists; the remaining UTF-8/shared-buffer subtests must pass",
+      "issue": "#763",
+      "failed_subtests": [
+        "decoding a transferred Uint8Array chunk should give no output",
+        "decoding a transferred ArrayBuffer chunk should give no output"
+      ]
+    } },
+    { "path": "encoding/streams/encode-bad-chunks.any.js" },
+    { "path": "encoding/streams/encode-utf8.any.js" },
+    { "path": "encoding/streams/readable-writable-properties.any.js" }
   ]
 }

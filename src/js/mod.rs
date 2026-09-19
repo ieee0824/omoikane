@@ -64,6 +64,9 @@ mod node_lifetime_tests;
 mod popover_tests;
 #[cfg(test)]
 mod query_tests;
+mod text_stream;
+#[cfg(test)]
+mod text_stream_tests;
 use module_fetch::{ModuleFetch, ModuleFetchPool};
 
 mod csp;
@@ -7789,6 +7792,21 @@ fn register_host_bindings(
             js_string!("__omoikane_crypto_digest"),
             2,
             NativeFunction::from_copy_closure(crypto_digest_native),
+        ),
+        (
+            js_string!("__omoikane_text_decoder_create"),
+            3,
+            NativeFunction::from_copy_closure(text_stream::create_native),
+        ),
+        (
+            js_string!("__omoikane_text_decoder_decode"),
+            3,
+            NativeFunction::from_copy_closure(text_stream::decode_native),
+        ),
+        (
+            js_string!("__omoikane_text_encoder_encode"),
+            1,
+            NativeFunction::from_copy_closure(text_stream::encode_native),
         ),
         (
             js_string!("__omoikane_compression_create"),

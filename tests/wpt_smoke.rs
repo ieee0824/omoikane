@@ -31,6 +31,9 @@ struct KnownFailure {
     issue: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     expires: Option<String>,
+    /// If present, only these FAIL subtests may account for the known failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failed_subtests: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -140,6 +143,22 @@ fn serve(mut stream: TcpStream, root: &Path) {
     }
     let target = request_line.split_whitespace().nth(1).unwrap_or("/");
     let path = target.split("?").next().unwrap_or("/");
+    if path == "/common/sab.js" {
+        // Upstream's buffer factory uses WebAssembly.Memory only to discover
+        // the SharedArrayBuffer constructor in browsers that hide its global.
+        // Omoikane exposes the real constructor but has no WebAssembly.Memory.
+        // Adapt constructor discovery, retaining actual shared buffers and all
+        // original test assertions (including transfer/detachment assertions).
+        let body = br#"
+const createBuffer = (type, length, opts) => {
+  if (type === "ArrayBuffer") return new ArrayBuffer(length, opts);
+  if (type === "SharedArrayBuffer") return new SharedArrayBuffer(length, opts);
+  throw new Error("type has to be ArrayBuffer or SharedArrayBuffer");
+};
+"#;
+        respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
+        return;
+    }
     if path == "/resources/testharnessreport.js" {
         // This runner consumes result callbacks rather than the interactive
         // HTML report. Disable that report before tests start so its DOM-heavy
@@ -240,6 +259,19 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), Vec<String>> {
             errors.push(format!("duplicate test path: {}", case.path));
         }
         if let Some(known) = &case.known_failure {
+            if let Some(names) = &known.failed_subtests {
+                let unique: HashSet<_> = names.iter().collect();
+                if known.status != ActualStatus::Fail
+                    || names.is_empty()
+                    || names.iter().any(|name| name.trim().is_empty())
+                    || unique.len() != names.len()
+                {
+                    errors.push(format!(
+                        "{}: failed_subtests requires FAIL and nonempty unique names",
+                        case.path
+                    ));
+                }
+            }
             if known.status == ActualStatus::Pass {
                 errors.push(format!(
                     "{}: known failure status must not be PASS",
@@ -283,6 +315,44 @@ fn classify(actual: ActualStatus, known: Option<&KnownFailure>) -> Classificatio
         (ActualStatus::Pass, None) => Classification::Pass,
         (status, Some(known)) if status == known.status => Classification::KnownFailure,
         _ => Classification::Regression,
+    }
+}
+
+fn classify_with_subtests(
+    actual: ActualStatus,
+    known: Option<&KnownFailure>,
+    subtests: &serde_json::Value,
+) -> Classification {
+    let classification = classify(actual, known);
+    let Some(expected) = known.and_then(|known| known.failed_subtests.as_ref()) else {
+        return classification;
+    };
+    if classification != Classification::KnownFailure {
+        return classification;
+    }
+    let Some(subtests) = subtests.as_array() else {
+        return Classification::Regression;
+    };
+    let mut failures = Vec::new();
+    for subtest in subtests {
+        match subtest["status"].as_u64() {
+            Some(0) => {}
+            Some(1) => {
+                let Some(name) = subtest["name"].as_str() else {
+                    return Classification::Regression;
+                };
+                failures.push(name);
+            }
+            _ => return Classification::Regression,
+        }
+    }
+    failures.sort_unstable();
+    let mut expected: Vec<_> = expected.iter().map(String::as_str).collect();
+    expected.sort_unstable();
+    if failures == expected {
+        classification
+    } else {
+        Classification::Regression
     }
 }
 
@@ -595,6 +665,7 @@ fn known_failure(status: ActualStatus) -> KnownFailure {
         reason: "not implemented <yet>".to_string(),
         issue: "#123&tracking".to_string(),
         expires: None,
+        failed_subtests: None,
     }
 }
 
@@ -691,6 +762,45 @@ fn manifest_validation_rejects_duplicates_and_invalid_known_failures() {
 }
 
 #[test]
+fn exact_subtest_failures_do_not_hide_new_regressions() {
+    use serde_json::json;
+    let mut known = known_failure(ActualStatus::Fail);
+    known.failed_subtests = Some(vec!["transfer".to_string()]);
+    let classify = |results| classify_with_subtests(ActualStatus::Fail, Some(&known), &results);
+    assert_eq!(
+        classify(json!([{"name":"decode","status":0}, {"name":"transfer","status":1}])),
+        Classification::KnownFailure
+    );
+    for results in [
+        json!([{"name":"decode","status":1}, {"name":"transfer","status":1}]),
+        json!([{"name":"transfer","status":2}]),
+        json!([{"name":"transfer","status":0}]),
+        json!([]),
+        json!(null),
+    ] {
+        assert_eq!(classify(results), Classification::Regression);
+    }
+    assert_eq!(
+        classify_with_subtests(ActualStatus::Pass, Some(&known), &json!([])),
+        Classification::Improvement
+    );
+    for (status, names) in [
+        ("FAIL", json!([])),
+        ("FAIL", json!([""])),
+        ("FAIL", json!(["a", "a"])),
+        ("TIMEOUT", json!(["a"])),
+    ] {
+        let manifest: Manifest = serde_json::from_value(json!({"tests":[{
+            "path":"encoding/a.any.js", "known_failure": {
+                "status":status, "reason":"reason", "issue":"#763", "failed_subtests": names
+            }
+        }]}))
+        .unwrap();
+        assert!(validate_manifest(&manifest).is_err());
+    }
+}
+
+#[test]
 fn selected_wpt_testharness_cases_match_expectations() {
     let root = std::env::var("WPT_ROOT")
         .map(PathBuf::from)
@@ -776,12 +886,13 @@ fn selected_wpt_testharness_cases_match_expectations() {
         } else {
             ActualStatus::Timeout
         };
-        let classification = classify(actual, case.known_failure.as_ref());
         let details = runtime
             .eval("JSON.stringify(globalThis.__wpt_results||[])")
             .ok()
             .and_then(|value| value.as_string().map(|text| text.to_std_string_escaped()))
             .unwrap_or_else(|| "[]".to_string());
+        let subtests = serde_json::from_str(&details).unwrap_or(serde_json::Value::Null);
+        let classification = classify_with_subtests(actual, case.known_failure.as_ref(), &subtests);
         // Each WPT case uses a fresh Boa realm.  The main branch's expanded
         // bootstrap creates considerably more short-lived objects than the
         // original smoke set, so dropping the runtime alone can leave enough
@@ -814,7 +925,7 @@ fn selected_wpt_testharness_cases_match_expectations() {
             classification,
             known_failure: case.known_failure,
             script_errors: errors,
-            subtests: serde_json::from_str(&details).unwrap_or(serde_json::Value::Null),
+            subtests,
         });
     }
     let summary = summarize(&results);
