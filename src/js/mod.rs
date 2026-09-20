@@ -11643,14 +11643,9 @@ fn parent_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     })
 }
 
-/// `__omoikane_owner_document(nodeId)` — returns the node id of the Document
-/// that owns `node`, found by walking to the root of its tree.
-///
-/// Returns `null` for a document node itself (a document has no owner
-/// document), and also for a detached node whose tree root is not a document
-/// (a freshly created, not-yet-inserted element): the JS layer then falls back
-/// to the node's creation-time owner. An attached node correctly reports the
-/// top-level document or the iframe sub-document it currently lives in.
+/// Returns the node's current Document owner. Detached nodes retain the
+/// registered owner from their most recent adoption, shared by all Realms.
+/// A Document itself has no owner; an unregistered node may use the JS fallback.
 fn owner_document_native(
     _: &JsValue,
     args: &[JsValue],
@@ -11662,9 +11657,12 @@ fn owner_document_native(
         let Some(node) = s.get_node(node_id) else {
             return Ok(JsValue::null());
         };
-        // DOM `ownerDocument` semantics: a document node has no owner document,
-        // and a detached node whose root is not a document reports none.
-        Ok(node_to_js_value(owner_document_for_node(&node)))
+        if node.node_type() == NodeType::Document {
+            return Ok(JsValue::null());
+        }
+        Ok(node_to_js_value(
+            owner_document_for_node(&node).or_else(|| s.node_lifetime_owner(node_id)),
+        ))
     })
 }
 

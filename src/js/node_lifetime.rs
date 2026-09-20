@@ -100,6 +100,14 @@ unsafe impl Trace for NodeLifetimes {
 }
 
 impl HostState {
+    /// Registered owner shared by all wrappers, including after detachment.
+    pub(super) fn node_lifetime_owner(&self, node_id: usize) -> Option<NodeHandle> {
+        self.node_lifetimes
+            .owners
+            .get(&node_id)
+            .and_then(|id| self.get_node(*id))
+    }
+
     pub(super) fn document_is_active(&self, id: usize) -> bool {
         id == self.document.identity()
             || self

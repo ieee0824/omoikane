@@ -812,3 +812,71 @@ fn discarding_a_restoring_iframe_cancels_its_pending_form_state_callback() {
     );
     assert!(runtime.take_task_errors().is_empty());
 }
+
+#[test]
+fn a_late_child_realm_control_keeps_form_reactions_after_parent_adoption() {
+    for move_ancestor in [false, true] {
+        let mut runtime = JsRuntime::with_document_and_url(
+            omoikane::html::TreeBuilder::parse(
+                "<form id=parent><fieldset></fieldset></form><iframe></iframe>",
+            )
+            .document(),
+            "https://example.test/owner",
+        )
+        .unwrap();
+        runtime
+            .eval(&format!("globalThis.moveAncestor={move_ancestor}"))
+            .unwrap();
+        runtime
+        .eval(
+            r#"
+        for (let i=0;i<20;i++) {
+            const ordinary=document.createElement('div');
+            ordinary.appendChild(document.createTextNode('ordinary'));
+            document.body.appendChild(ordinary);
+            ordinary.remove();
+        }
+        globalThis.frame=document.querySelector('iframe');
+        globalThis.child=frame.contentWindow;
+        child.eval(`
+            globalThis.reactions=[];
+            document.body.innerHTML='<form id=child><div id=holder><x-late></x-late></div></form>';
+            customElements.define('x-late',class extends HTMLElement {
+                static formAssociated=true;
+                constructor(){super();this.i=this.attachInternals();}
+                formAssociatedCallback(form){reactions.push(form ? form.id : 'null');}
+                formDisabledCallback(disabled){reactions.push('disabled:'+disabled);}
+            });
+        `);
+        globalThis.field=child.eval("document.querySelector('x-late')");
+        globalThis.fieldset=document.querySelector('fieldset');
+        fieldset.appendChild(moveAncestor ? child.eval("document.getElementById('holder')") : field);
+        fieldset.disabled=true;
+        fieldset.disabled=false;
+        field.remove();
+    "#,
+        )
+        .unwrap();
+        let reactions = runtime
+            .eval("child.reactions.join()")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            reactions,
+            "child,null,parent,disabled:true,disabled:false,null"
+        );
+        let owner = runtime
+            .eval("JSON.stringify([field.i.form === null, field.ownerDocument.URL, document.URL])")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            owner,
+            r#"[true,"https://example.test/owner","https://example.test/owner"]"#
+        );
+        assert!(runtime.take_task_errors().is_empty());
+    }
+}

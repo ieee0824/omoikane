@@ -252,7 +252,7 @@
   const getOwnerDocumentId = safeWeakMapGet;
   function setOwnerDocumentId(target, node, id) {
     safeWeakMapSet(target, node, id);
-    const nodeId = canonicalWrapperId(node);
+    const nodeId = internalNodeId(node);
     if (nodeId !== undefined) nativeSetNodeOwner(nodeId, id);
   }
   const hasSetValue = Function.prototype.call.bind(Set.prototype.has);
@@ -282,7 +282,10 @@
     return id !== undefined && hasCanonicalElementId(ids, id);
   }
   const nativeNodeIds = new WeakMap();
-  const nodeEventStates = new WeakMap();
+  // A foreign wrapper passed to a DOM method must expose the same private
+  // state without trusting its public properties. Keys remain weak.
+  const nodeEventStates = browsingInput.nodeEventStates ||
+    (browsingInput.nodeEventStates = new WeakMap());
   // Native nodes share event state across Realm wrappers. Allocate these
   // otherwise empty containers in the runtime's top Realm: a Map prototype
   // from a retired child would keep that child's global and Document alive
@@ -8435,6 +8438,11 @@
   function initializeCustomInternals(element, definition, phase) {
     definition = safeWeakMapGet(customInternalsDefinitions, definition);
     if (!definition) throw new TypeError("Unknown custom element definition");
+    // DOM mutations need form reactions only after a form-associated custom
+    // element exists. Share the activation across Realms so a control created
+    // in a child still receives reactions when its parent adopts or moves it.
+    // Keeping this boolean after retirement retains no nodes or child globals.
+    if (definition.formAssociated) browsingInput.hasCustomFormControls = true;
     const events = safeWeakMapGet(nodeEventStates, element);
     nativeSetFormAssociatedCustom(internalNodeId(element), definition.formAssociated && phase === "custom");
     const state = events.customInternals = {
@@ -8483,7 +8491,8 @@
       const candidate = wrapNode(nativeGetElementById(internalNodeId(root), formId));
       return candidate && internalNodeLocalName(candidate) === "form" ? candidate : null;
     }
-    for (let node = element; node && node !== removing;) {
+    const removingId = internalNodeId(removing);
+    for (let node = element; node && internalNodeId(node) !== removingId;) {
       node = internalParentNode(node);
       if (!node) break;
       if (internalNodeType(node) === 1 && internalNodeLocalName(node) === "form") return node;
@@ -8493,7 +8502,8 @@
 
   function customControlDisabled(element, removing = null) {
     if (nativeAttribute(element, "disabled") !== null) return true;
-    for (let parent = element; parent && parent !== removing;) {
+    const removingId = internalNodeId(removing);
+    for (let parent = element; parent && internalNodeId(parent) !== removingId;) {
       parent = internalParentNode(parent);
       if (!parent) break;
       if (internalNodeType(parent) !== 1 || internalNodeLocalName(parent) !== "fieldset" ||
@@ -8918,10 +8928,12 @@
   }
 
   function customFormSubtreeRemoving(root) {
+    if (!browsingInput.hasCustomFormControls) return;
     customElementTreeWalk(root, element => syncCustomFormState(element, root));
   }
 
   function customFormChildrenChanged(parent, init) {
+    if (!browsingInput.hasCustomFormControls) return;
     // notifyImplicitRemoval publishes its MutationRecord before native code
     // detaches the node. The eventual insertion will flush the reaction queue.
     if (init.removedNodes?.some(node =>
@@ -8945,6 +8957,7 @@
   }
 
   function customFormAttributeChanged(element, name, oldValue, newValue, namespace) {
+    if (!browsingInput.hasCustomFormControls) return;
     if (namespace !== null || oldValue === newValue) return;
     if (name === "form") syncCustomFormState(element);
     else if (name === "disabled") {
