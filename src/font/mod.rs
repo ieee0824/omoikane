@@ -505,6 +505,16 @@ impl Font {
         let metrics = face.underline_metrics()?;
         Some(metrics.thickness as f32 * size_px / face.units_per_em().max(1) as f32)
     }
+
+    /// Returns the preferred underline position in CSS pixels below the baseline.
+    ///
+    /// Font tables use an upward-positive coordinate system, so a usual negative
+    /// underline position becomes a positive distance below the baseline here.
+    pub fn underline_position(&self, size_px: f32) -> Option<f32> {
+        let face = Face::from_slice(self.inner.font_data(), self.face_index)?;
+        let metrics = face.underline_metrics()?;
+        Some(-(metrics.position as f32) * size_px / face.units_per_em().max(1) as f32)
+    }
 }
 
 /// Font metrics extracted from font tables.

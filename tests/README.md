@@ -215,3 +215,16 @@ API surface tests. Separate browser instances have separate in-memory storage;
 persistence across process restarts and cross-tab storage events are not asserted
 by these cases. See [the Gate 6 browser baseline](../docs/jit/gate6-browser-baseline.md)
 for the defects, source baseline and verification order.
+
+
+## Underline position and offset
+
+`underline_fixed_font_matrix_matches_firefox_pixels` compares all pixels of the
+90-case `anonymized-underline-positions/fixed.html` fixture to Firefox references
+for both underlines and overlines (180 cases).
+It covers horizontal and both vertical writing modes, underline position,
+positive/negative/percentage offsets, and a shared bundled font. Related paint
+tests cover calc offsets, overline side swapping, and decoration propagation
+across descendants with different font sizes. Set `OMOIKANE_BROWSER_REPORT_DIR`
+to retain generated actual/diff images without changing the checked-in reference.
+Reference provenance and refresh rules are in the fixture's README.

@@ -3055,6 +3055,22 @@ fn auto_width_from_layout(
     resolver: &mut StyleResolver,
     available_width: f32,
 ) -> f32 {
+    if is_vertical_writing(&resolver.computed_style(node)) {
+        // Columns consume physical width, whereas intrinsic_width measures the
+        // horizontal text advance (the inline axis before transposition). Sum
+        // the flow's column widths, independent of provisional right alignment.
+        let columns = layout.lines.iter().map(|line| line.rect.width).sum::<f32>();
+        let blocks = layout
+            .children
+            .iter()
+            .filter_map(|child| {
+                let style = resolver.computed_style(&child.node);
+                (!is_out_of_flow_positioned(&style) && !is_inline_child(&child.node, resolver))
+                    .then(|| child.total_width())
+            })
+            .sum::<f32>();
+        return (columns + blocks).max(0.0);
+    }
     used_content_width(layout)
         .max(shrink_to_fit_width(node, resolver, available_width))
         .min(available_width)
@@ -3458,8 +3474,15 @@ fn layout_positioned_child_mode(
     if specified_width.is_none() {
         let auto_width = auto_width_from_layout(&layout_child, child, resolver, origin.width);
         if (auto_width - layout_child.dimensions.content.width).abs() > 0.5 {
+            let outside_width = if is_vertical_writing(style) {
+                layout_child.dimensions.padding.horizontal()
+                    + layout_child.dimensions.border.horizontal()
+                    + layout_child.dimensions.margin.horizontal()
+            } else {
+                0.0
+            };
             let relayout_containing = Rect {
-                width: auto_width,
+                width: auto_width + outside_width,
                 ..child_containing
             };
             layout_child = if top_layer_root {

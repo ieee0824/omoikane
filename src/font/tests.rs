@@ -1491,3 +1491,17 @@ fn css_pixel_size_uses_the_em_square_for_shaping_and_rasterization() {
         "character advance must use the same em-square scale as shaping"
     );
 }
+
+#[test]
+fn underline_position_uses_signed_font_metric_and_scales_with_size() {
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-textarea-lines/LiberationSans-Regular.ttf")
+            .to_vec(),
+    )
+    .unwrap();
+    // The fixture's post table specifies position=-67, thickness=150, UPM=2048.
+    for size in [10.0, 20.0, 40.0] {
+        assert!((font.underline_position(size).unwrap() - 67.0 * size / 2048.0).abs() < 0.0001);
+        assert!((font.underline_thickness(size).unwrap() - 150.0 * size / 2048.0).abs() < 0.0001);
+    }
+}

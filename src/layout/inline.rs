@@ -688,6 +688,22 @@ fn collect_element_inline_segments(
     }
 
     match node.tag_name().as_deref() {
+        Some("br") => {
+            // An explicit HTML line break is independent of white-space's
+            // handling of literal newlines. Reuse the forced-break path.
+            out.push(InlineSegment {
+                node: node.clone(),
+                content: InlineSegmentContent::Text("\n".to_string()),
+                metrics: font_metrics(&style),
+                line_height: line_height(&style),
+                vertical_align: vertical_align(&style),
+                style: FragmentStyle::from_computed(&style),
+                word_break: word_break(&style),
+                overflow_wrap: overflow_wrap(&style),
+                white_space_mode: WhiteSpaceMode::PreLine,
+            });
+            return;
+        }
         Some("input") => {
             collect_input_segment(node, &style, out);
             return;
