@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import select
+import signal
 import subprocess as S
 import threading
 import time
@@ -35,6 +36,15 @@ processes = []
 logs = []
 evidence = []
 env = os.environ.copy()
+env['OMOIKANE_TRACE_INPUT'] = '1'
+
+def input_events():
+    path = OUT / 'browser.log'
+    if not path.exists():
+        return []
+    return [json.loads(line.removeprefix('OMOIKANE_INPUT '))
+            for line in path.read_text().splitlines(keepends=True)
+            if line.startswith('OMOIKANE_INPUT ') and line.endswith('\n')]
 
 def start(command, name, **kwargs):
     log = (OUT / (name + '.log')).open('w')
@@ -121,6 +131,10 @@ try:
     x.XStoreName(d,other,b'Pointer lock focus test')
     x.XMapWindow.argtypes = [C.c_void_p,C.c_ulong]; x.XMapWindow(d,other)
     x.XFlush.argtypes = [C.c_void_p]; x.XFlush(d)
+    # Only this private X server is affected. Held-key focus tests must not
+    # introduce real auto-repeat presses while checking synthetic key delivery.
+    x.XAutoRepeatOff.argtypes = [C.c_void_p]
+    x.XAutoRepeatOff(d); x.XFlush(d)
     x.XGrabPointer.argtypes = [C.c_void_p,C.c_ulong,C.c_int,C.c_uint,C.c_int,C.c_int,C.c_ulong,C.c_ulong,C.c_ulong]
     x.XUngrabPointer.argtypes = [C.c_void_p,C.c_ulong]
     def grabbed():
@@ -212,9 +226,60 @@ try:
     command('xdotool','windowactivate','--sync',str(other))
     wait_for('focus loss releases native grab',grabbed,lambda v:not v)
     wait_for('focus loss releases page lock',state,lambda s:s.get('locked') is False and s.get('changes')==6)
+    # Queue focus and one actual key press while the app cannot process them.
+    # On resume winit sees L in the keymap and emits both a synthetic press
+    # and the queued real press. This makes the old CI race deterministic.
+    start_event = len(input_events())
+    previous_keys = state()['keys']
+    app.send_signal(signal.SIGSTOP)
+    try:
+        wait_for('browser stopped for queued focus',
+                 lambda: next(line for line in Path(f'/proc/{app.pid}/status').read_text().splitlines()
+                              if line.startswith('State:')),
+                 lambda s: 'T (stopped)' in s)
+        command('xdotool','windowactivate','--sync',win)
+        command('xdotool','keydown','l')
+    finally:
+        app.send_signal(signal.SIGCONT)
+    queued = wait_for('focus and synthetic/real L press recorded',
+        lambda: input_events()[start_event:],
+        lambda events: any(e['kind']=='focus' and e['focused'] for e in events)
+        and all(any(e['kind']=='key' and e['code']=='KeyL' and e['pressed']
+                    and e['synthetic']==synthetic for e in events) for synthetic in (False,True)))
+    focus_sequence = next(e['sequence'] for e in queued if e['kind']=='focus' and e['focused'])
+    synthetic_sequence = next(e['sequence'] for e in queued if e['kind']=='key'
+                              and e['code']=='KeyL' and e['pressed'] and e['synthetic'])
+    real_sequence = next(e['sequence'] for e in queued if e['kind']=='key'
+                         and e['code']=='KeyL' and e['pressed'] and not e['synthetic'])
+    assert focus_sequence < synthetic_sequence < real_sequence, queued
+    command('xdotool','keyup','l')
+    focused = wait_for('queued L release reaches page',state,
+        lambda s: len(s.get('keys',[]))>len(previous_keys) and s['keys'][-1]==['up','l',False])
+    assert focused['keys'][len(previous_keys):] == [['down','l',False],['up','l',False]], focused
+    wait_for('one acquisition for queued focus and key',state,
+             lambda s:s.get('locked') and s.get('resolved')==4 and s.get('changes')==7)
+
+    command('xdotool','key','e')
+    wait_for('exit before held-key focus check',state,
+             lambda s:s.get('locked') is False and s.get('changes')==8
+             and s.get('keys',[])[-1:]==[['up','e',False]])
+    command('xdotool','windowactivate','--sync',str(other))
+    start_event = len(input_events())
+    previous_keys = state()['keys']
+    command('xdotool','keydown','l')
     command('xdotool','windowactivate','--sync',win)
+    wait_for('held L synthetic press recorded',lambda:input_events()[start_event:],
+             lambda events:any(e['kind']=='key' and e['code']=='KeyL' and e['pressed']
+                               and e['synthetic'] for e in events))
+    command('xdotool','keyup','l')
+    held = wait_for('held L real release reaches page',state,
+        lambda s:len(s.get('keys',[]))>len(previous_keys) and s['keys'][-1]==['up','l',False])
+    assert held['keys'][len(previous_keys):] == [['up','l',False]], held
+    assert (held['locked'],held['resolved'],held['changes']) == (False,4,8), held
+    wait_for('held-key focus leaves native grab released',grabbed,lambda v:not v)
+
     command('xdotool','key','l')
-    wait_for('reacquire for navigation',state,lambda s:s.get('locked') and s.get('resolved')==4)
+    wait_for('reacquire for navigation',state,lambda s:s.get('locked') and s.get('resolved')==5)
     command('xdotool','key','n')
     wait_for('navigation completes',title,lambda s:s=='PLTEST:NAVIGATED')
     wait_for('navigation releases native grab',grabbed,lambda v:not v)
@@ -226,6 +291,7 @@ except Exception as error:
     raise
 finally:
     (OUT/'results.json').write_text(json.dumps(evidence,indent=2)+'\n')
+    (OUT/'input-events.json').write_text(json.dumps(input_events(),indent=2)+'\n')
     for p in reversed(processes):
         if p.poll() is None:
             p.terminate()

@@ -14,7 +14,7 @@ body { margin: 24px; font: 18px sans-serif; background: #edf1f5; color: #17202b;
 <script>
 const target = document.getElementById('target');
 const state = { locked: false, moves: 0, dx: 0, dy: 0, x: 0, y: 0,
-  down: 0, wheel: 0, changes: 0, resolved: 0, error: '' };
+  down: 0, wheel: 0, changes: 0, resolved: 0, error: '', keys: [] };
 function report() {
   const text = JSON.stringify(state);
   document.title = 'PLTEST:' + text;
@@ -39,11 +39,14 @@ document.onpointerlockchange = () => {
 };
 document.onpointerlockerror = () => { state.error = 'pointerlockerror'; report(); };
 document.onkeydown = event => {
+  state.keys.push(['down', event.key, event.repeat]);
   if (event.key === 'l') lock();
   if (event.key === 'e') document.exitPointerLock();
   if (event.key === 'Escape') event.preventDefault();
   if (event.key === 'n') location.href = '/next';
+  report();
 };
+document.onkeyup = event => { state.keys.push(['up', event.key, event.repeat]); report(); };
 report();
 </script>
 </html>
