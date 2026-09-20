@@ -126,6 +126,7 @@ git_wpt sparse-checkout add \
 git_wpt sparse-checkout add "/custom-elements/form-associated/" "/html/semantics/forms/form-submission-0/resources/targetted-form.js"
 git_wpt sparse-checkout add "/common/blank.html" "/FileAPI/file/resources/echo-content-escaped.py"
 git_wpt sparse-checkout add "/domxpath/"
+git_wpt sparse-checkout add "/visual-viewport/"
 git_wpt sparse-checkout add \
   "/storage/storagemanager-estimate.https.any.js" \
   "/storage/storagemanager-persisted.https.any.js" \

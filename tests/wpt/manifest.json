@@ -192,6 +192,16 @@
     { "path": "domxpath/result-iterateNext.html" },
     { "path": "domxpath/text-html-attributes.html" },
     { "path": "domxpath/text-html-elements.html" },
-    { "path": "domxpath/xpathevaluatorbase-creatensresolver.html" }
+    { "path": "domxpath/xpathevaluatorbase-creatensresolver.html" },
+    { "path": "visual-viewport/viewport-type.html" },
+    { "path": "visual-viewport/viewport-unscaled-scale.html" },
+    { "path": "visual-viewport/viewport-unscaled-scale-iframe.html" },
+    { "path": "visual-viewport/viewport-unscaled-scroll.html" },
+    { "path": "visual-viewport/viewport-unscaled-scroll-iframe.html" },
+    { "path": "visual-viewport/viewport-unscaled-size.html" },
+    { "path": "visual-viewport/viewport-unscaled-size-iframe.html" },
+    { "path": "visual-viewport/viewport-read-size-causes-layout.html" },
+    { "path": "visual-viewport/viewport-read-size-in-iframe-causes-layout.html" },
+    { "path": "visual-viewport/viewport-resize-event-on-iframe-size-change.html" }
   ]
 }

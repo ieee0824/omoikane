@@ -13659,9 +13659,20 @@
   // built-in globals intact. These properties remain writable because an
   // explicit script global takes precedence over Window named access.
   globalThis.__omoikane_install_window_named_properties = function() {
+    let frameIndex = 0;
     const visit = node => {
       for (const child of node.childNodes) {
         if (child.nodeType !== 1) continue;
+        if ((child.localName || "").toLowerCase() === "iframe") {
+          const index = String(frameIndex++);
+          if (!Object.prototype.hasOwnProperty.call(globalThis, index)) {
+            Object.defineProperty(globalThis, index, {
+              configurable: true,
+              enumerable: true,
+              get() { return child.contentWindow; },
+            });
+          }
+        }
         const id = child.getAttribute("id");
         if (id && !Object.prototype.hasOwnProperty.call(globalThis, id)) {
           Object.defineProperty(globalThis, id, {
@@ -13685,6 +13696,7 @@
     globalThis.window = globalThis;
   }
   globalThis.self = globalThis;
+  globalThis.frames = globalThis;
   Object.defineProperty(globalThis, "__listeners", {
     configurable: true,
     value: new Map(),
@@ -15939,7 +15951,12 @@
   }
   globalThis.__omoikane_dispatch_scroll_event = function(nodeId, viewport) {
     const target = viewport ? document : wrapNode(nodeId);
-    if (target) target.dispatchEvent(new Event("scroll", { bubbles: !!viewport }));
+    if (!target) return;
+    const event = new Event("scroll", { bubbles: !!viewport });
+    if (viewport && typeof globalThis.onscroll === "function") {
+      __omoikane_call_event_listener(globalThis.onscroll, globalThis, event);
+    }
+    target.dispatchEvent(event);
   };
   function isScrollOptions(value) {
     return value !== null && (typeof value === "object" || typeof value === "function");
@@ -18891,6 +18908,73 @@
       if (typeof this.signal.onabort === "function") this.signal.onabort.call(this.signal, event);
     }
   }
+
+  const visualViewportConstructionToken = {};
+  const nativeVisualViewportState = globalThis.__omoikane_visual_viewport_state;
+  try { delete globalThis.__omoikane_visual_viewport_state; } catch (_) {}
+  function currentVisualViewportState() {
+    try {
+      return JSON.parse(nativeVisualViewportState());
+    } catch (_) {
+      return {
+        width: Number(globalThis.innerWidth) || 0,
+        height: Number(globalThis.innerHeight) || 0,
+        offsetLeft: 0,
+        offsetTop: 0,
+        pageLeft: Number(globalThis.scrollX) || 0,
+        pageTop: Number(globalThis.scrollY) || 0,
+        scale: 1,
+      };
+    }
+  }
+  class VisualViewport extends EventTarget {
+    constructor(token) {
+      if (token !== visualViewportConstructionToken) throw new TypeError("Illegal constructor");
+      super();
+      this.__onresize = null;
+      this.__onscroll = null;
+    }
+    get width() { return currentVisualViewportState().width; }
+    get height() { return currentVisualViewportState().height; }
+    get offsetLeft() { return currentVisualViewportState().offsetLeft; }
+    get offsetTop() { return currentVisualViewportState().offsetTop; }
+    get pageLeft() { return currentVisualViewportState().pageLeft; }
+    get pageTop() { return currentVisualViewportState().pageTop; }
+    get scale() { return currentVisualViewportState().scale; }
+    get onresize() { return this.__onresize; }
+    set onresize(callback) {
+      if (this.__onresize) this.removeEventListener("resize", this.__onresize);
+      this.__onresize = typeof callback === "function" ? callback : null;
+      if (this.__onresize) this.addEventListener("resize", this.__onresize);
+    }
+    get onscroll() { return this.__onscroll; }
+    set onscroll(callback) {
+      if (this.__onscroll) this.removeEventListener("scroll", this.__onscroll);
+      this.__onscroll = typeof callback === "function" ? callback : null;
+      if (this.__onscroll) this.addEventListener("scroll", this.__onscroll);
+    }
+    get [Symbol.toStringTag]() { return "VisualViewport"; }
+  }
+  const visualViewport = new VisualViewport(visualViewportConstructionToken);
+  globalThis.VisualViewport = VisualViewport;
+  Object.defineProperty(globalThis, "visualViewport", {
+    configurable: true,
+    enumerable: true,
+    get() { return visualViewport; },
+  });
+  globalThis.__omoikane_dispatch_viewport_events = function(
+    windowResize, visualResize, visualScroll
+  ) {
+    if (windowResize) {
+      const event = new Event("resize");
+      if (typeof globalThis.onresize === "function") {
+        __omoikane_call_event_listener(globalThis.onresize, globalThis, event);
+      }
+      globalThis.dispatchEvent(event);
+    }
+    if (visualResize) visualViewport.dispatchEvent(new Event("resize"));
+    if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
+  };
   globalThis.EventTarget = EventTarget;
   // XMLHttpRequestUpload is declared beside XMLHttpRequest so the latter can
   // construct it before this general EventTarget definition is reached.  Link

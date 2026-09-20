@@ -940,6 +940,12 @@ fn selected_wpt_testharness_cases_match_expectations() {
             .expect("wire WPT handlers");
         runtime.fire_load().expect("fire WPT load");
         runtime.run_timers(5_000, 10, 2_000);
+        // WPTs commonly observe rendering steps through nested
+        // requestAnimationFrame callbacks. Drive a bounded number of explicit
+        // opportunities after load so resize/scroll events queued for a frame
+        // can settle without turning a self-rescheduling callback into an
+        // unbounded test run.
+        runtime.run_animation_frames(16, 16);
         runtime.run_jobs().expect("drain WPT jobs");
         errors.extend(runtime.take_task_errors());
         let complete = js_bool(&mut runtime, "globalThis.__wpt_complete === true");
