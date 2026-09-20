@@ -76,7 +76,7 @@ pub(super) struct InlineLayoutResult {
 struct InlineLayoutContext {
     available_width: f32,
     containing_height: f32,
-    viewport: Rect,
+    viewport: super::LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     allow_atomic_boxes: bool,
 }
@@ -92,7 +92,7 @@ pub(super) fn layout_inline_nodes(
     direction_rtl: bool,
     text_overflow_style: Option<&ComputedStyle>,
     containing_height: f32,
-    viewport: Rect,
+    viewport: super::LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     allow_atomic_boxes: bool,
 ) -> InlineLayoutResult {
@@ -130,7 +130,7 @@ pub(super) fn layout_inline_nodes(
             style,
         );
     }
-    position_atomic_boxes(&lines, &mut atomic_boxes);
+    position_atomic_boxes(&lines, &mut atomic_boxes, resolver);
     InlineLayoutResult {
         lines,
         atomic_boxes,
@@ -160,7 +160,7 @@ pub(super) fn layout_vertical_inline_nodes(
     direction_rtl: bool,
     text_overflow_style: Option<&ComputedStyle>,
     containing_width: f32,
-    viewport: Rect,
+    viewport: super::LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
 ) -> InlineLayoutResult {
     let context = InlineLayoutContext {
@@ -270,7 +270,7 @@ pub(super) fn layout_vertical_inline_nodes(
             }
         })
         .collect::<Vec<_>>();
-    position_atomic_boxes(&lines, &mut atomic_boxes);
+    position_atomic_boxes(&lines, &mut atomic_boxes, resolver);
     InlineLayoutResult {
         lines,
         atomic_boxes,
@@ -471,14 +471,23 @@ fn text_fitting_graphemes(
     Some((fitted.to_string(), measure_text_width(fitted, metrics)))
 }
 
-fn position_atomic_boxes(lines: &[LineBox], atomic_boxes: &mut [LayoutBox]) {
+fn position_atomic_boxes(
+    lines: &[LineBox],
+    atomic_boxes: &mut [LayoutBox],
+    resolver: &mut StyleResolver,
+) {
     for fragment in lines.iter().flat_map(|line| &line.fragments) {
         if matches!(fragment.content, InlineFragmentContent::AtomicInline(_))
             && let Some(layout) = atomic_boxes
                 .iter_mut()
                 .find(|layout| layout.node == fragment.node)
         {
-            super::translate_layout_box_to_outer(layout, fragment.rect.x, fragment.rect.y);
+            super::translate_layout_box_to_outer(
+                layout,
+                fragment.rect.x,
+                fragment.rect.y,
+                resolver,
+            );
         }
     }
 }
@@ -772,7 +781,7 @@ fn collect_element_inline_segments(
             if super::margin_start_is_auto(&style) {
                 let auto_margin = layout.dimensions.margin.left;
                 layout.dimensions.margin.left = 0.0;
-                super::translate_layout_box(&mut layout, -auto_margin, 0.0);
+                super::translate_layout_box(&mut layout, -auto_margin, 0.0, resolver);
             }
             if super::margin_end_is_auto(&style) {
                 layout.dimensions.margin.right = 0.0;

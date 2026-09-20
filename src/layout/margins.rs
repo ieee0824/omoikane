@@ -140,26 +140,16 @@ pub(super) fn shift_flow(
     dy: f32,
     resolver: &mut StyleResolver,
     containing_block_moves: bool,
+    fixed_containing_block_moves: bool,
 ) {
-    if dy == 0.0 {
-        return;
-    }
-    let style = resolver.computed_style(&layout.node);
-    let outside = position_scheme(&style) == PositionScheme::Fixed
-        || (position_scheme(&style) == PositionScheme::Absolute && !containing_block_moves);
-    if outside && (!auto(&style, "top") || !auto(&style, "bottom")) {
-        return;
-    }
-    layout.dimensions.content.y += dy;
-    shift_lines(&mut layout.lines, dy);
-    if let Some(marker) = &mut layout.marker {
-        marker.y += dy;
-    }
-    let containing_block_moves =
-        containing_block_moves || establishes_positioned_containing_block(&style);
-    for child in &mut layout.children {
-        shift_flow(child, dy, resolver, containing_block_moves);
-    }
+    translate_inherited_box(
+        layout,
+        0.0,
+        dy,
+        resolver,
+        containing_block_moves,
+        fixed_containing_block_moves,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -174,7 +164,7 @@ pub(super) fn layout_children(
     y: f32,
     width: f32,
     containing_height: f32,
-    viewport: Rect,
+    viewport: super::LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     used_height: Option<UsedHeight>,
 ) -> BlockChildrenResult {

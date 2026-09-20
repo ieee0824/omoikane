@@ -148,7 +148,7 @@ pub(super) fn layout_grid_container(
     y: f32,
     width: f32,
     containing_block_height: f32,
-    viewport: Rect,
+    viewport: super::LayoutViewport,
     inherited_subgrid: Option<SubgridContext>,
     used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
@@ -476,6 +476,7 @@ pub(super) fn layout_grid_container(
             &mut child,
             column_offsets[placement.column] + dx,
             row_offsets[placement.row] + dy,
+            resolver,
         );
         children.push(child);
     }
@@ -490,6 +491,7 @@ pub(super) fn layout_grid_container(
         border,
         margin,
     };
+    let viewport = viewport.after_sizing(&style, dimensions, &mut children, resolver);
     for (child, child_style) in positioned {
         if let Some(child) = layout_positioned_child(
             &child,

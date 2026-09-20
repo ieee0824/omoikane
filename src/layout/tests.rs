@@ -9154,12 +9154,12 @@ fn flush_pending_inline_nodes_clears_whitespace_only() {
         0.0,
         200.0,
         0.0,
-        Rect {
+        LayoutViewport::new(Rect {
             x: 0.0,
             y: 0.0,
             width: 200.0,
             height: 0.0,
-        },
+        }),
         None,
         &mut lines,
         &mut children,
