@@ -59,8 +59,13 @@ fn report(title: &str, run: &Acid3Run) {
         println!("    [{i}] {}", truncate(e, 300));
     }
     println!("loop iterations driven : {}", run.iterations);
+    println!("termination reason      : {:?}", run.termination_reason);
     println!("drive errors           : {}", run.drive_errors.len());
     for (i, e) in run.drive_errors.iter().enumerate() {
+        println!("    [{i}] {}", truncate(e, 300));
+    }
+    println!("task errors            : {}", run.task_errors.len());
+    for (i, e) in run.task_errors.iter().enumerate() {
         println!("    [{i}] {}", truncate(e, 300));
     }
 

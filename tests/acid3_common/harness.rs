@@ -261,6 +261,24 @@ pub enum DriveMode {
     DirectDrive,
 }
 
+/// Why the harness stopped driving one Acid3 mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminationReason {
+    /// The page advanced through every declared subtest.
+    Completed,
+    /// A page-script task failed and no further work could advance the page.
+    TaskError,
+    /// A direct harness operation returned an error.
+    DriveError,
+    /// The page stopped advancing and no timer work remained.
+    NoPendingWork,
+    /// DirectDrive exceeded its bounded allowance for a retrying subtest.
+    RetryLimit,
+    /// The mode exhausted its overall iteration bound.
+    IterationLimit,
+}
+
 /// Outcome of a single Acid3 run.
 #[derive(Clone, Debug)]
 pub struct Acid3Run {
@@ -275,6 +293,10 @@ pub struct Acid3Run {
     pub script_errors: Vec<String>,
     /// Errors raised while invoking the load handler / driving the loop.
     pub drive_errors: Vec<String>,
+    /// Errors raised by page script while an event-loop task ran.
+    pub task_errors: Vec<String>,
+    /// The condition that ended the drive loop.
+    pub termination_reason: TerminationReason,
     /// Global `tests.length` (total number of Acid3 subtests), if readable.
     pub total: Option<i64>,
     /// Global `score` after driving, if readable.
@@ -287,6 +309,23 @@ pub struct Acid3Run {
     pub log: Option<String>,
     /// How many times the loop step actually executed.
     pub iterations: usize,
+}
+
+impl Acid3Run {
+    /// Serializes the outcome fields retained by CI artifacts.
+    pub fn report_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "score": self.score,
+            "total": self.total,
+            "index": self.index,
+            "script_errors": self.script_errors,
+            "drive_errors": self.drive_errors,
+            "task_errors": self.task_errors,
+            "termination_reason": self.termination_reason,
+            "iterations": self.iterations,
+            "log": self.log,
+        })
+    }
 }
 
 /// Fetches, parses, scripts, and drives the Acid3 page, returning an honest
@@ -316,6 +355,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
 
     // 3. Execute all inline / external <script>s (fires DOMContentLoaded).
     let script_errors = runtime.execute_document_scripts(Some(&base));
+    let mut task_errors = runtime.take_task_errors();
     acid3_debug_log(&format!("mode={mode:?} after scripts"));
 
     acid3_debug_log(&format!("mode={mode:?} before update typeof"));
@@ -324,6 +364,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
 
     let mut drive_errors = Vec::new();
     let mut iterations = 0usize;
+    let mut termination_reason = TerminationReason::IterationLimit;
 
     match mode {
         DriveMode::Faithful => {
@@ -337,6 +378,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             if let Err(e) = runtime.fire_load() {
                 drive_errors.push(format!("fire load: {e}"));
             }
+            task_errors.extend(runtime.take_task_errors());
             acid3_debug_log(&format!("mode={mode:?} after fire load"));
             // Advance virtual time so setTimeout(update, delay) tasks fire.
             // Cap: 60 virtual seconds at the page's 10ms delay = 6000 ticks.
@@ -350,8 +392,11 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                 acid3_debug_log(&format!(
                     "mode={mode:?} tick start iteration={iterations} index={last_index}"
                 ));
-                if let Err(e) = runtime.tick(delay_ms) {
+                let tick_result = runtime.tick(delay_ms);
+                task_errors.extend(runtime.take_task_errors());
+                if let Err(e) = tick_result {
                     drive_errors.push(format!("tick: {e}"));
+                    termination_reason = TerminationReason::DriveError;
                     break;
                 }
                 acid3_debug_log(&format!("mode={mode:?} tick after iteration={iterations}"));
@@ -362,6 +407,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                 let total = read_int(&mut runtime, "tests.length");
                 if let Some(t) = total {
                     if idx >= t {
+                        termination_reason = TerminationReason::Completed;
                         break;
                     }
                 }
@@ -374,6 +420,11 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                     // timer means real progress is still possible. The max_ticks
                     // cap keeps this bounded if a retry never resolves.
                     if stalled >= 3 && !runtime.has_pending_timers() {
+                        termination_reason = incomplete_termination_reason(
+                            &task_errors,
+                            &drive_errors,
+                            TerminationReason::NoPendingWork,
+                        );
                         break;
                     }
                 } else {
@@ -391,6 +442,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             if let Err(e) = runtime.tick(0) {
                 drive_errors.push(format!("initial resource tasks: {e}"));
             }
+            task_errors.extend(runtime.take_task_errors());
             acid3_debug_log(&format!("mode={mode:?} after initial tick"));
             // Invoke update() directly, once per subtest, bypassing setTimeout.
             let total = read_int(&mut runtime, "tests.length").unwrap_or(0);
@@ -406,18 +458,23 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                 iterations += 1;
                 if let Err(e) = runtime.eval_safe("if (typeof update === 'function') update();") {
                     drive_errors.push(format!("update(): {e}"));
+                    termination_reason = TerminationReason::DriveError;
                     break;
                 }
                 // A directly invoked preparation test may connect an iframe or
                 // object (test 65). Run only zero-delay work so its resource
                 // load events complete without advancing the page's 10ms
                 // setTimeout-driven update chain that this mode bypasses.
-                if let Err(e) = runtime.tick(0) {
+                let tick_result = runtime.tick(0);
+                task_errors.extend(runtime.take_task_errors());
+                if let Err(e) = tick_result {
                     drive_errors.push(format!("resource tasks after update(): {e}"));
+                    termination_reason = TerminationReason::DriveError;
                     break;
                 }
                 let idx = read_int(&mut runtime, "index").unwrap_or(last_index);
                 if total > 0 && idx >= total {
+                    termination_reason = TerminationReason::Completed;
                     break;
                 }
                 if idx == last_index {
@@ -425,6 +482,11 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                     // A test stuck on "retry" self-resolves after 500 attempts;
                     // give it room but do not spin forever.
                     if stall > 600 {
+                        termination_reason = incomplete_termination_reason(
+                            &task_errors,
+                            &drive_errors,
+                            TerminationReason::RetryLimit,
+                        );
                         break;
                     }
                 } else {
@@ -435,6 +497,7 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
         }
     }
 
+    task_errors.extend(runtime.take_task_errors());
     acid3_debug_log(&format!("mode={mode:?} before result total"));
     let result = Acid3Run {
         mode,
@@ -443,6 +506,8 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
         update_typeof,
         script_errors,
         drive_errors,
+        task_errors,
+        termination_reason,
         total: read_int(&mut runtime, "tests.length"),
         score: read_int(&mut runtime, "score"),
         index: read_int(&mut runtime, "index"),
@@ -470,6 +535,20 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
     eprintln!("[acid3-debug] mode={mode:?} after force_collect");
     acid3_debug_log(&format!("mode={mode:?} after force_collect"));
     result
+}
+
+fn incomplete_termination_reason(
+    task_errors: &[String],
+    drive_errors: &[String],
+    fallback: TerminationReason,
+) -> TerminationReason {
+    if !task_errors.is_empty() {
+        TerminationReason::TaskError
+    } else if !drive_errors.is_empty() {
+        TerminationReason::DriveError
+    } else {
+        fallback
+    }
 }
 
 /// Evaluates `expr` and returns it coerced to a Rust `String`. Any thrown error

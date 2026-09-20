@@ -69,6 +69,10 @@ cargo test --test acid3_harness
 ## 現状のスコア（更新: 066 時点、2026-07-13）
 
 `cargo run --example acid3` の実測で **Faithful / DirectDrive 両モードとも 100/100（満点、reached index 100）**。
+
+runnerは各モードの進行index、終了理由、document script / drive / event-loop taskの
+エラーを個別に記録する。CIの`acid3.json`にも同じ診断を残すため、timer task内の例外で
+進行が止まった場合も、単なるscore不足と区別できる。
 0/100 → 100/100 の到達経緯（子 issue 23 件のスコア推移表）は
 [`issues/closed/016-acid3-conformance.md`](/issues/closed/016-acid3-conformance.md) を参照。
 
