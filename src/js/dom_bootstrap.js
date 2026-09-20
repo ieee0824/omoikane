@@ -18,6 +18,7 @@
   const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
+  const nativeStorageManager = globalThis.__omoikane_storage_manager;
   // Worklet lifecycle bindings are private implementation hooks. Keep them in
   // this closure so page code can only reach the standard Worklet methods.
   const nativeCreateWorklet = globalThis.__omoikane_create_worklet;
@@ -131,6 +132,7 @@
   delete globalThis.__omoikane_clipboard_permission;
   delete globalThis.__omoikane_geolocation_permission;
   delete globalThis.__omoikane_is_secure_context;
+  delete globalThis.__omoikane_storage_manager;
   delete globalThis.__omoikane_create_worklet;
   delete globalThis.__omoikane_worklet_add_module;
   delete globalThis.__omoikane_worklet_register;
@@ -15427,6 +15429,43 @@
   globalThis.GPUShaderStage = WEBGPU_SHADER_STAGE;
   globalThis.GPUTextureUsage = WEBGPU_TEXTURE_USAGE;
 
+  const storageManagerAvailable = (() => {
+    try { return nativeStorageManager("available", __omoikane_document_id) === true; }
+    catch (_) { return false; }
+  })();
+  const storageManagerConstructionToken = {};
+  const storageManagerDocuments = new WeakMap();
+  const storageManagerDocumentId = value => {
+    if (!storageManagerDocuments.has(value)) throw new TypeError("Illegal invocation");
+    return storageManagerDocuments.get(value);
+  };
+  let StorageManager;
+  if (storageManagerAvailable) {
+    StorageManager = class StorageManager {
+      constructor(token, documentId) {
+        if (token !== storageManagerConstructionToken) throw new TypeError("Illegal constructor");
+        storageManagerDocuments.set(this, documentId);
+      }
+      estimate() {
+        return Promise.resolve().then(() => JSON.parse(nativeStorageManager("estimate", storageManagerDocumentId(this))));
+      }
+      persisted() {
+        return Promise.resolve().then(() => nativeStorageManager("persisted", storageManagerDocumentId(this)) === true);
+      }
+      persist() {
+        return Promise.resolve().then(() => {
+          const result = nativeStorageManager("persist", storageManagerDocumentId(this)) === true;
+          if (result && typeof globalThis.__omoikane_permission_changed === "function") {
+            globalThis.__omoikane_permission_changed("persistent-storage", "granted");
+          }
+          return result;
+        });
+      }
+      get [Symbol.toStringTag]() { return "StorageManager"; }
+    };
+    globalThis.StorageManager = StorageManager;
+  }
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -15446,6 +15485,14 @@
       // its shape is stable during bootstrap and in worker globals.
       this.permissions = null;
       this.gpu = new GPU(gpuConstructionToken);
+      if (storageManagerAvailable) {
+        Object.defineProperty(this, "storage", {
+          configurable: true,
+          enumerable: true,
+          value: new StorageManager(storageManagerConstructionToken, __omoikane_document_id),
+          writable: false,
+        });
+      }
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
@@ -18470,7 +18517,7 @@
   const permissionStatusUsesWeakRefs = typeof WeakRef === "function";
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
-    "notifications", "geolocation", "clipboard-read", "clipboard-write",
+    "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
   ]);
 
   function permissionDescriptorName(descriptor) {
@@ -18486,6 +18533,14 @@
   }
 
   function permissionStateFor(name) {
+    if (name === "persistent-storage") {
+      try {
+        if (!storageManagerAvailable) return "denied";
+        return String(nativeStorageManager("permission", __omoikane_document_id));
+      } catch (_) {
+        return "denied";
+      }
+    }
     if (name === "notifications") {
       const permission = currentNotificationPermission();
       return permission === "default" ? "prompt" : permission;
@@ -20583,6 +20638,7 @@
     // a DedicatedWorkerGlobalScope.
     try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
     try { if (globalThis.navigator) delete globalThis.navigator.geolocation; } catch (_) {}
+    try { if (globalThis.StorageManager) delete globalThis.StorageManager.prototype.persist; } catch (_) {}
     try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
     try { delete globalThis.__omoikane_dispatch_notification_click; } catch (_) {}
     for (const name of ["Geolocation", "GeolocationCoordinates", "GeolocationPosition", "GeolocationPositionError"]) {

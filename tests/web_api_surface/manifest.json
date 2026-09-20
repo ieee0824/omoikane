@@ -533,6 +533,15 @@
       "baseline_supported": true
     },
     {
+      "id": "storage.navigator-storage-manager",
+      "area": "storage",
+      "description": "StorageManager reports changing usage and host persistence decisions",
+      "setup": "globalThis.__storageManagerProbe = { done: false, ok: false }; (async () => { const same = navigator.storage === navigator.storage; const before = await navigator.storage.estimate(); localStorage.setItem('surface-estimate', 'stored-value'); const after = await navigator.storage.estimate(); const persist = await navigator.storage.persist(); const persisted = await navigator.storage.persisted(); __storageManagerProbe = { done: true, ok: same && typeof before.usage === 'number' && typeof before.quota === 'number' && after.usage > before.usage && typeof persist === 'boolean' && persist === persisted }; })().catch(error => { __storageManagerProbe = { done: true, ok: false, error: String(error) }; })",
+      "run_tasks": true,
+      "probe": "typeof StorageManager === 'function' && navigator.storage instanceof StorageManager && __storageManagerProbe.done && __storageManagerProbe.ok",
+      "baseline_supported": true
+    },
+    {
       "id": "workers.dedicated-worker",
       "area": "workers",
       "description": "Dedicated workers are exposed",

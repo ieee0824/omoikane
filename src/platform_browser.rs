@@ -152,9 +152,15 @@ pub struct PlatformBrowser {
 impl PlatformBrowser {
     /// Creates an empty browser. Use open_tab to create the first context.
     pub fn new() -> Self {
+        Self::with_storage_manager(StorageManager::new())
+    }
+
+    /// Creates an empty browser using the embedder's storage quota and
+    /// persistence policy.
+    pub fn with_storage_manager(storage_manager: StorageManager) -> Self {
         Self {
             tabs: BTreeMap::new(),
-            storage_manager: StorageManager::new(),
+            storage_manager,
             active_tab: None,
             next_tab_id: 1,
             downloads: BTreeMap::new(),

@@ -161,6 +161,10 @@
     { "path": "custom-elements/form-associated/form-disabled-callback.html" },
     { "path": "custom-elements/form-associated/form-reset-callback.html" },
     { "path": "custom-elements/form-associated/fieldset-elements.html" },
-    { "path": "custom-elements/form-associated/form-elements-namedItem.html" }
+    { "path": "custom-elements/form-associated/form-elements-namedItem.html" },
+    { "path": "storage/storagemanager-estimate.https.any.js" },
+    { "path": "storage/storagemanager-persisted.https.any.js" },
+    { "path": "storage/storagemanager-persist.https.window.js" },
+    { "path": "storage/storagemanager-persist-persisted-match.https.window.js" }
   ]
 }

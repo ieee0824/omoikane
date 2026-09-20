@@ -125,6 +125,12 @@ git_wpt sparse-checkout add \
   "/css/css-transitions/events-002.html"
 git_wpt sparse-checkout add "/custom-elements/form-associated/" "/html/semantics/forms/form-submission-0/resources/targetted-form.js"
 git_wpt sparse-checkout add "/common/blank.html" "/FileAPI/file/resources/echo-content-escaped.py"
+git_wpt sparse-checkout add \
+  "/storage/storagemanager-estimate.https.any.js" \
+  "/storage/storagemanager-persisted.https.any.js" \
+  "/storage/storagemanager-persist.https.window.js" \
+  "/storage/storagemanager-persist-persisted-match.https.window.js" \
+  "/storage/resources/helpers.js"
 if [[ "$(git_wpt rev-parse HEAD 2>/dev/null || true)" == "$revision" ]]; then exit 0; fi
 git_wpt fetch --depth 1 origin "$revision"
 git_wpt checkout --detach "$revision"

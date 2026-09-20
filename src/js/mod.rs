@@ -85,8 +85,8 @@ mod storage;
 mod stylesheet;
 use csp::{CspPolicy, CspViolation, ResourceType};
 use event_loop::{EventLoop, Task};
-pub use storage::StorageManager;
 use storage::StorageOrigin;
+pub use storage::{StorageManager, StoragePersistencePolicy};
 
 /// Most page-script task errors retained per drain. See
 /// [`JsRuntime::record_task_error`].
@@ -8286,6 +8286,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(storage_clear_native),
         ),
         (
+            js_string!("__omoikane_storage_manager"),
+            2,
+            NativeFunction::from_copy_closure(storage_manager_native),
+        ),
+        (
             js_string!("__omoikane_cache_storage"),
             3,
             NativeFunction::from_copy_closure(cache_storage_native),
@@ -9355,6 +9360,20 @@ fn host_is_secure_context(state: &HostState) -> bool {
     is_secure_context_url(&state.location_href)
 }
 
+fn document_is_secure_context(state: &HostState, document_id: usize) -> bool {
+    if !host_is_secure_context(state) {
+        return false;
+    }
+    state
+        .document_urls
+        .get(&document_id)
+        .is_some_and(|url| is_secure_context_url(url))
+        || state
+            .document_base_urls
+            .get(&document_id)
+            .is_some_and(is_secure_context_parsed_url)
+}
+
 fn is_secure_context_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     with_host_state(|state| {
         let state = state.borrow();
@@ -9819,6 +9838,71 @@ fn storage_clear_native(
 ) -> JsResult<JsValue> {
     let (local, _, manager, session, origin) = storage_arguments(args, context)?;
     Ok(JsValue::from(manager.clear(session, &origin, local)))
+}
+
+fn storage_manager_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let operation = string_argument(args.first(), "", context)?;
+    let document_id = parse_node_id(args.get(1), context)?;
+    with_host_state(|host| {
+        let state = host.borrow();
+        let secure = document_is_secure_context(&state, document_id);
+        if operation == "available" {
+            return Ok(JsValue::from(secure));
+        }
+        if !secure {
+            return Err(JsNativeError::error()
+                .with_message("StorageManager requires a secure context")
+                .into());
+        }
+        let origin = state
+            .document_origins
+            .get(&document_id)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| {
+                JsError::from(
+                    JsNativeError::typ().with_message("StorageManager requires a tuple origin"),
+                )
+            })?;
+        let manager = state.storage_manager.clone();
+        drop(state);
+        match operation.as_str() {
+            "estimate" => {
+                let estimate = manager.estimate(&origin);
+                Ok(js_string!(
+                    serde_json::json!({"usage": estimate.usage, "quota": estimate.quota})
+                        .to_string()
+                )
+                .into())
+            }
+            "persisted" => Ok(JsValue::from(manager.persisted(&origin))),
+            "persist" => manager
+                .persist(&origin)
+                .map(JsValue::from)
+                .map_err(|error| {
+                    JsNativeError::error()
+                        .with_message(format!("could not persist storage permission: {error}"))
+                        .into()
+                }),
+            "permission" => {
+                let permission = if manager.persisted(&origin) {
+                    "granted"
+                } else if manager.persistence_policy() == StoragePersistencePolicy::Allow {
+                    "prompt"
+                } else {
+                    "denied"
+                };
+                Ok(js_string!(permission).into())
+            }
+            _ => Err(JsNativeError::typ()
+                .with_message(format!("unknown StorageManager operation: {operation}"))
+                .into()),
+        }
+    })
 }
 
 /// Host-side backing store for the Cache Storage JavaScript wrappers.
@@ -30454,6 +30538,169 @@ b</textarea></form>"#,
         )
         .unwrap();
         assert!(other_origin.eval("localStorage.getItem('shared') === null && sessionStorage.getItem('shared') === null").unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn navigator_storage_reports_usage_quota_and_persistence_policy() {
+        let storage = StorageManager::with_policy(8192, StoragePersistencePolicy::Allow);
+        let session = storage.create_session();
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "https://storage.example.test/page",
+            storage.clone(),
+            session,
+        )
+        .unwrap();
+        runtime
+            .eval(
+                r#"globalThis.storageProbe = { done: false, ok: false };
+                   (async () => {
+                     const same = navigator.storage === navigator.storage;
+                     const before = await navigator.storage.estimate();
+                     localStorage.setItem('estimate-key', 'estimate-value');
+                     const after = await navigator.storage.estimate();
+                     const beforePermission = await navigator.permissions.query({ name: 'persistent-storage' });
+                     const initialPermission = beforePermission.state;
+                     let permissionChanges = 0;
+                     beforePermission.onchange = () => { permissionChanges += 1; };
+                     const granted = await navigator.storage.persist();
+                     const persisted = await navigator.storage.persisted();
+                     const afterPermission = await navigator.permissions.query({ name: 'persistent-storage' });
+                     storageProbe = { done: true, ok: same && before.quota === 8192 &&
+                       after.usage > before.usage && initialPermission === 'prompt' &&
+                       beforePermission.state === 'granted' && permissionChanges === 1 &&
+                       granted === true && persisted === true && afterPermission.state === 'granted' };
+                   })().catch(error => { storageProbe = { done: true, ok: false, error: String(error) }; });"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "storageProbe.done + ':' + storageProbe.ok"),
+            "true:true"
+        );
+
+        let mut other_origin = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "https://other.example.test/page",
+            storage,
+            session,
+        )
+        .unwrap();
+        other_origin
+            .eval(
+                "globalThis.otherEstimate = null; navigator.storage.estimate().then(value => { otherEstimate = value; });",
+            )
+            .unwrap();
+        other_origin.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(
+                &mut other_origin,
+                "otherEstimate.usage + ':' + otherEstimate.quota"
+            ),
+            "0:8192"
+        );
+    }
+
+    #[test]
+    fn navigator_storage_is_secure_context_only_and_denial_is_not_fixed_success() {
+        let mut insecure =
+            JsRuntime::with_document_and_url(default_document(), "http://example.test/").unwrap();
+        assert_eq!(
+            eval_str(
+                &mut insecure,
+                "typeof StorageManager + ':' + ('storage' in navigator)"
+            ),
+            "undefined:false"
+        );
+        {
+            let mut state = insecure.host_state.borrow_mut();
+            state
+                .document_urls
+                .insert(usize::MAX, "https://child.example.test/".into());
+            state
+                .document_base_urls
+                .insert(usize::MAX, "https://child.example.test/".parse().unwrap());
+            assert!(!document_is_secure_context(&state, usize::MAX));
+        }
+
+        let storage = StorageManager::with_policy(1024, StoragePersistencePolicy::Denied);
+        let session = storage.create_session();
+        let mut denied = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            "https://denied.example.test/",
+            storage,
+            session,
+        )
+        .unwrap();
+        denied
+            .eval(
+                "globalThis.deniedResult = null; navigator.storage.persist().then(value => { deniedResult = value; });",
+            )
+            .unwrap();
+        denied.run_until_idle().unwrap();
+        assert_eq!(eval_str(&mut denied, "String(deniedResult)"), "false");
+    }
+
+    #[test]
+    fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
+        let mut runtime =
+            JsRuntime::with_document_and_url(default_document(), "https://example.test/").unwrap();
+        let document_id = runtime.host_state.borrow().document.identity();
+        runtime
+            .host_state
+            .borrow_mut()
+            .document_origins
+            .insert(document_id, None);
+        runtime
+            .eval(
+                r#"globalThis.opaqueProbe = { done: false, exposed: false, rejected: false };
+                   (() => {
+                     opaqueProbe.exposed = typeof StorageManager === 'function' &&
+                       navigator.storage instanceof StorageManager;
+                     navigator.storage.estimate().then(
+                       () => { opaqueProbe.done = true; },
+                       error => { opaqueProbe.done = true; opaqueProbe.rejected = error instanceof TypeError; }
+                     );
+                   })();"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "opaqueProbe.done + ':' + opaqueProbe.exposed + ':' + opaqueProbe.rejected"
+            ),
+            "true:true:true"
+        );
+    }
+
+    #[test]
+    fn worker_navigator_exposes_estimate_and_persisted_but_not_persist() {
+        let mut runtime =
+            JsRuntime::with_document_and_url(default_document(), "https://example.test/").unwrap();
+        runtime
+            .eval("__omoikane_install_worker_global('https://example.test/worker.js', '1')")
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "typeof navigator.storage.estimate + ':' + typeof navigator.storage.persisted + ':' + typeof navigator.storage.persist"
+            ),
+            "function:function:undefined"
+        );
+        runtime
+            .eval(
+                "globalThis.workerEstimate = null; navigator.storage.estimate().then(value => { workerEstimate = value; });",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "typeof workerEstimate.usage + ':' + typeof workerEstimate.quota"
+            ),
+            "number:number"
+        );
     }
 
     #[test]
