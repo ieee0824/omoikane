@@ -23,6 +23,10 @@ use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
 #[path = "omoikane/pointer_lock_host.rs"]
 mod pointer_lock_host;
 
+#[cfg(test)]
+#[path = "omoikane/keyboard_tests.rs"]
+mod keyboard_tests;
+
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
 
@@ -38,6 +42,8 @@ struct BrowserApp {
     native_pointer_lock: bool,
     native_pointer_lock_raw_buttons: bool,
     pointer_restore: (f64, f64),
+    trace_input: bool,
+    input_trace_sequence: u64,
 }
 
 impl BrowserApp {
@@ -58,6 +64,8 @@ impl BrowserApp {
             native_pointer_lock: false,
             native_pointer_lock_raw_buttons: false,
             pointer_restore: (0.0, 0.0),
+            trace_input: std::env::var_os("OMOIKANE_TRACE_INPUT").is_some(),
+            input_trace_sequence: 0,
         })
     }
 
@@ -167,7 +175,46 @@ impl BrowserApp {
         Ok(())
     }
 
+    fn trace_input_event(&mut self, event: &WindowEvent) {
+        if !self.trace_input {
+            return;
+        }
+        let mut record = match event {
+            WindowEvent::Focused(focused) => json!({ "kind": "focus", "focused": focused }),
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => json!({
+                "kind": "key", "synthetic": is_synthetic,
+                "pressed": event.state == ElementState::Pressed,
+                "key": logical_key_name(&event.logical_key),
+                "code": physical_key_code(event.physical_key), "repeat": event.repeat,
+            }),
+            _ => return,
+        };
+        self.input_trace_sequence += 1;
+        record["sequence"] = json!(self.input_trace_sequence);
+        eprintln!("OMOIKANE_INPUT {record}");
+    }
+
+    fn dispatch_key_input(
+        &mut self,
+        event: PlatformKeyEvent,
+        is_synthetic: bool,
+    ) -> Result<(), omoikane::cdp::JsonRpcError> {
+        // winit replays held keys on focus changes. They are state snapshots,
+        // not new user input: dispatching them would edit text, trigger page
+        // shortcuts and grant activation again. Focused(false) independently
+        // releases Pointer Lock and clears stale button/modifier state.
+        if is_synthetic {
+            return Ok(());
+        }
+        self.input.key_event(&mut self.session, event)
+    }
+
     fn dispatch_input(&mut self, event: WindowEvent) -> bool {
+        self.trace_input_event(&event);
         let scale_factor = self
             .window
             .as_ref()
@@ -209,14 +256,17 @@ impl BrowserApp {
                 });
                 return true;
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 let text = event
                     .text
                     .as_deref()
                     .filter(|text| text.chars().all(|character| !character.is_control()))
                     .map(ToOwned::to_owned);
-                self.input.key_event(
-                    &mut self.session,
+                self.dispatch_key_input(
                     PlatformKeyEvent {
                         pressed: event.state == ElementState::Pressed,
                         key: logical_key_name(&event.logical_key),
@@ -224,6 +274,7 @@ impl BrowserApp {
                         text,
                         repeat: event.repeat,
                     },
+                    is_synthetic,
                 )
             }
             WindowEvent::Ime(event) => self

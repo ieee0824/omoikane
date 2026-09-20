@@ -108,7 +108,17 @@ tested in a dedicated Xvfb/Openbox display by `scripts/test-pointer-lock-x11.py`
 It sends XTEST input, checks exact relative deltas (including identical successive
 events), frozen page coordinates, cursor confinement/hiding/restoration, button
 and wheel delivery, explicit exit, Escape with `preventDefault()`, focus loss,
-and navigation. It preserves logs, JSON results, original screenshots and
+and navigation. The focus regressions queue focus restoration and a single real
+L press while the test's browser process is stopped, then resume it to exercise
+winit's synthetic press followed by the queued real press. Only one DOM keydown
+and one lock acquisition are allowed. A second case holds L in the other window
+while restoring focus; the synthetic press must not acquire Pointer Lock.
+Auto-repeat is disabled only on the test's private X server for these cases.
+`OMOIKANE_TRACE_INPUT=1` enables ordered native focus/key diagnostics on stderr;
+the harness saves them as `input-events.json` alongside the DOM event history.
+GUI bridge unit tests also check that synthetic events cannot edit text or grant
+activation, while real keydown, repeat, keyup and focus-loss cleanup still work.
+It preserves logs, JSON results, original screenshots and
 losslessly compressed copies in a new artifact directory. The script never
 attaches to an existing display. Its CI job runs on Linux x86_64 and aarch64.
 
