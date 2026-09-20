@@ -11411,25 +11411,40 @@ fn underline_and_overline_swap_physical_sides_without_following_vertical_line_st
         let left = underline_blue_bounds(&render_underline_case(mode, "left", "0px", "HH", ""));
         let right = underline_blue_bounds(&render_underline_case(mode, "right", "0px", "HH", ""));
         assert!(left.2 < 40 && right.0 >= 59, "{mode}: {left:?} {right:?}");
-        let over_right = underline_blue_bounds(&render_underline_case(
-            mode,
-            "left",
-            "10px",
-            "HH",
-            "div{text-decoration-line:overline}",
-        ));
-        let over_left = underline_blue_bounds(&render_underline_case(
-            mode,
-            "right",
-            "10px",
-            "HH",
-            "div{text-decoration-line:overline}",
-        ));
-        assert_eq!(
-            over_right, right,
-            "overline is unaffected by underline offset"
-        );
-        assert_eq!(over_left, left, "overline swaps sides with underline");
+        for position in ["left", "right"] {
+            let base = render_underline_case(
+                mode,
+                position,
+                "0px",
+                "HH",
+                "div{text-decoration-line:overline}",
+            );
+            let bounds = underline_blue_bounds(&base);
+            assert!(
+                if position == "left" {
+                    bounds.0 >= 59
+                } else {
+                    bounds.2 < 40
+                },
+                "overline must be on the opposite physical side: {mode} {position} {bounds:?}"
+            );
+            // The overline retains the font's automatic gap. An underline
+            // with an explicit zero offset need not have the same position.
+            for offset in ["10px", "-5px", "20%", "calc(2px + 10%)"] {
+                let changed = render_underline_case(
+                    mode,
+                    position,
+                    offset,
+                    "HH",
+                    "div{text-decoration-line:overline}",
+                );
+                let (_, changed_pixels) = diff_canvases(&base, &changed);
+                assert_eq!(
+                    changed_pixels, 0,
+                    "overline must ignore underline offset: {mode} {position} {offset}"
+                );
+            }
+        }
     }
 }
 
