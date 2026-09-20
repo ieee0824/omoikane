@@ -19,6 +19,7 @@
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
+  const nativeWebLocks = globalThis.__omoikane_web_locks;
   // Worklet lifecycle bindings are private implementation hooks. Keep them in
   // this closure so page code can only reach the standard Worklet methods.
   const nativeCreateWorklet = globalThis.__omoikane_create_worklet;
@@ -133,6 +134,7 @@
   delete globalThis.__omoikane_geolocation_permission;
   delete globalThis.__omoikane_is_secure_context;
   delete globalThis.__omoikane_storage_manager;
+  delete globalThis.__omoikane_web_locks;
   delete globalThis.__omoikane_create_worklet;
   delete globalThis.__omoikane_worklet_add_module;
   delete globalThis.__omoikane_worklet_register;
@@ -18908,6 +18910,199 @@
       if (typeof this.signal.onabort === "function") this.signal.onabort.call(this.signal, event);
     }
   }
+
+  const webLocksAvailable = (() => {
+    try { return nativeWebLocks("available") === true; }
+    catch (_) { return false; }
+  })();
+  const webLockConstructionToken = {};
+  const webLockRequests = new Map();
+  function webLockAbortError() {
+    return new DOMException("The lock request was aborted.", "AbortError");
+  }
+  function invokeWebLockCallback(entry, lock) {
+    let result;
+    try {
+      result = entry.callback(lock);
+    } catch (error) {
+      if (entry.id !== null) nativeWebLocks("release", entry.id);
+      webLockRequests.delete(entry.id);
+      entry.reject(error);
+      return;
+    }
+    Promise.resolve(result).then(
+      value => {
+        if (entry.id !== null && webLockRequests.get(entry.id) !== entry) return;
+        if (entry.id !== null) {
+          webLockRequests.delete(entry.id);
+          nativeWebLocks("release", entry.id);
+        }
+        entry.resolve(value);
+      },
+      error => {
+        if (entry.id !== null && webLockRequests.get(entry.id) !== entry) return;
+        if (entry.id !== null) {
+          webLockRequests.delete(entry.id);
+          nativeWebLocks("release", entry.id);
+        }
+        entry.reject(error);
+      }
+    );
+  }
+  function startWebLockRequest(id) {
+    const entry = webLockRequests.get(String(id));
+    if (!entry || entry.started) return;
+    const status = String(nativeWebLocks("start", entry.id));
+    if (status === "stolen") {
+      webLockRequests.delete(entry.id);
+      nativeWebLocks("finish-stolen", entry.id);
+      entry.reject(webLockAbortError());
+      return;
+    }
+    if (status !== "held") return;
+    entry.started = true;
+    if (entry.signal && entry.abortHandler) {
+      entry.signal.removeEventListener("abort", entry.abortHandler);
+    }
+    invokeWebLockCallback(
+      entry,
+      new Lock(webLockConstructionToken, entry.name, entry.mode)
+    );
+  }
+
+  let Lock;
+  let LockManager;
+  if (webLocksAvailable) {
+    Lock = class Lock {
+      constructor(token, name, mode) {
+        if (token !== webLockConstructionToken) throw new TypeError("Illegal constructor");
+        Object.defineProperties(this, {
+          name: { enumerable: true, value: name },
+          mode: { enumerable: true, value: mode },
+        });
+      }
+      get [Symbol.toStringTag]() { return "Lock"; }
+    };
+    LockManager = class LockManager {
+      constructor(token) {
+        if (token !== webLockConstructionToken) throw new TypeError("Illegal constructor");
+      }
+      request(name, options, callback) {
+        return new Promise((resolve, reject) => {
+          try {
+            if (arguments.length < 2) throw new TypeError("A name and callback are required");
+            let settings;
+            let handler;
+            if (typeof options === "function" && callback === undefined) {
+              settings = {};
+              handler = options;
+            } else {
+              settings = options === undefined ? {} : options;
+              handler = callback;
+            }
+            if (settings === null) settings = {};
+            if (typeof settings !== "object" && typeof settings !== "function") {
+              throw new TypeError("Lock options must be a dictionary");
+            }
+            if (typeof handler !== "function") throw new TypeError("Lock callback must be a function");
+            const lockName = String(name);
+            if (lockName.startsWith("-")) {
+              throw new DOMException("Lock names cannot start with '-'.", "NotSupportedError");
+            }
+            const mode = settings.mode === undefined ? "exclusive" : String(settings.mode);
+            if (mode !== "exclusive" && mode !== "shared") {
+              throw new TypeError("Lock mode must be 'exclusive' or 'shared'");
+            }
+            const ifAvailable = Boolean(settings.ifAvailable);
+            const steal = Boolean(settings.steal);
+            const signal = settings.signal === undefined ? null : settings.signal;
+            if (ifAvailable && steal) {
+              throw new DOMException("ifAvailable and steal are mutually exclusive", "NotSupportedError");
+            }
+            if (steal && mode !== "exclusive") {
+              throw new DOMException("steal requires an exclusive lock", "NotSupportedError");
+            }
+            if (signal !== null && !(signal instanceof AbortSignal)) {
+              throw new TypeError("signal must be an AbortSignal");
+            }
+            if (signal !== null && (ifAvailable || steal)) {
+              throw new DOMException("signal cannot be combined with ifAvailable or steal", "NotSupportedError");
+            }
+            if (signal && signal.aborted) throw signal.reason;
+
+            const result = JSON.parse(
+              nativeWebLocks("request", lockName, mode, ifAvailable, steal)
+            );
+            if (result.status === "unavailable") {
+              queueMicrotask(() => invokeWebLockCallback({
+                id: null,
+                name: lockName,
+                mode,
+                callback: handler,
+                resolve,
+                reject,
+              }, null));
+              return;
+            }
+            const id = String(result.id);
+            const entry = {
+              id,
+              name: lockName,
+              mode,
+              callback: handler,
+              resolve,
+              reject,
+              signal,
+              abortHandler: null,
+              started: false,
+            };
+            webLockRequests.set(id, entry);
+            if (signal) {
+              entry.abortHandler = () => {
+                if (!nativeWebLocks("cancel", id)) return;
+                webLockRequests.delete(id);
+                reject(signal.reason);
+              };
+              signal.addEventListener("abort", entry.abortHandler, { once: true });
+            }
+            if (result.status === "granted") {
+              queueMicrotask(() => startWebLockRequest(id));
+            }
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+      query() {
+        return Promise.resolve().then(() => JSON.parse(nativeWebLocks("query")));
+      }
+      get [Symbol.toStringTag]() { return "LockManager"; }
+    };
+    globalThis.Lock = Lock;
+    globalThis.LockManager = LockManager;
+    const webLockManagers = new WeakMap();
+    webLockManagers.set(navigator, new LockManager(webLockConstructionToken));
+    Object.defineProperty(Navigator.prototype, "locks", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        if (!webLockManagers.has(this)) throw new TypeError("Illegal invocation");
+        return webLockManagers.get(this);
+      },
+    });
+  }
+  globalThis.__omoikane_web_lock_granted = id => startWebLockRequest(String(id));
+  globalThis.__omoikane_web_lock_stolen = id => {
+    const key = String(id);
+    const entry = webLockRequests.get(key);
+    if (!entry) return;
+    webLockRequests.delete(key);
+    if (entry.signal && entry.abortHandler) {
+      entry.signal.removeEventListener("abort", entry.abortHandler);
+    }
+    nativeWebLocks("finish-stolen", key);
+    entry.reject(webLockAbortError());
+  };
 
   const visualViewportConstructionToken = {};
   const nativeVisualViewportState = globalThis.__omoikane_visual_viewport_state;

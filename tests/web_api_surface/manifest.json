@@ -542,6 +542,15 @@
       "baseline_supported": true
     },
     {
+      "id": "storage.web-locks",
+      "area": "storage",
+      "description": "Web Locks serializes exclusive requests and reports live state",
+      "setup": "globalThis.__webLocksSurface = { done: false, ok: false }; navigator.locks.request('surface-lock', lock => lock.name + ':' + lock.mode).then(async value => { const state = await navigator.locks.query(); __webLocksSurface = { done: true, ok: value === 'surface-lock:exclusive' && state.held.length === 0 && state.pending.length === 0 }; }, () => { __webLocksSurface.done = true; })",
+      "run_tasks": true,
+      "probe": "typeof Lock === 'function' && typeof LockManager === 'function' && navigator.locks instanceof LockManager && navigator.locks === navigator.locks && __webLocksSurface.done && __webLocksSurface.ok",
+      "baseline_supported": false
+    },
+    {
       "id": "workers.dedicated-worker",
       "area": "workers",
       "description": "Dedicated workers are exposed",
