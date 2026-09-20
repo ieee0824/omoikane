@@ -44,9 +44,12 @@ pub enum ComputedValue {
 /// Paint data captured from a box that originates a text decoration.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PropagatedTextDecoration {
+    pub(crate) origin: (usize, Option<PseudoElement>),
     pub(crate) line: String,
     pub(crate) color: String,
     pub(crate) thickness: ComputedValue,
+    pub(crate) underline_position: String,
+    pub(crate) underline_offset: ComputedValue,
     pub(crate) font_size: f32,
     pub(crate) font_family: Option<crate::font::FontFamilyKey>,
     pub(crate) font_weight: crate::font::FontWeight,
@@ -1358,8 +1361,12 @@ impl StyleResolver {
                 .sample(node.identity(), &mut properties);
         }
 
-        let text_decorations =
-            propagated_text_decorations(&properties, parent_style, font_family_scope_root);
+        let text_decorations = propagated_text_decorations(
+            &properties,
+            parent_style,
+            font_family_scope_root,
+            (node.identity(), pseudo),
+        );
         ComputedStyle {
             properties,
             custom_properties,
@@ -1596,6 +1603,7 @@ fn propagated_text_decorations(
     properties: &BTreeMap<String, ComputedValue>,
     parent_style: Option<&ComputedStyle>,
     font_family_scope_root: Option<usize>,
+    origin: (usize, Option<PseudoElement>),
 ) -> Arc<[PropagatedTextDecoration]> {
     let interrupts_parent = matches!(
         properties.get("position"),
@@ -1651,10 +1659,19 @@ fn propagated_text_decorations(
     let mut extended = Vec::with_capacity(decorations.len() + 1);
     extended.extend(decorations.iter().cloned());
     extended.push(PropagatedTextDecoration {
+        origin,
         line: line.clone(),
         color,
         thickness: properties
             .get("text-decoration-thickness")
+            .cloned()
+            .unwrap_or_else(|| ComputedValue::Keyword("auto".to_string())),
+        underline_position: properties
+            .get("text-underline-position")
+            .map(computed_value_css_text)
+            .unwrap_or_else(|| "auto".to_string()),
+        underline_offset: properties
+            .get("text-underline-offset")
             .cloned()
             .unwrap_or_else(|| ComputedValue::Keyword("auto".to_string())),
         font_size: properties
@@ -1926,6 +1943,20 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if name.eq_ignore_ascii_case("text-decoration-thickness") {
         return validate_text_decoration_thickness(value);
+    }
+    if name.eq_ignore_ascii_case("text-underline-position") {
+        return validate_text_underline_position(value);
+    }
+    if name.eq_ignore_ascii_case("text-underline-offset") {
+        return match value {
+            Value::Keyword(value) if value.eq_ignore_ascii_case("from-font") => {
+                DeclarationValidation::Invalid
+            }
+            Value::Number(value) if *value == 0.0 => {
+                DeclarationValidation::Valid(ComputedValue::Px(0.0))
+            }
+            _ => validate_text_decoration_thickness(value),
+        };
     }
     if let Value::CommaList(values) = value {
         let is_mask_layer_property = matches!(
@@ -2560,6 +2591,43 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn validate_text_underline_position(value: &Value) -> DeclarationValidation {
+    if let Value::Keyword(keyword) = value {
+        let keyword = keyword.to_ascii_lowercase();
+        if keyword == "auto" || is_css_wide_keyword(&keyword) {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(keyword));
+        }
+    }
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        Value::Keyword(_) => std::slice::from_ref(value),
+        _ => return DeclarationValidation::Invalid,
+    };
+    let mut horizontal = None;
+    let mut vertical = None;
+    for value in values {
+        let Value::Keyword(keyword) = value else {
+            return DeclarationValidation::Invalid;
+        };
+        let keyword = keyword.to_ascii_lowercase();
+        match keyword.as_str() {
+            "from-font" | "under" if horizontal.is_none() => horizontal = Some(keyword),
+            "left" | "right" if vertical.is_none() => vertical = Some(keyword),
+            _ => return DeclarationValidation::Invalid,
+        }
+    }
+    if horizontal.is_none() && vertical.is_none() {
+        return DeclarationValidation::Invalid;
+    }
+    DeclarationValidation::Valid(ComputedValue::Keyword(
+        horizontal
+            .into_iter()
+            .chain(vertical)
+            .collect::<Vec<_>>()
+            .join(" "),
+    ))
 }
 
 fn validate_text_decoration_thickness(value: &Value) -> DeclarationValidation {
@@ -5090,6 +5158,8 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "text-decoration-color",
     "text-decoration-style",
     "text-decoration-thickness",
+    "text-underline-position",
+    "text-underline-offset",
     "text-indent",
     "text-overflow",
     "text-transform",
@@ -5228,6 +5298,18 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
             }
         }
     })
+}
+
+/// Validates and canonicalizes the specified underline longhand value for CSSOM.
+pub(crate) fn normalize_underline_value(property: &str, value: &str) -> Option<String> {
+    if !supports_declaration(property, value) {
+        return None;
+    }
+    let declarations = super::parse_style_attribute(&format!("{property}: {value}"));
+    match validate_declaration(property, &declarations.first()?.value) {
+        DeclarationValidation::Valid(computed) => Some(computed_value_css_text(&computed)),
+        _ => Some(value.trim().to_string()),
+    }
 }
 
 pub(super) fn value_contains_var_function(value: &Value) -> bool {
@@ -6457,6 +6539,11 @@ fn apply_ua_defaults(
         None => return,
     };
     let parent_font_size = inherited_font_size(parent_style, properties);
+    if tag == "br" {
+        properties
+            .entry("display".to_string())
+            .or_insert_with(|| ComputedValue::Keyword("inline".to_string()));
+    }
 
     // Fullscreen's UA rules fill the viewport and suppress transforms. These
     // declarations are mandatory overrides in the Fullscreen specification.
@@ -7063,6 +7150,11 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("text-decoration-thickness".to_string())
         .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    for property in ["text-underline-position", "text-underline-offset"] {
+        properties
+            .entry(property.to_string())
+            .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    }
     // `cursor` initial value is `auto` (CSS UI). Ensuring it is always present
     // lets a dropped/absent `cursor` declaration serialize as `auto` in
     // getComputedStyle (Acid3 test 47).
@@ -7365,6 +7457,8 @@ const INHERITED_PROPERTIES: &[&str] = &[
     "visibility",
     "white-space",
     "writing-mode",
+    "text-underline-position",
+    "text-underline-offset",
     "word-break",
     "word-spacing",
 ];

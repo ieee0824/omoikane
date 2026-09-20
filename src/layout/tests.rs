@@ -9944,3 +9944,78 @@ fn replaced_element_min_max_constraints_use_the_box_sizing_box() {
         (80.0, 40.0)
     );
 }
+
+#[test]
+fn positioned_vertical_auto_width_uses_columns_instead_of_text_advance() {
+    for mode in ["vertical-rl", "vertical-lr"] {
+        for (content, columns) in [("ABCDEFG", 1.0), ("AB<br>CD<br>EF", 3.0)] {
+            for (width, expected) in [("auto", columns * 20.0), ("100px", 100.0)] {
+                let source = format!(
+                    "<style>html,body{{margin:0}}div{{position:absolute;right:15px;top:10px;font:20px/20px sans-serif;writing-mode:{mode};width:{width};padding:3px;border:2px solid}}</style><div>{content}</div>"
+                );
+                let document = crate::html::TreeBuilder::parse(&source).document();
+                let mut resolver = StyleResolver::new();
+                for stylesheet in
+                    crate::paint::stylesheet::extract_author_stylesheets(&document, None).unwrap()
+                {
+                    resolver.add_stylesheet(
+                        Origin::Author,
+                        crate::paint::stylesheet::parse_stylesheet_forgiving(&stylesheet),
+                    );
+                }
+                let viewport = Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 320.0,
+                    height: 240.0,
+                };
+                let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+                let child = find_layout_box_by_tag(&layout, "div").unwrap();
+                assert!(
+                    (child.dimensions.content.width - expected).abs() < 0.01,
+                    "{mode} {content} {width}: {:?}",
+                    child.dimensions
+                );
+                let border_box = child.dimensions.border_box();
+                assert!((border_box.x + border_box.width - 305.0).abs() < 0.01);
+                assert_eq!(child.lines.len(), columns as usize);
+                for line in &child.lines {
+                    assert!(line.rect.x >= child.dimensions.content.x - 0.01);
+                    assert!(
+                        line.rect.x + line.rect.width
+                            <= child.dimensions.content.x + expected + 0.01
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn html_br_forces_inline_break_even_when_literal_newlines_collapse() {
+    for white_space in ["normal", "nowrap", "pre-line"] {
+        let document = crate::html::TreeBuilder::parse("<div>AB<br>CD<br>EF</div>").document();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "div{{font:20px/20px sans-serif;white-space:{white_space}}}"
+            ))
+            .unwrap(),
+        );
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 240.0,
+        };
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        let child = find_layout_box_by_tag(&layout, "div").unwrap();
+        assert_eq!(child.lines.len(), 3, "{white_space}");
+        assert_eq!(child.dimensions.content.height, 60.0, "{white_space}");
+        assert!(
+            child.children.is_empty(),
+            "br must not create full-width block boxes"
+        );
+    }
+}

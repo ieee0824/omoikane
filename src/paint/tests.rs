@@ -5876,7 +5876,7 @@ fn render_text_with_decoration(decoration: &str) -> Canvas {
         Origin::Author,
         parse_stylesheet(&format!(
             "body {{ margin: 0; }} \
-             p {{ text-decoration: {}; color: #ff0000; font-size: 20px; }}",
+             p {{ margin-top: 12px; text-decoration: {}; color: #ff0000; font-size: 20px; }}",
             decoration
         ))
         .unwrap(),
@@ -6248,6 +6248,10 @@ fn text_decoration_thickness_fixed_fixture_covers_nested_vertical_and_scale() {
 
     assert!((3..=5).contains(&height(green)), "green={green:?}");
     assert!((5..=7).contains(&width(blue)), "blue={blue:?}");
+    assert!(
+        blue.2 < 20,
+        "vertical-rl underline must be left of the text, as in Firefox: {blue:?}"
+    );
     assert!(
         (3..=4).contains(&height(unscaled_red)),
         "unscaled_red={unscaled_red:?}"
@@ -11319,4 +11323,322 @@ fn object_fit_applies_to_a_block_level_replaced_box() {
         painted_bounds_in_box(&canvas, content_box),
         Some((0, 25, 100, 50))
     );
+}
+
+fn render_underline_case(
+    mode: &str,
+    position: &str,
+    offset: &str,
+    content: &str,
+    extra: &str,
+) -> Canvas {
+    let document = TreeBuilder::parse(&format!(
+        "<style>html,body{{margin:0}}div{{position:absolute;left:40px;top:30px;font:20px/20px sans-serif;writing-mode:{mode};color:transparent;text-decoration:underline 2px blue;text-underline-position:{position};text-underline-offset:{offset}}}{extra}</style><div>{content}</div>"
+    )).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 250.0,
+        height: 200.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    paint_layout(&layout, &mut resolver, viewport)
+}
+
+fn underline_blue_bounds(canvas: &Canvas) -> (i32, i32, i32, i32) {
+    let mut bounds = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for y in 0..canvas.height() {
+        for x in 0..canvas.width() {
+            if canvas
+                .pixel(x, y)
+                .is_some_and(|p| p.b > 200 && p.r < 30 && p.g < 30)
+            {
+                bounds = (
+                    bounds.0.min(x as i32),
+                    bounds.1.min(y as i32),
+                    bounds.2.max(x as i32),
+                    bounds.3.max(y as i32),
+                );
+            }
+        }
+    }
+    assert!(bounds.0 <= bounds.2, "a blue decoration must be painted");
+    bounds
+}
+
+#[test]
+fn underline_offset_moves_outward_and_preserves_thickness_in_every_writing_mode() {
+    for mode in ["horizontal-tb", "vertical-rl", "vertical-lr"] {
+        for position in ["auto", "from-font", "under", "left", "right", "under right"] {
+            let base =
+                underline_blue_bounds(&render_underline_case(mode, position, "0px", "HH", ""));
+            for (offset, delta) in [("5px", 5), ("-5px", -5), ("20%", 4), ("calc(2px + 10%)", 4)] {
+                let bounds =
+                    underline_blue_bounds(&render_underline_case(mode, position, offset, "HH", ""));
+                let horizontal = mode == "horizontal-tb";
+                let (dx, dy) = if horizontal {
+                    (0, delta)
+                } else if position.contains("right") {
+                    (delta, 0)
+                } else {
+                    (-delta, 0)
+                };
+                assert_eq!(
+                    bounds,
+                    (base.0 + dx, base.1 + dy, base.2 + dx, base.3 + dy),
+                    "{mode} {position} {offset}"
+                );
+                assert_eq!(
+                    if horizontal {
+                        bounds.3 - bounds.1 + 1
+                    } else {
+                        bounds.2 - bounds.0 + 1
+                    },
+                    2
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn underline_and_overline_swap_physical_sides_without_following_vertical_line_stacking() {
+    for mode in ["vertical-rl", "vertical-lr"] {
+        let left = underline_blue_bounds(&render_underline_case(mode, "left", "0px", "HH", ""));
+        let right = underline_blue_bounds(&render_underline_case(mode, "right", "0px", "HH", ""));
+        assert!(left.2 < 40 && right.0 >= 59, "{mode}: {left:?} {right:?}");
+        for position in ["left", "right"] {
+            let base = render_underline_case(
+                mode,
+                position,
+                "0px",
+                "HH",
+                "div{text-decoration-line:overline}",
+            );
+            let bounds = underline_blue_bounds(&base);
+            assert!(
+                if position == "left" {
+                    bounds.0 >= 59
+                } else {
+                    bounds.2 < 40
+                },
+                "overline must be on the opposite physical side: {mode} {position} {bounds:?}"
+            );
+            // The overline retains the font's automatic gap. An underline
+            // with an explicit zero offset need not have the same position.
+            for offset in ["10px", "-5px", "20%", "calc(2px + 10%)"] {
+                let changed = render_underline_case(
+                    mode,
+                    position,
+                    offset,
+                    "HH",
+                    "div{text-decoration-line:overline}",
+                );
+                let (_, changed_pixels) = diff_canvases(&base, &changed);
+                assert_eq!(
+                    changed_pixels, 0,
+                    "overline must ignore underline offset: {mode} {position} {offset}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn underline_origin_offset_is_uniform_across_nested_font_sizes() {
+    for mode in ["horizontal-tb", "vertical-rl", "vertical-lr"] {
+        for position in ["auto", "under", "right"] {
+            let content = "H<span>H</span>H";
+            let base =
+                render_underline_case(mode, position, "20%", content, "span{font-size:40px}");
+            let changed = render_underline_case(
+                mode,
+                position,
+                "20%",
+                content,
+                "span{font-size:40px;text-underline-offset:30px;text-underline-position:under right}",
+            );
+            assert_eq!(
+                underline_blue_bounds(&base),
+                underline_blue_bounds(&changed),
+                "{mode} {position}"
+            );
+            for y in 0..base.height() {
+                for x in 0..base.width() {
+                    assert_eq!(base.pixel(x, y), changed.pixel(x, y));
+                }
+            }
+            let bounds = underline_blue_bounds(&base);
+            assert_eq!(
+                if mode == "horizontal-tb" {
+                    bounds.3 - bounds.1 + 1
+                } else {
+                    bounds.2 - bounds.0 + 1
+                },
+                2,
+                "one continuous line per origin"
+            );
+        }
+    }
+}
+
+#[test]
+fn underline_fixed_font_matrix_matches_firefox_pixels() {
+    let fixture = PathBuf::from("tests/fixtures/anonymized-underline-positions");
+    let source = fs::read_to_string(fixture.join("fixed.html")).unwrap();
+    for line in ["underline", "overline"] {
+        let html = source.replace(
+            "text-decoration-line:underline;",
+            &format!("text-decoration-line:{line};"),
+        );
+        let document = TreeBuilder::parse(&html).document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+            resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+        }
+        let font = Font::load_from_bytes(
+            include_bytes!(
+                "../../tests/fixtures/anonymized-textarea-lines/LiberationSans-Regular.ttf"
+            )
+            .to_vec(),
+        )
+        .unwrap();
+        let mut registry = crate::font::WebFontRegistry::new();
+        registry.push(
+            "Fixture",
+            crate::font::FontWeight::default(),
+            crate::font::FontStyle::default(),
+            font,
+        );
+        let registry = Arc::new(registry);
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 900.0,
+        };
+        let actual = crate::layout::with_layout_fonts(vec![], Some(Arc::clone(&registry)), || {
+            let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+            paint_layout_with_web_fonts(
+                &layout,
+                &mut resolver,
+                viewport,
+                vec![],
+                Some(registry.as_ref()),
+            )
+        });
+        let expected = Image::decode_png(
+            &fs::read(fixture.join(if line == "underline" {
+                "fixed.firefox.png"
+            } else {
+                "overline.firefox.png"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut expected_canvas = Canvas::new(expected.width(), expected.height());
+        expected_canvas.pixels.copy_from_slice(expected.pixels());
+        let (diff, changed) = diff_canvases(&actual, &expected_canvas);
+        if let Some(directory) = std::env::var_os("OMOIKANE_BROWSER_REPORT_DIR") {
+            let directory = PathBuf::from(directory);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join(format!("anonymized-underline-positions.{line}.actual.png")),
+                actual.encode_png(),
+            )
+            .unwrap();
+            fs::write(
+                directory.join(format!("anonymized-underline-positions.{line}.diff.png")),
+                diff.encode_png(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            changed, 0,
+            "all 90 fixed-font {line} cases must match the Firefox reference"
+        );
+    }
+}
+
+#[test]
+fn underline_nested_fixed_font_keeps_the_origin_line_despite_child_overrides() {
+    let fixture = PathBuf::from("tests/fixtures/anonymized-underline-positions");
+    let html = fs::read_to_string(fixture.join("nested.html")).unwrap();
+    let document = TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-textarea-lines/LiberationSans-Regular.ttf")
+            .to_vec(),
+    )
+    .unwrap();
+    let mut registry = crate::font::WebFontRegistry::new();
+    registry.push(
+        "Fixture",
+        crate::font::FontWeight::default(),
+        crate::font::FontStyle::default(),
+        font,
+    );
+    let registry = Arc::new(registry);
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1080.0,
+        height: 960.0,
+    };
+    let actual = crate::layout::with_layout_fonts(vec![], Some(Arc::clone(&registry)), || {
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        paint_layout_with_web_fonts(
+            &layout,
+            &mut resolver,
+            viewport,
+            vec![],
+            Some(registry.as_ref()),
+        )
+    });
+    let reference: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.join("nested-firefox-bounds.json")).unwrap())
+            .unwrap();
+    let cases = reference["cases"].as_array().unwrap();
+    for (index, case) in cases.iter().enumerate() {
+        // The descendant originates no line. Its own position/offset must not
+        // change the ancestor's line, even where Firefox's reference has a jog.
+        let reference_case = if case["override"].as_bool().unwrap() {
+            &cases[index - 1]
+        } else {
+            case
+        };
+        let bounds = reference_case["bounds"].as_array().unwrap();
+        let bounds = bounds
+            .iter()
+            .map(|v| v.as_i64().unwrap() as i32)
+            .collect::<Vec<_>>();
+        let x = case["x"].as_i64().unwrap() as i32;
+        let y = case["y"].as_i64().unwrap() as i32;
+        for dy in -35..120 {
+            for dx in -35..130 {
+                let blue = actual
+                    .pixel((x + dx) as u32, (y + dy) as u32)
+                    .is_some_and(|p| p.b > 200 && p.r < 30 && p.g < 30);
+                let expected =
+                    dx >= bounds[0] && dx <= bounds[2] && dy >= bounds[1] && dy <= bounds[3];
+                assert_eq!(blue, expected, "case {index}, relative pixel ({dx},{dy})");
+            }
+        }
+    }
+    if let Some(directory) = std::env::var_os("OMOIKANE_BROWSER_REPORT_DIR") {
+        let directory = PathBuf::from(directory);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("anonymized-underline-positions.nested.actual.png"),
+            actual.encode_png(),
+        )
+        .unwrap();
+    }
 }

@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::css::style::PropagatedTextDecoration;
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{
     Font, FontError, FontFallbackCandidate, FontFamilyKey, FontVariantKey, FontWeight, GlyphRaster,
@@ -12,7 +13,7 @@ use crate::font::{
     is_zero_advance_character, load_default_text_fonts_shared, select_text_font,
     shape_text_with_fallback_candidates,
 };
-use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, ListMarker, Rect};
+use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, Rect};
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -198,6 +199,9 @@ pub(crate) fn paint_text_with_registry(
             .map_or(line.fragments.as_slice(), |overflow| {
                 overflow.fragments.as_slice()
             });
+        // Cache font metrics and placement once per decorating origin on the
+        // line; descendants cannot substitute their own font or underline data.
+        let mut decorations = HashMap::new();
         for fragment in fragments {
             let fragment_rect = offset.rect(fragment.rect);
             match &fragment.content {
@@ -345,58 +349,26 @@ pub(crate) fn paint_text_with_registry(
                     for decoration in fragment.style.text_decorations.iter() {
                         let lines = decoration_lines(&decoration.line);
                         let color = parse_color(&decoration.color).unwrap_or(frag_color);
-                        let decoration_selected = matches!(
-                            &decoration.thickness,
-                            ComputedValue::Keyword(value)
-                                if value.eq_ignore_ascii_case("from-font")
-                        )
-                        .then(|| {
-                            select_text_font(
-                                "paint decoration",
-                                decoration.font_family,
-                                decoration.font_scope_root,
-                                FontVariantKey {
-                                    weight: decoration.font_weight,
-                                    style: decoration.font_style,
-                                    style_angle: decoration.font_style_angle,
-                                    stretch: decoration.font_stretch,
-                                },
-                                web_fonts,
+                        let geometry = decorations.entry(decoration.origin).or_insert_with(|| {
+                            DecorationGeometry::new(
+                                decoration,
+                                line,
+                                vertical_mode.is_some(),
                                 fonts,
+                                web_fonts,
                             )
-                        })
-                        .flatten();
-                        let decoration_font = decoration_selected
-                            .as_ref()
-                            .map(AsRef::as_ref)
-                            .or_else(|| fonts.first().map(AsRef::as_ref));
-                        let thickness = used_text_decoration_thickness(
-                            &decoration.thickness,
-                            decoration.font_size,
-                            decoration_font,
+                        });
+                        paint_fragment_decoration(
+                            canvas,
+                            fragment_rect,
+                            fragment.metrics.ascent,
+                            geometry,
+                            lines,
+                            color,
+                            clip,
+                            vertical_mode.is_some(),
+                            offset,
                         );
-                        if let Some((vertical_rl, _)) = vertical_mode {
-                            paint_text_decoration_vertical(
-                                canvas,
-                                fragment_rect,
-                                thickness,
-                                lines,
-                                color,
-                                clip,
-                                vertical_rl,
-                            );
-                        } else {
-                            paint_text_decoration(
-                                canvas,
-                                fragment_rect,
-                                fragment.metrics.ascent,
-                                fragment.metrics.descent,
-                                thickness,
-                                lines,
-                                color,
-                                clip,
-                            );
-                        }
                     }
                 }
                 InlineFragmentContent::AtomicInline(_) => {
@@ -716,39 +688,185 @@ pub(crate) fn used_text_decoration_thickness(
     }
 }
 
-/// Draw text decoration lines (underline, overline, line-through) for a fragment.
-pub(crate) fn paint_text_decoration(
+/// Per-origin line geometry, shared by every decorated fragment on this line.
+struct DecorationGeometry {
+    thickness: f32,
+    default_thickness: f32,
+    offset: f32,
+    baseline: f32,
+    from_font: Option<f32>,
+    automatic: f32,
+    under: bool,
+    right: bool,
+    font_position: bool,
+    offset_auto: bool,
+    start: f32,
+    end: f32,
+}
+
+impl DecorationGeometry {
+    fn new(
+        decoration: &PropagatedTextDecoration,
+        line: &LineBox,
+        vertical: bool,
+        fonts: &[Arc<Font>],
+        web_fonts: Option<&WebFontRegistry>,
+    ) -> Self {
+        let selected = select_text_font(
+            "paint decoration",
+            decoration.font_family,
+            decoration.font_scope_root,
+            FontVariantKey {
+                weight: decoration.font_weight,
+                style: decoration.font_style,
+                style_angle: decoration.font_style_angle,
+                stretch: decoration.font_stretch,
+            },
+            web_fonts,
+            fonts,
+        );
+        let font = selected
+            .as_ref()
+            .map(AsRef::as_ref)
+            .or_else(|| fonts.first().map(AsRef::as_ref));
+        let metric = font.and_then(|font| font.underline_position(decoration.font_size));
+        let baseline = line.baseline;
+        let (start, end) = if vertical {
+            let center = line.rect.x + line.rect.width * 0.5;
+            (
+                center - decoration.font_size * 0.5,
+                center + decoration.font_size * 0.5,
+            )
+        } else {
+            let (ascent, descent) = font
+                .map(|font| {
+                    let metrics = font.layout_metrics(decoration.font_size);
+                    (metrics.ascent, metrics.descent)
+                })
+                .unwrap_or((decoration.font_size * 0.8, decoration.font_size * 0.2));
+            (baseline - ascent, baseline + descent)
+        };
+        let offset = match &decoration.underline_offset {
+            ComputedValue::Px(value) => *value,
+            ComputedValue::Percentage(value) => decoration.font_size * value / 100.0,
+            ComputedValue::CalcPxPercent(px, percent) => {
+                px + decoration.font_size * percent / 100.0
+            }
+            _ => 0.0,
+        };
+        let has = |keyword| {
+            decoration
+                .underline_position
+                .split_whitespace()
+                .any(|part| part == keyword)
+        };
+        Self {
+            thickness: used_text_decoration_thickness(
+                &decoration.thickness,
+                decoration.font_size,
+                font,
+            ),
+            default_thickness: font
+                .and_then(|font| font.underline_thickness(decoration.font_size))
+                .unwrap_or(decoration.font_size * 0.075)
+                .round()
+                .max(1.0),
+            offset,
+            baseline,
+            from_font: metric,
+            automatic: metric.unwrap_or(decoration.font_size * 0.1).max(1.0),
+            under: has("under"),
+            right: has("right"),
+            font_position: has("from-font"),
+            offset_auto: matches!(&decoration.underline_offset, ComputedValue::Keyword(value) if value == "auto"),
+            start,
+            end,
+        }
+    }
+}
+
+fn paint_fragment_decoration(
     canvas: &mut Canvas,
     rect: Rect,
     ascent: f32,
-    descent: f32,
-    line_thickness: f32,
+    geometry: &DecorationGeometry,
     decoration: TextDecorationLines,
     color: Color,
     clip: Option<Rect>,
+    vertical: bool,
+    offset: super::PaintOffset,
 ) {
     if decoration.is_none() {
         return;
     }
-
-    let mut draw_line = |line_y: f32| {
-        let line_rect = Rect {
-            x: rect.x,
-            y: line_y.round(),
-            width: rect.width,
-            height: line_thickness,
+    let thickness = geometry.thickness;
+    // A small font-derived gap separates the vertical line from the em edge.
+    let automatic_gap = geometry.from_font.unwrap_or(0.0) * 0.5;
+    let mut draw = |position: f32| {
+        let line_rect = if vertical {
+            Rect {
+                x: (position + offset.x).round(),
+                y: rect.y.round(),
+                width: thickness,
+                height: (rect.y + rect.height).round() - rect.y.round(),
+            }
+        } else {
+            Rect {
+                x: rect.x.round(),
+                y: (position + offset.y).round(),
+                width: (rect.x + rect.width).round() - rect.x.round(),
+                height: thickness,
+            }
         };
         canvas.fill_rect_clipped(line_rect, color, clip);
     };
-
     if decoration.underline {
-        draw_line(rect.y + ascent + descent * 0.5);
+        let position = if vertical {
+            let distance = if geometry.offset_auto {
+                automatic_gap
+            } else {
+                geometry.offset
+            };
+            if geometry.right {
+                geometry.end - geometry.default_thickness + distance
+            } else {
+                geometry.start - distance - thickness
+            }
+        } else if geometry.under {
+            geometry.end.ceil() + geometry.offset
+        } else {
+            geometry.baseline
+                + if geometry.font_position {
+                    geometry.from_font.unwrap_or(if geometry.offset_auto {
+                        geometry.automatic
+                    } else {
+                        0.0
+                    }) + geometry.offset
+                } else if geometry.offset_auto {
+                    geometry.automatic
+                } else {
+                    geometry.offset
+                }
+        };
+        draw(position);
     }
     if decoration.overline {
-        draw_line(rect.y);
+        draw(if vertical && !geometry.right {
+            geometry.end - geometry.default_thickness + automatic_gap
+        } else if vertical {
+            geometry.start - automatic_gap - thickness
+        } else {
+            // Place the default overline just inside the text-over edge, then
+            // grow an authored thicker line outward rather than over the text.
+            geometry.start.floor() + geometry.default_thickness - thickness
+        });
     }
     if decoration.line_through {
-        draw_line(rect.y + ascent * 0.6);
+        draw(if vertical {
+            (geometry.start + geometry.end - thickness) * 0.5
+        } else {
+            rect.y - offset.y + ascent * 0.6
+        });
     }
 }
 
@@ -1814,55 +1932,6 @@ pub(crate) fn paint_text_placeholder_with_mode(
         if !zero_advance {
             remaining_non_zero -= 1;
         }
-    }
-}
-
-fn paint_text_decoration_vertical(
-    canvas: &mut Canvas,
-    rect: Rect,
-    thickness: f32,
-    decoration: TextDecorationLines,
-    color: Color,
-    clip: Option<Rect>,
-    vertical_rl: bool,
-) {
-    if decoration.is_none() {
-        return;
-    }
-    let draw = |canvas: &mut Canvas, x: f32| {
-        canvas.fill_rect_clipped(
-            Rect {
-                x: x.round(),
-                y: rect.y,
-                width: thickness,
-                height: rect.height,
-            },
-            color,
-            clip,
-        );
-    };
-    if decoration.underline {
-        draw(
-            canvas,
-            if vertical_rl {
-                rect.x + rect.width - thickness
-            } else {
-                rect.x
-            },
-        );
-    }
-    if decoration.overline {
-        draw(
-            canvas,
-            if vertical_rl {
-                rect.x
-            } else {
-                rect.x + rect.width - thickness
-            },
-        );
-    }
-    if decoration.line_through {
-        draw(canvas, rect.x + ((rect.width - thickness) * 0.5).max(0.0));
     }
 }
 

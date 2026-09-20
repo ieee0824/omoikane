@@ -5535,6 +5535,76 @@ fn text_decoration_longhands_do_not_inherit_from_parent() {
 }
 
 #[test]
+fn text_underline_position_and_offset_validate_and_inherit() {
+    for value in [
+        "auto",
+        "from-font",
+        "under",
+        "left",
+        "right",
+        "under left",
+        "right under",
+        "from-font right",
+    ] {
+        assert!(
+            supports_declaration("text-underline-position", value),
+            "{value}"
+        );
+    }
+    for value in [
+        "none",
+        "auto left",
+        "under from-font",
+        "left right",
+        "under under",
+        "1px",
+        "left, right",
+    ] {
+        assert!(
+            !supports_declaration("text-underline-position", value),
+            "{value}"
+        );
+    }
+    for value in ["auto", "0", "-3px", "0.5em", "20%", "calc(2px + 10%)"] {
+        assert!(
+            supports_declaration("text-underline-offset", value),
+            "{value}"
+        );
+    }
+    for value in [
+        "from-font",
+        "none",
+        "1",
+        "2px 3px",
+        "auto, 2px",
+        "calc(1px * 1px)",
+    ] {
+        assert!(
+            !supports_declaration("text-underline-offset", value),
+            "{value}"
+        );
+    }
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    document.append_child(parent.clone());
+    parent.append_child(child.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+        "div { font-size:20px; text-underline-position: right under; text-underline-offset: 0.5em } span {font-size:40px}"
+    ).unwrap());
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("text-underline-position"),
+        Some(&ComputedValue::Keyword("under right".into()))
+    );
+    assert_eq!(
+        style.get("text-underline-offset"),
+        Some(&ComputedValue::Px(10.0))
+    );
+}
+
+#[test]
 fn text_decoration_thickness_computes_and_validates_supported_values() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
@@ -8521,5 +8591,43 @@ fn out_of_range_calc_aspect_ratio_is_clamped_not_dropped() {
             "auto",
             "aspect-ratio: {value}"
         );
+    }
+}
+
+#[test]
+fn underline_properties_preserve_relative_inheritance_and_decoration_origin() {
+    for (value, expected) in [
+        ("0", ComputedValue::Px(0.0)),
+        ("20%", ComputedValue::Percentage(20.0)),
+        ("calc(2px + 10%)", ComputedValue::CalcPxPercent(2.0, 10.0)),
+    ] {
+        let document = NodeHandle::document();
+        let parent = NodeHandle::element("div");
+        let child = NodeHandle::element("span");
+        let own = NodeHandle::element("b");
+        document.append_child(parent.clone());
+        parent.append_child(child.clone());
+        child.append_child(own.clone());
+        parent.set_attribute("style", &format!("font-size:20px;text-decoration:underline;text-underline-position:under left;text-underline-offset:{value}"));
+        child.set_attribute("style", "font-size:40px;text-underline-position:initial");
+        own.set_attribute(
+            "style",
+            "text-decoration:underline;text-underline-position:right;text-underline-offset:5px",
+        );
+        let mut resolver = StyleResolver::new();
+        let inherited = resolver.computed_style(&child);
+        assert_eq!(inherited.get("text-underline-offset"), Some(&expected));
+        assert_eq!(
+            inherited.get("text-underline-position"),
+            Some(&ComputedValue::Keyword("auto".into()))
+        );
+        let style = resolver.computed_style(&own);
+        let decorations = style.text_decorations();
+        assert_eq!(decorations.len(), 2);
+        assert_eq!(decorations[0].underline_offset, expected);
+        assert_eq!(decorations[0].underline_position, "under left");
+        assert_eq!(decorations[0].font_size, 20.0);
+        assert_eq!(decorations[1].underline_offset, ComputedValue::Px(5.0));
+        assert_eq!(decorations[1].underline_position, "right");
     }
 }

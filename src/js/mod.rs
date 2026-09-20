@@ -10066,7 +10066,8 @@ fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> S
         ComputedValue::Percentage(pct) => format!("{}%", format_css_number(*pct)),
         ComputedValue::Number(number) => format_css_number(*number),
         ComputedValue::CalcPxPercent(px, pct)
-            if property_name.eq_ignore_ascii_case("text-decoration-thickness") =>
+            if property_name.eq_ignore_ascii_case("text-decoration-thickness")
+                || property_name.eq_ignore_ascii_case("text-underline-offset") =>
         {
             if *px == 0.0 {
                 format!("{}%", format_css_number(*pct))
@@ -12114,7 +12115,12 @@ fn normalize_style_value_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    let normalized = if property == "transition" {
+    let normalized = if matches!(
+        property.as_str(),
+        "text-underline-position" | "text-underline-offset"
+    ) {
+        crate::css::style::normalize_underline_value(&property, &value)
+    } else if property == "transition" {
         crate::css::normalize_transition_shorthand(&value)
     } else if matches!(
         property.as_str(),
@@ -23655,6 +23661,46 @@ b</textarea></form>"#,
                 "getComputedStyle(document.querySelector('div')).textOverflow",
             ),
             "ellipsis",
+        );
+    }
+
+    #[test]
+    fn underline_cssom_validates_normalizes_inherits_and_serializes_calc() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<div style='font-size:20px;text-underline-position:under left;text-underline-offset:20%'><span id='target' style='font-size:40px'></span></div>",
+        ).document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval("var target=document.getElementById('target')")
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "JSON.stringify([getComputedStyle(target).textUnderlinePosition,getComputedStyle(target).textUnderlineOffset])"
+            ),
+            r#"["under left","20%"]"#
+        );
+        runtime.eval("target.style.textUnderlinePosition='right under';target.style.textUnderlinePosition='auto left';target.style.textUnderlineOffset='0';target.style.textUnderlineOffset='from-font'").unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "JSON.stringify([target.style.textUnderlinePosition,target.style.textUnderlineOffset])"
+            ),
+            r#"["under right","0px"]"#
+        );
+        runtime
+            .eval("target.style.textUnderlineOffset='calc(2em - 50%)'")
+            .unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).textUnderlineOffset"),
+            "calc(-50% + 80px)"
+        );
+        runtime
+            .eval("target.style.textUnderlineOffset='calc(200% - 0.5em)'")
+            .unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "getComputedStyle(target).textUnderlineOffset"),
+            "calc(200% - 20px)"
         );
     }
 
