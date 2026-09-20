@@ -28,7 +28,7 @@ ENGINE_NOTICES = {
     "boa-origin.json": Path("engine/boa-origin.json"),
 }
 SUITE_COMMAND = ["cargo", "test", "--locked", "--features", "baseline-jit,jit-differential",
-                 "--", "--include-ignored", "--nocapture", "--test-threads=1"]
+                 "--", "--include-ignored", "--nocapture"]
 
 
 def output(*args):

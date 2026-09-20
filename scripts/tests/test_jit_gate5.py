@@ -74,6 +74,10 @@ class GateTests(unittest.TestCase):
     def test_complete_evidence_passes(self):
         self.assertTrue(self.decision())
 
+    def test_full_suite_uses_the_test_harness_default_parallelism(self):
+        self.assertNotIn("--test-threads=1", gate.SUITE_COMMAND)
+        self.assertIn("--include-ignored", gate.SUITE_COMMAND)
+
     def test_missing_or_changed_engine_notices_reject_the_archive(self):
         path = self.root / next(iter(gate.TARGETS)) / "package/result.json"
         original = gate.read(path)
