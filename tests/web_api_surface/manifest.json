@@ -877,6 +877,14 @@
       "baseline_supported": true
     },
     {
+      "id": "css.multi-column-layout",
+      "area": "cssom",
+      "description": "Multi-column properties compute and distribute fixed-height flow content across columns",
+      "setup": "globalThis.__multicol = document.createElement('div'); __multicol.style.cssText = 'width:220px;height:40px;columns:100px 2;column-gap:20px;column-fill:auto;column-rule:4px solid red'; globalThis.__multicolChildren = []; for (let i = 0; i < 3; i++) { const child = document.createElement('div'); child.style.height = '20px'; __multicol.appendChild(child); __multicolChildren.push(child); } document.body.appendChild(__multicol)",
+      "probe": "(() => { const style = getComputedStyle(__multicol); const box = __multicol.getBoundingClientRect(); const rects = __multicolChildren.map(child => child.getBoundingClientRect()); return CSS.supports('columns', '100px 2') && CSS.supports('column-fill', 'auto') && CSS.supports('column-rule', '4px solid red') && !CSS.supports('column-count', '0') && style.columnCount === '2' && style.columnWidth === '100px' && style.columnGap === '20px' && style.columnRuleWidth === '4px' && rects[0].left === box.left && rects[1].left === box.left && rects[2].left === box.left + 120 && rects[2].top === box.top; })()",
+      "baseline_supported": false
+    },
+    {
       "id": "network.text-streams",
       "area": "network",
       "description": "TextEncoderStream and TextDecoderStream preserve split Unicode characters through a pipeline",

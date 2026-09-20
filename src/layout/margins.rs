@@ -102,6 +102,7 @@ fn formatting_root(node: &NodeHandle, style: &ComputedStyle, resolver: &mut Styl
         || overflow(style) == Overflow::Hidden
         || has_containment(style, "layout")
         || has_containment(style, "paint")
+        || multicol::is_multicol_container(style)
         || matches!(
             table::table_display_for_node(node, style),
             Some(table::TableDisplay::Cell)
@@ -395,5 +396,6 @@ pub(super) fn layout_children(
         positioned_children,
         margin_info: Some(info),
         child_shifts,
+        multicol: None,
     }
 }

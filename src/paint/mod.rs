@@ -3005,6 +3005,8 @@ fn paint_box_internal_to(
         inherited_clip
     };
 
+    paint_column_rules(canvas, layout, style, clip, offset);
+
     let mut negative_positioned_children = Vec::new();
     let mut normal_block_children = Vec::new();
     let mut float_children = Vec::new();
@@ -3106,6 +3108,133 @@ fn paint_box_internal_to(
         viewport,
         offset,
     );
+}
+
+fn paint_column_rules(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+    offset: PaintOffset,
+) {
+    let Some(multicol) = &layout.multicol else {
+        return;
+    };
+    let width = match style.get("column-rule-width") {
+        Some(ComputedValue::Px(value)) if *value > 0.0 => *value,
+        _ => return,
+    };
+    let rule_style = match style.get("column-rule-style") {
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
+            value.to_ascii_lowercase()
+        }
+        _ => return,
+    };
+    if matches!(rule_style.as_str(), "none" | "hidden") {
+        return;
+    }
+    let Some(color) = resolve_color_value(style.get("column-rule-color"), style) else {
+        return;
+    };
+
+    for geometry in &multicol.rules {
+        let vertical = geometry.width == 0.0;
+        let full = offset.rect(if vertical {
+            Rect {
+                x: geometry.x - width / 2.0,
+                y: geometry.y,
+                width,
+                height: geometry.height,
+            }
+        } else {
+            Rect {
+                x: geometry.x,
+                y: geometry.y - width / 2.0,
+                width: geometry.width,
+                height: width,
+            }
+        });
+        match rule_style.as_str() {
+            "double" if width >= 3.0 => {
+                let stripe = width / 3.0;
+                if vertical {
+                    canvas.fill_rect_clipped(
+                        Rect {
+                            width: stripe,
+                            ..full
+                        },
+                        color,
+                        clip,
+                    );
+                    canvas.fill_rect_clipped(
+                        Rect {
+                            x: full.x + width - stripe,
+                            width: stripe,
+                            ..full
+                        },
+                        color,
+                        clip,
+                    );
+                } else {
+                    canvas.fill_rect_clipped(
+                        Rect {
+                            height: stripe,
+                            ..full
+                        },
+                        color,
+                        clip,
+                    );
+                    canvas.fill_rect_clipped(
+                        Rect {
+                            y: full.y + width - stripe,
+                            height: stripe,
+                            ..full
+                        },
+                        color,
+                        clip,
+                    );
+                }
+            }
+            "dashed" | "dotted" => {
+                let length = if rule_style == "dotted" {
+                    width
+                } else {
+                    width * 3.0
+                }
+                .max(1.0);
+                let gap = if rule_style == "dotted" {
+                    width
+                } else {
+                    width * 2.0
+                }
+                .max(1.0);
+                let extent = if vertical { full.height } else { full.width };
+                let mut position = 0.0;
+                while position < extent {
+                    let segment = (extent - position).min(length);
+                    let rect = if vertical {
+                        Rect {
+                            y: full.y + position,
+                            height: segment,
+                            ..full
+                        }
+                    } else {
+                        Rect {
+                            x: full.x + position,
+                            width: segment,
+                            ..full
+                        }
+                    };
+                    canvas.fill_rect_clipped(rect, color, clip);
+                    position += length + gap;
+                }
+            }
+            // CSS border color shading for groove/ridge/inset/outset is a
+            // paint refinement; their rule geometry and visibility match a
+            // solid rule here.
+            _ => canvas.fill_rect_clipped(full, color, clip),
+        }
+    }
 }
 
 fn collect_phase_descendants<'a>(

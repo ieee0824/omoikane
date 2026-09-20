@@ -128,6 +128,7 @@ git_wpt sparse-checkout add "/common/blank.html" "/FileAPI/file/resources/echo-c
 git_wpt sparse-checkout add "/domxpath/"
 git_wpt sparse-checkout add "/visual-viewport/"
 git_wpt sparse-checkout add "/web-locks/"
+git_wpt sparse-checkout add "/css/css-multicol/parsing/" "/css/support/shorthand-testcommon.js"
 git_wpt sparse-checkout add \
   "/storage/storagemanager-estimate.https.any.js" \
   "/storage/storagemanager-persisted.https.any.js" \

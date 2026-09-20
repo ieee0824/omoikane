@@ -1341,6 +1341,7 @@ impl StyleResolver {
         apply_inheritance(&mut properties, parent_style);
         resolve_initial_css_wide_keywords(&mut properties);
         apply_initial_values(&mut properties);
+        resolve_column_rule_current_color(&mut properties);
         normalize_background_layer_lists(&mut properties);
         properties.insert(
             "transition".to_string(),
@@ -1896,6 +1897,7 @@ fn is_color_property(name: &str) -> bool {
         || name.eq_ignore_ascii_case("border-bottom-color")
         || name.eq_ignore_ascii_case("border-left-color")
         || name.eq_ignore_ascii_case("outline-color")
+        || name.eq_ignore_ascii_case("column-rule-color")
         || name.eq_ignore_ascii_case("text-decoration-color")
 }
 
@@ -1925,6 +1927,137 @@ pub(super) fn is_valid_color_value(value: &Value) -> bool {
     !matches!(validate_color_value(value), DeclarationValidation::Invalid)
 }
 
+fn validate_multicol_declaration(name: &str, value: &Value) -> Option<DeclarationValidation> {
+    let property_name = name;
+    let keyword = |allowed: &[&str]| match value {
+        Value::Keyword(keyword) => {
+            let lower = keyword.to_ascii_lowercase();
+            if is_css_wide_keyword(&lower) || allowed.contains(&lower.as_str()) {
+                DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+            } else {
+                DeclarationValidation::Invalid
+            }
+        }
+        _ => DeclarationValidation::Invalid,
+    };
+    let non_negative_length = || match value {
+        Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => {
+            DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()))
+        }
+        Value::Length(number, unit)
+            if *number >= 0.0
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some() =>
+        {
+            DeclarationValidation::Unvalidated
+        }
+        Value::Number(number) if *number == 0.0 => {
+            DeclarationValidation::Valid(ComputedValue::Px(0.0))
+        }
+        Value::Function { name: function, .. }
+            if function.eq_ignore_ascii_case("calc") || function.eq_ignore_ascii_case("clamp") =>
+        {
+            match compute_value(value, property_name, ResolutionContext::default()) {
+                ComputedValue::Px(number) if number >= 0.0 => DeclarationValidation::Unvalidated,
+                _ => DeclarationValidation::Invalid,
+            }
+        }
+        _ => DeclarationValidation::Invalid,
+    };
+
+    Some(match name.to_ascii_lowercase().as_str() {
+        "column-count" => match value {
+            Value::Keyword(keyword) => {
+                let lower = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&lower) || lower == "auto" {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            Value::Number(number)
+                if number.is_finite() && *number >= 1.0 && number.fract() == 0.0 =>
+            {
+                DeclarationValidation::Valid(ComputedValue::Number(*number))
+            }
+            Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+                match evaluate_calc(arguments, ResolutionContext::default()) {
+                    Some(quantity)
+                        if quantity.unit == CalcUnit::Unitless
+                            && quantity.value >= 1.0
+                            && quantity.value.fract() == 0.0 =>
+                    {
+                        DeclarationValidation::Valid(ComputedValue::Number(quantity.value))
+                    }
+                    _ => DeclarationValidation::Invalid,
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        },
+        "column-width" => match value {
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") => {
+                DeclarationValidation::Valid(ComputedValue::Keyword("auto".to_string()))
+            }
+            _ => non_negative_length(),
+        },
+        "column-fill" => keyword(&["auto", "balance", "balance-all"]),
+        "column-span" => keyword(&["none", "all"]),
+        "column-rule-style" => keyword(&[
+            "none", "hidden", "dotted", "dashed", "solid", "double", "groove", "ridge", "inset",
+            "outset",
+        ]),
+        "column-rule-width" => match value {
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "thin" | "medium" | "thick"
+                ) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            _ => non_negative_length(),
+        },
+        "column-gap" => match value {
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal") => {
+                DeclarationValidation::Valid(ComputedValue::Keyword("normal".to_string()))
+            }
+            _ => non_negative_length(),
+        },
+        "break-before" | "break-after" => keyword(&[
+            "auto",
+            "avoid",
+            "avoid-page",
+            "page",
+            "left",
+            "right",
+            "recto",
+            "verso",
+            "avoid-column",
+            "column",
+            "avoid-region",
+            "region",
+        ]),
+        "break-inside" => keyword(&[
+            "auto",
+            "avoid",
+            "avoid-page",
+            "avoid-column",
+            "avoid-region",
+        ]),
+        "orphans" | "widows" => match value {
+            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => {
+                DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()))
+            }
+            Value::Number(number)
+                if number.is_finite() && *number >= 1.0 && number.fract() == 0.0 =>
+            {
+                DeclarationValidation::Valid(ComputedValue::Number(*number))
+            }
+            _ => DeclarationValidation::Invalid,
+        },
+        _ => return None,
+    })
+}
+
 /// Validates a resolved declaration value against the property's grammar.
 ///
 /// This is the single extension point for per-property value validation.
@@ -1940,6 +2073,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // never accepts a top-level comma-separated list.
     if is_color_property(name) {
         return validate_color_value(value);
+    }
+    if let Some(validation) = validate_multicol_declaration(name, value) {
+        return validation;
     }
     if name.eq_ignore_ascii_case("text-decoration-thickness") {
         return validate_text_decoration_thickness(value);
@@ -2710,7 +2846,15 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
 fn is_non_negative_sizing_property(name: &str) -> bool {
     matches!(
         name,
-        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
+        "width"
+            | "height"
+            | "min-width"
+            | "min-height"
+            | "max-width"
+            | "max-height"
+            | "column-width"
+            | "column-gap"
+            | "column-rule-width"
     )
 }
 
@@ -4092,6 +4236,9 @@ fn is_length_property(name: &str) -> bool {
             | "inset-block-end"
             | "border-spacing"
             | "flex-basis"
+            | "column-width"
+            | "column-gap"
+            | "column-rule-width"
             | "outline-width"
             | "outline-offset"
     )
@@ -5058,6 +5205,9 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "border-top-style",
     "border-top-width",
     "bottom",
+    "break-after",
+    "break-before",
+    "break-inside",
     "inset-inline-start",
     "inset-inline-end",
     "inset-block-start",
@@ -5070,6 +5220,15 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "contain",
     "container-name",
     "container-type",
+    "column-count",
+    "column-fill",
+    "column-rule",
+    "column-rule-color",
+    "column-rule-style",
+    "column-rule-width",
+    "column-span",
+    "column-width",
+    "columns",
     "content",
     "cursor",
     "display",
@@ -5127,6 +5286,7 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "outline-offset",
     "outline-style",
     "outline-width",
+    "orphans",
     "overflow",
     "overflow-x",
     "overflow-y",
@@ -5171,6 +5331,7 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "visibility",
     "white-space",
     "width",
+    "widows",
     "word-break",
     "overflow-wrap",
     "word-wrap",
@@ -5234,6 +5395,8 @@ fn is_shorthand_or_legacy_alias(name: &str) -> bool {
             | "grid-gap"
             | "grid-row-gap"
             | "grid-column-gap"
+            | "columns"
+            | "column-rule"
             | "grid-template"
             | "grid-area"
             | "grid-column"
@@ -5391,6 +5554,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             | "border-right-width"
             | "border-bottom-width"
             | "border-left-width"
+            | "column-rule-width"
     ) && let Value::Keyword(keyword) = value
     {
         let pixels = match keyword.to_ascii_lowercase().as_str() {
@@ -7146,7 +7310,7 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .unwrap_or_else(|| ComputedValue::Color("black".to_string()));
     properties
         .entry("text-decoration-color".to_string())
-        .or_insert(current_color);
+        .or_insert(current_color.clone());
     properties
         .entry("text-decoration-thickness".to_string())
         .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
@@ -7176,6 +7340,40 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("container-type".to_string())
         .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
+    properties
+        .entry("column-count".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    properties
+        .entry("column-width".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    properties
+        .entry("column-gap".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
+    properties
+        .entry("column-fill".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("balance".to_string()));
+    properties
+        .entry("column-span".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("column-rule-style".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("column-rule-width".to_string())
+        .or_insert_with(|| ComputedValue::Px(3.0));
+    properties
+        .entry("column-rule-color".to_string())
+        .or_insert_with(|| current_color.clone());
+    for property in ["break-before", "break-after", "break-inside"] {
+        properties
+            .entry(property.to_string())
+            .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    }
+    for property in ["orphans", "widows"] {
+        properties
+            .entry(property.to_string())
+            .or_insert(ComputedValue::Number(2.0));
+    }
     // CSS Sizing: `aspect-ratio` is `auto`, meaning "use the intrinsic ratio".
     properties
         .entry("aspect-ratio".to_string())
@@ -7379,6 +7577,20 @@ fn resolve_current_color_on_color_property(
     }
 }
 
+fn resolve_column_rule_current_color(properties: &mut BTreeMap<String, ComputedValue>) {
+    let Some(current_color) = properties.get("color").cloned() else {
+        return;
+    };
+    let is_current_color = matches!(
+        properties.get("column-rule-color"),
+        Some(ComputedValue::Color(value) | ComputedValue::Keyword(value))
+            if value.eq_ignore_ascii_case("currentcolor")
+    );
+    if is_current_color {
+        properties.insert("column-rule-color".to_string(), current_color);
+    }
+}
+
 fn resolve_inherit_and_unset(
     properties: &mut BTreeMap<String, ComputedValue>,
     parent_style: Option<&ComputedStyle>,
@@ -7450,6 +7662,7 @@ const INHERITED_PROPERTIES: &[&str] = &[
     "list-style-position",
     "list-style-type",
     "overflow-wrap",
+    "orphans",
     "pointer-events",
     "text-align",
     "text-indent",
@@ -7461,6 +7674,7 @@ const INHERITED_PROPERTIES: &[&str] = &[
     "text-underline-offset",
     "word-break",
     "word-spacing",
+    "widows",
 ];
 
 fn is_inherited_property(name: &str) -> bool {

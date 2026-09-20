@@ -348,6 +348,9 @@
     "color", "background-color", "border-color",
     "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
     "outline-color", "text-decoration", "text-decoration-color", "text-decoration-thickness",
+    "columns", "column-count", "column-width", "column-fill", "column-span", "column-gap",
+    "column-rule", "column-rule-color", "column-rule-style", "column-rule-width",
+    "break-before", "break-after", "break-inside", "orphans", "widows",
     "text-underline-position", "text-underline-offset",
     "clip-path", "-webkit-clip-path", "mask", "-webkit-mask",
     "mask-image", "-webkit-mask-image", "mask-mode", "-webkit-mask-mode",
@@ -355,6 +358,10 @@
     "transform-style", "backface-visibility", "mix-blend-mode", "isolation",
     "text-overflow",
   ]);
+  const styleShorthandLonghands = Object.freeze({
+    "columns": ["column-width", "column-count"],
+    "column-rule": ["column-rule-width", "column-rule-style", "column-rule-color"],
+  });
   const customElementConstructionStack = [];
   const customElementDefinitionByConstructor = new Map();
   const customElementRegistryByDocument = new WeakMap();
@@ -2423,6 +2430,18 @@
           value = normalized;
         }
         const decls = parseDecls();
+        const longhands = styleShorthandLonghands[kebab];
+        if (longhands) {
+          const expanded = JSON.parse(__omoikane_expand_style_shorthand(kebab, value));
+          if (expanded.length === 0) return;
+          const replaced = new Set([kebab, ...longhands]);
+          const remaining = decls.filter(d => !replaced.has(d.name));
+          for (const [name, expandedValue] of expanded) {
+            remaining.push({ name, value: expandedValue, priority: priority || "" });
+          }
+          writeDecls(remaining);
+          return;
+        }
         const remaining = decls.filter(d => d.name !== kebab);
         remaining.push({ name: kebab, value, priority: priority || "" });
         writeDecls(remaining);
@@ -2433,7 +2452,9 @@
       // just the first — is removed.
       const removeValue = (kebab) => {
         const decls = parseDecls();
-        const remaining = decls.filter(d => d.name !== kebab);
+        const longhands = styleShorthandLonghands[kebab] || [];
+        const removed = new Set([kebab, ...longhands]);
+        const remaining = decls.filter(d => !removed.has(d.name));
         if (remaining.length === decls.length) return "";
         let old = "";
         for (let i = decls.length - 1; i >= 0; i--) {
@@ -6108,6 +6129,21 @@
         if (normalized === null) return;
         value = normalized;
       }
+      const longhands = styleShorthandLonghands[key];
+      if (longhands) {
+        const expanded = JSON.parse(__omoikane_expand_style_shorthand(key, value));
+        if (expanded.length === 0) return;
+        const replaced = new Set([key, ...longhands]);
+        const values = declarations().filter(declaration => !replaced.has(declaration.name));
+        for (const [expandedName, expandedValue] of expanded) {
+          values.push({
+            name: expandedName,
+            value: expandedValue + (priority ? " !important" : ""),
+          });
+        }
+        write(values, key);
+        return;
+      }
       const values = declarations().filter(declaration => declaration.name !== key);
       values.push({ name: key, value: value + (priority ? " !important" : "") });
       write(values, key);
@@ -6119,7 +6155,10 @@
       for (let index = values.length - 1; index >= 0; index--) {
         if (values[index].name === key) { previous = values[index].value; break; }
       }
-      if (previous !== "") write(values.filter(declaration => declaration.name !== key), key);
+      const longhands = styleShorthandLonghands[key] || [];
+      const removed = new Set([key, ...longhands]);
+      const remaining = values.filter(declaration => !removed.has(declaration.name));
+      if (remaining.length !== values.length) write(remaining, key);
       return previous;
     };
     const target = {

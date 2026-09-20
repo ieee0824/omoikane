@@ -90,6 +90,86 @@ fn opaque_blend_replaces_the_destination_pixel() {
     assert_eq!(pixel, [201, 177, 153, 255]);
 }
 
+#[test]
+fn multicol_column_rule_paints_between_columns() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:white}div{width:220px;columns:2;column-gap:20px;\
+         column-rule:4px solid red;font-size:10px;line-height:20px}</style>\
+         <div>one<br>two<br>three<br>four</div>",
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 240.0,
+            height: 60.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(canvas.pixel(110, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(106, 10), Some(Color::rgb(255, 255, 255)));
+}
+
+#[test]
+fn vertical_multicol_paints_a_horizontal_column_rule() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:white}div{writing-mode:vertical-rl;width:40px;\
+         height:220px;columns:2;column-gap:20px;column-rule:4px solid red;\
+         font-size:10px;line-height:20px}</style><div>one<br>two<br>three<br>four</div>",
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 60.0,
+            height: 240.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(canvas.pixel(10, 110), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(10, 106), Some(Color::rgb(255, 255, 255)));
+}
+
+#[test]
+fn multicol_fixed_fixture_paints_columns_spanner_and_rules() {
+    let html = include_str!("../../tests/fixtures/anonymized-multicol/basic.html");
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 320.0,
+        },
+    )
+    .unwrap();
+
+    if let Some(directory) = std::env::var_os("OMOIKANE_BROWSER_REPORT_DIR") {
+        let directory = PathBuf::from(directory);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("anonymized-multicol-basic.actual.png"),
+            canvas.encode_png(),
+        )
+        .unwrap();
+    }
+
+    // The first balanced fragment and the full-width spanner keep their
+    // fixture colors, while rules occupy the centers of the two column gaps.
+    assert_eq!(canvas.pixel(20, 20), Some(Color::rgb(40, 120, 208)));
+    assert_eq!(canvas.pixel(140, 20), Some(Color::rgb(224, 120, 40)));
+    assert_eq!(canvas.pixel(20, 40), Some(Color::rgb(48, 160, 80)));
+    assert_eq!(canvas.pixel(20, 60), Some(Color::rgb(40, 120, 208)));
+    assert_eq!(canvas.pixel(140, 60), Some(Color::rgb(224, 120, 40)));
+    assert_eq!(canvas.pixel(126, 20), Some(Color::rgb(32, 32, 32)));
+    assert_eq!(canvas.pixel(252, 20), Some(Color::rgb(32, 32, 32)));
+}
+
 fn load_cjk_fallback_test_fonts() -> Option<Vec<std::sync::Arc<crate::font::Font>>> {
     let Some(primary_path) = crate::font::find_system_font("sans-serif") else {
         eprintln!("Skipping CJK fallback test: no primary sans-serif system font was found");
@@ -1328,6 +1408,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
         paint_scroll: None,
+        multicol: None,
         lines: Vec::new(),
         children: vec![
             LayoutBox {
@@ -1347,6 +1428,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
                 paint_scroll: None,
+                multicol: None,
                 lines: Vec::new(),
                 children: Vec::new(),
                 marker: None,
@@ -1368,6 +1450,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
                 paint_scroll: None,
+                multicol: None,
                 lines: vec![LineBox {
                     rect: Rect {
                         x: 0.0,
@@ -1495,6 +1578,7 @@ fn float_grandchild_paints_above_block_uncle() {
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
         paint_scroll: None,
+        multicol: None,
         lines: Vec::new(),
         children: vec![
             LayoutBox {
@@ -1514,6 +1598,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
                 paint_scroll: None,
+                multicol: None,
                 lines: Vec::new(),
                 children: vec![LayoutBox {
                     node: floated,
@@ -1532,6 +1617,7 @@ fn float_grandchild_paints_above_block_uncle() {
                     transform: crate::css::AffineTransform::identity(),
                     needs_scroll_translation: false,
                     paint_scroll: None,
+                    multicol: None,
                     lines: Vec::new(),
                     children: Vec::new(),
                     marker: None,
@@ -1555,6 +1641,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
                 paint_scroll: None,
+                multicol: None,
                 lines: Vec::new(),
                 children: Vec::new(),
                 marker: None,
@@ -9994,6 +10081,7 @@ fn form_control_label_uses_web_font_variant() {
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
         paint_scroll: None,
+        multicol: None,
         lines: vec![LineBox {
             rect: viewport,
             baseline: 12.8,
@@ -10109,6 +10197,7 @@ fn focused_text_control_paints_selection_and_caret() {
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
         paint_scroll: None,
+        multicol: None,
         lines: vec![LineBox {
             rect: viewport,
             baseline: 12.8,

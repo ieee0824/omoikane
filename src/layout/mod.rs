@@ -23,6 +23,7 @@ mod flex;
 mod grid;
 mod inline;
 mod margins;
+mod multicol;
 mod table;
 
 use flex::{is_flex_container, layout_flex_container};
@@ -813,6 +814,8 @@ pub struct LayoutBox {
     /// Pre-translation scroll geometry consumed by paint-only features such as
     /// `background-attachment: local`. Kept separate from CSSOM layout data.
     pub(crate) paint_scroll: Option<PaintScrollGeometry>,
+    /// Used multi-column overflow and the physical centers of column rules.
+    pub(crate) multicol: Option<MultiColumnLayout>,
     pub lines: Vec<LineBox>,
     pub children: Vec<LayoutBox>,
     /// List marker for `display: list-item` elements.
@@ -823,6 +826,12 @@ pub struct LayoutBox {
 pub(crate) struct PaintScrollGeometry {
     pub offset: (f32, f32),
     pub overflow_size: (f32, f32),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MultiColumnLayout {
+    pub(crate) overflow: Rect,
+    pub(crate) rules: Vec<Rect>,
 }
 
 impl LayoutBox {
@@ -857,6 +866,10 @@ impl LayoutBox {
         let padding_bottom_edge = content.y + content.height + padding.bottom;
         let mut max_right = padding_right_edge;
         let mut max_bottom = padding_bottom_edge;
+        if let Some(multicol) = &self.multicol {
+            max_right = max_right.max(multicol.overflow.x + multicol.overflow.width);
+            max_bottom = max_bottom.max(multicol.overflow.y + multicol.overflow.height);
+        }
         expand_line_overflow(&self.lines, &mut max_right, &mut max_bottom, true, true);
         expand_scrollable_overflow(&self.children, &mut max_right, &mut max_bottom);
         // Once descendant content crosses the padding-box end edge, the
@@ -1384,6 +1397,7 @@ fn layout_document(
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
         paint_scroll: None,
+        multicol: None,
         lines: Vec::new(),
         children,
         marker: None,
@@ -1848,6 +1862,7 @@ fn layout_element_with_cell(
                 transform: AffineTransform::identity(),
                 needs_scroll_translation: false,
                 paint_scroll: None,
+                multicol: None,
                 lines,
                 children: Vec::new(),
                 marker: None,
@@ -1920,6 +1935,7 @@ fn layout_element_with_cell(
                 transform: AffineTransform::identity(),
                 needs_scroll_translation: false,
                 paint_scroll: None,
+                multicol: None,
                 lines,
                 children: Vec::new(),
                 marker: None,
@@ -2001,6 +2017,7 @@ fn layout_element_with_cell(
         mut positioned_children,
         margin_info,
         child_shifts,
+        multicol,
     } = layout_block_children(
         node,
         resolver,
@@ -2107,6 +2124,7 @@ fn layout_element_with_cell(
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
         paint_scroll: None,
+        multicol,
         lines,
         children,
         marker,
@@ -2123,6 +2141,7 @@ struct BlockChildrenResult {
     positioned_children: Vec<(NodeHandle, ComputedStyle, Rect)>,
     margin_info: Option<margins::Info>,
     child_shifts: Vec<(usize, f32)>,
+    multicol: Option<MultiColumnLayout>,
 }
 
 /// Lays out block-level children, returning in-flow children, lines,
@@ -2142,6 +2161,23 @@ fn layout_block_children(
     positioned_ancestor: Option<BoxDimensions>,
     used_height: Option<UsedHeight>,
 ) -> BlockChildrenResult {
+    if multicol::is_multicol_container(style) {
+        return multicol::layout_multicol_children(
+            node,
+            resolver,
+            style,
+            padding,
+            border,
+            margin,
+            x,
+            y,
+            width,
+            containing_height,
+            viewport,
+            positioned_ancestor,
+            used_height,
+        );
+    }
     if is_vertical_writing(style) {
         return layout_vertical_block_children(
             node,
@@ -2337,6 +2373,7 @@ fn layout_vertical_block_children(
         positioned_children,
         margin_info: None,
         child_shifts: Vec::new(),
+        multicol: None,
     }
 }
 
@@ -3686,6 +3723,14 @@ fn translate_contents_in_context(
 ) {
     if (dx, dy) == (0.0, 0.0) {
         return;
+    }
+    if let Some(multicol) = &mut layout.multicol {
+        multicol.overflow.x += dx;
+        multicol.overflow.y += dy;
+        for rule in &mut multicol.rules {
+            rule.x += dx;
+            rule.y += dy;
+        }
     }
     for line in &mut layout.lines {
         line.rect.x += dx;

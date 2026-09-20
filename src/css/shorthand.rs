@@ -48,6 +48,8 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "transition" => super::expand_transition_shorthand(value, important),
         "font" => super::font_shorthand::expand_value(value, important),
         "outline" => expand_outline_shorthand(value, important),
+        "columns" => expand_columns_shorthand(value, important),
+        "column-rule" => expand_column_rule_shorthand(value, important),
         "grid-column" | "grid-row" => expand_grid_axis_shorthand(name, value, important),
         "grid-area" => expand_grid_area_shorthand(value, important),
         "grid-template" => expand_grid_template_shorthand(value, important),
@@ -104,6 +106,8 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "transition"
             | "font"
             | "outline"
+            | "columns"
+            | "column-rule"
             | "grid-column"
             | "grid-row"
             | "grid-area"
@@ -295,6 +299,18 @@ fn expand_css_wide_shorthand(
             .into_iter()
             .map(str::to_string)
             .collect(),
+        "columns" => ["column-width", "column-count"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "column-rule" => [
+            "column-rule-width",
+            "column-rule-style",
+            "column-rule-color",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
         "grid-column" | "grid-row" => ["start", "end"]
             .into_iter()
             .map(|edge| format!("{name}-{edge}"))
@@ -2364,6 +2380,128 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
         },
         Declaration {
             name: "outline-color".to_string(),
+            value: color.unwrap_or_else(|| Value::Keyword("currentcolor".to_string())),
+            important,
+        },
+    ]
+}
+
+/// Expand `columns` into its width and count longhands.
+///
+/// The grammar is `<column-width> || <column-count>`; `auto` is ambiguous but
+/// has the same initial meaning for either omitted component. One or two
+/// `auto` components therefore reset both longhands.
+fn expand_columns_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+    if values.is_empty() || values.len() > 2 {
+        return Vec::new();
+    }
+
+    let mut width = None;
+    let mut count = None;
+    let mut auto_count = 0usize;
+    for item in values {
+        match &item {
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") => {
+                auto_count += 1;
+                if auto_count > 2 {
+                    return Vec::new();
+                }
+            }
+            Value::Length(number, _) if *number >= 0.0 && width.is_none() => {
+                width = Some(item);
+            }
+            Value::Number(number) if *number == 0.0 && width.is_none() => {
+                width = Some(item);
+            }
+            Value::Number(number)
+                if number.is_finite()
+                    && *number >= 1.0
+                    && number.fract() == 0.0
+                    && count.is_none() =>
+            {
+                count = Some(item);
+            }
+            _ => return Vec::new(),
+        }
+    }
+
+    vec![
+        Declaration {
+            name: "column-width".to_string(),
+            value: width.unwrap_or_else(|| Value::Keyword("auto".to_string())),
+            important,
+        },
+        Declaration {
+            name: "column-count".to_string(),
+            value: count.unwrap_or_else(|| Value::Keyword("auto".to_string())),
+            important,
+        },
+    ]
+}
+
+/// Expand `column-rule` using the same component grammar as a border side.
+fn expand_column_rule_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+    if values.is_empty() || values.len() > 3 {
+        return Vec::new();
+    }
+
+    let mut width = None;
+    let mut style = None;
+    let mut color = None;
+    for item in values {
+        let width_keyword = matches!(
+            &item,
+            Value::Keyword(keyword)
+                if matches!(keyword.to_ascii_lowercase().as_str(), "thin" | "medium" | "thick")
+        );
+        let style_keyword = matches!(
+            &item,
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "none"
+                        | "hidden"
+                        | "dotted"
+                        | "dashed"
+                        | "solid"
+                        | "double"
+                        | "groove"
+                        | "ridge"
+                        | "inset"
+                        | "outset"
+                )
+        );
+        match &item {
+            Value::Length(number, _) if *number >= 0.0 && width.is_none() => width = Some(item),
+            Value::Number(number) if *number == 0.0 && width.is_none() => width = Some(item),
+            Value::Keyword(_) if width_keyword && width.is_none() => width = Some(item),
+            Value::Keyword(_) if style_keyword && style.is_none() => style = Some(item),
+            _ if color.is_none() && super::style::is_valid_color_value(&item) => color = Some(item),
+            _ => return Vec::new(),
+        }
+    }
+
+    vec![
+        Declaration {
+            name: "column-rule-width".to_string(),
+            value: width.unwrap_or_else(|| Value::Keyword("medium".to_string())),
+            important,
+        },
+        Declaration {
+            name: "column-rule-style".to_string(),
+            value: style.unwrap_or_else(|| Value::Keyword("none".to_string())),
+            important,
+        },
+        Declaration {
+            name: "column-rule-color".to_string(),
             value: color.unwrap_or_else(|| Value::Keyword("currentcolor".to_string())),
             important,
         },
