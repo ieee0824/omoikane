@@ -8,6 +8,8 @@
   const HTML_NS = "http://www.w3.org/1999/xhtml";
   const XML_NS = "http://www.w3.org/XML/1998/namespace";
   const versions = new WeakMap();
+  const iteratorDocuments = new WeakSet();
+  let hasIteratorDocuments = false;
   const installMutationHook = globalThis.__omoikane_install_xpath_mutation_hook;
 
   function ownerDocument(node) {
@@ -17,8 +19,14 @@
   }
 
   installMutationHook(target => {
+    // Most pages never create an XPath iterator. Keep their DOM mutation path
+    // unchanged: resolving ownerDocument for every mutation is only necessary
+    // once an iterator exists and can become invalid.
+    if (!hasIteratorDocuments) return;
     const doc = ownerDocument(target);
-    if (doc) versions.set(doc, (versions.get(doc) || 0) + 1);
+    if (doc && iteratorDocuments.has(doc)) {
+      versions.set(doc, (versions.get(doc) || 0) + 1);
+    }
   });
 
   function namespaceElement(node) {
@@ -554,6 +562,10 @@
       this._index = 0;
       this._document = doc;
       this._version = doc ? versions.get(doc) || 0 : 0;
+      if ((type === 4 || type === 5) && doc) {
+        iteratorDocuments.add(doc);
+        hasIteratorDocuments = true;
+      }
     }
     get numberValue() { if (this.resultType !== 1) throw new TypeError("Result is not a number"); return this._value; }
     get stringValue() { if (this.resultType !== 2) throw new TypeError("Result is not a string"); return this._value; }
