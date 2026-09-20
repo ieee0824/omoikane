@@ -74,6 +74,8 @@ pub(super) struct InlineLayoutResult {
 
 #[derive(Clone, Copy)]
 struct InlineLayoutContext {
+    start_x: f32,
+    start_y: f32,
     available_width: f32,
     containing_height: f32,
     viewport: super::LayoutViewport,
@@ -97,6 +99,8 @@ pub(super) fn layout_inline_nodes(
     allow_atomic_boxes: bool,
 ) -> InlineLayoutResult {
     let context = InlineLayoutContext {
+        start_x,
+        start_y,
         available_width,
         containing_height,
         viewport,
@@ -164,6 +168,8 @@ pub(super) fn layout_vertical_inline_nodes(
     positioned_ancestor: Option<BoxDimensions>,
 ) -> InlineLayoutResult {
     let context = InlineLayoutContext {
+        start_x,
+        start_y,
         available_width: containing_width,
         containing_height: available_height,
         viewport,
@@ -780,8 +786,8 @@ fn collect_element_inline_segments(
             super::shrink_to_fit_layout_width(node, resolver, available_width)
         };
         let containing = Rect {
-            x: 0.0,
-            y: 0.0,
+            x: context.start_x,
+            y: context.start_y,
             width: containing_width,
             height: context.containing_height,
         };

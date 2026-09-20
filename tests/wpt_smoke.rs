@@ -945,7 +945,7 @@ fn selected_wpt_testharness_cases_match_expectations() {
         // opportunities after load so resize/scroll events queued for a frame
         // can settle without turning a self-rescheduling callback into an
         // unbounded test run.
-        runtime.run_animation_frames(16, 16);
+        runtime.run_animation_frames(32, 16);
         runtime.run_jobs().expect("drain WPT jobs");
         errors.extend(runtime.take_task_errors());
         let complete = js_bool(&mut runtime, "globalThis.__wpt_complete === true");

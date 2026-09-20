@@ -50,6 +50,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "outline" => expand_outline_shorthand(value, important),
         "columns" => expand_columns_shorthand(value, important),
         "column-rule" => expand_column_rule_shorthand(value, important),
+        "contain-intrinsic-size" => expand_contain_intrinsic_size(value, important),
         "grid-column" | "grid-row" => expand_grid_axis_shorthand(name, value, important),
         "grid-area" => expand_grid_area_shorthand(value, important),
         "grid-template" => expand_grid_template_shorthand(value, important),
@@ -108,6 +109,7 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "outline"
             | "columns"
             | "column-rule"
+            | "contain-intrinsic-size"
             | "grid-column"
             | "grid-row"
             | "grid-area"
@@ -311,6 +313,10 @@ fn expand_css_wide_shorthand(
         .into_iter()
         .map(str::to_string)
         .collect(),
+        "contain-intrinsic-size" => ["contain-intrinsic-width", "contain-intrinsic-height"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         "grid-column" | "grid-row" => ["start", "end"]
             .into_iter()
             .map(|edge| format!("{name}-{edge}"))
@@ -357,6 +363,79 @@ fn expand_css_wide_shorthand(
             })
             .collect(),
     )
+}
+
+/// Expands `contain-intrinsic-size` into its physical width/height longhands.
+///
+/// Each axis is `auto? [ none | <length> ]`, so `auto 10px` is one axis while
+/// `10px none` is two. Invalid input is retained under the shorthand name and
+/// rejected by the property grammar after `var()` substitution.
+fn expand_contain_intrinsic_size(value: Value, important: bool) -> Vec<Declaration> {
+    let original = value.clone();
+    let values = match value {
+        Value::List(values) => values,
+        value => vec![value],
+    };
+
+    fn scalar(value: &Value) -> bool {
+        matches!(value, Value::Length(number, _) if number.is_finite() && *number >= 0.0)
+            || matches!(value, Value::Number(number) if *number == 0.0)
+            || matches!(value, Value::Function { name, .. }
+                if name.eq_ignore_ascii_case("calc") || name.eq_ignore_ascii_case("clamp"))
+            || matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none"))
+    }
+
+    fn axis(values: &[Value], start: usize) -> Option<(Value, usize)> {
+        let first = values.get(start)?;
+        if matches!(first, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto")) {
+            let fallback = values.get(start + 1)?;
+            if !scalar(fallback) {
+                return None;
+            }
+            return Some((Value::List(vec![first.clone(), fallback.clone()]), 2));
+        }
+        scalar(first).then(|| (first.clone(), 1))
+    }
+
+    let Some((width, used)) = axis(&values, 0) else {
+        return vec![Declaration {
+            name: "contain-intrinsic-size".to_string(),
+            value: original,
+            important,
+        }];
+    };
+    let height = if used == values.len() {
+        width.clone()
+    } else {
+        let Some((height, height_used)) = axis(&values, used) else {
+            return vec![Declaration {
+                name: "contain-intrinsic-size".to_string(),
+                value: original,
+                important,
+            }];
+        };
+        if used + height_used != values.len() {
+            return vec![Declaration {
+                name: "contain-intrinsic-size".to_string(),
+                value: original,
+                important,
+            }];
+        }
+        height
+    };
+
+    vec![
+        Declaration {
+            name: "contain-intrinsic-width".to_string(),
+            value: width,
+            important,
+        },
+        Declaration {
+            name: "contain-intrinsic-height".to_string(),
+            value: height,
+            important,
+        },
+    ]
 }
 
 fn expand_background_position_shorthand(value: Value, important: bool) -> Vec<Declaration> {

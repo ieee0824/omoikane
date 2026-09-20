@@ -513,6 +513,7 @@ pub(super) fn layout_grid_container(
         z_index: z_index(&style),
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
         paint_scroll: None,
         multicol: None,
         lines: Vec::new(),

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::css::{ComputedValue, Origin, parse_stylesheet};
 use crate::dom::ShadowRootMode;
 use crate::layout::*;
@@ -9334,8 +9336,10 @@ fn resolve_style_for_test(css: &str, tag: &str) -> ComputedStyle {
 
 #[test]
 fn resolve_content_height_uses_auto_when_no_explicit_height() {
+    let node = NodeHandle::element("div");
     let style = ComputedStyle::default();
     let height = resolve_content_height(
+        &node,
         &style,
         0.0,
         EdgeSizes::default(),
@@ -9348,8 +9352,10 @@ fn resolve_content_height_uses_auto_when_no_explicit_height() {
 
 #[test]
 fn resolve_content_height_uses_explicit_height() {
+    let node = NodeHandle::element("div");
     let style = resolve_style_for_test("div { height: 100px; }", "div");
     let height = resolve_content_height(
+        &node,
         &style,
         500.0,
         EdgeSizes::default(),
@@ -9362,8 +9368,10 @@ fn resolve_content_height_uses_explicit_height() {
 
 #[test]
 fn resolve_content_height_clamps_to_min_height() {
+    let node = NodeHandle::element("div");
     let style = resolve_style_for_test("div { min-height: 80px; }", "div");
     let height = resolve_content_height(
+        &node,
         &style,
         500.0,
         EdgeSizes::default(),
@@ -9376,8 +9384,10 @@ fn resolve_content_height_clamps_to_min_height() {
 
 #[test]
 fn resolve_content_height_clamps_to_max_height() {
+    let node = NodeHandle::element("div");
     let style = resolve_style_for_test("div { max-height: 20px; }", "div");
     let height = resolve_content_height(
+        &node,
         &style,
         500.0,
         EdgeSizes::default(),
@@ -9390,6 +9400,7 @@ fn resolve_content_height_clamps_to_max_height() {
 
 #[test]
 fn resolve_content_height_border_box_subtracts_padding_and_border() {
+    let node = NodeHandle::element("div");
     let style = resolve_style_for_test("div { height: 100px; box-sizing: border-box; }", "div");
     let padding = EdgeSizes {
         top: 10.0,
@@ -9403,7 +9414,7 @@ fn resolve_content_height_border_box_subtracts_padding_and_border() {
         left: 0.0,
         right: 0.0,
     };
-    let height = resolve_content_height(&style, 500.0, padding, border, 0.0, 0.0);
+    let height = resolve_content_height(&node, &style, 500.0, padding, border, 0.0, 0.0);
     assert_eq!(height, 70.0);
 }
 
@@ -10294,4 +10305,236 @@ fn html_br_forces_inline_break_even_when_literal_newlines_collapse() {
             "br must not create full-width block boxes"
         );
     }
+}
+
+#[test]
+fn content_visibility_hidden_keeps_principal_box_and_forced_geometry() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let hidden = NodeHandle::element("div");
+    hidden.set_attribute("id", "hidden");
+    let child = NodeHandle::element("span");
+    child.append_child(NodeHandle::text("hidden text"));
+    document.append_child(body.clone());
+    body.append_child(hidden.clone());
+    hidden.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             #hidden { content-visibility: hidden; contain-intrinsic-size: 120px 40px; \
+                       border: 2px solid; } \
+             #hidden span { display: block; height: 10px; }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 200.0,
+    };
+    let (layout, report) = layout_tree_with_content_visibility(
+        &document,
+        &mut resolver,
+        viewport,
+        ContentVisibilityLayoutInput {
+            visible_rect: viewport,
+            ..ContentVisibilityLayoutInput::default()
+        },
+    );
+    let layout = layout.unwrap();
+    let hidden_box = find_layout_box(&layout, &hidden).unwrap();
+    assert_eq!(hidden_box.dimensions.content.height, 40.0);
+    assert!(find_layout_box(&layout, &child).is_none());
+    assert!(report.skipped_nodes.contains(&hidden.identity()));
+
+    let (forced, report) = layout_tree_with_content_visibility(
+        &document,
+        &mut resolver,
+        viewport,
+        ContentVisibilityLayoutInput {
+            visible_rect: viewport,
+            forced_nodes: HashSet::from([hidden.identity()]),
+            ..ContentVisibilityLayoutInput::default()
+        },
+    );
+    assert!(find_layout_box(&forced.unwrap(), &child).is_some());
+    assert!(
+        report.skipped_nodes.contains(&hidden.identity()),
+        "forced layout must not make hidden contents paint-visible"
+    );
+}
+
+#[test]
+fn content_visibility_auto_reenters_and_remembers_its_size() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let spacer = NodeHandle::element("div");
+    spacer.set_attribute("id", "spacer");
+    let automatic = NodeHandle::element("section");
+    automatic.set_attribute("id", "automatic");
+    let child = NodeHandle::element("div");
+    child.set_attribute("id", "child");
+    document.append_child(body.clone());
+    body.append_child(spacer);
+    body.append_child(automatic.clone());
+    automatic.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } #spacer { height: 1000px; } \
+             #automatic { content-visibility: auto; contain-intrinsic-size: auto 30px; } \
+             #child { height: 80px; }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 100.0,
+    };
+    let (offscreen, offscreen_report) = layout_tree_with_content_visibility(
+        &document,
+        &mut resolver,
+        Rect {
+            height: 1200.0,
+            ..viewport
+        },
+        ContentVisibilityLayoutInput {
+            visible_rect: viewport,
+            ..ContentVisibilityLayoutInput::default()
+        },
+    );
+    let offscreen = offscreen.unwrap();
+    assert!(find_layout_box(&offscreen, &child).is_none());
+    assert_eq!(
+        find_layout_box(&offscreen, &automatic)
+            .unwrap()
+            .dimensions
+            .content
+            .height,
+        30.0
+    );
+    assert!(
+        offscreen_report
+            .skipped_nodes
+            .contains(&automatic.identity())
+    );
+
+    let visible_rect = Rect {
+        y: 950.0,
+        ..viewport
+    };
+    let (onscreen, onscreen_report) = layout_tree_with_content_visibility(
+        &document,
+        &mut resolver,
+        Rect {
+            height: 1200.0,
+            ..viewport
+        },
+        ContentVisibilityLayoutInput {
+            visible_rect,
+            ..ContentVisibilityLayoutInput::default()
+        },
+    );
+    let onscreen = onscreen.unwrap();
+    assert!(find_layout_box(&onscreen, &child).is_some());
+    assert_eq!(
+        onscreen_report
+            .remembered_sizes
+            .get(&automatic.identity())
+            .copied(),
+        Some((320.0, 80.0))
+    );
+
+    let (offscreen_again, _) = layout_tree_with_content_visibility(
+        &document,
+        &mut resolver,
+        Rect {
+            height: 1200.0,
+            ..viewport
+        },
+        ContentVisibilityLayoutInput {
+            visible_rect: viewport,
+            remembered_sizes: onscreen_report.remembered_sizes,
+            ..ContentVisibilityLayoutInput::default()
+        },
+    );
+    assert_eq!(
+        find_layout_box(&offscreen_again.unwrap(), &automatic)
+            .unwrap()
+            .dimensions
+            .content
+            .height,
+        80.0
+    );
+}
+
+#[test]
+fn skipped_content_visibility_uses_intrinsic_inline_size_for_shrink_to_fit_boxes() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let spacer = NodeHandle::element("div");
+    spacer.set_attribute("id", "spacer");
+    let hidden = NodeHandle::element("span");
+    hidden.set_attribute("id", "hidden");
+    let automatic = NodeHandle::element("span");
+    automatic.set_attribute("id", "automatic");
+    let hidden_child = NodeHandle::element("span");
+    hidden_child.append_child(NodeHandle::text("contents wider than the placeholder"));
+    let auto_child = NodeHandle::element("span");
+    auto_child.append_child(NodeHandle::text("contents wider than the placeholder"));
+    document.append_child(body.clone());
+    body.append_child(hidden.clone());
+    hidden.append_child(hidden_child);
+    body.append_child(spacer);
+    body.append_child(automatic.clone());
+    automatic.append_child(auto_child);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             #hidden { display: inline-block; content-visibility: hidden; \
+                       contain-intrinsic-size: 45px 20px; } \
+             #spacer { display: block; height: 1000px; } \
+             #automatic { display: inline-block; content-visibility: auto; \
+                          contain-intrinsic-size: 55px 25px; }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 100.0,
+    };
+    let (layout, report) = layout_tree_with_content_visibility(
+        &document,
+        &mut resolver,
+        Rect {
+            height: 1200.0,
+            ..viewport
+        },
+        ContentVisibilityLayoutInput {
+            visible_rect: viewport,
+            ..ContentVisibilityLayoutInput::default()
+        },
+    );
+    let layout = layout.unwrap();
+    let hidden_box = find_layout_box(&layout, &hidden).unwrap();
+    let automatic_box = find_layout_box(&layout, &automatic).unwrap();
+    assert_eq!(hidden_box.dimensions.content.width, 45.0);
+    assert_eq!(hidden_box.dimensions.content.height, 20.0);
+    assert_eq!(automatic_box.dimensions.content.width, 55.0);
+    assert_eq!(automatic_box.dimensions.content.height, 25.0);
+    assert!(report.skipped_nodes.contains(&hidden.identity()));
+    assert!(report.skipped_nodes.contains(&automatic.identity()));
 }

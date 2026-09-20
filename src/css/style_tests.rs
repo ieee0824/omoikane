@@ -1418,6 +1418,94 @@ fn contain_computes_core_keywords_and_defaults_to_none() {
 }
 
 #[test]
+fn content_visibility_and_intrinsic_size_validate_their_grammars() {
+    for value in ["visible", "hidden", "auto"] {
+        assert!(supports_declaration("content-visibility", value), "{value}");
+    }
+    for value in [
+        "none",
+        "24px",
+        "auto 24px",
+        "24px 48px",
+        "auto 24px auto 48px",
+    ] {
+        assert!(
+            supports_declaration("contain-intrinsic-size", value),
+            "{value}"
+        );
+    }
+    for value in ["none", "0", "auto 12px"] {
+        assert!(
+            supports_declaration("contain-intrinsic-inline-size", value),
+            "{value}"
+        );
+    }
+
+    assert!(!supports_declaration("content-visibility", "collapse"));
+    for value in ["auto", "-1px", "10%", "1px 2px 3px"] {
+        assert!(
+            !supports_declaration("contain-intrinsic-size", value),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn contain_intrinsic_size_expands_axes_and_maps_logical_longhands() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "content-visibility: auto; \
+         contain-intrinsic-size: auto 10px auto 20px; \
+         contain-intrinsic-inline-size: 30px",
+    );
+    let style = StyleResolver::new().computed_style(&element);
+
+    assert_eq!(
+        style.get("content-visibility"),
+        Some(&ComputedValue::Keyword("auto".to_string()))
+    );
+    assert_eq!(
+        style.get("contain-intrinsic-width"),
+        Some(&ComputedValue::Px(30.0))
+    );
+    assert_eq!(
+        style.get("contain-intrinsic-height"),
+        Some(&ComputedValue::Keyword("auto 20px".to_string()))
+    );
+    assert_eq!(
+        style.get("contain-intrinsic-inline-size"),
+        Some(&ComputedValue::Px(30.0))
+    );
+    assert_eq!(
+        style.get("contain-intrinsic-size"),
+        Some(&ComputedValue::Keyword("30px auto 20px".to_string()))
+    );
+}
+
+#[test]
+fn content_visibility_and_intrinsic_size_have_specified_initial_values() {
+    let style = StyleResolver::new().computed_style(&NodeHandle::element("div"));
+    assert_eq!(
+        style.get("content-visibility"),
+        Some(&ComputedValue::Keyword("visible".to_string()))
+    );
+    for property in [
+        "contain-intrinsic-width",
+        "contain-intrinsic-height",
+        "contain-intrinsic-inline-size",
+        "contain-intrinsic-block-size",
+        "contain-intrinsic-size",
+    ] {
+        assert_eq!(
+            style.get(property),
+            Some(&ComputedValue::Keyword("none".to_string())),
+            "{property}"
+        );
+    }
+}
+
+#[test]
 fn expands_grid_placement_shorthands_and_keeps_longhands() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

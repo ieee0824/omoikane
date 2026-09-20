@@ -1202,6 +1202,14 @@ struct HostState {
     /// participate in layout (layout metrics for sub-document nodes report
     /// zero); only computed styles are document-scoped here.
     layout_root: Option<LayoutBox>,
+    /// Results and persistent inputs for `content-visibility` layout.
+    content_visibility_auto_nodes: HashSet<usize>,
+    content_visibility_skipped_nodes: HashSet<usize>,
+    content_visibility_remembered_sizes: HashMap<usize, (f32, f32)>,
+    content_visibility_forced_nodes: HashSet<usize>,
+    content_visibility_forced_in_layout: HashSet<usize>,
+    content_visibility_focus_nodes: HashSet<usize>,
+    content_visibility_selection_nodes: HashSet<usize>,
     style_generation: u64,
     layout_generation: u64,
     paint_generation: u64,
@@ -1864,6 +1872,13 @@ impl HostState {
             document_styles,
             font_loading: Default::default(),
             layout_root: None,
+            content_visibility_auto_nodes: HashSet::new(),
+            content_visibility_skipped_nodes: HashSet::new(),
+            content_visibility_remembered_sizes: HashMap::new(),
+            content_visibility_forced_nodes: HashSet::new(),
+            content_visibility_forced_in_layout: HashSet::new(),
+            content_visibility_focus_nodes: HashSet::new(),
+            content_visibility_selection_nodes: HashSet::new(),
             style_generation: 0,
             layout_generation: 0,
             paint_generation: 0,
@@ -3320,25 +3335,64 @@ impl HostState {
             self.base_url_for_document(document_id).as_ref(),
         );
         let animation_time = self.event_loop.rendering_time_ms() as u64;
+        let relevant_nodes = self
+            .content_visibility_focus_nodes
+            .union(&self.content_visibility_selection_nodes)
+            .copied()
+            .collect();
+        let forced_in_layout = self.content_visibility_forced_nodes.clone();
+        let content_visibility_input = crate::layout::ContentVisibilityLayoutInput {
+            visible_rect: Rect {
+                x: self.window_scroll.0,
+                y: self.window_scroll.1,
+                width: viewport.width,
+                height: viewport.height,
+            },
+            forced_nodes: forced_in_layout.clone(),
+            relevant_nodes,
+            remembered_sizes: self.content_visibility_remembered_sizes.clone(),
+        };
         // Compute into a local so the `document_styles` borrow is released
         // before assigning `self.layout_root` (a different field).
-        let layout = self
+        let (layout, content_visibility_report) = self
             .document_styles
             .get_mut(&document_id)
             .and_then(|entry| {
                 let resolver = entry.resolver.as_mut()?;
-                crate::layout::with_layout_fonts(
+                Some(crate::layout::with_layout_fonts(
                     crate::paint::text::load_text_fonts(),
                     Some(entry.web_fonts.clone()),
                     || {
                         crate::layout::with_image_base_url(base, || {
                             crate::layout::with_image_animation_time(animation_time, || {
-                                crate::layout::layout_tree(&document, resolver, viewport)
+                                crate::layout::layout_tree_with_content_visibility(
+                                    &document,
+                                    resolver,
+                                    viewport,
+                                    content_visibility_input,
+                                )
                             })
                         })
                     },
-                )
-            });
+                ))
+            })
+            .unwrap_or_default();
+        self.content_visibility_auto_nodes = content_visibility_report.auto_nodes;
+        self.content_visibility_skipped_nodes = content_visibility_report.skipped_nodes;
+        self.content_visibility_remembered_sizes
+            .retain(|node, _| self.nodes.contains_key(node));
+        for node in &content_visibility_report.visited_nodes {
+            if !content_visibility_report
+                .auto_intrinsic_nodes
+                .contains(node)
+            {
+                self.content_visibility_remembered_sizes.remove(node);
+            }
+        }
+        self.content_visibility_remembered_sizes
+            .extend(content_visibility_report.remembered_sizes);
+        self.content_visibility_forced_in_layout = forced_in_layout;
+        self.content_visibility_forced_nodes.clear();
         // This is a generation of rebuild attempts, not only successful trees:
         // a failed rebuild must not leave an older adjusted tree reusable.
         self.layout_generation = self.layout_generation.saturating_add(1);
@@ -3372,6 +3426,121 @@ impl HostState {
         for node_id in clamped_targets {
             self.queue_scroll_target(node_id);
         }
+    }
+
+    fn content_visibility_ancestor_ids(node: &NodeHandle) -> HashSet<usize> {
+        let mut result = HashSet::new();
+        let mut current = Some(node.clone());
+        while let Some(candidate) = current {
+            result.insert(candidate.identity());
+            current = candidate.assigned_slot().or_else(|| {
+                candidate.parent_node().and_then(|parent| {
+                    if parent.node_type() == NodeType::Element {
+                        Some(parent)
+                    } else {
+                        parent.shadow_host()
+                    }
+                })
+            });
+        }
+        result
+    }
+
+    fn replace_content_visibility_relevance(
+        &mut self,
+        focus: Option<HashSet<usize>>,
+        selection: Option<HashSet<usize>>,
+    ) {
+        let mut changed = false;
+        if let Some(focus) = focus
+            && self.content_visibility_focus_nodes != focus
+        {
+            self.content_visibility_focus_nodes = focus;
+            changed = true;
+        }
+        if let Some(selection) = selection
+            && self.content_visibility_selection_nodes != selection
+        {
+            self.content_visibility_selection_nodes = selection;
+            changed = true;
+        }
+        if changed {
+            self.capture_scroll_offsets_before_layout();
+            self.layout_root = None;
+            self.invalidate_paint_cache();
+        }
+    }
+
+    fn set_content_visibility_focus(&mut self, node: Option<&NodeHandle>) {
+        let relevant = node
+            .filter(|node| self.node_is_in_active_document(node))
+            .map(Self::content_visibility_ancestor_ids)
+            .unwrap_or_default();
+        self.replace_content_visibility_relevance(Some(relevant), None);
+    }
+
+    fn set_content_visibility_selection(
+        &mut self,
+        start: Option<&NodeHandle>,
+        end: Option<&NodeHandle>,
+    ) {
+        let mut relevant = HashSet::new();
+        for node in [start, end].into_iter().flatten() {
+            if self.node_is_in_active_document(node) {
+                relevant.extend(Self::content_visibility_ancestor_ids(node));
+            }
+        }
+        self.replace_content_visibility_relevance(None, Some(relevant));
+    }
+
+    fn ensure_content_visibility_geometry(&mut self, node: &NodeHandle) {
+        self.ensure_layout();
+        let ancestors = Self::content_visibility_ancestor_ids(node);
+        let skipped_ancestors = ancestors
+            .iter()
+            .copied()
+            .filter(|identity| {
+                *identity != node.identity()
+                    && self.content_visibility_skipped_nodes.contains(identity)
+            })
+            .collect::<Vec<_>>();
+        if skipped_ancestors
+            .iter()
+            .all(|identity| self.content_visibility_forced_in_layout.contains(identity))
+        {
+            return;
+        }
+        self.content_visibility_forced_nodes.extend(ancestors);
+        self.capture_scroll_offsets_before_layout();
+        self.layout_root = None;
+        self.invalidate_paint_cache();
+        self.ensure_layout();
+    }
+
+    fn content_visibility_skips_inner_text(&mut self, node: &NodeHandle) -> bool {
+        self.ensure_layout();
+        Self::content_visibility_ancestor_ids(node)
+            .iter()
+            .any(|identity| self.content_visibility_skipped_nodes.contains(identity))
+    }
+
+    fn retarget_content_visibility_hit(&self, node: NodeHandle) -> NodeHandle {
+        let original = node.identity();
+        let mut current = Some(node.clone());
+        while let Some(candidate) = current {
+            if candidate.identity() != original
+                && self
+                    .content_visibility_skipped_nodes
+                    .contains(&candidate.identity())
+            {
+                return candidate;
+            }
+            current = candidate
+                .assigned_slot()
+                .or_else(|| candidate.parent_node())
+                .or_else(|| candidate.shadow_host());
+        }
+        node
     }
 
     /// Builds paint-time geometry once per tracked style/layout/paint/scroll
@@ -3443,6 +3612,10 @@ impl HostState {
         }
         self.window_scroll = next;
         self.scroll_generation = self.scroll_generation.saturating_add(1);
+        if !self.content_visibility_auto_nodes.is_empty() {
+            self.capture_scroll_offsets_before_layout();
+            self.layout_root = None;
+        }
         self.invalidate_paint_cache();
         let document_id = self.document.identity();
         self.queue_scroll_target(document_id);
@@ -3457,7 +3630,7 @@ impl HostState {
     /// maintained — reports zero without disturbing the stored value, so the
     /// offset comes back when its box does.
     fn element_scroll_offset(&mut self, node: &NodeHandle) -> (f32, f32) {
-        self.ensure_layout();
+        self.ensure_content_visibility_geometry(node);
         self.layout_root
             .as_ref()
             .and_then(|root| find_layout_box(root, node))
@@ -3471,7 +3644,7 @@ impl HostState {
     /// Per CSSOM View, an element with no box or no scrolling box is left
     /// untouched rather than remembering an offset it cannot apply.
     fn set_element_scroll(&mut self, node: &NodeHandle, x: f32, y: f32) -> bool {
-        self.ensure_layout();
+        self.ensure_content_visibility_geometry(node);
         let Some(layout) = self
             .layout_root
             .as_ref()
@@ -4190,6 +4363,15 @@ impl JsRuntime {
             ) {
                 return AccessibilityRenderState::NotRendered;
             }
+            if element.identity() != node.identity()
+                && matches!(
+                    resolver.computed_property(&element, "content-visibility"),
+                    Some(ComputedValue::Keyword(value))
+                        if value.eq_ignore_ascii_case("hidden")
+                )
+            {
+                return AccessibilityRenderState::NotRendered;
+            }
             current = element.assigned_slot().or_else(|| {
                 element.parent_node().and_then(|parent| {
                     if parent.node_type() == NodeType::Element {
@@ -4495,11 +4677,14 @@ impl JsRuntime {
         let document_id = state.document.identity();
         let state = &mut *state;
         let layout = &state.adjusted_layout_cache.as_ref()?.root;
-        let resolver = state
-            .document_styles
-            .get_mut(&document_id)
-            .and_then(|entry| entry.resolver.as_mut())?;
-        crate::paint::hit_test_layout(layout, resolver, viewport, x, y)
+        let target = {
+            let resolver = state
+                .document_styles
+                .get_mut(&document_id)
+                .and_then(|entry| entry.resolver.as_mut())?;
+            crate::paint::hit_test_layout(layout, resolver, viewport, x, y)
+        }?;
+        Some(state.retarget_content_visibility_hit(target))
     }
 
     /// Sets the User-Agent exposed to scripts in this runtime.
@@ -9395,6 +9580,21 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(is_rendered_for_focus_native),
         ),
         (
+            js_string!("__omoikane_set_content_visibility_focus"),
+            1,
+            NativeFunction::from_copy_closure(set_content_visibility_focus_native),
+        ),
+        (
+            js_string!("__omoikane_set_content_visibility_selection"),
+            2,
+            NativeFunction::from_copy_closure(set_content_visibility_selection_native),
+        ),
+        (
+            js_string!("__omoikane_content_visibility_skips_inner_text"),
+            1,
+            NativeFunction::from_copy_closure(content_visibility_skips_inner_text_native),
+        ),
+        (
             js_string!("__omoikane_parser_form_owner"),
             1,
             NativeFunction::from_copy_closure(parser_form_owner_native),
@@ -11440,6 +11640,69 @@ fn computed_style_native(
     })
 }
 
+/// Resolves an optional native node argument used by content-visibility hooks.
+fn optional_node_argument(
+    value: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<Option<NodeHandle>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
+    }
+    let node_id = parse_node_id(Some(value), context)?;
+    with_host_state(|state| Ok(state.borrow().get_node(node_id)))
+}
+
+fn set_content_visibility_focus_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node = optional_node_argument(args.first(), context)?;
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .set_content_visibility_focus(node.as_ref());
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
+}
+
+fn set_content_visibility_selection_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let start = optional_node_argument(args.first(), context)?;
+    let end = optional_node_argument(args.get(1), context)?;
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .set_content_visibility_selection(start.as_ref(), end.as_ref());
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
+}
+
+fn content_visibility_skips_inner_text_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let node = state.borrow().get_node(node_id);
+        let skipped = node.is_some_and(|node| {
+            state
+                .borrow_mut()
+                .content_visibility_skips_inner_text(&node)
+        });
+        Ok(JsValue::from(skipped))
+    })
+}
+
 /// `__omoikane_is_rendered_for_focus(nodeId)` reports the rendered-ness parts
 /// of focusability that cannot be determined from the DOM alone. `display:none`
 /// removes the whole subtree, while `visibility` is inherited and therefore is
@@ -11480,6 +11743,15 @@ fn is_rendered_for_focus_native(
                 return Ok(JsValue::from(false));
             };
             if matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none"))
+            {
+                return Ok(JsValue::from(false));
+            }
+            if element.identity() != node.identity()
+                && matches!(
+                    style.get("content-visibility"),
+                    Some(ComputedValue::Keyword(value))
+                        if value.eq_ignore_ascii_case("hidden")
+                )
             {
                 return Ok(JsValue::from(false));
             }
@@ -11605,7 +11877,7 @@ fn layout_metrics_native(
             let viewport = document
                 .as_ref()
                 .map(|document| state.viewport_for_document(document));
-            state.ensure_layout();
+            state.ensure_content_visibility_geometry(&node);
             let current_scroll = state.window_scroll;
             state.set_window_scroll(current_scroll.0, current_scroll.1);
             let main_document_id = state.document.identity();
@@ -12934,6 +13206,12 @@ fn normalize_style_value_native(
                 | "mix-blend-mode"
                 | "isolation"
                 | "text-overflow"
+                | "content-visibility"
+                | "contain-intrinsic-size"
+                | "contain-intrinsic-width"
+                | "contain-intrinsic-height"
+                | "contain-intrinsic-inline-size"
+                | "contain-intrinsic-block-size"
                 | "columns"
                 | "column-count"
                 | "column-width"
@@ -24498,6 +24776,36 @@ b</textarea></form>"#,
                 .as_boolean()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn content_visibility_cssom_rejects_invalid_values_and_serializes_intrinsic_size() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div);
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const target = document.querySelector("div");
+                target.style.contentVisibility = "visible auto";
+                const invalidVisibility = target.style.contentVisibility;
+                target.style.contentVisibility = "hidden";
+                target.style.containIntrinsicWidth = "1px auto";
+                const invalidWidth = target.style.containIntrinsicWidth;
+                target.style.containIntrinsicSize = "5px 5px";
+                const equalAxes = target.style.containIntrinsicSize;
+                target.style.containIntrinsicSize = "auto 1px auto 1px";
+                const equalAutoAxes = target.style.containIntrinsicSize;
+                target.style.containIntrinsicSize = "2em 3px";
+                return [invalidVisibility, target.style.contentVisibility,
+                        invalidWidth, equalAxes, equalAutoAxes,
+                        target.style.containIntrinsicSize].join("|");
+            })()"#,
+        );
+
+        assert_eq!(result, "|hidden||5px|auto 1px|2em 3px");
     }
 
     #[test]
@@ -44684,6 +44992,172 @@ b</textarea></form>"#,
         assert_eq!(result, "sticky,30,5,15,30");
         let hit = runtime.hit_test(5.0, 6.0).expect("sticky box must be hit");
         assert_eq!(hit.get_attribute("id").as_deref(), Some("sticky"));
+    }
+
+    #[test]
+    fn content_visibility_auto_tracks_scroll_focus_selection_and_dom_updates() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 #spacer { display: block; height: 20px }
+                 #automatic { content-visibility: auto; contain-intrinsic-size: auto 30px }
+                 #child { display: block; height: 80px }
+               </style></head><body><button id="spacer">outside</button><div style="height:380px"></div>
+                 <section id="automatic" tabindex="0"><span id="child" tabindex="0">Hello</span></section>
+               </body></html>"#,
+        );
+        runtime.set_viewport(100.0, 100.0);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const automatic = document.getElementById("automatic");
+                const child = document.getElementById("child");
+                const spacer = document.getElementById("spacer");
+                const out = [automatic.innerText === "", automatic.offsetHeight];
+                child.style.height = "90px";
+                child.appendChild(document.createTextNode(" updated"));
+                out.push(automatic.innerText === "");
+                window.scrollTo(0, 350);
+                out.push(automatic.innerText, automatic.offsetHeight);
+                window.scrollTo(0, 0);
+                out.push(automatic.innerText === "", automatic.offsetHeight);
+                child.focus({ preventScroll: true });
+                out.push(automatic.innerText, document.activeElement === child);
+                spacer.focus({ preventScroll: true });
+                out.push(automatic.innerText === "");
+                getSelection().selectAllChildren(automatic);
+                out.push(automatic.innerText);
+                getSelection().empty();
+                out.push(automatic.innerText === "");
+                automatic.style.containIntrinsicSize = "30px";
+                out.push(automatic.offsetHeight);
+                automatic.style.containIntrinsicSize = "auto 30px";
+                out.push(automatic.offsetHeight);
+                return out.join("|");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "true|30|true|Hello updated|90|true|90|Hello updated|true|true|Hello updated|true|30|30"
+        );
+        let child = runtime
+            .document()
+            .query_selector("#child")
+            .expect("automatic subtree child");
+        assert_eq!(
+            runtime.accessibility_render_state(&child),
+            AccessibilityRenderState::Rendered,
+            "an offscreen automatic subtree remains in the accessibility tree"
+        );
+    }
+
+    #[test]
+    fn content_visibility_hidden_forces_fresh_geometry_but_rejects_focus_and_accessibility() {
+        let document = crate::html::TreeBuilder::parse(
+            r#"<html><head><style>
+                 body { margin: 8px }
+                 #hidden { content-visibility: hidden; contain-intrinsic-size: 20px }
+                 #target { position: absolute; top: 100px; left: 100px; width: 5px; height: 5px }
+               </style></head><body><div id="sibling"></div><div id="hidden">
+                 <button id="target">hidden</button>
+                 <span id="inside" style="position:absolute;left:0;top:0;width:20px;height:20px">inside</span>
+               </div></body></html>"#,
+        )
+        .document();
+        let hidden = document.query_selector("#hidden").unwrap();
+        let target = document.query_selector("#target").unwrap();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.set_viewport(200.0, 100.0);
+
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const hidden = document.getElementById("hidden");
+                const target = document.getElementById("target");
+                const inside = document.getElementById("inside");
+                const host = hidden.getBoundingClientRect();
+                const first = target.getBoundingClientRect();
+                inside.getBoundingClientRect();
+                target.style.top = "120px";
+                const second = target.getBoundingClientRect();
+                target.focus();
+                target.scrollIntoView();
+                return [hidden.innerText === "", first.left, first.top,
+                        second.top, document.activeElement === target,
+                        host.left, host.top,
+                        getComputedStyle(hidden).contentVisibility,
+                        target.offsetParent === hidden, window.scrollY].join("|");
+            })()"#,
+        );
+        assert_eq!(result, "true|108|108|128|false|8|8|hidden|true|0");
+        fn find_box<'a>(layout: &'a LayoutBox, node: &NodeHandle) -> Option<&'a LayoutBox> {
+            if layout.node == *node {
+                return Some(layout);
+            }
+            layout
+                .children
+                .iter()
+                .find_map(|child| find_box(child, node))
+        }
+        let (hit_x, hit_y, hidden_border_box) = {
+            let state = runtime.host_state.borrow();
+            let layout = find_box(state.layout_root.as_ref().unwrap(), &hidden).unwrap();
+            let border_box = layout.dimensions.border_box();
+            (
+                border_box.x + border_box.width / 2.0,
+                border_box.y + border_box.height / 2.0,
+                border_box,
+            )
+        };
+        let hit = runtime.hit_test(hit_x, hit_y).map(|node| {
+            (
+                node.tag_name().unwrap_or_default(),
+                node.get_attribute("id").unwrap_or_default(),
+            )
+        });
+        assert_eq!(
+            hit,
+            Some(("div".to_string(), "hidden".to_string())),
+            "hidden border box {hidden_border_box:?}, probe=({hit_x}, {hit_y})"
+        );
+        let layout_generation = runtime.host_state.borrow().layout_generation;
+        runtime
+            .eval("document.getElementById('target').getBoundingClientRect().top")
+            .unwrap();
+        assert_eq!(
+            runtime.host_state.borrow().layout_generation,
+            layout_generation,
+            "repeated geometry queries must reuse the forced layout"
+        );
+        assert_eq!(
+            runtime.accessibility_render_state(&target),
+            AccessibilityRenderState::NotRendered
+        );
+    }
+
+    #[test]
+    fn focusing_new_content_visibility_auto_descendant_scrolls_it_into_view() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 * { margin: 0; padding: 0 }
+                 #spacer { height: 3000px }
+                 #automatic { content-visibility: auto; contain-intrinsic-size: 20px }
+               </style></head><body><div id="spacer"></div><div id="automatic"></div></body></html>"#,
+        );
+        runtime.set_viewport(100.0, 100.0);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const target = document.createElement("div");
+                target.tabIndex = 0;
+                document.getElementById("automatic").appendChild(target);
+                target.focus();
+                return [document.activeElement === target, window.scrollY > 500,
+                        document.scrollingElement === document.documentElement,
+                        document.scrollingElement.scrollTop === window.scrollY].join("|");
+            })()"#,
+        );
+        assert_eq!(result, "true|true|true|true");
     }
 
     #[test]

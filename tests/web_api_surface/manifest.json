@@ -877,6 +877,14 @@
       "baseline_supported": true
     },
     {
+      "id": "css.content-visibility",
+      "area": "cssom",
+      "description": "Content visibility validates, computes intrinsic placeholders, skips offscreen text, and re-enters for focus",
+      "setup": "globalThis.__cvSpacer = document.createElement('div'); __cvSpacer.style.height = '2000px'; globalThis.__cv = document.createElement('section'); __cv.style.cssText = 'content-visibility:auto;contain-intrinsic-size:auto 24px'; globalThis.__cvChild = document.createElement('span'); __cvChild.tabIndex = 0; __cvChild.textContent = 'visible when relevant'; __cv.appendChild(__cvChild); document.body.appendChild(__cvSpacer); document.body.appendChild(__cv)",
+      "probe": "CSS.supports('content-visibility', 'auto') && CSS.supports('contain-intrinsic-size', 'auto 24px') && !CSS.supports('contain-intrinsic-size', 'auto') && getComputedStyle(__cv).contentVisibility === 'auto' && getComputedStyle(__cv).containIntrinsicSize === 'auto 24px' && __cv.innerText === '' && (() => { __cvChild.focus({preventScroll:true}); return document.activeElement === __cvChild && __cv.innerText === 'visible when relevant'; })()",
+      "baseline_supported": false
+    },
+    {
       "id": "css.multi-column-layout",
       "area": "cssom",
       "description": "Multi-column properties compute and distribute fixed-height flow content across columns",
