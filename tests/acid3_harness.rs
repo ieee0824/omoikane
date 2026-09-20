@@ -6,9 +6,37 @@
 #[path = "acid3_common/harness.rs"]
 mod harness;
 
-use harness::{DriveMode, FixtureServer, run_acid3};
+use harness::{DriveMode, FixtureServer, TerminationReason, run_acid3};
 use omoikane::html::TreeBuilder;
 use omoikane::http::Client;
+
+struct TemporaryFixture(std::path::PathBuf);
+
+impl TemporaryFixture {
+    fn start(html: &str) -> (FixtureServer, Self) {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "omoikane-acid3-diagnostic-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("create diagnostic fixture directory");
+        std::fs::write(
+            directory.join("manifest.json"),
+            r#"{"files":[{"path":"acid3.html","status":200,"content_type":"text/html; charset=utf-8"}]}"#,
+        )
+        .expect("write diagnostic fixture manifest");
+        std::fs::write(directory.join("acid3.html"), html).expect("write diagnostic Acid3 page");
+        let server = FixtureServer::start_in(directory.clone());
+        (server, Self(directory))
+    }
+}
+
+impl Drop for TemporaryFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// The fixture server must replay the exact status code + Content-Type recorded
 /// in `manifest.json` for the resources Acid3 relies on. In particular
@@ -106,6 +134,66 @@ fn acid3_page_parses_to_dom_with_scoreboard() {
     );
 }
 
+#[test]
+fn runner_preserves_task_errors_progress_and_termination_reason() {
+    let (server, _fixture) = TemporaryFixture::start(
+        r#"<!doctype html>
+        <html><body><span id="score">1</span><script>
+        var tests = [null, null];
+        var score = 1;
+        var index = 1;
+        var log = "";
+        setTimeout(function () { throw new Error("acid3 diagnostic sentinel"); }, 0);
+        function update() { throw new Error("acid3 direct-drive sentinel"); }
+        </script></body></html>"#,
+    );
+
+    let faithful = run_acid3(&server.base_url(), DriveMode::Faithful);
+    assert_eq!((faithful.index, faithful.total), (Some(1), Some(2)));
+    assert_eq!(faithful.termination_reason, TerminationReason::TaskError);
+    assert!(
+        faithful
+            .task_errors
+            .iter()
+            .any(|error| error.contains("acid3 diagnostic sentinel")),
+        "task failure was missing from Faithful diagnostics: {faithful:?}"
+    );
+    let faithful_report = faithful.report_json();
+    assert_eq!(faithful_report["index"], 1);
+    assert_eq!(faithful_report["termination_reason"], "task-error");
+    assert!(
+        faithful_report["task_errors"][0]
+            .as_str()
+            .is_some_and(|error| error.contains("acid3 diagnostic sentinel"))
+    );
+
+    let direct = run_acid3(&server.base_url(), DriveMode::DirectDrive);
+    assert_eq!((direct.index, direct.total), (Some(1), Some(2)));
+    assert_eq!(direct.termination_reason, TerminationReason::DriveError);
+    assert!(
+        direct
+            .task_errors
+            .iter()
+            .any(|error| error.contains("acid3 diagnostic sentinel")),
+        "task failure was missing from DirectDrive diagnostics: {direct:?}"
+    );
+    assert!(
+        direct
+            .drive_errors
+            .iter()
+            .any(|error| error.contains("acid3 direct-drive sentinel")),
+        "direct update failure was missing from diagnostics: {direct:?}"
+    );
+    let direct_report = direct.report_json();
+    assert_eq!(direct_report["index"], 1);
+    assert_eq!(direct_report["termination_reason"], "drive-error");
+    assert!(
+        direct_report["task_errors"][0]
+            .as_str()
+            .is_some_and(|error| error.contains("acid3 diagnostic sentinel"))
+    );
+}
+
 /// Both drive modes must score 100/100 without script or driving errors.
 #[test]
 fn runner_scores_100_in_both_drive_modes() {
@@ -119,14 +207,10 @@ fn runner_scores_100_in_both_drive_modes() {
     assert_eq!(direct.page_status, 200);
 
     {
-        let row = |run: &harness::Acid3Run| {
-            serde_json::json!({
-                "score":run.score,"total":run.total,"index":run.index,
-                "script_errors":run.script_errors,"drive_errors":run.drive_errors,
-                "log":run.log,
-            })
-        };
-        let report = serde_json::json!({"faithful":row(&faithful),"direct":row(&direct)});
+        let report = serde_json::json!({
+            "faithful": faithful.report_json(),
+            "direct": direct.report_json(),
+        });
         let directory = std::env::var_os("OMOIKANE_JIT_GATE_REPORT_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| ".artifacts/js-benchmark/jit-gate4".into());
@@ -151,6 +235,12 @@ fn runner_scores_100_in_both_drive_modes() {
                 run.drive_errors.is_empty(),
                 "{name}: {:?}",
                 run.drive_errors
+            );
+            assert!(run.task_errors.is_empty(), "{name}: {:?}", run.task_errors);
+            assert_eq!(
+                run.termination_reason,
+                TerminationReason::Completed,
+                "{name}: {report}"
             );
         }
         println!("Acid3 JIT gate: {report}");
