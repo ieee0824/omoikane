@@ -5,7 +5,7 @@ use omoikane::js::JsRuntime;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -133,16 +133,84 @@ impl StaticServer {
     }
 }
 
+fn escaped_request_body(body: &[u8]) -> Vec<u8> {
+    let mut escaped = Vec::new();
+    let mut index = 0;
+    while index < body.len() {
+        if body[index..].starts_with(b"\r\n") {
+            escaped.extend_from_slice(b"\r\n");
+            index += 2;
+            continue;
+        }
+        match body[index] {
+            b'\\' => escaped.extend_from_slice(b"\\\\"),
+            value if value < 0x20 || value >= 0x7f => {
+                escaped.extend_from_slice(format!("\\x{value:02x}").as_bytes())
+            }
+            value => escaped.push(value),
+        }
+        index += 1;
+    }
+    escaped
+}
+
+#[test]
+fn echo_endpoint_preserves_crlf_and_escapes_request_bytes() {
+    assert_eq!(
+        escaped_request_body(b"a\r\n\n\0\x7f\xff\\<p>"),
+        b"a\r\n\\x0a\\x00\\x7f\\xff\\\\<p>"
+    );
+}
+
 fn serve(mut stream: TcpStream, root: &Path) {
     let mut request_line = String::new();
+    let mut request_content_type = String::new();
+    let mut content_length = 0;
+    let mut body = Vec::new();
     {
         let mut reader = BufReader::new(&stream);
         if reader.read_line(&mut request_line).is_err() {
             return;
         }
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).is_err() {
+                return;
+            }
+            if header == "\r\n" || header.is_empty() {
+                break;
+            }
+            if let Some((key, value)) = header.split_once(':') {
+                if key.eq_ignore_ascii_case("content-length") {
+                    let Ok(length) = value.trim().parse::<usize>() else {
+                        return;
+                    };
+                    content_length = length;
+                } else if key.eq_ignore_ascii_case("content-type") {
+                    request_content_type = value.trim().to_string();
+                }
+            }
+        }
+        body.resize(content_length, 0);
+        if reader.read_exact(&mut body).is_err() {
+            return;
+        }
     }
     let target = request_line.split_whitespace().nth(1).unwrap_or("/");
     let path = target.split("?").next().unwrap_or("/");
+    if path == "/FileAPI/file/resources/echo-content-escaped.py" {
+        // Equivalent to the pinned wptserve endpoint: echo actual request
+        // bytes, escaping controls/non-ASCII/backslashes and preserving CRLF.
+        let escaped = escaped_request_body(&body);
+        let method = request_line.split_whitespace().next().unwrap_or("GET");
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Length: {}\r\nX-Request-Method: {method}\r\nX-Request-Content-Length: {content_length}\r\nX-Request-Content-Type: {request_content_type}\r\nConnection: close\r\n\r\n",
+            escaped.len()
+        );
+        let _ = stream.write_all(&escaped);
+        return;
+    }
     if path == "/common/sab.js" {
         // Upstream's buffer factory uses WebAssembly.Memory only to discover
         // the SharedArrayBuffer constructor in browsers that hide its global.
@@ -859,7 +927,8 @@ fn selected_wpt_testharness_cases_match_expectations() {
         };
         let document = TreeBuilder::parse(&document_source).document();
         let base: Url = url.parse().expect("parse WPT URL");
-        let mut runtime = JsRuntime::with_document(document).expect("create WPT runtime");
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, &url).expect("create WPT runtime");
         // The bootstrap itself creates a large graph of host API constructors.
         // Collect its short-lived initialization temporaries before page code
         // starts allocating, keeping each WPT case's GC pressure bounded.

@@ -143,6 +143,17 @@
     } },
     { "path": "encoding/streams/encode-bad-chunks.any.js" },
     { "path": "encoding/streams/encode-utf8.any.js" },
-    { "path": "encoding/streams/readable-writable-properties.any.js" }
+    { "path": "encoding/streams/readable-writable-properties.any.js" },
+    { "path": "custom-elements/form-associated/ElementInternals-NotSupportedError.html" },
+    { "path": "custom-elements/form-associated/ElementInternals-form.html" },
+    { "path": "custom-elements/form-associated/ElementInternals-labels.html" },
+    { "path": "custom-elements/form-associated/ElementInternals-setFormValue-nullish-value.html" },
+    { "path": "custom-elements/form-associated/ElementInternals-setFormValue.html" },
+    { "path": "custom-elements/form-associated/ElementInternals-validation.html" },
+    { "path": "custom-elements/form-associated/form-associated-callback.html" },
+    { "path": "custom-elements/form-associated/form-disabled-callback.html" },
+    { "path": "custom-elements/form-associated/form-reset-callback.html" },
+    { "path": "custom-elements/form-associated/fieldset-elements.html" },
+    { "path": "custom-elements/form-associated/form-elements-namedItem.html" }
   ]
 }

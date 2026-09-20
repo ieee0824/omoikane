@@ -173,6 +173,11 @@ impl WriteParser {
                 ancestors.push(node);
             }
             ancestors.reverse();
+            builder.form_element = ancestors
+                .iter()
+                .rev()
+                .find(|node| node.tag_name().as_deref() == Some("form"))
+                .cloned();
             builder.open_elements = ancestors;
             builder.reset_insertion_mode();
             builder.write_boundary = Some((parent, reference));
@@ -214,6 +219,7 @@ struct Builder {
     document: NodeHandle,
     open_elements: Vec<NodeHandle>,
     active_formatting_elements: Vec<NodeHandle>,
+    form_element: Option<NodeHandle>,
     template_insertion_modes: Vec<InsertionMode>,
     mode: InsertionMode,
     write_boundary: Option<(NodeHandle, Option<NodeHandle>)>,
@@ -227,6 +233,7 @@ impl Builder {
             document: NodeHandle::document(),
             open_elements: Vec::new(),
             active_formatting_elements: Vec::new(),
+            form_element: None,
             template_insertion_modes: Vec::new(),
             mode: InsertionMode::Initial,
             write_boundary: None,
@@ -238,6 +245,14 @@ impl Builder {
     fn new_fragment(context: &NodeHandle) -> (Self, NodeHandle) {
         let mut builder = Self::new();
         builder.fragment = true;
+        let mut ancestor = Some(context.clone());
+        while let Some(node) = ancestor {
+            if node.tag_name().as_deref() == Some("form") {
+                builder.form_element = Some(node);
+                break;
+            }
+            ancestor = node.parent_node();
+        }
         let html = NodeHandle::element("html");
         builder.document.append_child(html.clone());
 
@@ -472,6 +487,17 @@ impl Builder {
                             }
                         }
                     }
+                    "form" => {
+                        let in_template = !self.template_insertion_modes.is_empty();
+                        if self.form_element.is_some() && !in_template {
+                            return;
+                        }
+                        let form = self.insert_element_with_attributes("form", &attributes);
+                        if !in_template {
+                            self.form_element = Some(form.clone());
+                        }
+                        self.open_elements.push(form);
+                    }
                     "svg" | "math" => {
                         let namespace = if name == "svg" {
                             SVG_NAMESPACE
@@ -528,6 +554,37 @@ impl Builder {
                 }
             }
             Token::EndTag { name } => match name.as_str() {
+                "form" => {
+                    if !self.template_insertion_modes.is_empty() {
+                        if self.find_open_element("form").is_some() {
+                            self.pop_until("form");
+                        }
+                    } else if let Some(form) = self.form_element.take() {
+                        let in_scope = self
+                            .open_elements
+                            .iter()
+                            .rev()
+                            .take_while(|node| {
+                                !matches!(
+                                    node.tag_name().as_deref(),
+                                    Some(
+                                        "html"
+                                            | "table"
+                                            | "td"
+                                            | "th"
+                                            | "template"
+                                            | "object"
+                                            | "applet"
+                                            | "marquee"
+                                    )
+                                )
+                            })
+                            .any(|node| node == &form);
+                        if in_scope {
+                            self.open_elements.retain(|node| node != &form);
+                        }
+                    }
+                }
                 "body" => {
                     self.pop_matching("body");
                     self.mode = InsertionMode::AfterBody;
@@ -582,6 +639,14 @@ impl Builder {
                 attributes,
                 self_closing,
             } => match name.as_str() {
+                "form" => {
+                    if self.form_element.is_none() && self.template_insertion_modes.is_empty() {
+                        // The in-table rule inserts the form and immediately
+                        // pops it, retaining only the parser's form pointer.
+                        let form = self.insert_element_with_attributes("form", &attributes);
+                        self.form_element = Some(form);
+                    }
+                }
                 "colgroup" => {
                     self.clear_stack_to_table_context();
                     let table = self
@@ -908,7 +973,9 @@ impl Builder {
                     self.open_elements.push(group);
                 }
             }
-            Token::StartTag { name, .. } if name == "select" => {}
+            Token::StartTag { name, .. } if name == "select" => {
+                self.close_select();
+            }
             token if matches!(&token, Token::StartTag { name, .. } if name == "script" || name == "template") => {
                 self.handle_in_head(token, errors)
             }
@@ -925,11 +992,49 @@ impl Builder {
                     self.open_elements.pop();
                 }
             }
-            Token::EndTag { name } if name == "select" => {}
+            Token::EndTag { name } if name == "select" => {
+                self.close_select();
+            }
+            token
+                if matches!(&token, Token::StartTag { name, .. }
+                if matches!(name.as_str(), "input" | "keygen" | "textarea")) =>
+            {
+                if self.close_select() {
+                    self.process_token(token, errors);
+                }
+            }
+            token
+                if self.current_table().is_some()
+                    && matches!(&token,
+                Token::StartTag { name, .. } | Token::EndTag { name }
+                if matches!(name.as_str(), "caption" | "table" | "tbody" | "tfoot" | "thead" | "tr" | "td" | "th")) =>
+            {
+                if self.close_select() {
+                    self.process_token(token, errors);
+                }
+            }
             Token::Doctype(_) => {}
             Token::Eof => self.mode = InsertionMode::AfterAfterBody,
             _ => {}
         }
+    }
+
+    fn close_select(&mut self) -> bool {
+        let Some(index) = self
+            .open_elements
+            .iter()
+            .rposition(|node| node.tag_name().as_deref() == Some("select"))
+        else {
+            return false;
+        };
+        // The synthetic context element in fragment parsing is not an open
+        // select token: an end tag must not escape that fragment context.
+        if self.fragment && index == 1 {
+            return false;
+        }
+        self.open_elements.truncate(index);
+        self.reset_insertion_mode();
+        true
     }
 
     fn process_foreign_token(&mut self, token: &Token, errors: &mut Vec<HtmlParseError>) -> bool {
@@ -1172,7 +1277,32 @@ impl Builder {
             element.set_attribute(attribute.name(), attribute.value());
         }
         self.append_node(parent, element.clone());
+        self.associate_parser_form(&element);
         element
+    }
+
+    fn associate_parser_form(&self, element: &NodeHandle) {
+        if self.fragment
+            || !self.template_insertion_modes.is_empty()
+            || element.get_attribute("form").is_some()
+            || !matches!(
+                element.tag_name().as_deref(),
+                Some("button" | "fieldset" | "input" | "object" | "output" | "select" | "textarea")
+            )
+        {
+            return;
+        }
+        let Some(form) = &self.form_element else {
+            return;
+        };
+        let mut ancestor = element.parent_node();
+        while let Some(node) = ancestor {
+            if node.tag_name().as_deref() == Some("form") && node == *form {
+                return;
+            }
+            ancestor = node.parent_node();
+        }
+        element.set_parser_form_owner(form);
     }
 
     fn merge_missing_attributes(&self, element: &NodeHandle, attributes: &[super::Attribute]) {
@@ -1248,6 +1378,7 @@ impl Builder {
             let element = self.insert_into(&parent, name, attributes);
             let _ = parent.remove_child(&element);
             let _ = parent.insert_before(element.clone(), &table);
+            self.associate_parser_form(&element);
             if !self_closing && !is_void_element(name) {
                 self.open_elements.push(element);
             }
@@ -1994,6 +2125,74 @@ mod tests {
         assert!(result.document().query_selector("div").is_none());
         assert_eq!(div.child_nodes()[0].data(), Some("inside".to_string()));
         assert_eq!(p.child_nodes()[0].data(), Some("after".to_string()));
+    }
+
+    #[test]
+    fn parser_form_owner_is_weak_and_attribute_namespace_sensitive() {
+        let document = TreeBuilder::parse(
+            "<table><form id=f><tr><td><input><select><option>a</select></table><p>after</p>",
+        )
+        .document();
+        let form = document.query_selector("form").unwrap();
+        let input = document.query_selector("input").unwrap();
+        let select = document.query_selector("select").unwrap();
+        assert_eq!(input.parser_form_owner(), Some(form.clone()));
+        assert_eq!(select.parser_form_owner(), Some(form.clone()));
+        assert!(document.query_selector("p").is_some());
+        input.set_xml_attribute_ns("x:form", Some("urn:test".into()), "form", "other");
+        assert_eq!(input.parser_form_owner(), Some(form.clone()));
+        input.remove_xml_attribute("x:form");
+        assert_eq!(input.parser_form_owner(), Some(form.clone()));
+        input.set_xml_attribute_ns("form", None, "form", "other");
+        assert_eq!(input.parser_form_owner(), None);
+        let weak_form = form.downgrade();
+        drop(form);
+        drop(document);
+        assert!(weak_form.upgrade().is_none());
+        assert_eq!(select.parser_form_owner(), None);
+    }
+
+    #[test]
+    fn fragment_form_context_ignores_nested_form_without_retaining_parser_owner() {
+        let form = NodeHandle::element("form");
+        let fragment = TreeBuilder::parse_fragment("<form><input></form><input>", &form).fragment();
+        assert!(fragment.query_selector("form").is_none());
+        let inputs = fragment.child_nodes();
+        assert_eq!(inputs.len(), 2);
+        assert!(
+            inputs
+                .iter()
+                .all(|input| input.tag_name().as_deref() == Some("input")
+                    && input.parser_form_owner().is_none())
+        );
+    }
+
+    #[test]
+    fn select_end_tag_returns_to_table_and_body_contexts() {
+        let document = TreeBuilder::parse(
+            "<select><option>a</select><p>after</p><table><tr><td><select><option>b</select><input></table><p>last</p>",
+        ).document();
+        let input = document.query_selector("input").unwrap();
+        assert_eq!(
+            input.parent_node().unwrap().tag_name().as_deref(),
+            Some("td")
+        );
+        assert_eq!(
+            document.query_selector("p").unwrap().child_nodes()[0]
+                .data()
+                .as_deref(),
+            Some("after")
+        );
+        let context = NodeHandle::element("select");
+        let fragment =
+            TreeBuilder::parse_fragment("</select><p>ignored</p><option>kept", &context).fragment();
+        assert!(fragment.query_selector("p").is_none());
+        assert_eq!(
+            fragment.query_selector("option").unwrap().child_nodes()[0]
+                .data()
+                .as_deref(),
+            Some("kept")
+        );
     }
 
     #[test]

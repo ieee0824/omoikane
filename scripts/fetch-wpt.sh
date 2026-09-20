@@ -116,6 +116,8 @@ git_wpt sparse-checkout add \
   "/css/css-transitions/support/helper.js" \
   "/css/css-transitions/events-001.html" \
   "/css/css-transitions/events-002.html"
+git_wpt sparse-checkout add "/custom-elements/form-associated/" "/html/semantics/forms/form-submission-0/resources/targetted-form.js"
+git_wpt sparse-checkout add "/common/blank.html" "/FileAPI/file/resources/echo-content-escaped.py"
 if [[ "$(git_wpt rev-parse HEAD 2>/dev/null || true)" == "$revision" ]]; then exit 0; fi
 git_wpt fetch --depth 1 origin "$revision"
 git_wpt checkout --detach "$revision"

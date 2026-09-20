@@ -52,9 +52,14 @@ mod font_descriptors;
 mod font_loading;
 #[cfg(test)]
 mod font_loading_tests;
+mod form_state;
+mod form_submission;
+mod form_validation;
 #[cfg(test)]
 mod fullscreen_tests;
+mod iframe_navigation;
 mod input_bridge;
+pub use form_state::{FormStateRestoreMode, FormStateSnapshot};
 #[cfg(test)]
 mod layout_metrics_tests;
 mod module_fetch;
@@ -676,6 +681,11 @@ enum TimerPayload {
     },
     /// A connected iframe/object resource load, followed by `load` dispatch.
     ResourceLoad { node_id: usize },
+    /// A form navigation into an existing iframe without changing its attributes.
+    FormSubmission {
+        node_id: usize,
+        request: form_submission::Submission,
+    },
     /// A geolocation request whose timeout has elapsed.
     GeolocationTimeout { request_id: u64 },
     /// A script task captured while an iframe child Realm was active.
@@ -1006,6 +1016,7 @@ impl TimerPayload {
             Self::Source(_) => "source",
             Self::Callback { .. } => "callback",
             Self::ResourceLoad { .. } => "resource-load",
+            Self::FormSubmission { .. } => "form-submission",
             Self::GeolocationTimeout { .. } => "geolocation-timeout",
             Self::Realm { payload, .. } => payload.kind(),
         }
@@ -1024,6 +1035,9 @@ struct HostState {
     node_lifetimes: node_lifetime::NodeLifetimes,
     pointer_lock: pointer_lock::State,
     input_bridge: input_bridge::State,
+    form_state: form_state::State,
+    iframe_navigation: iframe_navigation::State,
+    form_validation: form_validation::State,
     /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
     /// returns their native node identity.
     canonical_node_identity_resolver: Option<JsValue>,
@@ -1141,6 +1155,8 @@ struct HostState {
     /// new identity so an old WindowProxy stays permanently closed.
     iframe_context_ids: HashMap<usize, u64>,
     next_iframe_context_id: u64,
+    /// Live navigable names; zero identifies the top-level context.
+    browsing_context_names: HashMap<usize, String>,
     /// Node-wrapper ids removed during nested browsing-context teardown. The
     /// bootstrap drains these before wrapping a replacement document so a
     /// pointer identity reused by Rust cannot resurrect a stale JS wrapper.
@@ -1242,6 +1258,9 @@ unsafe impl Trace for HostState {
         unsafe { self.node_lifetimes.trace(tracer) };
         unsafe { self.pointer_lock.trace(tracer) };
         unsafe { self.input_bridge.trace(tracer) };
+        unsafe { self.form_state.trace(tracer) };
+        unsafe { self.iframe_navigation.trace(tracer) };
+        unsafe { self.form_validation.trace(tracer) };
         if let Some(maps) = &self.font_loading.maps {
             unsafe { maps.trace(tracer) };
         }
@@ -1493,6 +1512,10 @@ struct IframeDocument {
     loaded_attribute: &'static str,
     /// The resource attribute value used by the committed navigation.
     loaded_resource: String,
+    /// Request retained by the active document for history replay.
+    submission: Option<form_submission::Submission>,
+    /// Parser-created initial scripts, consumed once by the load task.
+    initial_scripts: Vec<usize>,
     /// Monotonic identity of the active Window/Document generation. Unlike a
     /// pointer-derived node identity this cannot be reused after teardown.
     generation: u64,
@@ -1517,6 +1540,8 @@ struct IframeSandboxPolicy {
     allow_scripts: bool,
     allow_same_origin: bool,
     allow_pointer_lock: bool,
+    allow_forms: bool,
+    allow_top_navigation: bool,
 }
 
 impl Default for IframeSandboxPolicy {
@@ -1526,6 +1551,8 @@ impl Default for IframeSandboxPolicy {
             allow_scripts: true,
             allow_same_origin: true,
             allow_pointer_lock: true,
+            allow_forms: true,
+            allow_top_navigation: true,
         }
     }
 }
@@ -1544,6 +1571,8 @@ impl IframeSandboxPolicy {
             allow_scripts: tokens.contains("allow-scripts"),
             allow_same_origin: tokens.contains("allow-same-origin"),
             allow_pointer_lock: tokens.contains("allow-pointer-lock"),
+            allow_forms: tokens.contains("allow-forms"),
+            allow_top_navigation: tokens.contains("allow-top-navigation"),
         }
     }
 
@@ -1673,6 +1702,9 @@ impl HostState {
             node_lifetimes: node_lifetime::NodeLifetimes::default(),
             pointer_lock: pointer_lock::State::default(),
             input_bridge: input_bridge::State::default(),
+            form_state: form_state::State::default(),
+            iframe_navigation: iframe_navigation::State::default(),
+            form_validation: form_validation::State::default(),
             canonical_node_identity_resolver: None,
             remote_objects: HashMap::new(),
             console_logs: Vec::new(),
@@ -1729,6 +1761,7 @@ impl HostState {
             next_iframe_generation: 1,
             iframe_context_ids: HashMap::new(),
             next_iframe_context_id: 1,
+            browsing_context_names: HashMap::new(),
             discarded_node_ids: Vec::new(),
             pending_resource_loads: HashSet::new(),
             navigation_requests: VecDeque::new(),
@@ -1879,6 +1912,10 @@ impl HostState {
         {
             return;
         }
+        // A later attribute navigation supersedes a pending form navigation.
+        self.event_loop
+            .cancel_resource_loads_for_nodes(&HashSet::from([node.identity()]));
+        self.pending_resource_loads.remove(&node.identity());
         if self.pending_resource_loads.insert(node.identity()) {
             self.event_loop.enqueue_timer(TimerPayload::ResourceLoad {
                 node_id: node.identity(),
@@ -1897,6 +1934,14 @@ impl HostState {
     /// parsed as HTML or XML (including SVG) according to their content type;
     /// unsupported content types and load failures yield the empty skeleton.
     fn iframe_content_document(&mut self, iframe: &NodeHandle) -> Result<NodeHandle, String> {
+        self.iframe_document_with_submission(iframe, None)
+    }
+
+    fn iframe_document_with_submission(
+        &mut self,
+        iframe: &NodeHandle,
+        submission: Option<&form_submission::Submission>,
+    ) -> Result<NodeHandle, String> {
         if !self.node_is_in_active_document(iframe) {
             return Err("iframe owner document is no longer active".into());
         }
@@ -1926,7 +1971,8 @@ impl HostState {
         };
         let iframe_id = iframe.identity();
 
-        if let Some(entry) = self.iframe_documents.get(&iframe_id)
+        if submission.is_none()
+            && let Some(entry) = self.iframe_documents.get(&iframe_id)
             && entry.loaded_attribute == resource_attribute
             && entry.loaded_resource == resource
         {
@@ -1958,10 +2004,13 @@ impl HostState {
             // unrelated top-level base URL.
             self.document_base_urls.get(&owner_document_id).cloned()
         };
-        let inherits_creator_origin = resource_attribute == "srcdoc"
-            || resource.is_empty()
-            || matches_about_blank_url(&resource);
-        let (document, csp_headers, child_url) = if resource_attribute == "srcdoc" {
+        let navigation_url = submission.map_or(resource.as_str(), |request| request.url.as_str());
+        let inherits_creator_origin = submission.is_none() && resource_attribute == "srcdoc"
+            || navigation_url.is_empty()
+            || matches_about_blank_url(navigation_url);
+        let (document, csp_headers, child_url) = if let Some(request) = submission {
+            self.load_iframe_form_submission(request)?
+        } else if resource_attribute == "srcdoc" {
             (
                 crate::html::TreeBuilder::parse(&resource).document(),
                 Vec::new(),
@@ -2013,6 +2062,8 @@ impl HostState {
         self.retire_iframe_document(iframe_id);
         if let Some(context_id) = new_context_id {
             self.iframe_context_ids.insert(iframe_id, context_id);
+            self.browsing_context_names
+                .insert(iframe_id, iframe.get_attribute("name").unwrap_or_default());
         }
         self.register_tree(&document);
         self.document_origins
@@ -2034,7 +2085,7 @@ impl HostState {
         // `data:` documents have an opaque origin.  They must not inherit the
         // embedding document's URL as the CSP base, otherwise `'self'` in a
         // meta policy would incorrectly match the parent origin.
-        let policy_base = if resource
+        let policy_base = if navigation_url
             .get(..5)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
         {
@@ -2094,6 +2145,16 @@ impl HostState {
                 realm: None,
                 loaded_attribute: resource_attribute,
                 loaded_resource: resource,
+                submission: submission.cloned(),
+                initial_scripts: collect_script_elements(&document)
+                    .into_iter()
+                    .filter(|script| {
+                        script.is_html_element()
+                            || script.namespace_uri().as_deref()
+                                == Some("http://www.w3.org/1999/xhtml")
+                    })
+                    .map(|script| script.identity())
+                    .collect(),
                 generation,
             },
         );
@@ -2184,10 +2245,21 @@ impl HostState {
                 csp_headers,
                 effective_url,
             ),
-            // Unsupported content types (image/png, text/plain, ...) leave the
-            // sub-document as an empty skeleton so a page cannot mine markup
-            // from them. Acid3 tests 14 and 15 depend on this (a PNG/text file
-            // must not yield a <p>).
+            Some((mime, body, csp_headers, effective_url))
+                if mime
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/plain")) =>
+            {
+                (
+                    form_submission::plain_text_document(&body),
+                    csp_headers,
+                    effective_url,
+                )
+            }
+            // Unsupported content types such as images keep an empty
+            // document. Text responses above create text nodes, so literal
+            // markup in a text/plain response cannot become HTML elements.
             Some((_mime, _body, _csp_headers, effective_url)) => {
                 (blank_html_document(), Vec::new(), effective_url)
             }
@@ -2239,6 +2311,12 @@ impl HostState {
         self.pointer_lock
             .retire_document(previous.document.identity());
         self.input_bridge
+            .retire_document(previous.document.identity());
+        self.form_state
+            .retire_document(previous.document.identity());
+        self.iframe_navigation
+            .retire_document(previous.document.identity());
+        self.form_validation
             .retire_document(previous.document.identity());
         if self
             .fullscreen_elements
@@ -2301,6 +2379,7 @@ impl HostState {
     fn destroy_iframe_context(&mut self, iframe_id: usize) {
         self.retire_iframe_document(iframe_id);
         self.iframe_context_ids.remove(&iframe_id);
+        self.browsing_context_names.remove(&iframe_id);
     }
 
     /// Destroys every nested browsing context owned by iframe elements in a
@@ -2657,6 +2736,7 @@ impl HostState {
     /// identity. When it is the main document, the cached layout tree is also
     /// dropped, because layout is only maintained for the main document.
     fn mark_document_style_dirty(&mut self, document: &NodeHandle) {
+        self.form_validation.invalidate();
         let document_id = document.identity();
         self.document_styles.entry(document_id).or_default().dirty = true;
         if document_id == self.document.identity() {
@@ -2672,6 +2752,7 @@ impl HostState {
     /// Invalidates values derived from the DOM without rebuilding the parsed
     /// stylesheet/rule-index portion of an existing resolver.
     fn invalidate_document_style_cache(&mut self, document: &NodeHandle) {
+        self.form_validation.invalidate();
         let document_id = document.identity();
         if let Some(entry) = self.document_styles.get_mut(&document_id) {
             entry.needs_full_sample = true;
@@ -2704,6 +2785,7 @@ impl HostState {
     /// Invalidates computed/selector results for a node mutation while keeping
     /// stylesheet parsing intact. Detached nodes affect no live document.
     fn invalidate_style_cache_for_node(&mut self, node: &NodeHandle) {
+        self.form_validation.invalidate();
         if let Some(document) = document_root_for_node(node) {
             self.invalidate_document_style_cache(&document);
         }
@@ -2732,6 +2814,7 @@ impl HostState {
     /// eventual insertion invalidates the target document in the tree-mutation
     /// path, so mutations made while detached do not need to drop any cache.
     fn mark_style_dirty_for_node(&mut self, node: &NodeHandle) {
+        self.form_validation.invalidate();
         if let Some(document) = document_root_for_node(node) {
             self.mark_document_style_dirty(&document);
         }
@@ -4152,6 +4235,7 @@ impl JsRuntime {
     /// The adjusted layout is shared with CSSOM geometry queries and rebuilt
     /// only when a tracked style, layout, paint, or scroll generation changes.
     pub(crate) fn hit_test(&mut self, x: f32, y: f32) -> Option<NodeHandle> {
+        self.eval("__omoikane_flush_stylesheets()").ok()?;
         if !x.is_finite() || !y.is_finite() {
             return None;
         }
@@ -6607,6 +6691,19 @@ impl JsRuntime {
                 self.record_error_from("timer callback", result);
                 Ok(())
             }
+            TimerPayload::FormSubmission { node_id, request } => {
+                let Some(frame) = self.host_state.borrow().get_node(node_id) else {
+                    return Ok(());
+                };
+                if !self.host_state.borrow().node_is_in_active_document(&frame) {
+                    return Ok(());
+                }
+                self.host_state
+                    .borrow_mut()
+                    .iframe_document_with_submission(&frame, Some(&request))
+                    .map_err(|message| JsNativeError::typ().with_message(message))?;
+                self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
+            }
             TimerPayload::ResourceLoad { node_id } => {
                 if self
                     .host_state
@@ -6616,7 +6713,7 @@ impl JsRuntime {
                 {
                     return self.run_written_script(node_id);
                 }
-                let (should_dispatch, xhtml_scripts, dynamic_script, resource_document_id) = {
+                let (should_dispatch, initial_scripts, dynamic_script, resource_document_id) = {
                     let mut state = self.host_state.borrow_mut();
                     state.pending_resource_loads.remove(&node_id);
                     let Some(node) = state.get_node(node_id) else {
@@ -6628,7 +6725,7 @@ impl JsRuntime {
                     if !state.node_is_in_active_document(&node) {
                         (false, Vec::new(), None, resource_document_id)
                     } else {
-                        let mut xhtml_scripts: Vec<NodeHandle> = Vec::new();
+                        let mut initial_scripts: Vec<NodeHandle> = Vec::new();
                         // A dynamically inserted external script is classified by
                         // the same `type` gate the parsed-document path uses, so a
                         // script runs the same way however it reached the tree.
@@ -6665,25 +6762,21 @@ impl JsRuntime {
                                 state.iframe_content_document(&node).map_err(|message| {
                                     JsError::from(JsNativeError::error().with_message(message))
                                 })?;
-                            let is_xhtml = document
-                                .child_nodes()
+                            let ids = state
+                                .iframe_documents
+                                .get_mut(&node_id)
+                                .map(|entry| std::mem::take(&mut entry.initial_scripts))
+                                .unwrap_or_default();
+                            initial_scripts = ids
                                 .into_iter()
-                                .find(|child| child.node_type() == NodeType::Element)
-                                .and_then(|root| root.namespace_uri())
-                                .as_deref()
-                                == Some("http://www.w3.org/1999/xhtml");
-                            if is_xhtml {
-                                xhtml_scripts = collect_script_elements(&document)
-                                    .into_iter()
-                                    .filter(|script| {
-                                        script.namespace_uri().as_deref()
-                                            == Some("http://www.w3.org/1999/xhtml")
-                                    })
-                                    .filter(is_inline_classic_script)
-                                    .collect();
-                            }
+                                .filter_map(|id| state.get_node(id))
+                                .filter(|script| {
+                                    document_root_for_node(script).as_ref() == Some(&document)
+                                })
+                                .filter(is_inline_classic_script)
+                                .collect();
                         }
-                        (true, xhtml_scripts, dynamic_script, resource_document_id)
+                        (true, initial_scripts, dynamic_script, resource_document_id)
                     }
                 };
                 let dispatch_document_id = dynamic_script
@@ -6691,7 +6784,7 @@ impl JsRuntime {
                     .and_then(|(script, _, _, _, _)| document_root_for_node(script))
                     .map(|document| document.identity())
                     .unwrap_or(resource_document_id);
-                let xhtml_context = xhtml_scripts
+                let iframe_context = initial_scripts
                     .first()
                     .and_then(document_root_for_node)
                     .map(|document| (node_id, document.identity()));
@@ -6699,12 +6792,19 @@ impl JsRuntime {
                     let forgotten = self.eval("__omoikane_forget_discarded_node_wrappers()");
                     self.record_error_from("iframe wrapper cleanup", forgotten);
                 }
-                for script in xhtml_scripts {
-                    // Like top-level document scripts, one failing XHTML
+                for script in initial_scripts {
+                    // Like top-level document scripts, one failing initial
                     // script must not prevent later scripts or the iframe load
                     // event from running.
                     let (sandbox_allowed, csp_allowed) = {
-                        let state = self.host_state.borrow();
+                        let mut state = self.host_state.borrow_mut();
+                        // Earlier scripts can remove the frame or replace its
+                        // Document. Never run the remaining old script nodes.
+                        if !state.node_is_in_active_document(&script)
+                            || !state.started_inserted_scripts.insert(script.identity())
+                        {
+                            continue;
+                        }
                         (
                             state.sandbox_allows_scripts_for_node(&script),
                             state
@@ -6733,7 +6833,7 @@ impl JsRuntime {
                             .or_default() += 1;
                     }
                     let source = collect_text_content(&script);
-                    let result = if let Some((iframe_id, document_id)) = xhtml_context {
+                    let result = if let Some((iframe_id, document_id)) = iframe_context {
                         self.eval_iframe_script(iframe_id, document_id, script.identity(), &source)
                     } else {
                         self.eval(&source).and_then(|_| self.run_jobs())
@@ -6742,7 +6842,18 @@ impl JsRuntime {
                 }
                 // A script whose type Omoikane does not execute is not fetched and
                 // does not load, so it must not go on to dispatch `load` either.
-                let mut dispatch_load = should_dispatch;
+                let mut dispatch_load = should_dispatch && {
+                    let state = self.host_state.borrow();
+                    iframe_context.is_none_or(|(iframe_id, document_id)| {
+                        state
+                            .iframe_documents
+                            .get(&iframe_id)
+                            .is_some_and(|entry| entry.document.identity() == document_id)
+                            && state
+                                .get_node(iframe_id)
+                                .is_some_and(|frame| state.node_is_in_active_document(&frame))
+                    })
+                };
                 let mut dispatch_timing: Option<(String, bool, f64)> = None;
                 if let Some((script_node, src, kind, base_url, document_id)) = dynamic_script {
                     let _script_document = activate_module_document(&self.host_state, document_id);
@@ -7945,6 +8056,18 @@ fn ensure_iframe_realm(
             .borrow_mut()
             .input_bridge
             .retire_document(document_id);
+        host_state
+            .borrow_mut()
+            .form_state
+            .retire_document(document_id);
+        host_state
+            .borrow_mut()
+            .iframe_navigation
+            .retire_document(document_id);
+        host_state
+            .borrow_mut()
+            .form_validation
+            .retire_document(document_id);
         return Err(error);
     }
 
@@ -7955,6 +8078,8 @@ fn ensure_iframe_realm(
         .filter(|entry| entry.document.identity() == document_id)
         .ok_or_else(|| JsNativeError::reference().with_message("iframe document was replaced"))?;
     entry.realm = Some(realm.clone());
+    drop(state);
+    form_state::restore_pending_document(host_state, document_id, context)?;
     Ok(realm)
 }
 
@@ -7965,6 +8090,10 @@ fn register_host_bindings(
     font_loading::register(context, host_state)?;
     pointer_lock::register(context)?;
     input_bridge::register(context)?;
+    form_state::register(context)?;
+    iframe_navigation::register(context)?;
+    form_validation::register(context)?;
+    form_submission::register(context)?;
     let state = host_state.borrow();
     context.register_global_property(
         js_string!("__omoikane_document_id"),
@@ -8772,6 +8901,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(is_rendered_for_focus_native),
         ),
         (
+            js_string!("__omoikane_parser_form_owner"),
+            1,
+            NativeFunction::from_copy_closure(parser_form_owner_native),
+        ),
+        (
+            js_string!("__omoikane_set_form_associated_custom"),
+            2,
+            NativeFunction::from_copy_closure(set_form_associated_custom_native),
+        ),
+        (
             js_string!("__omoikane_is_actually_disabled"),
             1,
             NativeFunction::from_copy_closure(is_actually_disabled_native),
@@ -8940,7 +9079,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_submit_form"),
-            4,
+            6,
             NativeFunction::from_copy_closure(submit_form_native),
         ),
     ] {
@@ -10506,6 +10645,7 @@ fn computed_style_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    form_validation::flush(node_id, context)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let Some(node) = node else {
@@ -10635,6 +10775,39 @@ fn is_rendered_for_focus_native(
     })
 }
 
+fn parser_form_owner_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let owner = state
+            .borrow()
+            .get_node(node_id)
+            .and_then(|node| node.parser_form_owner());
+        Ok(node_to_js_value(owner))
+    })
+}
+
+fn set_form_associated_custom_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let associated = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::typ().with_message("Element required")))?;
+        node.set_form_associated_custom(associated);
+        state.borrow_mut().invalidate_style_cache_for_node(&node);
+        Ok(JsValue::undefined())
+    })
+}
+
 /// `__omoikane_is_actually_disabled(nodeId)` applies HTML's inherited
 /// `fieldset[disabled]` state, including the first-legend exception.
 fn is_actually_disabled_native(
@@ -10678,6 +10851,7 @@ fn layout_metrics_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    form_validation::flush(node_id, context)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let Some(node) = node else {
@@ -11301,6 +11475,9 @@ fn query_selector_native(
         .to_string(context)?
         .to_std_string_escaped();
     let selectors = parse_dom_selector_list(&selector)?;
+    if form_validation::selector_uses_validation(&selectors) {
+        form_validation::flush(node_id, context)?;
+    }
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         Ok(node_to_js_value(node.and_then(|node| {
@@ -12149,6 +12326,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let is_name_attribute = name.eq_ignore_ascii_case("name");
     let is_style_attribute = name.eq_ignore_ascii_case("style");
     with_host_state(|state| {
         let node = state
@@ -12172,6 +12350,9 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             }
         });
         node.set_attribute(name, value);
+        if is_name_attribute {
+            state.borrow_mut().refresh_iframe_context_name(&node);
+        }
         // Any attribute may participate in a selector (id/class/attribute
         // selectors), so invalidate the element's live document. Detached
         // elements cannot affect it until the insertion path invalidates it.
@@ -12222,12 +12403,16 @@ fn set_attribute_ns_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let is_name_attribute = namespace.is_none() && qualified_name == "name";
     with_host_state(|state| {
         let node = state
             .borrow()
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         node.set_xml_attribute_ns(qualified_name, namespace, local_name, value);
+        if is_name_attribute {
+            state.borrow_mut().refresh_iframe_context_name(&node);
+        }
         state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::undefined())
     })
@@ -12294,6 +12479,7 @@ fn set_option_selected_native(
                 .into());
         }
         node.set_selected(selected);
+        state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
@@ -14926,6 +15112,9 @@ fn query_selector_all_native(
         .to_string(context)?
         .to_std_string_escaped();
     let selectors = parse_dom_selector_list(&selector)?;
+    if form_validation::selector_uses_validation(&selectors) {
+        form_validation::flush(parent_id, context)?;
+    }
     with_host_state(|state| {
         let (parent, results) = {
             let s = state.borrow();
@@ -14963,6 +15152,9 @@ fn matches_selector_native(
         .to_string(context)?
         .to_std_string_escaped();
     let selectors = parse_dom_selector_list(&selector)?;
+    if form_validation::selector_uses_validation(&selectors) {
+        form_validation::flush(node_id, context)?;
+    }
     with_host_state(|state| {
         let state = state.borrow();
         let node = state
@@ -15216,7 +15408,12 @@ fn remove_attribute_native(
                 None
             }
         });
+        let removed_name =
+            name.eq_ignore_ascii_case("name") && node.get_attribute("name").is_some();
         node.remove_attribute(&name);
+        if removed_name {
+            state.borrow_mut().refresh_iframe_context_name(&node);
+        }
         // Any attribute may participate in a selector, so invalidate the
         // element's live document. Detached elements affect no document yet.
         if is_style_attribute {
@@ -15253,7 +15450,11 @@ fn remove_attribute_ns_native(
             .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let removed_name = qualified_name == "name" && node.get_attribute("name").is_some();
         node.remove_xml_attribute(&qualified_name);
+        if removed_name {
+            state.borrow_mut().refresh_iframe_context_name(&node);
+        }
         state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::undefined())
     })
@@ -15762,38 +15963,43 @@ fn resolve_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     };
     with_host_state(|state| {
         let base = state.borrow().base_url.clone();
-        let resolved = match base {
-            Some(base) => {
-                // Preserve any fragment: resolve only the part before the first
-                // `#`, then re-attach `#fragment` to the resolved output.
-                let (without_fragment, fragment) = match reference.split_once('#') {
-                    Some((before, after)) => (before, Some(after)),
-                    None => (reference.as_str(), None),
-                };
-                // An empty reference (RFC 3986 §5.2) resolves to the base URL
-                // itself. `None` marks a resolution failure -> raw fallback.
-                let base_part = if without_fragment.is_empty() {
-                    Some(base.to_string())
-                } else {
-                    crate::http::url::resolve_url(&base, without_fragment)
-                        .ok()
-                        .map(|url| url.to_string())
-                };
-                match base_part {
-                    Some(mut s) => {
-                        if let Some(frag) = fragment {
-                            s.push('#');
-                            s.push_str(frag);
-                        }
-                        s
-                    }
-                    None => reference.clone(),
-                }
-            }
-            None => reference,
-        };
+        let resolved = resolve_url_reference(&reference, base.as_ref());
         Ok(js_string!(resolved.as_str()).into())
     })
+}
+
+/// Resolve an IDL URL reference while retaining its fragment and raw fallback.
+fn resolve_url_reference(reference: &str, base: Option<&crate::http::Url>) -> String {
+    match base {
+        Some(base) => {
+            // Preserve any fragment: resolve only the part before the first
+            // `#`, then re-attach `#fragment` to the resolved output.
+            let (without_fragment, fragment) = match reference.split_once('#') {
+                Some((before, after)) => (before, Some(after)),
+                None => (reference, None),
+            };
+            // An empty reference (RFC 3986 §5.2) resolves to the base URL
+            // itself. `None` marks a resolution failure -> raw fallback.
+            let base_part = if without_fragment.is_empty() {
+                Some(base.to_string())
+            } else {
+                crate::http::url::resolve_url(&base, without_fragment)
+                    .ok()
+                    .map(|url| url.to_string())
+            };
+            match base_part {
+                Some(mut s) => {
+                    if let Some(frag) = fragment {
+                        s.push('#');
+                        s.push_str(frag);
+                    }
+                    s
+                }
+                None => reference.to_owned(),
+            }
+        }
+        None => reference.to_owned(),
+    }
 }
 
 fn schedule_navigation_native(
@@ -15871,15 +16077,21 @@ fn submit_form_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     } else {
         Some(string_arg(3, context)?)
     };
-    let request = NavigationRequest::FormSubmit {
+    let target = string_arg(4, context)?;
+    let form_id = parse_node_id(args.get(5), context)?;
+    let request = form_submission::Submission {
         url,
         method,
         body,
         content_type,
     };
     with_host_state(|state| {
-        state.borrow_mut().event_loop.enqueue_navigation(request);
-        Ok(JsValue::undefined())
+        let mut state = state.borrow_mut();
+        if let Some(form) = state.get_node(form_id) {
+            let frame = state.queue_form_submission(&form, &target, request)?;
+            return Ok(frame.map_or_else(JsValue::null, |id| JsValue::from(id as f64)));
+        }
+        Ok(JsValue::null())
     })
 }
 
@@ -34378,14 +34590,14 @@ b</textarea></form>"#,
                 if (f.elements.length !== 1) return 2;
                 if (f.elements[0] !== i) return 3;
                 if (f.elements.first !== i) return 4;
-                if (f.elements.second !== null) return 5;
+                if (f.elements.second !== undefined) return 5;
                 if (f.elements.item(0) !== i) return 6;
                 if (f.elements.namedItem('first') !== i) return 7;
                 if (!(0 in f.elements) || !('first' in f.elements)) return 8;
                 if (f.elements[Symbol('missing')] !== undefined) return 9;
                 i.name = 'second';
                 if (f.elements.second !== i) return 10;
-                if (f.elements.first !== null) return 11;
+                if (f.elements.first !== undefined) return 11;
                 var select = document.createElement('select');
                 select.name = 'choice';
                 f.appendChild(select);
@@ -34394,6 +34606,7 @@ b</textarea></form>"#,
                 if (Array.from(retained).length !== 2) return 13;
                 f.removeChild(i);
                 if (retained.length !== 1 || retained[0] !== select) return 14;
+                if (retained.namedItem('first') !== null || 'first' in retained) return 15;
                 return 0;
             })()
         "#,
