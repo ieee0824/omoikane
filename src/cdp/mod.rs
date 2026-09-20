@@ -760,7 +760,7 @@ impl CdpSession {
     }
 
     /// Creates a tab with its own session storage in a shared browser profile.
-    pub(crate) fn with_storage_manager(storage_manager: StorageManager) -> Result<Self, String> {
+    pub fn with_storage_manager(storage_manager: StorageManager) -> Result<Self, String> {
         let storage_session_id = storage_manager.create_session();
         let storage_lifetime = TabStorageLifetime {
             manager: storage_manager.clone(),

@@ -273,7 +273,7 @@ fn content_type(path: &Path) -> &str {
     }
 }
 
-fn any_script_dependencies(source: &[u8], test_path: &str) -> Vec<String> {
+fn script_dependencies(source: &[u8], test_path: &str) -> Vec<String> {
     let parent = Path::new(test_path)
         .parent()
         .unwrap_or_else(|| Path::new(""));
@@ -911,8 +911,9 @@ fn selected_wpt_testharness_cases_match_expectations() {
             "WPT resource missing: {}",
             case.path
         );
-        let document_source = if case.path.ends_with(".any.js") {
-            let dependencies = any_script_dependencies(response.body(), &case.path)
+        let document_source = if case.path.ends_with(".any.js") || case.path.ends_with(".window.js")
+        {
+            let dependencies = script_dependencies(response.body(), &case.path)
                 .into_iter()
                 .map(|path| format!("<script src=\"{path}\"></script>"))
                 .collect::<String>();

@@ -1,5 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+const DEFAULT_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct StorageOrigin {
@@ -50,7 +55,7 @@ impl StorageArea {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct StorageState {
     local: HashMap<StorageOrigin, StorageArea>,
     session: HashMap<(u64, StorageOrigin), StorageArea>,
@@ -60,6 +65,26 @@ struct StorageState {
     /// `CacheStorage.keys()` and `Cache.keys()` expose deterministic lists.
     caches: HashMap<StorageOrigin, CacheStorageArea>,
     next_cache_entry_id: u64,
+    quota_bytes: u64,
+    persistence_policy: StoragePersistencePolicy,
+    persistence_path: Option<PathBuf>,
+    persisted_origins: HashSet<StorageOrigin>,
+}
+
+impl Default for StorageState {
+    fn default() -> Self {
+        Self {
+            local: HashMap::new(),
+            session: HashMap::new(),
+            next_session_id: 0,
+            caches: HashMap::new(),
+            next_cache_entry_id: 0,
+            quota_bytes: DEFAULT_QUOTA_BYTES,
+            persistence_policy: StoragePersistencePolicy::Unsupported,
+            persistence_path: None,
+            persisted_origins: HashSet::new(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -84,12 +109,122 @@ pub(crate) struct CacheEntrySnapshot {
     pub(crate) response: String,
 }
 
+/// Host policy used to answer persistent-storage requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StoragePersistencePolicy {
+    /// The embedder has no durable profile store.
+    #[default]
+    Unsupported,
+    /// The embedder supports the API but denies persistence requests.
+    Denied,
+    /// The embedder allows origins to opt into persistent storage.
+    Allow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StorageEstimate {
+    pub(crate) usage: u64,
+    pub(crate) quota: u64,
+}
+
+/// Profile-wide storage shared by all browsing sessions created by an
+/// embedder.
 #[derive(Debug, Clone, Default)]
 pub struct StorageManager(Arc<Mutex<StorageState>>);
 
 impl StorageManager {
+    /// Creates an in-memory storage manager with a 50 MiB quota and no
+    /// persistent-storage host support.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an in-memory storage manager with host-defined quota and
+    /// persistence policy.
+    pub fn with_policy(quota_bytes: u64, persistence_policy: StoragePersistencePolicy) -> Self {
+        Self(Arc::new(Mutex::new(StorageState {
+            quota_bytes,
+            persistence_policy,
+            ..StorageState::default()
+        })))
+    }
+
+    /// Creates a storage manager whose granted persistent origins survive a
+    /// process restart in `persistence_path`.
+    pub fn with_profile(
+        persistence_path: impl Into<PathBuf>,
+        quota_bytes: u64,
+        persistence_policy: StoragePersistencePolicy,
+    ) -> io::Result<Self> {
+        let persistence_path = persistence_path.into();
+        let persisted_origins = load_persisted_origins(&persistence_path)?;
+        Ok(Self(Arc::new(Mutex::new(StorageState {
+            quota_bytes,
+            persistence_policy,
+            persistence_path: Some(persistence_path),
+            persisted_origins,
+            ..StorageState::default()
+        }))))
+    }
+
+    pub(crate) fn estimate(&self, origin: &StorageOrigin) -> StorageEstimate {
+        let state = self.0.lock().expect("storage manager mutex poisoned");
+        let local = state.local.get(origin).map_or(0, |area| {
+            area.entries.iter().fold(0_u64, |usage, (key, value)| {
+                usage
+                    .saturating_add(key.len() as u64)
+                    .saturating_add(value.len() as u64)
+            })
+        });
+        let caches = state.caches.get(origin).map_or(0, |storage| {
+            storage.caches.iter().fold(0_u64, |usage, cache| {
+                cache.entries.iter().fold(
+                    usage.saturating_add(cache.name.len() as u64),
+                    |usage, entry| {
+                        usage
+                            .saturating_add(entry.request.len() as u64)
+                            .saturating_add(entry.response.len() as u64)
+                    },
+                )
+            })
+        });
+        StorageEstimate {
+            usage: local.saturating_add(caches),
+            quota: state.quota_bytes,
+        }
+    }
+
+    pub(crate) fn persisted(&self, origin: &StorageOrigin) -> bool {
+        self.0
+            .lock()
+            .expect("storage manager mutex poisoned")
+            .persisted_origins
+            .contains(origin)
+    }
+
+    pub(crate) fn persistence_policy(&self) -> StoragePersistencePolicy {
+        self.0
+            .lock()
+            .expect("storage manager mutex poisoned")
+            .persistence_policy
+    }
+
+    pub(crate) fn persist(&self, origin: &StorageOrigin) -> io::Result<bool> {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        if state.persistence_policy != StoragePersistencePolicy::Allow {
+            return Ok(false);
+        }
+        if state.persisted_origins.contains(origin) {
+            return Ok(true);
+        }
+        state.persisted_origins.insert(origin.clone());
+        if let Some(path) = state.persistence_path.as_deref()
+            && let Err(error) = save_persisted_origins(path, &state.persisted_origins)
+        {
+            state.persisted_origins.remove(origin);
+            return Err(error);
+        }
+        Ok(true)
     }
 
     /// Allocates an isolated top-level browsing-session identifier.
@@ -321,6 +456,39 @@ impl StorageManager {
     }
 }
 
+fn load_persisted_origins(path: &Path) -> io::Result<HashSet<StorageOrigin>> {
+    let encoded = match fs::read(path) {
+        Ok(encoded) => encoded,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) => return Err(error),
+    };
+    let values: Vec<String> = serde_json::from_slice(&encoded)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(values
+        .into_iter()
+        .filter_map(|value| StorageOrigin::from_url(&value))
+        .collect())
+}
+
+fn save_persisted_origins(path: &Path, origins: &HashSet<StorageOrigin>) -> io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let mut values = origins
+        .iter()
+        .map(StorageOrigin::serialize)
+        .collect::<Vec<_>>();
+    values.sort();
+    let encoded = serde_json::to_vec_pretty(&values)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, encoded)?;
+    fs::rename(temporary, path)
+}
+
 /// Extracts the URL/method portion used by Cache.put's replacement rule.
 /// Request snapshots are intentionally JSON objects, but malformed payloads
 /// should never make the storage mutex panic; an empty key simply means the
@@ -344,6 +512,14 @@ fn cache_request_replacement_key(request: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temporary_profile(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "omoikane-storage-{name}-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ))
+    }
 
     #[test]
     fn closing_a_tab_discards_its_sessions_but_preserves_profile_storage() {
@@ -431,5 +607,89 @@ mod tests {
 
         assert!(manager.cache_delete(&first, "v1"));
         assert!(!manager.cache_has(&first, "v1"));
+    }
+
+    #[test]
+    fn estimate_counts_origin_local_and_cache_bytes() {
+        let manager = StorageManager::with_policy(4096, StoragePersistencePolicy::Denied);
+        let first = StorageOrigin::from_url("https://example.com/").unwrap();
+        let second = StorageOrigin::from_url("https://other.example.com/").unwrap();
+        let session = manager.create_session();
+
+        assert_eq!(
+            manager.estimate(&first),
+            StorageEstimate {
+                usage: 0,
+                quota: 4096
+            }
+        );
+        manager.set(session, &first, true, "key".into(), "value".into());
+        manager.set(
+            session,
+            &first,
+            false,
+            "session".into(),
+            "not-counted".into(),
+        );
+        assert_eq!(manager.estimate(&first).usage, 8);
+        assert_eq!(manager.estimate(&second).usage, 0);
+
+        manager.cache_open(&first, "v1".into());
+        manager
+            .cache_put(&first, "v1", "request".into(), "response".into())
+            .unwrap();
+        assert_eq!(manager.estimate(&first).usage, 8 + 2 + 7 + 8);
+        manager.remove(session, &first, true, "key");
+        assert_eq!(manager.estimate(&first).usage, 2 + 7 + 8);
+    }
+
+    #[test]
+    fn persistence_policy_handles_allow_deny_and_unsupported_hosts() {
+        let origin = StorageOrigin::from_url("https://example.com/").unwrap();
+        for policy in [
+            StoragePersistencePolicy::Unsupported,
+            StoragePersistencePolicy::Denied,
+        ] {
+            let manager = StorageManager::with_policy(1024, policy);
+            assert!(!manager.persist(&origin).unwrap());
+            assert!(!manager.persisted(&origin));
+        }
+
+        let manager = StorageManager::with_policy(1024, StoragePersistencePolicy::Allow);
+        assert!(manager.persist(&origin).unwrap());
+        assert!(manager.persisted(&origin));
+    }
+
+    #[test]
+    fn persistent_grant_survives_manager_restart_and_remains_origin_scoped() {
+        let path = temporary_profile("restart");
+        let _ = fs::remove_file(&path);
+        let first = StorageOrigin::from_url("https://example.com/").unwrap();
+        let second = StorageOrigin::from_url("https://other.example.com/").unwrap();
+        {
+            let manager =
+                StorageManager::with_profile(&path, 2048, StoragePersistencePolicy::Allow).unwrap();
+            assert!(manager.persist(&first).unwrap());
+        }
+        let restarted =
+            StorageManager::with_profile(&path, 2048, StoragePersistencePolicy::Allow).unwrap();
+        assert!(restarted.persisted(&first));
+        assert!(!restarted.persisted(&second));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_profile_write_does_not_report_or_retain_a_grant() {
+        let blocker = temporary_profile("blocked-parent");
+        let _ = fs::remove_file(&blocker);
+        let path = blocker.join("persistent-origins.json");
+        let origin = StorageOrigin::from_url("https://example.com/").unwrap();
+        let manager =
+            StorageManager::with_profile(&path, 1024, StoragePersistencePolicy::Allow).unwrap();
+        fs::write(&blocker, b"not a directory").unwrap();
+
+        assert!(manager.persist(&origin).is_err());
+        assert!(!manager.persisted(&origin));
+        fs::remove_file(blocker).unwrap();
     }
 }
