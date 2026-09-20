@@ -202,6 +202,17 @@
     { "path": "visual-viewport/viewport-unscaled-size-iframe.html" },
     { "path": "visual-viewport/viewport-read-size-causes-layout.html" },
     { "path": "visual-viewport/viewport-read-size-in-iframe-causes-layout.html" },
-    { "path": "visual-viewport/viewport-resize-event-on-iframe-size-change.html" }
+    { "path": "visual-viewport/viewport-resize-event-on-iframe-size-change.html" },
+    { "path": "web-locks/secure-context.https.any.js" },
+    { "path": "web-locks/query-empty.https.any.js" },
+    { "path": "web-locks/lock-attributes.https.any.js" },
+    { "path": "web-locks/acquire.https.any.js" },
+    { "path": "web-locks/mode-exclusive.https.any.js" },
+    { "path": "web-locks/mode-shared.https.any.js" },
+    { "path": "web-locks/mode-mixed.https.any.js" },
+    { "path": "web-locks/ifAvailable.https.any.js" },
+    { "path": "web-locks/signal.https.any.js" },
+    { "path": "web-locks/steal.https.any.js" },
+    { "path": "web-locks/held.https.any.js" }
   ]
 }

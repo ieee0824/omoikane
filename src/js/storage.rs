@@ -1,10 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 const DEFAULT_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
+static NEXT_WEB_LOCK_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct StorageOrigin {
@@ -69,6 +73,9 @@ struct StorageState {
     persistence_policy: StoragePersistencePolicy,
     persistence_path: Option<PathBuf>,
     persisted_origins: HashSet<StorageOrigin>,
+    web_locks: HashMap<(StorageOrigin, String), WebLockResource>,
+    web_lock_requests: HashMap<u64, WebLockRequest>,
+    next_web_lock_request_id: u64,
 }
 
 impl Default for StorageState {
@@ -83,8 +90,84 @@ impl Default for StorageState {
             persistence_policy: StoragePersistencePolicy::Unsupported,
             persistence_path: None,
             persisted_origins: HashSet::new(),
+            web_locks: HashMap::new(),
+            web_lock_requests: HashMap::new(),
+            next_web_lock_request_id: 1,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebLockMode {
+    Exclusive,
+    Shared,
+}
+
+impl WebLockMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Exclusive => "exclusive",
+            Self::Shared => "shared",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebLockRequestState {
+    Pending,
+    Granted,
+    Held,
+    Stolen,
+}
+
+#[derive(Debug)]
+struct WebLockRequest {
+    origin: StorageOrigin,
+    name: String,
+    mode: WebLockMode,
+    client_id: u64,
+    state: WebLockRequestState,
+}
+
+#[derive(Debug, Default)]
+struct WebLockResource {
+    held: Vec<u64>,
+    pending: VecDeque<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebLockRequestResult {
+    Granted(u64),
+    Pending(u64),
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebLockStartResult {
+    Held,
+    Pending,
+    Stolen,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebLockNotificationKind {
+    Granted,
+    Stolen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WebLockNotification {
+    pub(crate) client_id: u64,
+    pub(crate) request_id: u64,
+    pub(crate) kind: WebLockNotificationKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WebLockSnapshot {
+    pub(crate) name: String,
+    pub(crate) mode: WebLockMode,
+    pub(crate) client_id: u64,
 }
 
 #[derive(Debug, Default)]
@@ -232,6 +315,188 @@ impl StorageManager {
         let mut state = self.0.lock().expect("storage manager mutex poisoned");
         state.next_session_id = state.next_session_id.saturating_add(1);
         state.next_session_id
+    }
+
+    pub(crate) fn create_web_lock_client(&self) -> u64 {
+        NEXT_WEB_LOCK_CLIENT_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn request_web_lock(
+        &self,
+        origin: &StorageOrigin,
+        client_id: u64,
+        name: String,
+        mode: WebLockMode,
+        if_available: bool,
+        steal: bool,
+    ) -> (WebLockRequestResult, Vec<WebLockNotification>) {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let key = (origin.clone(), name.clone());
+        let grantable = web_lock_is_immediately_grantable(&state, &key, mode);
+        if if_available && !grantable {
+            return (WebLockRequestResult::Unavailable, Vec::new());
+        }
+
+        let request_id = state.next_web_lock_request_id;
+        state.next_web_lock_request_id = state.next_web_lock_request_id.saturating_add(1);
+        state.web_lock_requests.insert(
+            request_id,
+            WebLockRequest {
+                origin: origin.clone(),
+                name,
+                mode,
+                client_id,
+                state: WebLockRequestState::Pending,
+            },
+        );
+
+        let mut notifications = Vec::new();
+        if steal {
+            let held = state
+                .web_locks
+                .entry(key.clone())
+                .or_default()
+                .held
+                .drain(..)
+                .collect::<Vec<_>>();
+            for held_id in held {
+                if let Some(held_request) = state.web_lock_requests.get_mut(&held_id) {
+                    held_request.state = WebLockRequestState::Stolen;
+                    notifications.push(WebLockNotification {
+                        client_id: held_request.client_id,
+                        request_id: held_id,
+                        kind: WebLockNotificationKind::Stolen,
+                    });
+                }
+            }
+            state
+                .web_locks
+                .entry(key)
+                .or_default()
+                .held
+                .push(request_id);
+            state
+                .web_lock_requests
+                .get_mut(&request_id)
+                .expect("new Web Lock request must exist")
+                .state = WebLockRequestState::Granted;
+            return (WebLockRequestResult::Granted(request_id), notifications);
+        }
+
+        if grantable {
+            state
+                .web_locks
+                .entry(key)
+                .or_default()
+                .held
+                .push(request_id);
+            state
+                .web_lock_requests
+                .get_mut(&request_id)
+                .expect("new Web Lock request must exist")
+                .state = WebLockRequestState::Granted;
+            (WebLockRequestResult::Granted(request_id), notifications)
+        } else {
+            state
+                .web_locks
+                .entry(key)
+                .or_default()
+                .pending
+                .push_back(request_id);
+            (WebLockRequestResult::Pending(request_id), notifications)
+        }
+    }
+
+    pub(crate) fn start_web_lock(&self, request_id: u64) -> WebLockStartResult {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let Some(request) = state.web_lock_requests.get_mut(&request_id) else {
+            return WebLockStartResult::Missing;
+        };
+        match request.state {
+            WebLockRequestState::Granted => {
+                request.state = WebLockRequestState::Held;
+                WebLockStartResult::Held
+            }
+            WebLockRequestState::Held => WebLockStartResult::Held,
+            WebLockRequestState::Pending => WebLockStartResult::Pending,
+            WebLockRequestState::Stolen => WebLockStartResult::Stolen,
+        }
+    }
+
+    pub(crate) fn release_web_lock(&self, request_id: u64) -> Vec<WebLockNotification> {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        web_lock_remove_request(&mut state, request_id, true)
+    }
+
+    pub(crate) fn cancel_web_lock(&self, request_id: u64) -> (bool, Vec<WebLockNotification>) {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let cancellable = state
+            .web_lock_requests
+            .get(&request_id)
+            .is_some_and(|request| {
+                matches!(
+                    request.state,
+                    WebLockRequestState::Pending | WebLockRequestState::Granted
+                )
+            });
+        if !cancellable {
+            return (false, Vec::new());
+        }
+        (true, web_lock_remove_request(&mut state, request_id, true))
+    }
+
+    pub(crate) fn finish_stolen_web_lock(&self, request_id: u64) {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        if state
+            .web_lock_requests
+            .get(&request_id)
+            .is_some_and(|request| request.state == WebLockRequestState::Stolen)
+        {
+            state.web_lock_requests.remove(&request_id);
+        }
+    }
+
+    pub(crate) fn remove_web_lock_client(&self, client_id: u64) -> Vec<WebLockNotification> {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let request_ids = state
+            .web_lock_requests
+            .iter()
+            .filter_map(|(request_id, request)| {
+                (request.client_id == client_id).then_some(*request_id)
+            })
+            .collect::<Vec<_>>();
+        let mut notifications = Vec::new();
+        for request_id in request_ids {
+            notifications.extend(web_lock_remove_request(&mut state, request_id, true));
+        }
+        notifications
+    }
+
+    pub(crate) fn query_web_locks(
+        &self,
+        origin: &StorageOrigin,
+    ) -> (Vec<WebLockSnapshot>, Vec<WebLockSnapshot>) {
+        let state = self.0.lock().expect("storage manager mutex poisoned");
+        let mut requests = state.web_lock_requests.iter().collect::<Vec<_>>();
+        requests.sort_by_key(|(request_id, _)| **request_id);
+        let mut held = Vec::new();
+        let mut pending = Vec::new();
+        for (_, request) in requests {
+            if &request.origin != origin {
+                continue;
+            }
+            let snapshot = WebLockSnapshot {
+                name: request.name.clone(),
+                mode: request.mode,
+                client_id: request.client_id,
+            };
+            match request.state {
+                WebLockRequestState::Granted | WebLockRequestState::Held => held.push(snapshot),
+                WebLockRequestState::Pending => pending.push(snapshot),
+                WebLockRequestState::Stolen => {}
+            }
+        }
+        (held, pending)
     }
 
     /// Releases all origin-specific session storage when a tab closes.
@@ -454,6 +719,112 @@ impl StorageManager {
             changed
         })
     }
+}
+
+fn web_lock_is_immediately_grantable(
+    state: &StorageState,
+    key: &(StorageOrigin, String),
+    mode: WebLockMode,
+) -> bool {
+    let Some(resource) = state.web_locks.get(key) else {
+        return true;
+    };
+    if !resource.pending.is_empty() {
+        return false;
+    }
+    if resource.held.is_empty() {
+        return true;
+    }
+    mode == WebLockMode::Shared
+        && resource.held.iter().all(|request_id| {
+            state
+                .web_lock_requests
+                .get(request_id)
+                .is_some_and(|request| request.mode == WebLockMode::Shared)
+        })
+}
+
+fn web_lock_remove_request(
+    state: &mut StorageState,
+    request_id: u64,
+    advance: bool,
+) -> Vec<WebLockNotification> {
+    let Some(request) = state.web_lock_requests.remove(&request_id) else {
+        return Vec::new();
+    };
+    let key = (request.origin, request.name);
+    if let Some(resource) = state.web_locks.get_mut(&key) {
+        resource.held.retain(|held| *held != request_id);
+        resource.pending.retain(|pending| *pending != request_id);
+    }
+    if advance {
+        web_lock_advance(state, &key)
+    } else {
+        Vec::new()
+    }
+}
+
+fn web_lock_advance(
+    state: &mut StorageState,
+    key: &(StorageOrigin, String),
+) -> Vec<WebLockNotification> {
+    let mut notifications = Vec::new();
+    loop {
+        let Some(resource) = state.web_locks.get(key) else {
+            break;
+        };
+        let Some(request_id) = resource.pending.front().copied() else {
+            if resource.held.is_empty() {
+                state.web_locks.remove(key);
+            }
+            break;
+        };
+        let Some(request) = state.web_lock_requests.get(&request_id) else {
+            state
+                .web_locks
+                .get_mut(key)
+                .expect("Web Lock resource must exist")
+                .pending
+                .pop_front();
+            continue;
+        };
+        let can_grant = if resource.held.is_empty() {
+            true
+        } else {
+            request.mode == WebLockMode::Shared
+                && resource.held.iter().all(|held_id| {
+                    state
+                        .web_lock_requests
+                        .get(held_id)
+                        .is_some_and(|held| held.mode == WebLockMode::Shared)
+                })
+        };
+        if !can_grant {
+            break;
+        }
+        let mode = request.mode;
+        let client_id = request.client_id;
+        let resource = state
+            .web_locks
+            .get_mut(key)
+            .expect("Web Lock resource must exist");
+        resource.pending.pop_front();
+        resource.held.push(request_id);
+        state
+            .web_lock_requests
+            .get_mut(&request_id)
+            .expect("pending Web Lock request must exist")
+            .state = WebLockRequestState::Granted;
+        notifications.push(WebLockNotification {
+            client_id,
+            request_id,
+            kind: WebLockNotificationKind::Granted,
+        });
+        if mode == WebLockMode::Exclusive {
+            break;
+        }
+    }
+    notifications
 }
 
 fn load_persisted_origins(path: &Path) -> io::Result<HashSet<StorageOrigin>> {

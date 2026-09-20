@@ -31,6 +31,8 @@ pub(crate) enum TaskSource {
     FontLoading,
     /// The geolocation task source, used to deliver position/error callbacks.
     Geolocation,
+    /// Grant and forced-release notifications for the Web Locks API.
+    WebLocks,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +44,11 @@ pub(crate) enum Task {
     /// A geolocation request delivered after the current script task.
     Geolocation {
         request_id: u64,
+    },
+    WebLock {
+        document_id: usize,
+        request_id: u64,
+        stolen: bool,
     },
     Navigation(NavigationRequest),
     PostedMessage {
@@ -192,6 +199,7 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
             owner: Some(owner), ..
         } => unsafe { owner.trace(tracer) },
         Task::Geolocation { .. }
+        | Task::WebLock { .. }
         | Task::Navigation(_)
         | Task::BroadcastChannelMessage { .. }
         | Task::WorkerMessage { .. }
@@ -226,6 +234,17 @@ impl EventLoop {
 
     pub(crate) fn enqueue_timer(&mut self, payload: TimerPayload) {
         self.enqueue_timer_for_document(payload, None);
+    }
+
+    pub(crate) fn enqueue_web_lock(&mut self, document_id: usize, request_id: u64, stolen: bool) {
+        self.enqueue(
+            TaskSource::WebLocks,
+            Task::WebLock {
+                document_id,
+                request_id,
+                stolen,
+            },
+        );
     }
 
     pub(super) fn enqueue_timer_for_document(
@@ -596,6 +615,12 @@ impl EventLoop {
                     task,
                     Task::Timer {
                         owner_document_id: Some(owner_document_id),
+                        ..
+                    } if *owner_document_id == document_id
+                ) || matches!(
+                    task,
+                    Task::WebLock {
+                        document_id: owner_document_id,
                         ..
                     } if *owner_document_id == document_id
                 );

@@ -85,8 +85,11 @@ mod storage;
 mod stylesheet;
 use csp::{CspPolicy, CspViolation, ResourceType};
 use event_loop::{EventLoop, Task};
-use storage::StorageOrigin;
 pub use storage::{StorageManager, StoragePersistencePolicy};
+use storage::{
+    StorageOrigin, WebLockMode, WebLockNotification, WebLockNotificationKind, WebLockRequestResult,
+    WebLockStartResult,
+};
 
 /// Most page-script task errors retained per drain. See
 /// [`JsRuntime::record_task_error`].
@@ -135,6 +138,61 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
     static NEXT_SHARED_WORKER_ID: Cell<u64> = const { Cell::new(1) };
     static NEXT_SHARED_WORKER_CONNECTION_ID: Cell<u64> = const { Cell::new(1) };
+    static WEB_LOCK_CLIENT_REGISTRY: RefCell<HashMap<u64, (Weak<RefCell<HostState>>, usize)>> =
+        RefCell::new(HashMap::new());
+    static PENDING_WEB_LOCK_NOTIFICATIONS: RefCell<Vec<WebLockNotification>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn register_web_lock_client(
+    host_state: &Rc<RefCell<HostState>>,
+    document_id: usize,
+    client_id: u64,
+) {
+    let _ = WEB_LOCK_CLIENT_REGISTRY.try_with(|registry| {
+        registry
+            .borrow_mut()
+            .insert(client_id, (Rc::downgrade(host_state), document_id));
+    });
+}
+
+fn queue_web_lock_notifications(notifications: Vec<WebLockNotification>) {
+    let _ = PENDING_WEB_LOCK_NOTIFICATIONS
+        .try_with(|pending| pending.borrow_mut().extend(notifications));
+}
+
+fn flush_web_lock_notifications() {
+    let Ok(notifications) = PENDING_WEB_LOCK_NOTIFICATIONS
+        .try_with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+    else {
+        return;
+    };
+    let mut retry = Vec::new();
+    for notification in notifications {
+        let registration = WEB_LOCK_CLIENT_REGISTRY
+            .try_with(|registry| registry.borrow().get(&notification.client_id).cloned())
+            .ok()
+            .flatten();
+        let Some((host, document_id)) = registration else {
+            continue;
+        };
+        let Some(host) = host.upgrade() else {
+            continue;
+        };
+        let Ok(mut state) = host.try_borrow_mut() else {
+            retry.push(notification);
+            continue;
+        };
+        state.event_loop.enqueue_web_lock(
+            document_id,
+            notification.request_id,
+            notification.kind == WebLockNotificationKind::Stolen,
+        );
+    }
+    if !retry.is_empty() {
+        let _ =
+            PENDING_WEB_LOCK_NOTIFICATIONS.try_with(|pending| pending.borrow_mut().extend(retry));
+    }
 }
 
 /// Host clipboard storage shared by all page runtimes in this process.
@@ -1185,6 +1243,9 @@ struct HostState {
     /// explicitly via [`JsRuntime::set_base_url`]. `None` means relative
     /// references cannot be resolved.
     base_url: Option<crate::http::Url>,
+    /// Worker globals inherit the creator's secure-context state even when a
+    /// data/blob script URL itself is not a trustworthy URL.
+    secure_context_override: Option<bool>,
     /// Sub-browsing-context documents — one per `<iframe>` element whose
     /// `contentDocument` has been accessed. Keyed by the iframe element's node
     /// identity. Each entry records the loaded sub-document root and the `src`
@@ -1221,6 +1282,9 @@ struct HostState {
     next_javascript_dialog_id: u64,
     storage_manager: StorageManager,
     storage_session_id: u64,
+    /// Web Locks identifies each environment settings object separately even
+    /// when several same-origin Window realms share this runtime.
+    web_lock_clients: HashMap<usize, u64>,
     document_origins: HashMap<usize, Option<StorageOrigin>>,
     /// Committed URL per live Document. Nested Window/Document access must not
     /// accidentally expose the top-level Location after iframe navigation.
@@ -1724,6 +1788,11 @@ impl HostState {
         let mut document_origins = HashMap::new();
         let main_storage_origin = StorageOrigin::from_url(&location_href);
         document_origins.insert(document.identity(), main_storage_origin.clone());
+        let mut web_lock_clients = HashMap::new();
+        web_lock_clients.insert(
+            document.identity(),
+            storage_manager.create_web_lock_client(),
+        );
         let mut document_urls = HashMap::new();
         document_urls.insert(document.identity(), location_href.clone());
         let base_url = location_href.parse::<crate::http::Url>().ok();
@@ -1755,6 +1824,7 @@ impl HostState {
             task_errors: Vec::new(),
             suppressed_task_errors: 0,
             base_url,
+            secure_context_override: None,
             location_href,
             navigator_user_agent: default_user_agent(),
             clipboard: host_clipboard(),
@@ -1831,6 +1901,7 @@ impl HostState {
             next_javascript_dialog_id: 1,
             storage_manager,
             storage_session_id,
+            web_lock_clients,
             document_origins,
             document_urls,
             document_base_urls,
@@ -2416,6 +2487,12 @@ impl HostState {
             .retain(|script| script.document.identity() != document_id);
         self.parser_inserted_scripts
             .retain(|id| !tree_ids.contains(id));
+        if let Some(client_id) = self.web_lock_clients.remove(&document_id) {
+            let _ = WEB_LOCK_CLIENT_REGISTRY.try_with(|registry| {
+                registry.borrow_mut().remove(&client_id);
+            });
+            queue_web_lock_notifications(self.storage_manager.remove_web_lock_client(client_id));
+        }
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_base_urls.remove(&document_id);
@@ -3691,6 +3768,9 @@ impl JsRuntime {
             storage_manager,
             storage_session_id,
         )));
+        for (document_id, client_id) in host_state.borrow().web_lock_clients.clone() {
+            register_web_lock_client(&host_state, document_id, client_id);
+        }
         let module_loader = Rc::new(HttpModuleLoader {
             owner: Rc::downgrade(&host_state),
             ..HttpModuleLoader::default()
@@ -5459,6 +5539,7 @@ impl JsRuntime {
             if self.is_terminated_worker() {
                 break;
             }
+            flush_web_lock_notifications();
             let task = { self.host_state.borrow_mut().event_loop.pop_task() };
             let Some((_, task)) = task else {
                 break;
@@ -5467,6 +5548,7 @@ impl JsRuntime {
                 Task::Timer {
                     owner_document_id, ..
                 } => *owner_document_id,
+                Task::WebLock { document_id, .. } => Some(*document_id),
                 _ => None,
             };
             self.run_task(task)?;
@@ -5499,12 +5581,14 @@ impl JsRuntime {
             if self.is_terminated_worker() {
                 break;
             }
+            flush_web_lock_notifications();
             let task = { self.host_state.borrow_mut().event_loop.pop_task() };
             let Some((_, task)) = task else { break };
             let task_document_id = match &task {
                 Task::Timer {
                     owner_document_id, ..
                 } => *owner_document_id,
+                Task::WebLock { document_id, .. } => Some(*document_id),
                 _ => None,
             };
             match task {
@@ -6418,6 +6502,7 @@ impl JsRuntime {
             self.advance_worklet_clocks(step);
             self.run_worker_background_tasks();
             self.run_worklet_background_tasks();
+            flush_web_lock_notifications();
             advanced = advanced.saturating_add(step);
 
             loop {
@@ -6433,6 +6518,7 @@ impl JsRuntime {
                     Task::Timer {
                         owner_document_id, ..
                     } => *owner_document_id,
+                    Task::WebLock { document_id, .. } => Some(*document_id),
                     _ => None,
                 };
                 {
@@ -6442,6 +6528,7 @@ impl JsRuntime {
                     let task_kind = match &task {
                         Task::Timer { payload, .. } => payload.kind(),
                         Task::Geolocation { .. } => "geolocation",
+                        Task::WebLock { .. } => "web-lock",
                         Task::Navigation(_) => "navigation",
                         Task::PostedMessage { .. } => "posted-message",
                         Task::BroadcastChannelMessage { .. } => "broadcast-channel",
@@ -6515,6 +6602,22 @@ impl JsRuntime {
                 self.run_timer_payload(payload)
             }
             Task::Geolocation { request_id } => self.run_geolocation_delivery(request_id, false),
+            Task::WebLock {
+                document_id,
+                request_id,
+                stolen,
+            } => self.eval_in_document_realm(
+                document_id,
+                &format!(
+                    "{}({:?})",
+                    if stolen {
+                        "__omoikane_web_lock_stolen"
+                    } else {
+                        "__omoikane_web_lock_granted"
+                    },
+                    request_id.to_string(),
+                ),
+            ),
             Task::Navigation(request) => {
                 self.host_state
                     .borrow_mut()
@@ -7730,6 +7833,23 @@ impl Drop for JsRuntime {
         let _guard = activate_host_state(Rc::clone(&self.host_state));
         self.terminate_workers();
 
+        let (storage_manager, clients) = {
+            let mut state = self.host_state.borrow_mut();
+            (
+                state.storage_manager.clone(),
+                std::mem::take(&mut state.web_lock_clients)
+                    .into_values()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        for client_id in clients {
+            let _ = WEB_LOCK_CLIENT_REGISTRY.try_with(|registry| {
+                registry.borrow_mut().remove(&client_id);
+            });
+            queue_web_lock_notifications(storage_manager.remove_web_lock_client(client_id));
+        }
+        flush_web_lock_notifications();
+
         // Iframe realms and queued callbacks are explicit Boa roots held by
         // HostState. Release them while the Context is still alive.  Dropping
         // these roots after Context teardown leaves Boa's generational
@@ -8653,6 +8773,11 @@ fn register_host_bindings(
             js_string!("__omoikane_storage_manager"),
             2,
             NativeFunction::from_copy_closure(storage_manager_native),
+        ),
+        (
+            js_string!("__omoikane_web_locks"),
+            5,
+            NativeFunction::from_copy_closure(web_locks_native),
         ),
         (
             js_string!("__omoikane_cache_storage"),
@@ -9716,6 +9841,9 @@ fn is_secure_context_parsed_url(url: &crate::http::Url) -> bool {
 }
 
 fn host_is_secure_context(state: &HostState) -> bool {
+    if let Some(secure) = state.secure_context_override {
+        return secure;
+    }
     // The base URL is already parsed and is the canonical origin used by the
     // runtime. Avoid formatting and reparsing it on every secure-context or
     // clipboard check. The lightweight URL type does not model fragments, so
@@ -9730,6 +9858,9 @@ fn host_is_secure_context(state: &HostState) -> bool {
 }
 
 fn document_is_secure_context(state: &HostState, document_id: usize) -> bool {
+    if let Some(secure) = state.secure_context_override {
+        return secure;
+    }
     if !host_is_secure_context(state) {
         return false;
     }
@@ -10272,6 +10403,152 @@ fn storage_manager_native(
                 .into()),
         }
     })
+}
+
+fn web_lock_context(context: &Context) -> JsResult<(usize, u64, StorageManager, StorageOrigin)> {
+    with_host_state(|host| {
+        let document_id = {
+            let state = host.borrow();
+            context_document_id(context, &state)
+        };
+        let (client_id, created, manager, origin) = {
+            let mut state = host.borrow_mut();
+            if !document_is_secure_context(&state, document_id) {
+                return Err(JsNativeError::error()
+                    .with_message("Web Locks requires a secure context")
+                    .into());
+            }
+            let origin = state
+                .document_origins
+                .get(&document_id)
+                .cloned()
+                .flatten()
+                .ok_or_else(|| {
+                    JsError::from(
+                        JsNativeError::error().with_message("Web Locks requires a tuple origin"),
+                    )
+                })?;
+            let manager = state.storage_manager.clone();
+            let (client_id, created) = match state.web_lock_clients.get(&document_id).copied() {
+                Some(client_id) => (client_id, false),
+                None => {
+                    let client_id = manager.create_web_lock_client();
+                    state.web_lock_clients.insert(document_id, client_id);
+                    (client_id, true)
+                }
+            };
+            (client_id, created, manager, origin)
+        };
+        if created {
+            register_web_lock_client(host, document_id, client_id);
+        }
+        Ok((document_id, client_id, manager, origin))
+    })
+}
+
+fn web_locks_native(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let operation = string_argument(args.first(), "", context)?;
+    if operation == "available" {
+        return with_host_state(|host| {
+            let state = host.borrow();
+            let document_id = context_document_id(context, &state);
+            Ok(JsValue::from(
+                document_is_secure_context(&state, document_id)
+                    && state
+                        .document_origins
+                        .get(&document_id)
+                        .is_some_and(Option::is_some),
+            ))
+        });
+    }
+
+    let (_, client_id, manager, origin) = web_lock_context(context)?;
+    let request_id = |value: Option<&JsValue>, context: &mut Context| -> JsResult<u64> {
+        string_argument(value, "", context)?
+            .parse::<u64>()
+            .map_err(|_| {
+                JsNativeError::typ()
+                    .with_message("invalid Web Lock request id")
+                    .into()
+            })
+    };
+    match operation.as_str() {
+        "request" => {
+            let name = string_argument(args.get(1), "", context)?;
+            let mode = match string_argument(args.get(2), "exclusive", context)?.as_str() {
+                "shared" => WebLockMode::Shared,
+                "exclusive" => WebLockMode::Exclusive,
+                _ => {
+                    return Err(JsNativeError::typ()
+                        .with_message("invalid Web Lock mode")
+                        .into());
+                }
+            };
+            let if_available = args.get(3).is_some_and(JsValue::to_boolean);
+            let steal = args.get(4).is_some_and(JsValue::to_boolean);
+            let (result, notifications) =
+                manager.request_web_lock(&origin, client_id, name, mode, if_available, steal);
+            queue_web_lock_notifications(notifications);
+            flush_web_lock_notifications();
+            let (status, id) = match result {
+                WebLockRequestResult::Granted(id) => ("granted", Some(id)),
+                WebLockRequestResult::Pending(id) => ("pending", Some(id)),
+                WebLockRequestResult::Unavailable => ("unavailable", None),
+            };
+            Ok(js_string!(
+                serde_json::json!({"status": status, "id": id.map(|id| id.to_string())})
+                    .to_string()
+            )
+            .into())
+        }
+        "start" => {
+            let status = match manager.start_web_lock(request_id(args.get(1), context)?) {
+                WebLockStartResult::Held => "held",
+                WebLockStartResult::Pending => "pending",
+                WebLockStartResult::Stolen => "stolen",
+                WebLockStartResult::Missing => "missing",
+            };
+            Ok(js_string!(status).into())
+        }
+        "release" => {
+            let notifications = manager.release_web_lock(request_id(args.get(1), context)?);
+            queue_web_lock_notifications(notifications);
+            flush_web_lock_notifications();
+            Ok(JsValue::undefined())
+        }
+        "cancel" => {
+            let (cancelled, notifications) =
+                manager.cancel_web_lock(request_id(args.get(1), context)?);
+            queue_web_lock_notifications(notifications);
+            flush_web_lock_notifications();
+            Ok(JsValue::from(cancelled))
+        }
+        "finish-stolen" => {
+            manager.finish_stolen_web_lock(request_id(args.get(1), context)?);
+            Ok(JsValue::undefined())
+        }
+        "query" => {
+            let (held, pending) = manager.query_web_locks(&origin);
+            let snapshot = |lock: storage::WebLockSnapshot| {
+                serde_json::json!({
+                    "name": lock.name,
+                    "mode": lock.mode.as_str(),
+                    "clientId": format!("client-{}", lock.client_id),
+                })
+            };
+            Ok(js_string!(
+                serde_json::json!({
+                    "held": held.into_iter().map(snapshot).collect::<Vec<_>>(),
+                    "pending": pending.into_iter().map(snapshot).collect::<Vec<_>>(),
+                })
+                .to_string()
+            )
+            .into())
+        }
+        _ => Err(JsNativeError::typ()
+            .with_message(format!("unknown Web Locks operation: {operation}"))
+            .into()),
+    }
 }
 
 /// Host-side backing store for the Cache Storage JavaScript wrappers.
@@ -14020,8 +14297,21 @@ fn create_worker_for_owner_state(
     owner_state: Rc<RefCell<HostState>>,
     requested_url: &str,
 ) -> JsResult<u64> {
-    let (owner_url, base_url, storage, session_id, user_agent, worker_id) = {
+    let active_owner_document_id = active_document_id();
+    let (
+        owner_url,
+        base_url,
+        storage,
+        session_id,
+        user_agent,
+        worker_id,
+        owner_origin,
+        owner_security_origin,
+        owner_secure_context,
+    ) = {
         let mut state = owner_state.borrow_mut();
+        let owner_document_id =
+            active_owner_document_id.unwrap_or_else(|| state.document.identity());
         let id = state.next_worker_id;
         state.next_worker_id = state.next_worker_id.saturating_add(1);
         (
@@ -14035,6 +14325,16 @@ fn create_worker_for_owner_state(
             state.storage_session_id,
             state.navigator_user_agent.clone(),
             id,
+            state
+                .document_origins
+                .get(&owner_document_id)
+                .cloned()
+                .flatten(),
+            state
+                .document_security_origins
+                .get(&owner_document_id)
+                .cloned(),
+            document_is_secure_context(&state, owner_document_id),
         )
     };
     let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
@@ -14045,7 +14345,7 @@ fn create_worker_for_owner_state(
     };
     let mut worker_runtime = JsRuntime::with_document_url_and_storage(
         blank_html_document(),
-        &worker_url,
+        &owner_url,
         storage,
         session_id,
     )?;
@@ -14053,6 +14353,20 @@ fn create_worker_for_owner_state(
     let worker_state = Rc::clone(&worker_runtime.host_state);
     {
         let mut state = worker_state.borrow_mut();
+        let document_id = state.document.identity();
+        state.location_href = worker_url.clone();
+        state.base_url = worker_url.parse::<crate::http::Url>().ok();
+        state.document_urls.insert(document_id, worker_url.clone());
+        if let Some(base_url) = state.base_url.clone() {
+            state.document_base_urls.insert(document_id, base_url);
+        } else {
+            state.document_base_urls.remove(&document_id);
+        }
+        state.document_origins.insert(document_id, owner_origin);
+        if let Some(origin) = owner_security_origin {
+            state.document_security_origins.insert(document_id, origin);
+        }
+        state.secure_context_override = Some(owner_secure_context);
         state.worker_owner = Some(Rc::clone(&owner_state));
         state.worker_id = Some(worker_id);
         state.worker_terminated = false;
