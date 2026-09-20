@@ -106,7 +106,17 @@
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
   const nativeIframeGlobal = globalThis.__omoikane_iframe_global;
   const nativeIframeContextState = globalThis.__omoikane_iframe_context_state;
+  const nativeCaptureIframeFormState = globalThis.__omoikane_capture_iframe_form_state;
+  const nativeRestoreIframeFormState = globalThis.__omoikane_restore_iframe_form_state;
+  delete globalThis.__omoikane_capture_iframe_form_state;
+  delete globalThis.__omoikane_restore_iframe_form_state;
+  const nativeResolveFormAction = globalThis.__omoikane_resolve_form_action;
+  delete globalThis.__omoikane_resolve_form_action;
+  const nativeWindowName = globalThis.__omoikane_window_name;
+  delete globalThis.__omoikane_window_name;
   const nativeIframeForceNavigation = globalThis.__omoikane_iframe_force_navigation;
+  const nativeIframeSubmissionSnapshot = globalThis.__omoikane_iframe_submission_snapshot;
+  const nativeIframeReplaySubmission = globalThis.__omoikane_iframe_replay_submission;
   const nativeTakeDiscardedNodeIds = globalThis.__omoikane_take_discarded_node_ids;
   const nativeRetainNode = globalThis.__omoikane_retain_node;
   const nativeSetNodeOwner = globalThis.__omoikane_set_node_owner;
@@ -148,6 +158,8 @@
   delete globalThis.__omoikane_iframe_global;
   delete globalThis.__omoikane_iframe_context_state;
   delete globalThis.__omoikane_iframe_force_navigation;
+  delete globalThis.__omoikane_iframe_submission_snapshot;
+  delete globalThis.__omoikane_iframe_replay_submission;
   delete globalThis.__omoikane_take_discarded_node_ids;
   delete globalThis.__omoikane_document_url;
   delete globalThis.__omoikane_document_base_url;
@@ -240,7 +252,7 @@
   const getOwnerDocumentId = safeWeakMapGet;
   function setOwnerDocumentId(target, node, id) {
     safeWeakMapSet(target, node, id);
-    const nodeId = canonicalWrapperId(node);
+    const nodeId = internalNodeId(node);
     if (nodeId !== undefined) nativeSetNodeOwner(nodeId, id);
   }
   const hasSetValue = Function.prototype.call.bind(Set.prototype.has);
@@ -270,13 +282,25 @@
     return id !== undefined && hasCanonicalElementId(ids, id);
   }
   const nativeNodeIds = new WeakMap();
-  const nodeEventStates = new WeakMap();
+  // A foreign wrapper passed to a DOM method must expose the same private
+  // state without trusting its public properties. Keys remain weak.
+  const nodeEventStates = browsingInput.nodeEventStates ||
+    (browsingInput.nodeEventStates = new WeakMap());
+  // Native nodes share event state across Realm wrappers. Allocate these
+  // otherwise empty containers in the runtime's top Realm: a Map prototype
+  // from a retired child would keep that child's global and Document alive
+  // after the node is adopted into the parent.
+  const createNodeEventState = browsingInput.createNodeEventState ||
+    (browsingInput.createNodeEventState = () => ({
+      listeners: new Map(), handlers: new Map(), focusedElementId: null,
+    }));
   const layoutMetricsCache = new WeakMap();
   const retiredNodeWrappers = new WeakSet();
   // Same-document history state is browser-owned. Keeping it off the public
   // Document wrapper prevents an author-created expando from spoofing the URL
   // used by subsequent same-origin checks.
-  const documentHistoryURLs = new WeakMap();
+  const documentHistoryURLs = browsingInput.documentHistoryURLs ||
+    (browsingInput.documentHistoryURLs = new WeakMap());
   function forgetDiscardedNodeWrappers() {
     const ids = nativeTakeDiscardedNodeIds() || [];
     // Ordinary insert/remove operations do not retire a browsing context.
@@ -1735,6 +1759,7 @@
     if (internalParentNode(removed) === parent) {
       const id = internalNodeId(removed);
       if (id !== undefined) nativePointerLockRemoving(id);
+      customFormSubtreeRemoving(removed);
     }
     const doc = nodeDocument(parent);
     const state = traversalByDocument.get(traversalDocumentKey(doc));
@@ -2016,7 +2041,7 @@
           return safeWeakMapGet(nativeNodeIds, this);
         },
       });
-      safeWeakMapSet(nodeEventStates, this, { listeners: new Map(), handlers: new Map(), focusedElementId: null });
+      safeWeakMapSet(nodeEventStates, this, createNodeEventState());
     }
 
     get __listeners() { return safeWeakMapGet(nodeEventStates, this).listeners; }
@@ -3203,6 +3228,7 @@
     // True when this form control is actually disabled, including inherited
     // disabledness from a fieldset (with its first-legend exception).
     __isDisabledControl() {
+      if (isFormAssociatedElement(this)) return customControlDisabled(this);
       const DISABLEABLE_TAGS = ["input", "button", "select", "textarea", "option", "optgroup", "fieldset"];
       if (!DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase())) return false;
       return !!__omoikane_is_actually_disabled(this.__id);
@@ -3224,16 +3250,7 @@
       );
     }
 
-    // Nearest ancestor <form>, or null. The `form` content-attribute
-    // association is not modeled; ancestry suffices for our needs.
-    __owningForm() {
-      let node = this.parentNode;
-      while (node) {
-        if (node.nodeType === 1 && node.tagName === "FORM") return node;
-        node = node.parentNode;
-      }
-      return null;
-    }
+    __owningForm() { return formOwner(this); }
 
     __runActivationBehavior() {
       // A disabled form control has no activation behavior, so it never submits
@@ -3241,6 +3258,15 @@
       // directly through dispatchEvent.
       if (this.__isDisabledControl()) return;
       const tag = this.nodeName;
+      if (tag === "LABEL") {
+        const control = labelControl(this);
+        const state = safeWeakMapGet(nodeEventStates, this);
+        if (!control || control.__isDisabledControl() || state.labelActivating) return;
+        state.labelActivating = true;
+        try { control.focus(); control.click(); }
+        finally { state.labelActivating = false; }
+        return;
+      }
       let type = "";
       try {
         type = (this.type || "").toLowerCase();
@@ -3292,11 +3318,13 @@
     set checked(v) {
       const checked = !!v;
       if (checked && this.nodeName === "INPUT" && this.type.toLowerCase() === "radio") {
-        const document = this.ownerDocument;
         const name = this.name;
-        if (document) {
-          for (const radio of document.querySelectorAll("input[type=radio]")) {
-            if (radio.__id !== this.__id && radio.name === name) {
+        if (name) {
+          const root = formTreeRoot(this);
+          const owner = formOwner(this);
+          for (const radio of root.querySelectorAll("input")) {
+            if (radio.__id !== this.__id && radio.type === "radio" &&
+                radio.name === name && formOwner(radio) === owner) {
               __omoikane_set_checked(radio.__id, false);
             }
           }
@@ -3512,6 +3540,34 @@
       return inserted;
     }
 
+    insertAdjacentHTML(where, markup) {
+      requireCanonicalElement(this, "insertAdjacentHTML called on an incompatible receiver");
+      if (arguments.length < 2) throw new TypeError("insertAdjacentHTML requires 2 arguments");
+      where = asciiLowercase(toDOMString(where));
+      markup = toDOMString(markup);
+      if (!["beforebegin", "afterbegin", "beforeend", "afterend"].includes(where)) {
+        throw new DOMException("The provided position is not valid", "SyntaxError");
+      }
+      let context = this;
+      if (where === "beforebegin" || where === "afterend") {
+        context = internalParentNode(this);
+        if (!context || internalNodeType(context) === 9) {
+          throw new DOMException("The parent cannot contain this insertion", "NoModificationAllowedError");
+        }
+      }
+      const owner = elementNodeDocument(this);
+      const html = owner.contentType === "text/html";
+      if (internalNodeType(context) !== 1 ||
+          (html && internalNodeLocalName(context) === "html")) {
+        context = owner.createElement("body");
+      }
+      const fragment = wrapNode(__omoikane_parse_contextual_fragment(
+        internalNodeId(context), markup, !html,
+      ));
+      stampOwnerDoc(fragment, owner);
+      insertAdjacent(this, where, fragment);
+    }
+
     insertAdjacentText(where, data) {
       requireCanonicalElement(
         this,
@@ -3588,6 +3644,9 @@
           (!SHADOW_HOST_NAMES.has(name) && !customName)) {
         throw new DOMException("Element cannot host a shadow tree", "NotSupportedError");
       }
+      if (customInternalsState(this)?.definition.disabledFeatures.has("shadow")) {
+        throw new DOMException("Shadow trees are disabled for this element", "NotSupportedError");
+      }
       const root = wrapNode(__omoikane_attach_shadow(this.__id, mode === "closed"));
       if (!root) {
         throw new DOMException("Element already hosts a shadow tree", "NotSupportedError");
@@ -3660,12 +3719,25 @@
         element.__customElementDefinition = definition;
         element.__customElementState = "custom";
         element.__customElementConnected = false;
+        initializeCustomInternals(element, definition, "custom");
         super(element.__id);
         return element;
       }
 
       super(id);
       throw new TypeError("Illegal constructor");
+    }
+
+    attachInternals() {
+      if (!hasCanonicalWrapperId(canonicalHtmlElementIds, this)) {
+        throw new TypeError("Illegal invocation");
+      }
+      const state = customInternalsState(this);
+      if (!state || state.definition.disabledFeatures.has("internals") ||
+          state.internals || !["custom", "precustomized"].includes(state.phase)) {
+        throw new DOMException("Internals cannot be attached to this element", "NotSupportedError");
+      }
+      return state.internals = new ElementInternals(state, internalsConstructionToken);
     }
 
     get draggable() {
@@ -5714,7 +5786,7 @@
     }
 
     get URL() {
-      const historyURL = safeWeakMapGet(documentHistoryURLs, this);
+      const historyURL = safeWeakMapGet(documentHistoryURLs, safeWeakMapGet(nodeEventStates, this));
       if (historyURL !== undefined) return historyURL;
       const committed = nativeDocumentURL(this.__id);
       if (committed !== null) this.__documentURL = String(committed);
@@ -6824,6 +6896,7 @@
   }
 
   function flushStyleSheets() {
+    if (validationReady) nativeFlushValidation(internalNodeId(globalThis.document));
     for (const sheet of Array.from(dirtyStyleSheets)) sheet.__flush();
   }
   globalThis.__omoikane_flush_stylesheets = flushStyleSheets;
@@ -6886,12 +6959,37 @@
     "allow-top-navigation-by-user-activation",
     "allow-top-navigation-to-custom-protocols",
   ]);
+  function locationURLWithComponent(href, part, value) {
+    const url = new URL(href);
+    let text = String(value);
+    if (part === "search" && text && !text.startsWith("?")) text = "?" + text;
+    if (part === "hash" && text && !text.startsWith("#")) text = "#" + text;
+    if (part === "protocol" && !text.endsWith(":")) text += ":";
+    if (part === "pathname" && url.host && !text.startsWith("/")) text = "/" + text;
+    url[part] = text;
+    if (part === "hostname" || part === "port") {
+      url.host = url.hostname + (url.port ? ":" + url.port : "");
+    }
+    // The local URL implementation stores href at construction time, while
+    // toString serializes the current components.
+    return url.toString();
+  }
+  const nativeChildNavigation = globalThis.__omoikane_child_navigation;
+  const nativeIframeDocumentURL = globalThis.__omoikane_iframe_document_url;
+  const nativeRegisterIframeNavigation = globalThis.__omoikane_register_iframe_navigation;
+  delete globalThis.__omoikane_child_navigation;
+  delete globalThis.__omoikane_iframe_document_url;
+  delete globalThis.__omoikane_register_iframe_navigation;
+  const iframeChildNavigators = new WeakMap();
   const iframeWindowProxyRetirers = new WeakMap();
+  const iframeHistoryCapturers = new WeakMap();
   function retireIframeWindowProxy(iframe) {
     const retire = safeWeakMapGet(iframeWindowProxyRetirers, iframe);
     if (!retire) return;
     retire();
     safeWeakMapDelete(iframeWindowProxyRetirers, iframe);
+    safeWeakMapDelete(iframeHistoryCapturers, iframe);
+    safeWeakMapDelete(iframeChildNavigators, iframe);
     iframe.__contentWindowFacade = null;
     iframe.__contentWindowRefresh = null;
   }
@@ -6916,14 +7014,21 @@
   class HTMLIFrameElement extends HTMLElement {
     __prepareResourceNavigation() {
       if (!this.isConnected) return;
-      if (!this.__contentWindowFacade) {
-        // Creating the facade eagerly records the current initial entry before
-        // a direct src/srcdoc mutation replaces it.
-        void this.contentWindow;
-        return;
+      const events = safeWeakMapGet(nodeEventStates, this);
+      let captures = events.iframeHistoryCapturers;
+      if (captures) {
+        for (const reference of captures) {
+          if (!weakRefDeref(reference)) captures.delete(reference);
+        }
       }
-      if (typeof this.__contentWindowRefresh === "function") {
-        this.__contentWindowRefresh();
+      if (!captures || captures.size === 0) {
+        // Record the current entry before a direct src/srcdoc mutation. A
+        // wrapper in another Realm can already own the live history facade.
+        void this.contentWindow;
+        captures = events.iframeHistoryCapturers;
+      }
+      if (captures) {
+        for (const reference of captures) weakRefDeref(reference)?.();
       }
     }
 
@@ -6990,6 +7095,7 @@
         let historyIndex = -1;
         let pendingHistoryAction = null;
         let historyScrollRestoration = "auto";
+        let childNavigationDocument = null;
         let proxy;
         const securityError = () => new DOMException(
           "Blocked access to a cross-origin frame.",
@@ -7022,11 +7128,13 @@
           const committedDocument = wrapNode(documentId);
           let href = attribute === "srcdoc" ? "about:srcdoc" : "about:blank";
           if (committedDocument) href = committedDocument.URL;
+          else if (nativeIframeDocumentURL(iframe.__id) !== null) href = nativeIframeDocumentURL(iframe.__id);
           else if (value) {
             try { href = new URL(value, creatorBaseURL()).href; }
             catch (_) { href = value; }
           }
-          return { attribute, value, href, state: null, generation };
+          const submission = nativeIframeSubmissionSnapshot(iframe.__id);
+          return { attribute, value, href, state: null, generation, submission, persisted: null };
         };
         const commitHistoryEntry = generation => {
           const entry = captureHistoryEntry(generation);
@@ -7043,6 +7151,7 @@
               ...historyEntries[historyIndex],
               attribute: entry.attribute,
               value: entry.value,
+              submission: entry.submission,
               generation,
             };
             if (action === "traverse") {
@@ -7061,7 +7170,7 @@
             if (restoredDocument) {
               safeWeakMapSet(
                 documentHistoryURLs,
-                restoredDocument,
+                safeWeakMapGet(nodeEventStates, restoredDocument),
                 historyEntries[historyIndex].href,
               );
             }
@@ -7120,6 +7229,19 @@
           }
           return activeWindow;
         };
+        const captureActiveHistory = () => {
+          if (pendingHistoryAction !== null) return;
+          refresh();
+          if (access === "closed" || historyIndex < 0) return;
+          const entry = historyEntries[historyIndex];
+          if (entry.generation === activeGeneration) entry.persisted = nativeCaptureIframeFormState(iframe.__id);
+        };
+        const restoreHistoryState = (entry, restoreName = true) => {
+          if (entry.persisted !== null) {
+            nativeRestoreIframeFormState(iframe.__id, entry.persisted, entry.href, restoreName);
+            forgetDiscardedNodeWrappers();
+          }
+        };
         const forceNavigation = () => {
           nativeIframeForceNavigation(iframe.__id);
           forgetDiscardedNodeWrappers();
@@ -7132,6 +7254,7 @@
           // top-level realm, so its Document URL is the relevant base. History
           // state URLs deliberately continue to use the target Document below.
           const destination = new URL(String(value), callerBaseURL()).href;
+          captureActiveHistory();
           pendingHistoryAction = disposition;
           iframe.removeAttribute("srcdoc");
           iframe.src = destination;
@@ -7141,12 +7264,19 @@
           if (expectedGeneration === undefined) {
             refresh();
             if (access === "closed") return;
-            if (access !== "same") throw securityError();
+            if (access !== "same" && !childNavigationDocument) throw securityError();
           } else {
             requireHistoryAccess(expectedGeneration);
           }
+          captureActiveHistory();
           const entry = historyEntries[historyIndex];
           pendingHistoryAction = "reload";
+          if (entry.submission !== null) {
+            nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
+            forgetDiscardedNodeWrappers();
+            restoreHistoryState(entry);
+            return;
+          }
           const reloadsSrcdoc = entry.attribute === "srcdoc" && entry.href === "about:srcdoc";
           if (reloadsSrcdoc) {
             iframe.setAttribute("srcdoc", entry.value);
@@ -7155,10 +7285,11 @@
             iframe.src = entry.href;
           }
           forceNavigation();
+          restoreHistoryState(entry);
         };
         const requireHistoryAccess = expectedGeneration => {
           refresh();
-          if (access !== "same" ||
+          if ((access !== "same" && !childNavigationDocument) ||
               (expectedGeneration !== undefined && expectedGeneration !== activeGeneration)) {
             throw securityError();
           }
@@ -7173,19 +7304,27 @@
           }
           const target = historyIndex + Math.trunc(amount);
           if (target < 0 || target >= historyEntries.length || target === historyIndex) return;
+          captureActiveHistory();
           const entry = historyEntries[target];
           historyIndex = target;
           if (entry.generation === activeGeneration) {
-            const currentDocument = iframe.contentDocument;
+            const currentDocument = childNavigationDocument || iframe.contentDocument;
             if (currentDocument) {
-              safeWeakMapSet(documentHistoryURLs, currentDocument, entry.href);
+              safeWeakMapSet(documentHistoryURLs, safeWeakMapGet(nodeEventStates, currentDocument), entry.href);
             }
+            restoreHistoryState(entry, false);
             const event = new Event("popstate");
             event.state = globalThis.structuredClone(entry.state);
             proxy.dispatchEvent(event);
             return;
           }
           pendingHistoryAction = "traverse";
+          if (entry.submission !== null) {
+            nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
+            forgetDiscardedNodeWrappers();
+            restoreHistoryState(entry);
+            return;
+          }
           if (entry.attribute === "srcdoc") {
             iframe.setAttribute("srcdoc", entry.value);
           } else {
@@ -7193,10 +7332,11 @@
             iframe.src = entry.value;
           }
           forceNavigation();
+          restoreHistoryState(entry);
         };
         const sameDocumentHistoryURL = (value, expectedGeneration) => {
           requireHistoryAccess(expectedGeneration);
-          const currentDocument = iframe.contentDocument;
+          const currentDocument = childNavigationDocument || iframe.contentDocument;
           const currentURL = currentDocument ? currentDocument.URL : "about:blank";
           const hasURL = value !== undefined && value !== null && String(value) !== "";
           const nextURL = !hasURL
@@ -7239,6 +7379,7 @@
               const { currentDocument, nextURL } =
                 sameDocumentHistoryURL(url, generation);
               const clonedState = globalThis.structuredClone(state);
+              captureActiveHistory();
               historyEntries.splice(historyIndex + 1);
               historyEntries.push({
                 ...historyEntries[historyIndex],
@@ -7248,7 +7389,7 @@
               });
               historyIndex = historyEntries.length - 1;
               if (currentDocument) {
-                safeWeakMapSet(documentHistoryURLs, currentDocument, nextURL);
+                safeWeakMapSet(documentHistoryURLs, safeWeakMapGet(nodeEventStates, currentDocument), nextURL);
               }
             },
             replaceState(state, unused, url) {
@@ -7256,6 +7397,7 @@
               const { currentDocument, nextURL } =
                 sameDocumentHistoryURL(url, generation);
               const clonedState = globalThis.structuredClone(state);
+              captureActiveHistory();
               historyEntries[historyIndex] = {
                 ...historyEntries[historyIndex],
                 href: nextURL,
@@ -7263,7 +7405,7 @@
                 generation: activeGeneration,
               };
               if (currentDocument) {
-                safeWeakMapSet(documentHistoryURLs, currentDocument, nextURL);
+                safeWeakMapSet(documentHistoryURLs, safeWeakMapGet(nodeEventStates, currentDocument), nextURL);
               }
             },
             go(delta = 0) { traverseHistory(delta, generation); },
@@ -7304,6 +7446,19 @@
             return reloadLocation;
           },
         };
+        Object.defineProperty(locationFacade, "toString", {
+          value() { return locationFacade.href; },
+        });
+        for (const part of ["protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"]) {
+          const descriptor = {
+            enumerable: true,
+            get() { return new URL(locationFacade.href)[part]; },
+          };
+          if (part !== "origin") descriptor.set = value => {
+            navigate(locationURLWithComponent(locationFacade.href, part, value), "push");
+          };
+          Object.defineProperty(locationFacade, part, descriptor);
+        }
         const safeCrossOriginProperties = new Set([
           "window", "self", "frames", "closed", "length", "top", "parent",
           "opener", "location", "close", "focus", "blur", "postMessage",
@@ -7396,7 +7551,36 @@
         proxy = new Proxy({}, handler);
         this.__contentWindowFacade = proxy;
         this.__contentWindowRefresh = refresh;
+        safeWeakMapSet(iframeChildNavigators, this, (documentId, kind, value, extra) => {
+          const previous = childNavigationDocument;
+          childNavigationDocument = wrapNode(documentId);
+          try {
+            refresh();
+            switch (kind) {
+              case "location": return childNavigationDocument.URL;
+              case "assign": navigate(value, "push"); break;
+              case "replace": navigate(value, "replace"); break;
+              case "reload": reloadBrowsingContext(); break;
+              case "go": traverseHistory(value); break;
+              case "push-state": activeHistory.pushState(value, "", extra); break;
+              case "replace-state": activeHistory.replaceState(value, "", extra); break;
+              case "length": return activeHistory.length;
+              case "state": return activeHistory.state;
+              case "scroll-restoration": return activeHistory.scrollRestoration;
+              case "set-scroll-restoration": activeHistory.scrollRestoration = value; break;
+              default: throw new TypeError("Unknown child navigation operation");
+            }
+          } finally {
+            childNavigationDocument = previous;
+          }
+        });
+        safeWeakMapSet(iframeHistoryCapturers, this, captureActiveHistory);
+        const events = safeWeakMapGet(nodeEventStates, this);
+        const captures = events.iframeHistoryCapturers || (events.iframeHistoryCapturers = new Set());
+        const captureReference = new IntrinsicWeakRef(captureActiveHistory);
+        captures.add(captureReference);
         safeWeakMapSet(iframeWindowProxyRetirers, this, () => {
+          captures.delete(captureReference);
           retired = true;
           access = "closed";
           activeWindow = { __listeners: new Map() };
@@ -8213,6 +8397,582 @@
     }
   }
 
+  // Internals belong to a native element, including when another Realm wraps
+  // it. The shared browsing-context registry provides cross-Realm IDL branding.
+  const internalsObjects = browsingInput.internalsObjects ||
+    (browsingInput.internalsObjects = new WeakMap());
+  const formDataObjects = browsingInput.formDataObjects ||
+    (browsingInput.formDataObjects = new WeakMap());
+  const fileObjects = browsingInput.fileObjects ||
+    (browsingInput.fileObjects = new WeakMap());
+  const nativeRegisterValidation = globalThis.__omoikane_register_validation;
+  const nativeFlushValidation = globalThis.__omoikane_flush_validation;
+  const nativeInvalidateValidation = globalThis.__omoikane_invalidate_validation;
+  delete globalThis.__omoikane_register_validation;
+  delete globalThis.__omoikane_flush_validation;
+  delete globalThis.__omoikane_invalidate_validation;
+  let validationReady = false;
+
+  const nativeParserFormOwner = globalThis.__omoikane_parser_form_owner;
+  delete globalThis.__omoikane_parser_form_owner;
+  const nativeSetFormAssociatedCustom = globalThis.__omoikane_set_form_associated_custom;
+  delete globalThis.__omoikane_set_form_associated_custom;
+  const customInternalsDefinitions = new WeakMap();
+  const internalsConstructionToken = {};
+
+  function formDataEntries(value) {
+    const entries = safeWeakMapGet(formDataObjects, value);
+    if (!entries) throw new TypeError("Illegal FormData invocation");
+    return entries;
+  }
+
+  function isFile(value) { return !!safeWeakMapGet(fileObjects, value); }
+  const validityFlagNames = ["valueMissing", "typeMismatch", "patternMismatch",
+    "tooLong", "tooShort", "rangeUnderflow", "rangeOverflow", "stepMismatch",
+    "badInput", "customError"];
+
+  function customInternalsState(element) {
+    return safeWeakMapGet(nodeEventStates, element)?.customInternals || null;
+  }
+
+  function initializeCustomInternals(element, definition, phase) {
+    definition = safeWeakMapGet(customInternalsDefinitions, definition);
+    if (!definition) throw new TypeError("Unknown custom element definition");
+    // DOM mutations need form reactions only after a form-associated custom
+    // element exists. Share the activation across Realms so a control created
+    // in a child still receives reactions when its parent adopts or moves it.
+    // Keeping this boolean after retirement retains no nodes or child globals.
+    if (definition.formAssociated) browsingInput.hasCustomFormControls = true;
+    const events = safeWeakMapGet(nodeEventStates, element);
+    nativeSetFormAssociatedCustom(internalNodeId(element), definition.formAssociated && phase === "custom");
+    const state = events.customInternals = {
+      element, definition, phase, internals: null, form: null, disabled: false,
+      submission: null, restoration: null, message: "", anchor: element,
+      flags: Object.fromEntries(validityFlagNames.map(name => [name, false])),
+      validity: null, labels: null,
+    };
+    return state;
+  }
+
+  function isFormAssociatedElement(element) {
+    const state = customInternalsState(element);
+    return !!state && state.definition.formAssociated && state.phase === "custom";
+  }
+
+  function internalsTarget(object, requireForm = true) {
+    const state = safeWeakMapGet(internalsObjects, object);
+    if (!state) throw new TypeError("Illegal invocation");
+    if (requireForm && (!state.definition.formAssociated ||
+        !["custom", "precustomized"].includes(state.phase))) {
+      throw new DOMException("The element is not form-associated", "NotSupportedError");
+    }
+    return state;
+  }
+
+  function formTreeRoot(element) {
+    let root = element;
+    while (internalParentNode(root)) root = internalParentNode(root);
+    return root;
+  }
+
+  function nativeAttribute(element, name) {
+    return __omoikane_get_attribute(internalNodeId(element), name);
+  }
+
+  function formOwner(element, removing = null) {
+    if (!removing) {
+      const parserOwner = nativeParserFormOwner(internalNodeId(element));
+      if (parserOwner !== null) return wrapNode(parserOwner);
+    }
+    const root = formTreeRoot(element);
+    const formId = nativeAttribute(element, "form");
+    if (formId !== null && internalIsConnected(element) && !removing) {
+      if (!formId) return null;
+      const candidate = wrapNode(nativeGetElementById(internalNodeId(root), formId));
+      return candidate && internalNodeLocalName(candidate) === "form" ? candidate : null;
+    }
+    const removingId = internalNodeId(removing);
+    for (let node = element; node && internalNodeId(node) !== removingId;) {
+      node = internalParentNode(node);
+      if (!node) break;
+      if (internalNodeType(node) === 1 && internalNodeLocalName(node) === "form") return node;
+    }
+    return null;
+  }
+
+  function customControlDisabled(element, removing = null) {
+    if (nativeAttribute(element, "disabled") !== null) return true;
+    const removingId = internalNodeId(removing);
+    for (let parent = element; parent && internalNodeId(parent) !== removingId;) {
+      parent = internalParentNode(parent);
+      if (!parent) break;
+      if (internalNodeType(parent) !== 1 || internalNodeLocalName(parent) !== "fieldset" ||
+          nativeAttribute(parent, "disabled") === null) continue;
+      const legend = internalChildNodes(parent).find(node =>
+        internalNodeType(node) === 1 && internalNodeLocalName(node) === "legend");
+      if (!legend || !isInclusiveDescendant(element, legend)) return true;
+    }
+    return false;
+  }
+
+  function syncCustomFormState(element, removing = null) {
+    if (!isFormAssociatedElement(element)) return;
+    const state = customInternalsState(element);
+    const form = formOwner(element, removing);
+    const disabled = customControlDisabled(element, removing);
+    updateFormIdWatch(state, removing);
+    if (internalNodeId(form) !== internalNodeId(state.form)) {
+      state.form = form;
+      queueCustomFormReaction(state, "formAssociatedCallback", [form]);
+    }
+    if (state.disabled !== disabled) {
+      state.disabled = disabled;
+      queueCustomFormReaction(state, "formDisabledCallback", [disabled]);
+    }
+    if (internalIsConnected(element)) scheduleCustomFormRestoration();
+  }
+
+  function isListedFormControl(element) {
+    return internalNodeType(element) === 1 &&
+      (FORM_CONTROL_TAGS.has(String(internalNodeLocalName(element)).toUpperCase()) ||
+       isFormAssociatedElement(element));
+  }
+
+  function listedControls(root) {
+    const result = [];
+    const visit = node => {
+      for (const child of internalChildNodes(node)) {
+        if (isListedFormControl(child)) result.push(child);
+        visit(child);
+      }
+    };
+    visit(root);
+    return result;
+  }
+
+  function isLabelableElement(element) {
+    if (internalNodeType(element) !== 1) return false;
+    const name = internalNodeLocalName(element);
+    return isFormAssociatedElement(element) ||
+      ["button", "meter", "output", "progress", "select", "textarea"].includes(name) ||
+      (name === "input" && element.type !== "hidden");
+  }
+
+  function labelControl(label) {
+    const root = formTreeRoot(label);
+    const id = nativeAttribute(label, "for");
+    if (id !== null) {
+      const target = id ? wrapNode(nativeGetElementById(internalNodeId(root), id)) : null;
+      return target && isLabelableElement(target) ? target : null;
+    }
+    const find = node => {
+      for (const child of internalChildNodes(node)) {
+        if (isLabelableElement(child)) return child;
+        const nested = find(child);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    return find(label);
+  }
+
+  function labelsFor(element) {
+    const labels = [];
+    const visit = node => {
+      if (internalNodeType(node) === 1 && internalNodeLocalName(node) === "label" &&
+          internalNodeId(labelControl(node)) === internalNodeId(element)) labels.push(node);
+      for (const child of internalChildNodes(node)) visit(child);
+    };
+    visit(formTreeRoot(element));
+    return labels;
+  }
+
+  function makeLiveNodeList(resolve, prototype = NodeList.prototype) {
+    const target = makeNodeList([]);
+    Object.setPrototypeOf(target, prototype);
+    return new Proxy(target, {
+      get(target, property, receiver) {
+        if (property === "length") return resolve().length;
+        if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) {
+          return resolve()[Number(property)];
+        }
+        const member = Reflect.get(target, property, receiver);
+        return typeof member === "function" && property !== "constructor"
+          ? (...args) => Reflect.apply(member, makeNodeList(resolve()), args) : member;
+      },
+      has(target, property) {
+        if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) {
+          return Number(property) < resolve().length;
+        }
+        return Reflect.has(target, property);
+      },
+      ownKeys() { return [...resolve().keys()].map(String).concat("length"); },
+      getOwnPropertyDescriptor(target, property) {
+        if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) {
+          const value = resolve()[Number(property)];
+          return value === undefined ? undefined : { value, enumerable: true, configurable: true };
+        }
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+  }
+
+  class RadioNodeList extends NodeList {
+    get value() {
+      for (const node of this) {
+        if (internalNodeLocalName(node) === "input" && node.type === "radio" && node.checked) {
+          return node.value;
+        }
+      }
+      return "";
+    }
+    set value(value) {
+      value = String(value);
+      for (const node of this) {
+        if (internalNodeLocalName(node) === "input" && node.type === "radio" && node.value === value) {
+          node.checked = true;
+          return;
+        }
+      }
+    }
+  }
+  Object.defineProperty(RadioNodeList.prototype, Symbol.toStringTag, {
+    configurable: true, value: "RadioNodeList",
+  });
+  globalThis.RadioNodeList = RadioNodeList;
+
+  function formControlsCollection(form) {
+    const collect = () => form.__controls().filter(control =>
+      internalNodeLocalName(control) !== "input" || control.type !== "image");
+    const collection = makeHTMLCollection(collect, () => true);
+    const named = name => {
+      name = String(name);
+      if (!name) return null;
+      const resolve = () => collect().filter(control =>
+        nativeAttribute(control, "id") === name || nativeAttribute(control, "name") === name);
+      const controls = resolve();
+      return controls.length > 1 ? makeLiveNodeList(resolve, RadioNodeList.prototype) :
+        controls[0] || null;
+    };
+    return new Proxy(collection, {
+      get(target, property, receiver) {
+        if (property === "namedItem") return named;
+        if (typeof property === "string" && !/^(0|[1-9][0-9]*)$/.test(property) &&
+            !["length", "item"].includes(property) && !(property in Array.prototype)) {
+          return named(property) || undefined;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }
+
+  function copyCustomFormValue(value) {
+    if (value == null) return null;
+    if (isFile(value)) return value;
+    if (safeWeakMapGet(formDataObjects, value)) {
+      const copy = new FormData();
+      safeWeakMapSet(formDataObjects, copy, formDataEntries(value).map(entry => entry.slice()));
+      return copy;
+    }
+    return String(value).toWellFormed();
+  }
+
+  function reportControlValidity(control) {
+    const anchor = customInternalsState(control)?.anchor || control;
+    if (typeof anchor.focus === "function") anchor.focus();
+  }
+
+  class ElementInternals {
+    constructor(...args) {
+      if (args[1] !== internalsConstructionToken) throw new TypeError("Illegal constructor");
+      safeWeakMapSet(internalsObjects, this, args[0]);
+    }
+    get shadowRoot() {
+      const element = internalsTarget(this, false).element;
+      return wrapNode(__omoikane_shadow_root(internalNodeId(element)));
+    }
+    get form() { return internalsTarget(this).form; }
+    get labels() {
+      const state = internalsTarget(this);
+      return state.labels || (state.labels = makeLiveNodeList(() => labelsFor(state.element)));
+    }
+    get willValidate() { return controlWillValidate(internalsTarget(this).element); }
+    get validity() {
+      const state = internalsTarget(this);
+      return state.validity ||
+        (state.validity = new ValidityState(state.element, validityStateConstructionToken));
+    }
+    get validationMessage() { return internalsTarget(this).message; }
+    setFormValue(value, state) {
+      if (arguments.length === 0) throw new TypeError("setFormValue requires a value");
+      const target = internalsTarget(this);
+      const submission = copyCustomFormValue(value);
+      const restoration = arguments.length < 2 ? submission : copyCustomFormValue(state);
+      target.submission = submission;
+      target.restoration = restoration;
+    }
+    setValidity(flags = {}, message = "", anchor = undefined) {
+      const target = internalsTarget(this);
+      if (flags !== null && typeof flags !== "object" && typeof flags !== "function") {
+        throw new TypeError("ValidityStateFlags must be a dictionary");
+      }
+      const values = Object.fromEntries(validityFlagNames.slice().sort()
+        .map(name => [name, Boolean(flags?.[name])]));
+      message = String(message).replace(/\r\n?/g, "\n");
+      if (Object.values(values).some(Boolean) && message === "") {
+        throw new TypeError("An invalid control requires a validation message");
+      }
+      if (anchor !== undefined && !hasCanonicalWrapperId(canonicalHtmlElementIds, anchor)) {
+        throw new TypeError("The validation anchor must be an HTMLElement");
+      }
+      target.flags = values;
+      nativeInvalidateValidation(internalNodeId(target.element));
+      target.message = Object.values(values).some(Boolean) ? message : "";
+      if (anchor !== undefined) {
+        let current = anchor;
+        while (current && internalNodeId(current) !== internalNodeId(target.element)) {
+          current = internalHostIncludingParent(current);
+        }
+        if (!current) throw new DOMException("The anchor is outside the element", "NotFoundError");
+      }
+      target.anchor = anchor === undefined ? target.element : anchor;
+    }
+    checkValidity() { return dispatchInvalidEvent(internalsTarget(this).element, false); }
+    reportValidity() { return dispatchInvalidEvent(internalsTarget(this).element, true); }
+  }
+  Object.defineProperty(ElementInternals.prototype, Symbol.toStringTag, {
+    configurable: true, value: "ElementInternals",
+  });
+  globalThis.ElementInternals = ElementInternals;
+
+  const nativeRegisterFormState = globalThis.__omoikane_register_form_state;
+  delete globalThis.__omoikane_register_form_state;
+  const formStateStringify = JSON.stringify;
+  const formStateParse = JSON.parse;
+  const queueFormStateTask = globalThis.__omoikane_queue_dom_manipulation_task;
+  let formStateDocument = null;
+  let pendingFormRestoration = new Map();
+  let pendingFormRestoreMode = "restore";
+  let formRestoreTaskQueued = false;
+
+  function serializeCustomFormValue(value) {
+    if (typeof value === "string") return { kind: "string", value };
+    if (isFile(value)) return {
+      kind: "file", bytes: base64FromBytes(value.__bytes),
+      name: value.__name, type: value.__type, lastModified: value.__lastModified,
+    };
+    if (safeWeakMapGet(formDataObjects, value)) return {
+      kind: "entries", entries: formDataEntries(value).map(([name, entry]) =>
+        [name, serializeCustomFormValue(entry)]),
+    };
+    return null;
+  }
+
+  function deserializeCustomFormValue(value) {
+    if (value?.kind === "string" && typeof value.value === "string") return value.value;
+    if (value?.kind === "file" && typeof value.bytes === "string" &&
+        typeof value.name === "string" && typeof value.type === "string") {
+      return new File([bytesFromBase64(value.bytes)], value.name, {
+        type: value.type, lastModified: value.lastModified,
+      });
+    }
+    if (value?.kind === "entries" && Array.isArray(value.entries)) {
+      const data = new FormData();
+      const entries = value.entries.map(entry => {
+        if (!Array.isArray(entry) || typeof entry[0] !== "string") throw new TypeError("Invalid form entry");
+        const value = deserializeCustomFormValue(entry[1]);
+        if (typeof value !== "string" && !isFile(value)) throw new TypeError("Invalid form entry value");
+        return [entry[0], value];
+      });
+      safeWeakMapSet(formDataObjects, data, entries);
+      return data;
+    }
+    throw new TypeError("Invalid saved form value");
+  }
+
+  function visitFormStateElements(callback) {
+    if (!formStateDocument) return;
+    const visit = (node, path) => {
+      if (internalNodeType(node) === 1) {
+        if (isFormAssociatedElement(node)) callback(node, path);
+        const shadow = wrapNode(__omoikane_shadow_root(internalNodeId(node)));
+        if (shadow) visit(shadow, path.concat("shadow"));
+      }
+      const children = internalChildNodes(node);
+      for (let index = 0; index < children.length; index++) visit(children[index], path.concat(index));
+    };
+    visit(formStateDocument, []);
+  }
+
+  function captureCustomFormState() {
+    const records = [];
+    visitFormStateElements((element, path) => {
+      const state = customInternalsState(element);
+      if (state.restoration === null) return;
+      records.push({ path, tag: internalNodeLocalName(element),
+        name: nativeAttribute(element, "name"), id: nativeAttribute(element, "id"),
+        value: serializeCustomFormValue(state.restoration) });
+    });
+    return formStateStringify(records);
+  }
+
+  function scheduleCustomFormRestoration() {
+    if (!pendingFormRestoration.size || formRestoreTaskQueued) return;
+    formRestoreTaskQueued = true;
+    queueFormStateTask(() => {
+      formRestoreTaskQueued = false;
+      const reactions = [];
+      visitFormStateElements((element, path) => {
+        const key = formStateStringify(path);
+        const record = pendingFormRestoration.get(key);
+        if (!record || record.tag !== internalNodeLocalName(element) ||
+            record.name !== nativeAttribute(element, "name") || record.id !== nativeAttribute(element, "id")) return;
+        if (pendingFormRestoreMode === "autocomplete" && customControlDisabled(element)) return;
+        pendingFormRestoration.delete(key);
+        reactions.push([customInternalsState(element), record.value, pendingFormRestoreMode]);
+      });
+      for (const [state, value, mode] of reactions) {
+        queueCustomFormReaction(state, "formStateRestoreCallback", [value, mode]);
+      }
+      flushCustomFormReactions();
+    });
+  }
+
+  function restoreCustomFormState(json, mode) {
+    const records = formStateParse(json);
+    if (!Array.isArray(records)) throw new TypeError("Invalid form state snapshot");
+    const pending = new Map();
+    // Validate and copy all entries before replacing an existing restoration.
+    for (const record of records) {
+      if (!record || !Array.isArray(record.path) || typeof record.tag !== "string" ||
+          !record.path.every(part => part === "shadow" || Number.isSafeInteger(part) && part >= 0)) {
+        throw new TypeError("Invalid saved form control");
+      }
+      pending.set(formStateStringify(record.path), { ...record, value: deserializeCustomFormValue(record.value) });
+    }
+    pendingFormRestoration = pending;
+    pendingFormRestoreMode = mode;
+    scheduleCustomFormRestoration();
+  }
+
+  // A DOM move has a removal reaction followed by an insertion reaction. Hold
+  // both until the native mutation is complete; callbacks may then mutate DOM
+  // again without seeing a half-applied tree operation.
+  const customFormReactions = browsingInput.customFormReactions ||
+    (browsingInput.customFormReactions = { pending: [], delivering: false });
+  const formIdWatches = browsingInput.formIdWatches ||
+    (browsingInput.formIdWatches = new Map());
+
+  function queueCustomFormReaction(state, name, args) {
+    customFormReactions.pending.push({ state, name, args });
+  }
+
+  function flushCustomFormReactions() {
+    if (customFormReactions.delivering) return;
+    customFormReactions.delivering = true;
+    let index = 0;
+    try {
+      while (index < customFormReactions.pending.length) {
+        const { state, name, args } = customFormReactions.pending[index++];
+        if (state.phase !== "custom") continue;
+        const callback = state.definition.callbacks[name];
+        if (!callback) continue;
+        try { Reflect.apply(callback, state.element, args); }
+        catch (error) {
+          (state.element.__customElementCallbackErrors ||= []).push(error);
+        }
+      }
+    } finally {
+      customFormReactions.pending.splice(0, index);
+      customFormReactions.delivering = false;
+    }
+  }
+
+  function updateFormIdWatch(state, removing) {
+    const id = nativeAttribute(state.element, "form");
+    const rootId = removing || id === null ? null :
+      internalNodeId(formTreeRoot(state.element));
+    const old = state.formIdWatch;
+    if (old && old.rootId === rootId && old.id === id) return;
+    if (old) {
+      const byId = formIdWatches.get(old.rootId);
+      const entries = byId?.get(old.id);
+      entries?.delete(old.reference);
+      if (entries && !entries.size) byId.delete(old.id);
+      if (byId && !byId.size) formIdWatches.delete(old.rootId);
+      state.formIdWatch = null;
+    }
+    if (rootId === null || !id) return;
+    let byId = formIdWatches.get(rootId);
+    if (!byId) formIdWatches.set(rootId, byId = new Map());
+    let entries = byId.get(id);
+    if (!entries) byId.set(id, entries = new Set());
+    const reference = new WeakRef(state.element);
+    entries.add(reference);
+    state.formIdWatch = { rootId, id, reference };
+  }
+
+  function syncFormIdWatchers(root, id) {
+    if (!id) return;
+    const rootId = internalNodeId(root);
+    const byId = formIdWatches.get(rootId);
+    const entries = byId?.get(id);
+    if (!entries) return;
+    for (const reference of Array.from(entries)) {
+      const element = reference.deref();
+      if (element) syncCustomFormState(element);
+      else entries.delete(reference);
+    }
+    if (!entries.size) byId.delete(id);
+    if (!byId.size) formIdWatches.delete(rootId);
+  }
+
+  function customFormSubtreeRemoving(root) {
+    if (!browsingInput.hasCustomFormControls) return;
+    customElementTreeWalk(root, element => syncCustomFormState(element, root));
+  }
+
+  function customFormChildrenChanged(parent, init) {
+    if (!browsingInput.hasCustomFormControls) return;
+    // notifyImplicitRemoval publishes its MutationRecord before native code
+    // detaches the node. The eventual insertion will flush the reaction queue.
+    if (init.removedNodes?.some(node =>
+        internalNodeId(internalParentNode(node)) === internalNodeId(parent))) return;
+    const root = formTreeRoot(parent);
+    const changedIds = new Set();
+    for (const node of [...(init.removedNodes || []), ...(init.addedNodes || [])]) {
+      customElementTreeWalk(node, element => {
+        syncCustomFormState(element);
+        const id = nativeAttribute(element, "id");
+        if (id) changedIds.add(id);
+      });
+    }
+    for (const id of changedIds) syncFormIdWatchers(root, id);
+    // Adding/removing the first legend changes the exemption for controls
+    // elsewhere in the same fieldset, even if those controls did not move.
+    if (internalNodeLocalName(parent) === "fieldset") {
+      customElementTreeWalk(parent, syncCustomFormState);
+    }
+    flushCustomFormReactions();
+  }
+
+  function customFormAttributeChanged(element, name, oldValue, newValue, namespace) {
+    if (!browsingInput.hasCustomFormControls) return;
+    if (namespace !== null || oldValue === newValue) return;
+    if (name === "form") syncCustomFormState(element);
+    else if (name === "disabled") {
+      if (internalNodeLocalName(element) === "fieldset") {
+        customElementTreeWalk(element, syncCustomFormState);
+      } else syncCustomFormState(element);
+    } else if (name === "id") {
+      const root = formTreeRoot(element);
+      syncFormIdWatchers(root, oldValue);
+      syncFormIdWatchers(root, newValue);
+    }
+    flushCustomFormReactions();
+  }
+
+
   const FORM_CONTROL_TAGS = new Set([
     "INPUT", "SELECT", "TEXTAREA", "BUTTON", "FIELDSET", "OBJECT", "OUTPUT", "KEYGEN",
   ]);
@@ -8224,14 +8984,22 @@
   // Encodings that cannot carry a file — `application/x-www-form-urlencoded` and
   // `text/plain` — submit a File entry as its filename.
   function formEntryValueAsText(value) {
-    return value instanceof File ? value.name : String(value);
+    return isFile(value) ? value.name : String(value);
   }
 
   function collectFormEntries(form, submitter = null) {
     const entries = [];
     for (const control of form.__controls()) {
       const name = control.getAttribute("name") || "";
-      if (!name || control.__isDisabledControl()) continue;
+      if (control.__isDisabledControl() || hasDataListAncestor(control)) continue;
+      if (isFormAssociatedElement(control)) {
+        const value = customInternalsState(control).submission;
+        if (safeWeakMapGet(formDataObjects, value)) {
+          for (const entry of formDataEntries(value)) entries.push(entry.slice());
+        } else if (value !== null && name) entries.push([name, value]);
+        continue;
+      }
+      if (!name || ["FIELDSET", "OBJECT", "OUTPUT", "KEYGEN"].includes(control.tagName)) continue;
       const tag = control.tagName;
       const type = String(control.type || "").toLowerCase();
       if (tag === "INPUT" && (type === "checkbox" || type === "radio") && !control.checked) continue;
@@ -8291,9 +9059,9 @@
     const parts = [];
     for (const [name, value] of entries) {
       const disposition = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" +
-        escapeMultipartHeaderValue(name) + "\"";
-      if (value instanceof Blob) {
-        const filename = value instanceof File ? value.name : "blob";
+        escapeMultipartHeaderValue(normalizeFormLineBreaks(name)) + "\"";
+      if (value instanceof Blob || isFile(value)) {
+        const filename = isFile(value) ? value.name : "blob";
         parts.push(
           disposition + "; filename=\"" + escapeMultipartHeaderValue(filename) + "\"\r\n" +
             "Content-Type: " + (value.type || "application/octet-stream") + "\r\n\r\n",
@@ -8312,11 +9080,11 @@
   // wins, an existing File keeps its own name, and a bare Blob is named "blob".
   // A filename may only accompany a Blob.
   function formDataEntryValue(value, filename) {
-    if (value instanceof Blob) {
-      if (filename === undefined && value instanceof File) return value;
+    if (value instanceof Blob || isFile(value)) {
+      if (filename === undefined && isFile(value)) return value;
       return new File([value], filename === undefined ? "blob" : String(filename), {
         type: value.type,
-        lastModified: value instanceof File ? value.lastModified : undefined,
+        lastModified: isFile(value) ? value.lastModified : undefined,
       });
     }
     if (filename !== undefined) throw new TypeError("FormData filename requires a Blob value");
@@ -8326,34 +9094,34 @@
   class FormData {
     constructor(form = undefined) {
       if (form !== undefined && !(form instanceof HTMLFormElement)) throw new TypeError("FormData argument must be a form");
-      this.__entries = form ? collectFormEntries(form) : [];
+      safeWeakMapSet(formDataObjects, this, form ? collectFormEntries(form) : []);
     }
     append(name, value, filename = undefined) {
-      this.__entries.push([String(name), formDataEntryValue(value, filename)]);
+      formDataEntries(this).push([String(name), formDataEntryValue(value, filename)]);
     }
-    delete(name) { name = String(name); this.__entries = this.__entries.filter(entry => entry[0] !== name); }
-    get(name) { name = String(name); return this.__entries.find(entry => entry[0] === name)?.[1] ?? null; }
-    getAll(name) { name = String(name); return this.__entries.filter(entry => entry[0] === name).map(entry => entry[1]); }
-    has(name) { name = String(name); return this.__entries.some(entry => entry[0] === name); }
+    delete(name) { name = String(name); safeWeakMapSet(formDataObjects, this, formDataEntries(this).filter(entry => entry[0] !== name)); }
+    get(name) { name = String(name); return formDataEntries(this).find(entry => entry[0] === name)?.[1] ?? null; }
+    getAll(name) { name = String(name); return formDataEntries(this).filter(entry => entry[0] === name).map(entry => entry[1]); }
+    has(name) { name = String(name); return formDataEntries(this).some(entry => entry[0] === name); }
     set(name, value, filename = undefined) {
       name = String(name); value = formDataEntryValue(value, filename);
-      const index = this.__entries.findIndex(entry => entry[0] === name);
-      if (index < 0) this.__entries.push([name, value]);
+      const index = formDataEntries(this).findIndex(entry => entry[0] === name);
+      if (index < 0) formDataEntries(this).push([name, value]);
       else {
-        this.__entries[index] = [name, value];
-        this.__entries = this.__entries.filter((entry, i) => entry[0] !== name || i === index);
+        formDataEntries(this)[index] = [name, value];
+        safeWeakMapSet(formDataObjects, this, formDataEntries(this).filter((entry, i) => entry[0] !== name || i === index));
       }
     }
-    *entries() { yield* this.__entries.map(entry => entry.slice()); }
-    *keys() { for (const [name] of this.__entries) yield name; }
-    *values() { for (const [, value] of this.__entries) yield value; }
-    forEach(callback, thisArg) { for (const [name, value] of this.__entries) callback.call(thisArg, value, name, this); }
+    *entries() { yield* formDataEntries(this).map(entry => entry.slice()); }
+    *keys() { for (const [name] of formDataEntries(this)) yield name; }
+    *values() { for (const [, value] of formDataEntries(this)) yield value; }
+    forEach(callback, thisArg) { for (const [name, value] of formDataEntries(this)) callback.call(thisArg, value, name, this); }
     [Symbol.iterator]() { return this.entries(); }
     // `body` is a string while every part is text — which keeps the plain-text
     // submission path allocation-free — and a `Uint8Array` once a file entry
     // makes the payload binary. The host request binding accepts either.
     __multipart(boundary = "----omoikane-formdata-" + (++formDataBoundaryCounter)) {
-      const parts = formMultipartParts(this.__entries, boundary);
+      const parts = formMultipartParts(formDataEntries(this), boundary);
       const body = parts.every(part => typeof part === "string")
         ? parts.join("")
         : blobPartsToBytes(parts);
@@ -8555,9 +9323,9 @@
       const state = radioGroups.get(name);
       return state.required && !state.checked;
     }
-    const document = control.ownerDocument;
+    const root = formTreeRoot(control);
     const form = control.__owningForm();
-    const inputs = document ? Array.from(document.querySelectorAll("input")) : [];
+    const inputs = Array.from(root.querySelectorAll("input"));
     if (!inputs.includes(control)) inputs.push(control);
     const group = inputs.filter(candidate => candidate.type === "radio" &&
       candidate.name === name && candidate.__owningForm() === form);
@@ -8608,6 +9376,10 @@
   }
 
   function constraintValidityFlags(control, radioGroups = null) {
+    const internals = customInternalsState(control);
+    if (internals?.definition.formAssociated) {
+      return { ...internals.flags, valid: !Object.values(internals.flags).some(Boolean) };
+    }
     const type = control.tagName === "INPUT" ? control.type : "";
     const value = String(control.value ?? "");
     const numericValue = inputValueAsNumber(type, value);
@@ -8650,6 +9422,7 @@
 
   function controlWillValidate(control) {
     if (control.__isDisabledControl() || hasDataListAncestor(control)) return false;
+    if (isFormAssociatedElement(control)) return nativeAttribute(control, "readonly") === null;
     if (control.tagName === "INPUT") {
       return VALIDATED_INPUT_TYPES.has(control.type) && !BARRED_INPUT_TYPES.has(control.type) &&
         !control.readOnly;
@@ -8657,6 +9430,81 @@
     if (control.tagName === "BUTTON") return control.type === "submit";
     return control.tagName === "SELECT" ||
       (control.tagName === "TEXTAREA" && !control.readOnly);
+  }
+
+  // One tree walk builds form IDs and inherited owners. Radio groups are
+  // indexed once; the reverse pass aggregates fieldsets without rescanning
+  // their descendants. Shadow trees are independent validation trees.
+  function snapshotCssValidity(rootId) {
+    const output = [];
+    const roots = [wrapNode(rootId)];
+    while (roots.length) {
+      const root = roots.pop();
+      const records = [];
+      const firstIds = new Map();
+      const pending = [{ node: root, parent: -1, form: null }];
+      while (pending.length) {
+        const item = pending.pop();
+        const node = item.node;
+        const element = internalNodeType(node) === 1;
+        const tag = element && hasCanonicalWrapperId(canonicalHtmlElementIds, node) ? internalNodeLocalName(node) : "";
+        const index = records.length;
+        const record = { node, id: internalNodeId(node), tag, parent: item.parent,
+          form: item.form, invalid: 0, value: null };
+        records.push(record);
+        if (element) {
+          const id = nativeAttribute(node, "id");
+          if (id && !firstIds.has(id)) firstIds.set(id, node);
+          const shadow = wrapNode(__omoikane_shadow_root(record.id));
+          if (shadow) roots.push(shadow);
+        }
+        const form = tag === "form" ? node : item.form;
+        const children = internalChildNodes(node);
+        for (let child = children.length - 1; child >= 0; child--) {
+          pending.push({ node: children[child], parent: index, form });
+        }
+      }
+      const radioGroups = new Map();
+      const invalidForms = new Set();
+      for (const record of records) {
+        const node = record.node;
+        record.control = ["input", "select", "textarea", "button"].includes(record.tag) || isFormAssociatedElement(node);
+        if (!record.control) continue;
+        const parserOwner = nativeParserFormOwner(record.id);
+        const formId = nativeAttribute(node, "form");
+        if (parserOwner !== null) record.form = wrapNode(parserOwner);
+        else if (formId !== null && internalIsConnected(node)) {
+          const owner = firstIds.get(formId);
+          record.form = owner && hasCanonicalWrapperId(canonicalHtmlElementIds, owner) &&
+            internalNodeLocalName(owner) === "form" ? owner : null;
+        }
+        const ownerId = record.form ? internalNodeId(record.form) : rootId;
+        record.ownerId = ownerId;
+        if (record.tag !== "input" || node.type !== "radio" || !node.name) continue;
+        let groups = radioGroups.get(ownerId);
+        if (!groups) radioGroups.set(ownerId, groups = new Map());
+        let group = groups.get(node.name);
+        if (!group) groups.set(node.name, group = { required: false, checked: false });
+        group.required ||= node.hasAttribute("required");
+        group.checked ||= node.checked;
+      }
+      for (const record of records) {
+        if (!record.control || !controlWillValidate(record.node)) continue;
+        record.value = constraintValidityFlags(record.node, radioGroups.get(record.ownerId)).valid;
+        if (!record.value) {
+          record.invalid = 1;
+          if (record.form) invalidForms.add(internalNodeId(record.form));
+        }
+      }
+      for (let index = records.length - 1; index >= 0; index--) {
+        const record = records[index];
+        if (record.tag === "fieldset") record.value = record.invalid === 0;
+        else if (record.tag === "form") record.value = !invalidForms.has(record.id);
+        if (record.parent >= 0) records[record.parent].invalid += record.invalid;
+        if (record.tag) output.push([record.id, record.value]);
+      }
+    }
+    return JSON.stringify(output);
   }
 
   function constraintValidationMessage(control) {
@@ -8678,7 +9526,7 @@
   function dispatchInvalidEvent(control, report) {
     if (!controlWillValidate(control) || constraintValidityFlags(control).valid) return true;
     const unhandled = control.dispatchEvent(new Event("invalid", { cancelable: true }));
-    if (report && unhandled && typeof control.focus === "function") control.focus();
+    if (report && unhandled) reportControlValidity(control);
     return false;
   }
 
@@ -8704,6 +9552,10 @@
 
   function installConstraintValidationApi(prototype) {
     Object.defineProperties(prototype, {
+      form: {
+        configurable: true, enumerable: true,
+        get() { return formOwner(this); },
+      },
       validity: {
         configurable: true,
         get() {
@@ -8738,27 +9590,38 @@
 
   class HTMLFormElement extends HTMLElement {
     __controls() {
+      const root = formTreeRoot(this);
+      const id = nativeAttribute(this, "id");
+      const connected = internalIsConnected(this);
+      const explicitOwner = connected && !!id &&
+        nativeGetElementById(internalNodeId(root), id) === internalNodeId(this);
       const controls = [];
-      const walk = (node) => {
-        for (const child of node.childNodes) {
-          if (child.nodeType !== 1) continue;
-          if (FORM_CONTROL_TAGS.has(child.tagName)) controls.push(child);
-          walk(child);
+      const visit = (node, ancestorForm) => {
+        if (isListedFormControl(node)) {
+          const attribute = nativeAttribute(node, "form");
+          const parserOwner = nativeParserFormOwner(internalNodeId(node));
+          const owns = parserOwner !== null ? parserOwner === internalNodeId(this) :
+            connected && attribute !== null ? explicitOwner && attribute === id : ancestorForm === this;
+          if (owns) controls.push(node);
         }
+        if (internalNodeType(node) === 1 && internalNodeLocalName(node) === "form") ancestorForm = node;
+        for (const child of internalChildNodes(node)) visit(child, ancestorForm);
       };
-      walk(this);
+      visit(root, null);
       return controls;
     }
     // Live HTMLFormControlsCollection: index access, `.length`, `item()`,
     // `namedItem()`, iteration, and named access by control `name`/`id`.
     get elements() {
-      return makeHTMLCollection(() => this.__controls(), () => true, null);
+      return formControlsCollection(this);
     }
     get length() {
-      return this.__controls().length;
+      return this.elements.length;
     }
-    get action() { return this.getAttribute("action") || document.URL; }
+    get action() { return this.getAttribute("action") || this.ownerDocument.URL; }
     set action(value) { this.setAttribute("action", String(value)); }
+    get target() { return this.getAttribute("target") || ""; }
+    set target(value) { this.setAttribute("target", String(value)); }
     get method() { return (this.getAttribute("method") || "get").toLowerCase() === "post" ? "post" : "get"; }
     set method(value) { this.setAttribute("method", String(value)); }
     get enctype() {
@@ -8786,29 +9649,35 @@
           firstUnhandled = control;
         }
       }
-      if (report && firstUnhandled && typeof firstUnhandled.focus === "function") firstUnhandled.focus();
+      if (report && firstUnhandled) reportControlValidity(firstUnhandled);
       return false;
     }
     checkValidity() { return this.__validate(false); }
     reportValidity() { return this.__validate(true); }
     __navigate(submitter) {
+      const submit = (...args) => {
+        const frameId = __omoikane_submit_form(...args);
+        if (frameId !== null) wrapNode(frameId).__prepareResourceNavigation();
+      };
+      const target = submitter?.getAttribute("formtarget") ?? this.getAttribute("target") ??
+        this.ownerDocument.querySelector("base[target]")?.getAttribute("target") ?? "";
       const data = collectFormEntries(this, submitter);
-      let url = __omoikane_resolve_url(this.action);
+      let url = nativeResolveFormAction(internalNodeId(this), this.action);
       if (this.method === "get") {
         const hashIndex = url.indexOf("#");
         const hash = hashIndex < 0 ? "" : url.slice(hashIndex);
         url = (hashIndex < 0 ? url : url.slice(0, hashIndex)).replace(/\?.*$/, "") + "?" + formUrlEncode(data) + hash;
-        __omoikane_submit_form(url, "GET", null, null);
+        submit(url, "GET", null, null, target, internalNodeId(this));
         return;
       }
       let body;
       let contentType = this.enctype;
       if (contentType === "multipart/form-data") {
-        const encoded = new FormData(); encoded.__entries = data;
+        const encoded = new FormData(); safeWeakMapSet(formDataObjects, encoded, data);
         const multipart = encoded.__multipart(); body = multipart.body; contentType = multipart.contentType;
       } else if (contentType === "text/plain") body = formTextEncode(data);
       else body = formUrlEncode(data);
-      __omoikane_submit_form(url, "POST", body, contentType);
+      submit(url, "POST", body, contentType, target, internalNodeId(this));
     }
     __submit(submitter) {
       if (!this.noValidate && !(submitter && submitter.formNoValidate) && !this.__validate(true)) {
@@ -8827,8 +9696,48 @@
       }
       this.__submit(submitter);
     }
+    reset() {
+      const events = safeWeakMapGet(nodeEventStates, this);
+      if (events.formResetting) return;
+      events.formResetting = true;
+      let reactions;
+      try { reactions = this.__resetControls(); }
+      finally { events.formResetting = false; }
+      this.__deliverResetReactions(reactions);
+    }
     __reset() {
-      this.dispatchEvent(new Event("reset", { bubbles: true, cancelable: true }));
+      const reactions = this.__resetControls();
+      if (reactions.length) queueMicrotask(() => this.__deliverResetReactions(reactions));
+    }
+    __deliverResetReactions(reactions) {
+      for (const state of reactions) queueCustomFormReaction(state, "formResetCallback", []);
+      flushCustomFormReactions();
+    }
+    __resetControls() {
+      const reactions = [];
+      if (!this.dispatchEvent(new Event("reset", { bubbles: true, cancelable: true }))) return reactions;
+      // Complete all built-in reset algorithms before invoking any custom
+      // reactions, including when an output's text mutation changes the DOM.
+      for (const control of this.__controls()) {
+        if (isFormAssociatedElement(control)) reactions.push(customInternalsState(control));
+        else if (control.tagName === "INPUT") {
+          control.value = control.defaultValue;
+          control.checked = control.defaultChecked;
+          control.__value = undefined;
+          control.__lastValueChangeWasUser = false;
+        } else if (control.tagName === "TEXTAREA") {
+          control.value = control.defaultValue;
+          control.__value = undefined;
+          control.__lastValueChangeWasUser = false;
+        } else if (control.tagName === "SELECT") {
+          for (const option of control.options) option.selected = option.defaultSelected;
+        } else if (control.tagName === "OUTPUT") {
+          const value = control.defaultValue;
+          delete safeWeakMapGet(nodeEventStates, control).outputDefault;
+          control.textContent = value;
+        }
+      }
+      return reactions;
     }
   }
 
@@ -9336,6 +10245,8 @@
   installPopoverTargetMixin(HTMLButtonElement.prototype);
 
   class HTMLLabelElement extends HTMLElement {
+    get control() { return labelControl(this); }
+    get form() { const control = labelControl(this); return control ? formOwner(control) : null; }
     get htmlFor() {
       return this.getAttribute("for") || "";
     }
@@ -9422,6 +10333,7 @@
   }
 
   class HTMLFieldSetElement extends HTMLElement {
+    get elements() { return makeHTMLCollection(() => listedControls(this), () => true, null); }
     get disabled() { return this.hasAttribute("disabled"); }
     set disabled(value) {
       if (value) this.setAttribute("disabled", "");
@@ -9429,7 +10341,24 @@
     }
   }
 
-  class HTMLOutputElement extends HTMLElement {}
+  class HTMLOutputElement extends HTMLElement {
+    get value() { return this.textContent; }
+    set value(value) {
+      value = String(value);
+      const state = safeWeakMapGet(nodeEventStates, this);
+      if (state.outputDefault === undefined) state.outputDefault = this.textContent;
+      this.textContent = value;
+    }
+    get defaultValue() {
+      return safeWeakMapGet(nodeEventStates, this).outputDefault ?? this.textContent;
+    }
+    set defaultValue(value) {
+      value = String(value);
+      const state = safeWeakMapGet(nodeEventStates, this);
+      if (state.outputDefault === undefined) this.textContent = value;
+      else state.outputDefault = value;
+    }
+  }
 
   function Option(text = "", value = undefined, defaultSelected = false, selected = false) {
     const option = document.createElement("option");
@@ -9438,6 +10367,14 @@
     option.defaultSelected = Boolean(defaultSelected);
     option.selected = Boolean(selected);
     return option;
+  }
+
+  for (const prototype of [HTMLInputElement.prototype, HTMLButtonElement.prototype]) {
+    Object.defineProperty(prototype, "formTarget", {
+      configurable: true, enumerable: true,
+      get() { return this.getAttribute("formtarget") || ""; },
+      set(value) { this.setAttribute("formtarget", String(value)); },
+    });
   }
 
   installConstraintValidationApi(HTMLInputElement.prototype);
@@ -11646,15 +12583,14 @@
     newValue,
     namespace,
   ) {
-    if (!element || element.__customElementState !== "custom") return;
+    if (!element) return;
     const definition = element.__customElementDefinition;
-    if (!definition || !definition.observedAttributes.has(name)) return;
-    invokeCustomElementCallback(element, "attributeChangedCallback", [
-      name,
-      oldValue,
-      newValue,
-      namespace,
-    ]);
+    if (element.__customElementState === "custom" && definition?.observedAttributes.has(name)) {
+      invokeCustomElementCallback(element, "attributeChangedCallback", [
+        name, oldValue, newValue, namespace,
+      ]);
+    }
+    customFormAttributeChanged(element, name, oldValue, newValue, namespace);
   }
 
   function customElementTreeWalk(root, callback) {
@@ -11713,6 +12649,7 @@
     Object.setPrototypeOf(element, definition.prototype);
     element.__customElementDefinition = definition;
     element.__customElementState = "precustomized";
+    const internals = initializeCustomInternals(element, definition, "precustomized");
     const entry = { element, constructed: false };
     customElementConstructionStack.push(entry);
     try {
@@ -11728,6 +12665,8 @@
         );
       }
       element.__customElementState = "custom";
+      internals.phase = "custom";
+      nativeSetFormAssociatedCustom(id, internals.definition.formAssociated);
       element.__customElementConnected = false;
       for (const attribute of initialAttributes) {
         notifyCustomElementAttributeChanged(
@@ -11738,6 +12677,8 @@
           null,
         );
       }
+      syncCustomFormState(element);
+      flushCustomFormReactions();
       if (wasConnected) {
         connectCustomElement(element);
         // The upgrade reaction is based on the element's connectivity when the
@@ -11747,6 +12688,8 @@
       }
     } catch (error) {
       element.__customElementState = "failed";
+      internals.phase = "failed";
+      nativeSetFormAssociatedCustom(id, false);
       element.__customElementError = error;
     } finally {
       customElementConstructionStack.pop();
@@ -11845,6 +12788,8 @@
       let extendsValue = null;
       const callbacks = {};
       let observedAttributes = [];
+      let disabledFeatures = [];
+      let formAssociated = false;
       try {
         prototype = constructor.prototype;
         if ((typeof prototype !== "object" && typeof prototype !== "function") ||
@@ -11879,6 +12824,25 @@
             observedAttributes = Array.from(observed, value => String(value));
           }
         }
+        const disabled = constructor.disabledFeatures;
+        if (disabled !== undefined) {
+          if (disabled === null || !["object", "function"].includes(typeof disabled) ||
+              typeof disabled[Symbol.iterator] !== "function") {
+            throw new TypeError("disabledFeatures must be a sequence");
+          }
+          disabledFeatures = Array.from(disabled, String);
+        }
+        formAssociated = Boolean(constructor.formAssociated);
+        if (formAssociated) {
+          for (const name of ["formAssociatedCallback", "formDisabledCallback",
+              "formResetCallback", "formStateRestoreCallback"]) {
+            const callback = prototype[name];
+            if (callback !== undefined && typeof callback !== "function") {
+              throw new TypeError(name + " is not callable");
+            }
+            callbacks[name] = callback || null;
+          }
+        }
       } finally {
         this.__definitionRunning = false;
       }
@@ -11890,9 +12854,16 @@
         prototype,
         callbacks,
         observedAttributes: new Set(observedAttributes),
+        disabledFeatures: new Set(disabledFeatures),
+        formAssociated,
         document: this.__document,
         promise: pending ? pending.promise : Promise.resolve(constructor),
       };
+      safeWeakMapSet(customInternalsDefinitions, definition, {
+        formAssociated,
+        disabledFeatures: new Set(disabledFeatures),
+        callbacks: { ...callbacks },
+      });
       this.__definitions.set(name, definition);
       this.__constructors.set(constructor, name);
       if (!customElementDefinitionByConstructor.has(constructor)) {
@@ -11975,12 +12946,19 @@
 
   // Editing state belongs to the native control, not to a particular Realm's
   // wrapper. This also preserves UTF-16 values without a native string roundtrip.
-  for (const name of ["__value", "__selectionStart", "__selectionEnd",
+  for (const name of ["__value", "__customValidityMessage", "__files", "__selectionStart", "__selectionEnd",
       "__selectionDirection", "__focusValue", "__textEditChanged", "__lastValueChangeWasUser"]) {
     Object.defineProperty(Node.prototype, name, {
       configurable: true,
       get() { return safeWeakMapGet(nodeEventStates, this)[name]; },
-      set(value) { safeWeakMapGet(nodeEventStates, this)[name] = value; },
+      set(value) {
+        const state = safeWeakMapGet(nodeEventStates, this);
+        const changed = state[name] !== value;
+        state[name] = value;
+        if (changed && ["__value", "__customValidityMessage", "__lastValueChangeWasUser", "__files"].includes(name)) {
+          nativeInvalidateValidation(internalNodeId(this));
+        }
+      },
     });
   }
 
@@ -13139,6 +14117,14 @@
     },
   });
 
+  const navigationDocumentId = __omoikane_document_id;
+  const isChildWindow = navigationDocumentId !== browsingInput.topDocumentId;
+  const childNavigation = (kind, value, extra) =>
+    nativeChildNavigation(navigationDocumentId, kind, value, extra);
+  const scheduleWindowNavigation = (kind, value, extra) => {
+    if (isChildWindow) return childNavigation(kind, value, extra);
+    return __omoikane_schedule_navigation(kind, value, extra);
+  };
   let __locationHref = String(__omoikane_location_href);
   const __loc = { protocol: "", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
   try {
@@ -13159,14 +14145,31 @@
     get() { return __locationHref; },
     set(url) {
       const href = __applyLocationUrl(url, false);
-      if (href !== undefined) __omoikane_schedule_navigation("assign", href);
+      if (href !== undefined) scheduleWindowNavigation("assign", href);
     },
   });
+  const childLocation = {
+    get href() { return childNavigation("location"); },
+    set href(value) { this.assign(value); },
+    assign(value) { childNavigation("assign", new URL(String(value), nativeDocumentBaseURL(navigationDocumentId) || this.href).href); },
+    replace(value) { childNavigation("replace", new URL(String(value), nativeDocumentBaseURL(navigationDocumentId) || this.href).href); },
+    reload() { childNavigation("reload"); },
+    toString() { return this.href; },
+  };
+  for (const key of ["protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"]) {
+    Object.defineProperty(childLocation, key, {
+      enumerable: true,
+      get() { return new URL(childLocation.href)[key]; },
+      ...(key === "origin" ? {} : { set(value) {
+        childLocation.assign(locationURLWithComponent(childLocation.href, key, value));
+      } }),
+    });
+  }
   Object.defineProperty(globalThis, "location", {
     enumerable: true,
     configurable: false,
-    get() { return __loc; },
-    set(url) { __loc.assign(url); },
+    get() { return isChildWindow ? childLocation : __loc; },
+    set(url) { (isChildWindow ? childLocation : __loc).assign(url); },
   });
   function __applyLocationUrl(url, requireSameOrigin) {
     if (url == null || String(url) === "") return;
@@ -13191,14 +14194,14 @@
   }
   __loc.assign = function(url) {
     const href = __applyLocationUrl(url, false);
-    if (href !== undefined) __omoikane_schedule_navigation("assign", href);
+    if (href !== undefined) scheduleWindowNavigation("assign", href);
   };
   __loc.replace = function(url) {
     const href = __applyLocationUrl(url, false);
-    if (href !== undefined) __omoikane_schedule_navigation("replace", href);
+    if (href !== undefined) scheduleWindowNavigation("replace", href);
   };
   __loc.reload = function() {
-    __omoikane_schedule_navigation("reload", __loc.href);
+    scheduleWindowNavigation("reload", __loc.href);
   };
   const __historyEntries = [{ state: null, href: __loc.href }];
   let __historyIndex = 0;
@@ -13233,20 +14236,20 @@
       __historyEntries.push({ state, href: __loc.href });
       __historyIndex = __historyEntries.length - 1;
       const stateJSON = JSON.stringify(state);
-      __omoikane_schedule_navigation("push-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
+      scheduleWindowNavigation("push-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
     },
     replaceState(state, unused, url) {
       void unused;
       __applyHistoryUrl(url);
       __historyEntries[__historyIndex] = { state, href: __loc.href };
       const stateJSON = JSON.stringify(state);
-      __omoikane_schedule_navigation("replace-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
+      scheduleWindowNavigation("replace-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
     },
     go(delta = 0) {
       const numeric = Math.trunc(Number(delta || 0));
       if (!Number.isFinite(numeric)) return;
       if (numeric === 0) {
-        __omoikane_schedule_navigation("reload", __loc.href);
+        scheduleWindowNavigation("reload", __loc.href);
         return;
       }
       const localTarget = __historyIndex + numeric;
@@ -13254,11 +14257,24 @@
         __historyIndex = localTarget;
         __applyHistoryUrl(__historyEntries[localTarget].href);
       }
-      __omoikane_schedule_navigation("traverse", String(numeric));
+      scheduleWindowNavigation("traverse", String(numeric));
     },
     back() { this.go(-1); },
     forward() { this.go(1); },
   };
+  if (isChildWindow) {
+    globalThis.history = {
+      get length() { return childNavigation("length"); },
+      get state() { return childNavigation("state"); },
+      get scrollRestoration() { return childNavigation("scroll-restoration"); },
+      set scrollRestoration(value) { childNavigation("set-scroll-restoration", value); },
+      pushState(state, unused, url) { void unused; childNavigation("push-state", state, url); },
+      replaceState(state, unused, url) { void unused; childNavigation("replace-state", state, url); },
+      go(delta = 0) { childNavigation("go", delta); },
+      back() { childNavigation("go", -1); },
+      forward() { childNavigation("go", 1); },
+    };
+  }
   // Maps a JS-style property name to its CSS (kebab-case) form. `cssFloat` /
   // `styleFloat` alias the `float` property, matching the CSSOM.
   function __styleNameToCss(prop) {
@@ -14669,7 +15685,9 @@
           const baseValue = base === undefined ? globalThis.location.href : String(base);
           const match = baseValue.match(/^([A-Za-z][A-Za-z0-9+.-]*:)(?:\/\/([^/?#]*))?([^?#]*)/);
           if (!match) throw new TypeError("invalid base URL");
-          if (value.startsWith("//")) value = match[1] + value;
+          if (value === "" || value.startsWith("#")) value = baseValue.split("#")[0] + value;
+          else if (value.startsWith("?")) value = baseValue.split(/[?#]/)[0] + value;
+          else if (value.startsWith("//")) value = match[1] + value;
           else if (value.startsWith("/")) value = match[1] + "//" + (match[2] || "") + value;
           else {
             const directory = (match[3] || "/").replace(/[^/]*$/, "");
@@ -14920,6 +15938,7 @@
   }
 
   function queueMutation(target, type, init = {}) {
+    if (type === "childList") customFormChildrenChanged(target, init);
     for (const observer of mutationObservers) {
       let matched = false;
       let includeOldValue = false;
@@ -17729,6 +18748,13 @@
     return new DOMException(message, "DataCloneError");
   }
 
+  // Plain objects from a child Realm retain that Realm's Object.prototype.
+  // Accept registered intrinsic prototypes, and create the clone locally so
+  // session history does not retain the departing child's prototype/global.
+  const structuredCloneObjectPrototypes = browsingInput.structuredCloneObjectPrototypes ||
+    (browsingInput.structuredCloneObjectPrototypes = new WeakSet());
+  safeWeakSetAdd(structuredCloneObjectPrototypes, Object.prototype);
+
   function cloneStructuredValue(value, memory) {
     if (value === null || typeof value === "undefined" ||
         typeof value === "boolean" || typeof value === "number" ||
@@ -17775,9 +18801,9 @@
       return result;
     }
     const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) throw dataCloneError();
+    if (prototype !== null && !safeWeakSetHas(structuredCloneObjectPrototypes, prototype)) throw dataCloneError();
     if (Object.getOwnPropertySymbols(value).length) throw dataCloneError();
-    const result = Object.create(prototype); memory.set(value, result);
+    const result = Object.create(prototype === null ? null : Object.prototype); memory.set(value, result);
     for (const key of Object.keys(value)) {
       result[key] = cloneStructuredValue(value[key], memory);
     }
@@ -19547,6 +20573,10 @@
     }
     try { delete globalThis.getComputedStyle; } catch (_) { globalThis.getComputedStyle = undefined; }
     try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
+    Object.defineProperty(globalThis, "name", { configurable:true, enumerable:true, value:"", writable:false });
+    for (const name of ["ElementInternals", "RadioNodeList"]) {
+      try { delete globalThis[name]; } catch (_) { globalThis[name] = undefined; }
+    }
     // Async Clipboard is a Window-only surface in this runtime. Keep the
     // worker navigator object, but do not expose a page clipboard handle from
     // a DedicatedWorkerGlobalScope.
@@ -19952,7 +20982,7 @@
     let length = 0;
     for (const part of parts) {
       let chunk;
-      if (part instanceof Blob) chunk = part.__bytes;
+      if (part instanceof Blob || isFile(part)) chunk = part.__bytes;
       else if (part instanceof ArrayBuffer) chunk = new Uint8Array(part).slice();
       else if (ArrayBuffer.isView(part)) {
         chunk = new Uint8Array(part.buffer, part.byteOffset, part.byteLength).slice();
@@ -20024,6 +21054,7 @@
       if (arguments.length < 2) throw new TypeError("File requires fileBits and fileName");
       super(parts, options);
       const lastModified = (options ?? {}).lastModified;
+      safeWeakMapSet(fileObjects, this, true);
       Object.defineProperty(this, "__name", { value: String(name) });
       Object.defineProperty(this, "__lastModified", {
         value: lastModified === undefined ? Date.now() : Math.trunc(Number(lastModified)) || 0,
@@ -22222,4 +23253,19 @@
     capture: dispatchLostPointerCapture,
   };
   nativeRegisterInputDispatcher((kind, args) => safeApply(inputDispatchers[kind], undefined, args));
+  const windowNameDocument = internalNodeId(globalThis.document);
+  Object.defineProperty(globalThis, "name", {
+    configurable: true, enumerable: true,
+    get() { return nativeWindowName(windowNameDocument); },
+    set(value) { nativeWindowName(windowNameDocument, String(value)); },
+  });
+  nativeRegisterValidation(internalNodeId(globalThis.document), snapshotCssValidity);
+  validationReady = true;
+  formStateDocument = globalThis.document;
+  nativeRegisterIframeNavigation(internalNodeId(globalThis.document), (frameId, documentId, kind, value, extra) => {
+    const frame = wrapNode(frameId);
+    void frame.contentWindow;
+    return safeWeakMapGet(iframeChildNavigators, frame)(documentId, kind, value, extra);
+  });
+  nativeRegisterFormState(internalNodeId(formStateDocument), captureCustomFormState, restoreCustomFormState);
 })();

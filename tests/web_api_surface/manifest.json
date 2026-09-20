@@ -220,6 +220,14 @@
       "baseline_supported": false
     },
     {
+      "id": "html.element-internals",
+      "area": "html",
+      "description": "Form-associated custom elements contribute submission values, validation, labels and reset reactions through ElementInternals",
+      "setup": "globalThis.__internalsResets = 0; customElements.define('surface-form-control', class extends HTMLElement { static formAssociated = true; constructor() { super(); this.internals = this.attachInternals(); this.internals.setFormValue('submitted'); } formResetCallback() { __internalsResets++; this.internals.setFormValue('reset'); } }); globalThis.__internalsForm = document.createElement('form'); globalThis.__internalsControl = document.createElement('surface-form-control'); __internalsControl.setAttribute('name', 'answer'); __internalsForm.append(__internalsControl); document.body.append(__internalsForm)",
+      "probe": "(() => { const i = __internalsControl.internals; if (!(i instanceof ElementInternals) || i.form !== __internalsForm || !i.willValidate || new FormData(__internalsForm).get('answer') !== 'submitted') return false; i.setValidity({customError:true}, 'Fix the field'); if (__internalsForm.checkValidity() || i.validity.valid || i.validationMessage !== 'Fix the field') return false; i.setValidity({}); __internalsForm.reset(); return __internalsForm.checkValidity() && __internalsResets === 1 && new FormData(__internalsForm).get('answer') === 'reset'; })()",
+      "baseline_supported": false
+    },
+    {
       "id": "html.table-cell-interface",
       "area": "html",
       "description": "Table cells expose the HTMLTableCellElement interface and span/reflection semantics",

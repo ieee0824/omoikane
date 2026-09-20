@@ -604,6 +604,67 @@ fn filter() {
 }
 
 #[test]
+fn from_keeps_a_getter_created_iterator_method_alive_during_construction() {
+    use crate::{
+        JsSymbol, Source,
+        object::{FunctionObjectBuilder, JsObject},
+        property::{Attribute, PropertyDescriptor},
+    };
+
+    run_test_actions([
+        TestAction::inspect_context(|ctx| {
+            ctx.register_global_callable(
+                js_string!("forceCollect"),
+                0,
+                NativeFunction::from_fn_ptr(|_, _, _| {
+                    boa_gc::force_collect();
+                    Ok(JsValue::undefined())
+                }),
+            )
+            .unwrap();
+            // A native getter avoids retaining its return value in a retired
+            // JavaScript getter frame's registers during the collection.
+            let source = JsObject::with_null_proto().root();
+            let getter: JsObject = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_fn_ptr(|_, _, ctx| {
+                    let method = FunctionObjectBuilder::new(
+                        ctx.realm(),
+                        NativeFunction::from_fn_ptr(|_, _, ctx| {
+                            ctx.eval(Source::from_bytes("calls++; [37][Symbol.iterator]()"))
+                        }),
+                    )
+                    .build();
+                    Ok(method.into())
+                }),
+            )
+            .build()
+            .into();
+            let getter = getter.root();
+            source
+                .define_property_or_throw(
+                    JsSymbol::iterator(),
+                    PropertyDescriptor::builder().get(getter.to_edge()),
+                    ctx,
+                )
+                .unwrap();
+            ctx.register_global_property(js_string!("source"), source.to_edge(), Attribute::all())
+                .unwrap();
+        }),
+        TestAction::assert(indoc! {r#"
+            let calls = 0;
+            function Destination() {
+                forceCollect();
+                this.marker = 'destination';
+            }
+            const result = Array.from.call(Destination, source);
+            result instanceof Destination && result.marker === 'destination' &&
+                result.length === 1 && result[0] === 37 && calls === 1
+        "#}),
+    ]);
+}
+
+#[test]
 fn filter_roots_result_during_callback_allocations() {
     run_test_actions([
         TestAction::run_harness(),

@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; background:white; font:14px sans-serif; }
+  form, fieldset, x-field, input { box-sizing:border-box; }
+  form { margin:20px; width:280px; padding:8px; background:rgb(40,160,80); }
+  form:invalid { background:rgb(220,60,40); }
+  fieldset { width:100%; border:0; padding:8px; margin:0; background:rgb(40,160,80); }
+  fieldset:invalid { background:rgb(220,60,40); }
+  x-field, input { display:block; width:100%; height:40px; border:0; padding:0; margin:0; background:rgb(40,160,80); }
+  input { margin-top:8px; }
+  x-field:invalid, input:invalid { background:rgb(220,60,40); }
+  x-field:disabled, input:disabled { background:rgb(150,150,150); }
+</style>
+<form id="form">
+  <fieldset id="group">
+    <x-field id="custom" name="custom">Custom control</x-field>
+    <input id="native" name="native" placeholder="Native input" required>
+  </fieldset>
+</form>
+<script>
+  customElements.define('x-field', class extends HTMLElement {
+    static formAssociated = true;
+    constructor() { super(); this.internals = this.attachInternals(); }
+  });
+</script>

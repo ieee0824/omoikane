@@ -73,7 +73,7 @@ pub(crate) fn is_actually_disabled(node: &NodeHandle) -> bool {
     let Some(tag) = node.tag_name() else {
         return false;
     };
-    if !DISABLEABLE_TAGS.contains(&tag.as_str()) {
+    if !DISABLEABLE_TAGS.contains(&tag.as_str()) && !node.is_form_associated_custom() {
         return false;
     }
     if node.get_attribute("disabled").is_some() {
@@ -143,6 +143,7 @@ struct NodeInner {
     /// Stable, never-reused identity for this node (see [`NEXT_NODE_ID`]).
     id: usize,
     parent: Option<Weak<RefCell<NodeInner>>>,
+    parent_revision: u64,
     children: Vec<NodeHandle>,
     data: NodeData,
 }
@@ -231,6 +232,9 @@ pub struct Element {
     dirty_checkedness: bool,
     selected: bool,
     dirty_selectedness: bool,
+    form_associated_custom: bool,
+    css_validity: Option<bool>,
+    parser_form_owner: Option<ParserFormOwner>,
     text_control_state: Option<TextControlState>,
     /// Scroll offset of this element's scrolling box in CSS pixels, as set
     /// through `scrollTop` / `scrollLeft` and friends.
@@ -259,6 +263,25 @@ pub struct Element {
     top_layer_order: Option<u64>,
 }
 
+// Only parser associations outside the ancestor form need an override. Parent
+// revisions invalidate them lazily on moves, including an ancestor moved out
+// and back before the next query, without scanning subtrees on every mutation.
+#[derive(Debug, Clone)]
+struct ParserFormOwner {
+    owner: WeakNodeHandle,
+    owner_id: usize,
+    ancestry: Vec<(usize, u64)>,
+    owner_ancestry: Vec<(usize, u64)>,
+}
+
+impl PartialEq for ParserFormOwner {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner_id == other.owner_id
+            && self.ancestry == other.ancestry
+            && self.owner_ancestry == other.owner_ancestry
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AttributeName {
     namespace_uri: Option<String>,
@@ -283,6 +306,9 @@ impl Element {
             dirty_checkedness: false,
             selected: false,
             dirty_selectedness: false,
+            form_associated_custom: false,
+            css_validity: None,
+            parser_form_owner: None,
             text_control_state: None,
             scroll_offset: (0.0, 0.0),
             template_content,
@@ -313,6 +339,9 @@ impl Element {
             dirty_checkedness: false,
             selected: false,
             dirty_selectedness: false,
+            form_associated_custom: false,
+            css_validity: None,
+            parser_form_owner: None,
             text_control_state: None,
             scroll_offset: (0.0, 0.0),
             template_content: None,
@@ -571,6 +600,7 @@ impl NodeHandle {
         Self(Rc::new(RefCell::new(NodeInner {
             id: NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed),
             parent: None,
+            parent_revision: 0,
             children: Vec::new(),
             data,
         })))
@@ -754,7 +784,7 @@ impl NodeHandle {
             return;
         }
         detach_from_parent(&child);
-        child.0.borrow_mut().parent = Some(Rc::downgrade(&self.0));
+        child.set_parent_link(Some(self));
         self.0.borrow_mut().children.push(child);
         invalidate_slot_assignments();
     }
@@ -802,7 +832,7 @@ impl NodeHandle {
         } else {
             self.0.borrow().children.len()
         };
-        new_child.0.borrow_mut().parent = Some(Rc::downgrade(&self.0));
+        new_child.set_parent_link(Some(self));
         self.0.borrow_mut().children.insert(index, new_child);
         invalidate_slot_assignments();
         Ok(())
@@ -832,7 +862,7 @@ impl NodeHandle {
             .ok_or(DomError::ChildNotFound)?;
 
         let removed = self.0.borrow_mut().children.remove(index);
-        removed.0.borrow_mut().parent = None;
+        removed.set_parent_link(None);
         clear_top_layer_state(&removed);
         invalidate_slot_assignments();
         // Detaching destroys the subtree's boxes, and with them their scroll
@@ -919,6 +949,9 @@ impl NodeHandle {
             if matches!(name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             }
+            if name == "form" {
+                element.parser_form_owner = None;
+            }
             if name == "checked" && !element.dirty_checkedness {
                 element.checked = true;
             }
@@ -955,6 +988,9 @@ impl NodeHandle {
     ) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             let qualified_name = qualified_name.into();
+            if namespace_uri.is_none() && qualified_name == "form" {
+                element.parser_form_owner = None;
+            }
             if matches!(qualified_name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             }
@@ -1014,6 +1050,9 @@ impl NodeHandle {
             element.attributes.remove(&name);
             element.attribute_names.remove(&name);
             element.attribute_order.retain(|entry| entry != &name);
+            if name == "form" {
+                element.parser_form_owner = None;
+            }
             if name == "checked" && !element.dirty_checkedness {
                 element.checked = false;
             }
@@ -1028,6 +1067,14 @@ impl NodeHandle {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             if matches!(qualified_name, "slot" | "name") {
                 invalidate_slot_assignments();
+            }
+            if qualified_name == "form"
+                && element
+                    .attribute_names
+                    .get(qualified_name)
+                    .is_some_and(|name| name.namespace_uri.is_none())
+            {
+                element.parser_form_owner = None;
             }
             element.attributes.remove(qualified_name);
             element.attribute_names.remove(qualified_name);
@@ -1154,14 +1201,151 @@ impl NodeHandle {
         element.top_layer_order
     }
 
+    fn set_parent_link(&self, parent: Option<&Self>) {
+        let mut inner = self.0.borrow_mut();
+        inner.parent = parent.map(|node| Rc::downgrade(&node.0));
+        inner.parent_revision = inner
+            .parent_revision
+            .checked_add(1)
+            .expect("node parent revision exhausted");
+    }
+
+    fn ancestry_revisions(&self) -> Vec<(usize, u64)> {
+        let mut result = Vec::new();
+        let mut current = Some(self.clone());
+        while let Some(node) = current {
+            let inner = node.0.borrow();
+            result.push((inner.id, inner.parent_revision));
+            current = inner.parent.as_ref().and_then(Weak::upgrade).map(Self);
+        }
+        result
+    }
+
+    fn has_ancestry_revisions(&self, expected: &[(usize, u64)]) -> bool {
+        let mut current = Some(self.clone());
+        for &(id, revision) in expected {
+            let Some(node) = current else {
+                return false;
+            };
+            let inner = node.0.borrow();
+            if inner.id != id || inner.parent_revision != revision {
+                return false;
+            }
+            current = inner.parent.as_ref().and_then(Weak::upgrade).map(Self);
+        }
+        current.is_none()
+    }
+
+    /// Records a parser-created association that cannot be derived from the
+    /// control's ancestor chain. The owner is weak to avoid retaining removed DOM.
+    pub(crate) fn set_parser_form_owner(&self, owner: &Self) {
+        let record = ParserFormOwner {
+            owner: owner.downgrade(),
+            owner_id: owner.identity(),
+            ancestry: self.ancestry_revisions(),
+            owner_ancestry: owner.ancestry_revisions(),
+        };
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.parser_form_owner = Some(record);
+        }
+    }
+
+    /// Returns an exceptional parser form owner until a relevant reparenting
+    /// or explicit form-attribute mutation resets the association.
+    pub(crate) fn parser_form_owner(&self) -> Option<Self> {
+        let result = {
+            let inner = self.0.borrow();
+            let NodeData::Element(element) = &inner.data else {
+                return None;
+            };
+            let record = element.parser_form_owner.as_ref()?;
+            record.owner.upgrade().filter(|owner| {
+                self.has_ancestry_revisions(&record.ancestry)
+                    && owner.has_ancestry_revisions(&record.owner_ancestry)
+            })
+        };
+        if result.is_none() {
+            if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+                element.parser_form_owner = None;
+            }
+        }
+        result
+    }
+
+    /// CSS validation state supplied by the document's constraint validator.
+    /// None denotes an element that matches neither :valid nor :invalid.
+    pub(crate) fn css_validity(&self) -> Option<bool> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.css_validity,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_css_validity(&self, validity: Option<bool>) -> bool {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            if element.css_validity != validity {
+                element.css_validity = validity;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether the element has successfully upgraded to a form-associated
+    /// custom element. A hyphenated tag name alone does not confer this state.
+    pub(crate) fn is_form_associated_custom(&self) -> bool {
+        matches!(&self.0.borrow().data, NodeData::Element(element) if element.form_associated_custom)
+    }
+
+    /// Publishes the custom element definition's form participation to native
+    /// style matching and host input. Failed upgrades clear the state.
+    pub(crate) fn set_form_associated_custom(&self, associated: bool) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.form_associated_custom = associated;
+        }
+    }
+
     /// Updates an option element's live selectedness independently of its
     /// `selected` content attribute.
     pub(crate) fn set_selected(&self, selected: bool) {
-        if let NodeData::Element(element) = &mut self.0.borrow_mut().data
-            && element.tag_name == "option"
         {
+            let mut node = self.0.borrow_mut();
+            let NodeData::Element(element) = &mut node.data else {
+                return;
+            };
+            if element.tag_name != "option" {
+                return;
+            }
             element.selected = selected;
             element.dirty_selectedness = true;
+        }
+        if !selected {
+            return;
+        }
+        let mut parent = self.parent_node();
+        if parent
+            .as_ref()
+            .is_some_and(|node| node.tag_name().as_deref() == Some("optgroup"))
+        {
+            parent = parent.and_then(|node| node.parent_node());
+        }
+        let Some(select) = parent.filter(|node| {
+            node.tag_name().as_deref() == Some("select") && node.get_attribute("multiple").is_none()
+        }) else {
+            return;
+        };
+        let mut pending = select.child_nodes();
+        while let Some(option) = pending.pop() {
+            if option.tag_name().as_deref() == Some("optgroup") {
+                pending.extend(option.child_nodes());
+            } else if option != *self {
+                if let NodeData::Element(element) = &mut option.0.borrow_mut().data
+                    && element.tag_name == "option"
+                {
+                    // Only the explicitly assigned option becomes dirty.
+                    element.selected = false;
+                }
+            }
         }
     }
 

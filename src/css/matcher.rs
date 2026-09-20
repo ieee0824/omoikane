@@ -696,6 +696,8 @@ fn matches_pseudo_class(
         "enabled" => is_form_control(node) && !is_actually_disabled(node),
         "disabled" => is_actually_disabled(node),
         "checked" => node.checked(),
+        "valid" => pseudo.is_none() && node.css_validity() == Some(true),
+        "invalid" => pseudo.is_none() && node.css_validity() == Some(false),
         "empty" => node
             .child_nodes()
             .into_iter()
@@ -709,12 +711,13 @@ fn matches_pseudo_class(
 }
 
 fn is_form_control(node: &NodeHandle) -> bool {
-    node.tag_name().is_some_and(|tag| {
-        matches!(
-            tag.as_str(),
-            "button" | "input" | "select" | "textarea" | "option" | "optgroup" | "fieldset"
-        )
-    })
+    node.is_form_associated_custom()
+        || node.tag_name().is_some_and(|tag| {
+            matches!(
+                tag.as_str(),
+                "button" | "input" | "select" | "textarea" | "option" | "optgroup" | "fieldset"
+            )
+        })
 }
 
 fn matches_language(node: &NodeHandle, range: &str) -> bool {

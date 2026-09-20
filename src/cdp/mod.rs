@@ -23,9 +23,10 @@ use crate::http::{Client, HttpRequest, Method};
 #[cfg(test)]
 use crate::js::PageTaskSource;
 use crate::js::{
-    CompletedPageTask, FullscreenTransition, JavaScriptDialog, JavaScriptDialogController,
-    JavaScriptDialogError, JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask,
-    PageTaskError, PointerLockTransition, StorageManager,
+    CompletedPageTask, FormStateRestoreMode, FormStateSnapshot, FullscreenTransition,
+    JavaScriptDialog, JavaScriptDialogController, JavaScriptDialogError, JavaScriptDialogKind,
+    JsRuntime, NavigationRequest, OwnedPageTask, PageTaskError, PointerLockTransition,
+    StorageManager,
 };
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -729,6 +730,7 @@ enum NavigationCommit {
 struct SessionHistoryEntry {
     url: String,
     state_json: String,
+    form_state: Option<FormStateSnapshot>,
 }
 
 /// Document metadata held by the CDP host while its new runtime is owned by a
@@ -797,6 +799,7 @@ impl CdpSession {
             history_entries: vec![SessionHistoryEntry {
                 url: "about:blank".to_string(),
                 state_json: "null".to_string(),
+                form_state: None,
             }],
             history_index: 0,
             document_generation: 0,
@@ -1111,6 +1114,7 @@ impl CdpSession {
                 code: -32000,
                 message,
             })?;
+        let form_state = self.navigation_form_state(history_commit, &document_url)?;
         let (history_length, history_state) = self.prospective_history_state(history_commit);
         let (task, mut commit) = self
             .prepare_document_page_task(
@@ -1119,6 +1123,7 @@ impl CdpSession {
                 history_length,
                 &history_state,
                 &csp_headers,
+                form_state.as_ref(),
             )
             .map_err(|message| JsonRpcError {
                 code: -32000,
@@ -1153,6 +1158,7 @@ impl CdpSession {
             && commit != NavigationCommit::Reload
             && is_fragment_only_navigation(&self.current_url, url)
         {
+            let form_state = self.navigation_form_state(commit, url)?;
             let previous_url = self.current_url.clone();
             self.commit_history_url(url, commit, None);
             self.current_url = url.to_string();
@@ -1163,6 +1169,11 @@ impl CdpSession {
                 .and_then(|_| self.runtime.run_jobs())
                 .map_err(js_error)?;
             self.sync_history_length()?;
+            if let Some(state) = form_state {
+                self.runtime
+                    .restore_form_state(&state, FormStateRestoreMode::Restore)
+                    .map_err(js_error)?;
+            }
             self.emit(
                 "Page.navigatedWithinDocument",
                 json!({ "frameId": self.frame_id, "url": url, "navigationType": "fragment" }),
@@ -1187,6 +1198,7 @@ impl CdpSession {
                 message,
             })?;
 
+        let form_state = self.navigation_form_state(commit, &document_url)?;
         let (next_history_length, next_history_state) = self.prospective_history_state(commit);
         self.install_document_with_csp(
             &document_url,
@@ -1194,6 +1206,7 @@ impl CdpSession {
             next_history_length,
             &next_history_state,
             &csp_headers,
+            form_state.as_ref(),
         )
         .map_err(|message| JsonRpcError {
             code: -32000,
@@ -1312,6 +1325,9 @@ impl CdpSession {
                     replace,
                     state_json,
                 } => {
+                    // A same-document entry still needs a snapshot before
+                    // later changes overwrite the live controls' state.
+                    self.navigation_form_state(NavigationCommit::Push, &url)?;
                     self.commit_history_url(
                         &url,
                         if replace {
@@ -1368,6 +1384,7 @@ impl CdpSession {
                 self.history_entries.push(SessionHistoryEntry {
                     url: url.to_string(),
                     state_json: state_json.unwrap_or_else(|| "null".to_string()),
+                    form_state: None,
                 });
                 self.history_index = self.history_entries.len() - 1;
             }
@@ -1375,11 +1392,41 @@ impl CdpSession {
                 self.history_entries[self.history_index] = SessionHistoryEntry {
                     url: url.to_string(),
                     state_json: state_json.unwrap_or_else(|| "null".to_string()),
+                    form_state: None,
                 };
             }
-            NavigationCommit::Reload => {}
+            NavigationCommit::Reload => {
+                let entry = &mut self.history_entries[self.history_index];
+                if entry.url != url {
+                    entry.url = url.to_string();
+                    entry.form_state = None;
+                }
+            }
             NavigationCommit::Traverse(index) => self.history_index = index,
         }
+    }
+
+    /// Saves values independently of the departing runtime. Only history
+    /// traversal and reload may restore them, and a redirect to another URL
+    /// must not receive the original document's private form state.
+    fn navigation_form_state(
+        &mut self,
+        commit: NavigationCommit,
+        document_url: &str,
+    ) -> Result<Option<FormStateSnapshot>, JsonRpcError> {
+        let current = self.runtime.capture_form_state().map_err(js_error)?;
+        self.history_entries[self.history_index].form_state = Some(current);
+        let entry = match commit {
+            NavigationCommit::Reload => &self.history_entries[self.history_index],
+            NavigationCommit::Traverse(index) => &self.history_entries[index],
+            NavigationCommit::Push | NavigationCommit::Replace => return Ok(None),
+        };
+        let saved_url = entry.url.split('#').next().unwrap_or_default();
+        let loaded_url = document_url.split('#').next().unwrap_or_default();
+        if saved_url != loaded_url {
+            return Ok(None);
+        }
+        Ok(entry.form_state.clone())
     }
 
     fn prospective_history_state(&self, commit: NavigationCommit) -> (usize, String) {
@@ -2447,7 +2494,7 @@ impl CdpSession {
         history_length: usize,
         history_state_json: &str,
     ) -> Result<(), String> {
-        self.install_document_with_csp(url, html, history_length, history_state_json, &[])
+        self.install_document_with_csp(url, html, history_length, history_state_json, &[], None)
     }
 
     fn install_document_with_csp(
@@ -2457,6 +2504,7 @@ impl CdpSession {
         history_length: usize,
         history_state_json: &str,
         csp_headers: &[String],
+        form_state: Option<&FormStateSnapshot>,
     ) -> Result<(), String> {
         let document = TreeBuilder::parse(html).document();
         let mut runtime = JsRuntime::with_document_url_and_storage(
@@ -2475,6 +2523,11 @@ impl CdpSession {
         runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
         Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
         runtime.install_csp_policy(csp_headers);
+        if let Some(state) = form_state {
+            runtime
+                .restore_form_state(state, FormStateRestoreMode::Restore)
+                .map_err(js_error_message)?;
+        }
         runtime
             .eval(&format!(
                 "__omoikane_sync_history({history_length}, {history_state_json:?})"
@@ -2532,6 +2585,7 @@ impl CdpSession {
         history_length: usize,
         history_state_json: &str,
         csp_headers: &[String],
+        form_state: Option<&FormStateSnapshot>,
     ) -> Result<(OwnedPageTask, PendingDocumentCommit), String> {
         let document = TreeBuilder::parse(html).document();
         let mut runtime = JsRuntime::with_document_url_and_storage(
@@ -2550,6 +2604,11 @@ impl CdpSession {
         runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
         Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
         runtime.install_csp_policy(csp_headers);
+        if let Some(state) = form_state {
+            runtime
+                .restore_form_state(state, FormStateRestoreMode::Restore)
+                .map_err(js_error_message)?;
+        }
         runtime
             .eval(&format!(
                 "__omoikane_sync_history({history_length}, {history_state_json:?})"
@@ -5370,6 +5429,166 @@ mod tests {
             .unwrap();
         assert_eq!(restored["result"]["value"], true);
 
+        server.join().unwrap();
+    }
+
+    fn custom_form_state_server(
+        requests: usize,
+        redirect_reload: bool,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            for index in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 2048];
+                let size = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                if redirect_reload && index == 1 {
+                    stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /changed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    continue;
+                }
+                let html = if request.starts_with("GET /other ") {
+                    "<title>other</title>"
+                } else {
+                    "<form><x-history name='value'></x-history></form><script>\
+                     globalThis.restored = [];\
+                     customElements.define('x-history', class extends HTMLElement {\
+                       static formAssociated = true;\
+                       constructor() { super(); this.i = this.attachInternals(); this.i.setFormValue('default'); }\
+                       formStateRestoreCallback(value, mode) { restored.push([value, mode]); this.i.setFormValue(value); }\
+                     });</script>"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                    html.len()
+                )
+                .unwrap();
+            }
+        });
+        (origin, server)
+    }
+
+    fn assert_custom_form_state(session: &mut CdpSession, expected: &str) {
+        let result = session.dispatch("Runtime.evaluate", json!({
+            "expression": "JSON.stringify([restored, new FormData(document.querySelector('form')).get('value')])"
+        })).unwrap();
+        assert_eq!(result["result"]["value"], expected);
+    }
+
+    #[test]
+    fn custom_form_state_survives_back_forward_and_reload() {
+        let (origin, server) = custom_form_state_server(6, false);
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({"url": format!("{origin}/form")}))
+            .unwrap();
+        session.dispatch("Runtime.evaluate", json!({
+            "expression": "document.querySelector('x-history').i.setFormValue('submitted', 'saved')"
+        })).unwrap();
+        session
+            .dispatch("Page.navigate", json!({"url": format!("{origin}/other")}))
+            .unwrap();
+        session
+            .dispatch("Runtime.evaluate", json!({"expression": "history.back()"}))
+            .unwrap();
+        assert_custom_form_state(&mut session, r#"[[["saved","restore"]],"saved"]"#);
+        session.dispatch("Page.reload", json!({})).unwrap();
+        assert_custom_form_state(&mut session, r#"[[["saved","restore"]],"saved"]"#);
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression": "history.forward()"}),
+            )
+            .unwrap();
+        assert!(session.current_url().ends_with("/other"));
+        session
+            .dispatch("Runtime.evaluate", json!({"expression": "history.back()"}))
+            .unwrap();
+        assert_custom_form_state(&mut session, r#"[[["saved","restore"]],"saved"]"#);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn custom_form_state_is_restored_by_suspendable_page_startup() {
+        let (origin, server) = custom_form_state_server(2, false);
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({"url": format!("{origin}/form")}))
+            .unwrap();
+        session.dispatch("Runtime.evaluate", json!({
+            "expression": "document.querySelector('x-history').i.setFormValue('submitted', 'async saved')"
+        })).unwrap();
+        let PreparedPageNavigation::Pending { task, commit, .. } =
+            session.prepare_page_reload().unwrap()
+        else {
+            panic!("reload must recreate the document");
+        };
+        let mut task = Box::pin(task);
+        let mut context = TaskContext::from_waker(Waker::noop());
+        let started = std::time::Instant::now();
+        let completed = loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "page startup timed out"
+            );
+            if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+                break completed;
+            }
+        };
+        assert!(completed.result.as_ref().unwrap().is_empty());
+        session
+            .commit_document_page_task(completed, commit)
+            .unwrap();
+        assert_custom_form_state(
+            &mut session,
+            r#"[[["async saved","restore"]],"async saved"]"#,
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn custom_form_state_is_saved_before_pushstate_changes_the_current_entry() {
+        let (origin, server) = custom_form_state_server(3, false);
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({"url": format!("{origin}/form")}))
+            .unwrap();
+        session.dispatch("Runtime.evaluate", json!({
+            "expression": "document.querySelector('x-history').i.setFormValue('first'); history.pushState(null, '', '/step')"
+        })).unwrap();
+        session.dispatch("Runtime.evaluate", json!({
+            "expression": "document.querySelector('x-history').i.setFormValue('second'); history.back()"
+        })).unwrap();
+        assert_custom_form_state(&mut session, r#"[[["first","restore"]],"first"]"#);
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression": "history.forward()"}),
+            )
+            .unwrap();
+        assert_custom_form_state(&mut session, r#"[[["second","restore"]],"second"]"#);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn custom_form_state_is_not_delivered_to_a_reload_redirect() {
+        let (origin, server) = custom_form_state_server(3, true);
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({"url": format!("{origin}/form")}))
+            .unwrap();
+        session.dispatch("Runtime.evaluate", json!({
+            "expression": "document.querySelector('x-history').i.setFormValue('submitted', 'private state')"
+        })).unwrap();
+        session.dispatch("Page.reload", json!({})).unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/changed"));
+        assert_eq!(
+            session.history_entries[session.history_index].url,
+            session.current_url()
+        );
+        assert_custom_form_state(&mut session, r#"[[],"default"]"#);
         server.join().unwrap();
     }
 

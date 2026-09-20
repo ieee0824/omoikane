@@ -174,6 +174,7 @@ unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
         }
         TimerPayload::Source(_)
         | TimerPayload::ResourceLoad { .. }
+        | TimerPayload::FormSubmission { .. }
         | TimerPayload::GeolocationTimeout { .. } => {}
     }
 }
@@ -227,13 +228,15 @@ impl EventLoop {
         self.enqueue_timer_for_document(payload, None);
     }
 
-    fn enqueue_timer_for_document(
+    pub(super) fn enqueue_timer_for_document(
         &mut self,
         payload: TimerPayload,
         owner_document_id: Option<usize>,
     ) {
         let source = match payload {
-            TimerPayload::ResourceLoad { .. } => TaskSource::Networking,
+            TimerPayload::ResourceLoad { .. } | TimerPayload::FormSubmission { .. } => {
+                TaskSource::Networking
+            }
             TimerPayload::GeolocationTimeout { .. } => TaskSource::Geolocation,
             _ => TaskSource::Timer,
         };
@@ -257,7 +260,7 @@ impl EventLoop {
                 let cancelled = matches!(
                     task,
                     Task::Timer {
-                        payload: TimerPayload::ResourceLoad { node_id },
+                        payload: TimerPayload::ResourceLoad { node_id } | TimerPayload::FormSubmission { node_id, .. },
                         ..
                     }
                         if node_ids.contains(node_id)

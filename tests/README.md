@@ -66,6 +66,17 @@ For a known `FAIL` that affects only specific subtests, set
 additional failure, missing expected failure, or timeout instead of accepting all
 failures in that file.
 
+The ElementInternals subset exercises attachment conditions, form ownership,
+submission values, validation, and disabled/reset reactions. `element_internals`
+also checks restoration snapshots and callbacks through navigation. The
+`form_validity_css` target compares native/custom control validity, form and
+fieldset aggregation, detached/shadow trees, computed styles, and painted
+pixels in `anonymized-form-validity/states.html`. Set
+`OMOIKANE_FORM_VALIDITY_IMAGES=<artifact-directory>` to save the initial,
+changed, and disabled frames for visual review; it never updates a baseline.
+The fixture uses normal flow to isolate validity styling. Nested fixed-position
+translation observed during review is separately tracked in #773.
+
 The initial job is intentionally a small PR smoke gate. Expansion toward the full WPT suite and official `wpt run` integration is tracked in GitHub issue #150.
 
 The Fullscreen subset checks `fullscreenEnabled`, rejection and
@@ -119,6 +130,13 @@ For `/common/sab.js`, this smoke runner uses the exposed native
 real shared buffers and all assertions are retained. This adapter does not test
 WebAssembly compatibility. ArrayBuffer transfer via MessagePort is tracked in
 #763; decoder regressions use the engine's detach API independently of it.
+
+The form-associated custom-element subset submits GET and multipart POST
+requests into named iframes. The runner gives each document its actual local
+HTTP URL and implements the pinned `echo-content-escaped.py` endpoint in Rust,
+including request-body byte escaping. This exercises the engine's real form
+navigation and text response handling; it does not substitute successful
+JavaScript results or change upstream assertions.
 
 # Web API surface probe
 
