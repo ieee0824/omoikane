@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Multi-column rendering fixture</title>
+<style>
+  html, body { margin: 0; background: white; }
+  body { padding: 10px; }
+  .columns {
+    width: 360px;
+    column-count: 3;
+    column-gap: 18px;
+    column-rule: 4px solid #202020;
+    background: #f4f4f4;
+  }
+  .item { height: 24px; break-inside: avoid; background: #2878d0; }
+  .item:nth-child(even) { background: #e07828; }
+  #balanced { margin-bottom: 12px; }
+  #spanner { height: 16px; column-span: all; background: #30a050; }
+  #automatic { height: 48px; column-fill: auto; }
+  #lines {
+    font: 16px/20px monospace;
+    color: #101010;
+    orphans: 2;
+    widows: 2;
+  }
+</style>
+<section id="balanced" class="columns" data-probe>
+  <div id="a1" class="item" data-probe></div>
+  <div id="a2" class="item" data-probe></div>
+  <div id="a3" class="item" data-probe></div>
+  <div id="spanner" data-probe></div>
+  <div id="a4" class="item" data-probe></div>
+  <div id="a5" class="item" data-probe></div>
+  <div id="a6" class="item" data-probe></div>
+</section>
+<section id="automatic" class="columns" data-probe>
+  <div id="b1" class="item" data-probe></div>
+  <div id="b2" class="item" data-probe></div>
+  <div id="b3" class="item" data-probe></div>
+  <div id="b4" class="item" data-probe></div>
+  <div id="b5" class="item" data-probe></div>
+  <div id="b6" class="item" data-probe></div>
+  <div id="b7" class="item" data-probe></div>
+</section>
+<section id="text-flow" class="columns" data-probe>
+  <div id="lines">AA<br>BB<br>CC<br>DD<br>EE<br>FF</div>
+</section>

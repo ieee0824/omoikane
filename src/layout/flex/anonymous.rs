@@ -127,6 +127,7 @@ pub(super) fn layout(
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
         paint_scroll: None,
+        multicol: None,
         lines,
         children: Vec::new(),
         marker: None,

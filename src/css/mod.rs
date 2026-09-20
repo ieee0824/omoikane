@@ -41,6 +41,10 @@ pub(crate) use transition::{
     normalize_transition_longhand, normalize_transition_shorthand,
 };
 
+pub(crate) fn serialize_specified_value(value: &Value) -> String {
+    style::render_value(value)
+}
+
 pub(crate) fn split_top_level_commas(value: &str) -> Vec<&str> {
     let mut values = Vec::new();
     let mut start = 0usize;

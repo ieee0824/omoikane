@@ -8631,3 +8631,160 @@ fn underline_properties_preserve_relative_inheritance_and_decoration_origin() {
         assert_eq!(decorations[1].underline_position, "right");
     }
 }
+
+#[test]
+fn multicol_properties_compute_and_supply_initial_values() {
+    let (_, _, target, _) = sample_tree();
+    target.set_attribute(
+        "style",
+        "color: navy; columns: 120px 3; column-gap: 24px; column-fill: auto; \
+         column-span: all; column-rule: 5px dashed red; break-before: column; \
+         break-after: avoid-column; break-inside: avoid-column; orphans: 3; widows: 4",
+    );
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&target);
+    assert_eq!(style.get("column-width"), Some(&ComputedValue::Px(120.0)));
+    assert_eq!(style.get("column-count"), Some(&ComputedValue::Number(3.0)));
+    assert_eq!(style.get("column-gap"), Some(&ComputedValue::Px(24.0)));
+    assert_eq!(
+        style.get("column-fill"),
+        Some(&ComputedValue::Keyword("auto".into()))
+    );
+    assert_eq!(
+        style.get("column-span"),
+        Some(&ComputedValue::Keyword("all".into()))
+    );
+    assert_eq!(
+        style.get("column-rule-style"),
+        Some(&ComputedValue::Keyword("dashed".into()))
+    );
+    assert_eq!(
+        style.get("column-rule-width"),
+        Some(&ComputedValue::Px(5.0))
+    );
+    assert_eq!(
+        style.get("column-rule-color"),
+        Some(&ComputedValue::Color("red".into()))
+    );
+    assert_eq!(
+        style.get("break-before"),
+        Some(&ComputedValue::Keyword("column".into()))
+    );
+    assert_eq!(style.get("orphans"), Some(&ComputedValue::Number(3.0)));
+    assert_eq!(style.get("widows"), Some(&ComputedValue::Number(4.0)));
+
+    let initial = NodeHandle::element("div");
+    let document = NodeHandle::document();
+    document.append_child(initial.clone());
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&initial);
+    assert_eq!(
+        style.get("column-count"),
+        Some(&ComputedValue::Keyword("auto".into()))
+    );
+    assert_eq!(
+        style.get("column-width"),
+        Some(&ComputedValue::Keyword("auto".into()))
+    );
+    assert_eq!(
+        style.get("column-gap"),
+        Some(&ComputedValue::Keyword("normal".into()))
+    );
+    assert_eq!(
+        style.get("column-fill"),
+        Some(&ComputedValue::Keyword("balance".into()))
+    );
+    assert_eq!(
+        style.get("column-rule-style"),
+        Some(&ComputedValue::Keyword("none".into()))
+    );
+    assert_eq!(
+        style.get("column-rule-width"),
+        Some(&ComputedValue::Px(3.0))
+    );
+    assert_eq!(
+        style.get("column-rule-color"),
+        Some(&ComputedValue::Color("black".into()))
+    );
+}
+
+#[test]
+fn multicol_shorthands_expand_and_invalid_values_do_not_win() {
+    let declarations = parse_style_attribute("columns: 10px 4; column-rule: blue dotted");
+    let value = |name: &str| {
+        declarations
+            .iter()
+            .find(|declaration| declaration.name == name)
+            .map(|declaration| declaration.value.clone())
+    };
+    assert_eq!(
+        value("column-width"),
+        Some(Value::Length(10.0, "px".into()))
+    );
+    assert_eq!(value("column-count"), Some(Value::Number(4.0)));
+    assert_eq!(
+        value("column-rule-width"),
+        Some(Value::Keyword("medium".into()))
+    );
+    assert_eq!(
+        value("column-rule-style"),
+        Some(Value::Keyword("dotted".into()))
+    );
+    assert_eq!(
+        value("column-rule-color"),
+        Some(Value::Keyword("blue".into()))
+    );
+    let two_auto = parse_style_attribute("columns: auto auto");
+    assert_eq!(two_auto.len(), 2);
+    assert!(
+        two_auto
+            .iter()
+            .all(|declaration| { declaration.value == Value::Keyword("auto".into()) })
+    );
+
+    let (_, _, target, _) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#hero { column-count: 2; column-count: 0; column-width: 12px; \
+             column-width: -1px; column-fill: balance; column-fill: x-invalid; \
+             column-rule: 7px solid green; column-rule-style: x-invalid; \
+             break-inside: avoid-column; break-inside: always; orphans: 5; orphans: 0; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&target);
+    assert_eq!(style.get("column-count"), Some(&ComputedValue::Number(2.0)));
+    assert_eq!(style.get("column-width"), Some(&ComputedValue::Px(12.0)));
+    assert_eq!(
+        style.get("column-fill"),
+        Some(&ComputedValue::Keyword("balance".into()))
+    );
+    assert_eq!(
+        style.get("column-rule-style"),
+        Some(&ComputedValue::Keyword("solid".into()))
+    );
+    assert_eq!(
+        style.get("break-inside"),
+        Some(&ComputedValue::Keyword("avoid-column".into()))
+    );
+    assert_eq!(style.get("orphans"), Some(&ComputedValue::Number(5.0)));
+
+    for (property, valid, invalid) in [
+        ("column-count", "3", "0"),
+        ("column-width", "12px", "-1px"),
+        ("column-fill", "balance-all", "fill"),
+        ("column-span", "all", "auto"),
+        ("column-rule", "2px dotted red", "2px 3px"),
+        ("columns", "12px 2", "2 3"),
+        ("break-before", "column", "always"),
+        ("break-inside", "avoid-column", "column"),
+    ] {
+        assert!(supports_declaration(property, valid), "{property}: {valid}");
+        assert!(
+            !supports_declaration(property, invalid),
+            "{property}: {invalid}"
+        );
+    }
+}

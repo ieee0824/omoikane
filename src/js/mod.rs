@@ -9415,6 +9415,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(normalize_style_value_native),
         ),
         (
+            js_string!("__omoikane_expand_style_shorthand"),
+            2,
+            NativeFunction::from_copy_closure(expand_style_shorthand_native),
+        ),
+        (
             js_string!("__omoikane_take_transition_events"),
             0,
             NativeFunction::from_copy_closure(take_transition_events_native),
@@ -12929,15 +12934,73 @@ fn normalize_style_value_native(
                 | "mix-blend-mode"
                 | "isolation"
                 | "text-overflow"
+                | "columns"
+                | "column-count"
+                | "column-width"
+                | "column-fill"
+                | "column-span"
+                | "column-gap"
+                | "column-rule"
+                | "column-rule-color"
+                | "column-rule-style"
+                | "column-rule-width"
+                | "break-before"
+                | "break-after"
+                | "break-inside"
+                | "orphans"
+                | "widows"
         )
     {
-        crate::css::supports_declaration(&property, &value).then_some(value)
+        crate::css::supports_declaration(&property, &value).then(|| {
+            if matches!(
+                property.as_str(),
+                "column-width" | "column-gap" | "column-rule-width"
+            ) && value.trim() == "0"
+            {
+                "0px".to_string()
+            } else {
+                value
+            }
+        })
     } else {
         Some(value)
     };
     Ok(normalized
         .map(|value| js_string!(value).into())
         .unwrap_or_else(JsValue::null))
+}
+
+fn expand_style_shorthand_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let property = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped()
+        .to_ascii_lowercase();
+    let value = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let declarations = crate::css::parse_style_attribute(&format!("{property}: {value}"));
+    let rows = declarations
+        .into_iter()
+        .map(|declaration| {
+            [
+                declaration.name,
+                crate::css::serialize_specified_value(&declaration.value),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let encoded = serde_json::to_string(&rows)
+        .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
+    Ok(js_string!(encoded.as_str()).into())
 }
 
 fn take_transition_events_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
