@@ -894,6 +894,20 @@ impl CdpSession {
         self.runtime.set_viewport(width as f32, height as f32);
     }
 
+    /// Updates the visible portion of the active page for host-driven zoom or
+    /// on-screen-keyboard changes. Values are expressed in CSS pixels.
+    pub fn set_visual_viewport(
+        &mut self,
+        width: f32,
+        height: f32,
+        offset_left: f32,
+        offset_top: f32,
+        scale: f32,
+    ) {
+        self.runtime
+            .set_visual_viewport(width, height, offset_left, offset_top, scale);
+    }
+
     /// Advances the active page event loop and commits script navigation.
     ///
     /// This is the browser-session lifecycle entry point for a future GUI

@@ -108,7 +108,10 @@ const LOAD_SCRIPT: &str = concat!(
     "__omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } ",
-    "window.dispatchEvent(new Event('load', { bubbles: false })); ",
+    "{ const event = new Event('load', { bubbles: false }); ",
+    "if (typeof window.onload === 'function') ",
+    "__omoikane_call_event_listener(window.onload, window, event); ",
+    "window.dispatchEvent(event); } ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }",
 );
@@ -1025,6 +1028,30 @@ impl TimerPayload {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VisualViewportState {
+    width: f32,
+    height: f32,
+    offset_left: f32,
+    offset_top: f32,
+    scale: f32,
+}
+
+impl VisualViewportState {
+    fn json(self, window_scroll: (f32, f32)) -> String {
+        format!(
+            "{{\"width\":{},\"height\":{},\"offsetLeft\":{},\"offsetTop\":{},\"pageLeft\":{},\"pageTop\":{},\"scale\":{}}}",
+            json_number(self.width),
+            json_number(self.height),
+            json_number(self.offset_left),
+            json_number(self.offset_top),
+            json_number(window_scroll.0 + self.offset_left),
+            json_number(window_scroll.1 + self.offset_top),
+            json_number(self.scale),
+        )
+    }
+}
+
 struct HostState {
     runtime_identity: Rc<()>,
     /// Monotonic clock origin used by `performance.now()` for this global.
@@ -1079,8 +1106,23 @@ struct HostState {
     /// Viewport used when resolving computed styles and running layout for the
     /// `getComputedStyle` / layout-metrics bindings (issues 016-8 and 044-2).
     viewport: Rect,
+    /// Top-level visual viewport supplied by the presentation host. It follows
+    /// the layout viewport until the host reports a zoomed or occluded view.
+    visual_viewport: VisualViewportState,
+    visual_viewport_follows_layout: bool,
     /// Top-level Window scroll offset in document CSS pixels.
     window_scroll: (f32, f32),
+    /// Nested browsing contexts keep an independent layout viewport scroll.
+    /// Child layout is not painted by the top-level renderer yet, but its
+    /// Window and VisualViewport geometry must not borrow the parent's offset.
+    iframe_window_scrolls: HashMap<usize, (f32, f32)>,
+    /// Last dimensions observed for live child browsing contexts. A change is
+    /// converted into Window and VisualViewport resize steps at the next
+    /// rendering opportunity.
+    observed_iframe_viewports: HashMap<usize, (f32, f32)>,
+    pending_window_resize_documents: Vec<usize>,
+    pending_visual_viewport_resize_documents: Vec<usize>,
+    pending_visual_viewport_scroll_documents: Vec<usize>,
     /// Scroll targets waiting for the next rendering opportunity. This is an
     /// ordered set: first-queue order is retained and duplicate ids are skipped.
     pending_scroll_targets: Vec<usize>,
@@ -1733,7 +1775,20 @@ impl HostState {
                 width: DEFAULT_VIEWPORT_WIDTH,
                 height: DEFAULT_VIEWPORT_HEIGHT,
             },
+            visual_viewport: VisualViewportState {
+                width: DEFAULT_VIEWPORT_WIDTH,
+                height: DEFAULT_VIEWPORT_HEIGHT,
+                offset_left: 0.0,
+                offset_top: 0.0,
+                scale: 1.0,
+            },
+            visual_viewport_follows_layout: true,
             window_scroll: (0.0, 0.0),
+            iframe_window_scrolls: HashMap::new(),
+            observed_iframe_viewports: HashMap::new(),
+            pending_window_resize_documents: Vec::new(),
+            pending_visual_viewport_resize_documents: Vec::new(),
+            pending_visual_viewport_scroll_documents: Vec::new(),
             pending_scroll_targets: Vec::new(),
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
@@ -2341,6 +2396,14 @@ impl HostState {
         }
 
         let document_id = previous.document.identity();
+        self.iframe_window_scrolls.remove(&document_id);
+        self.observed_iframe_viewports.remove(&document_id);
+        self.pending_window_resize_documents
+            .retain(|id| *id != document_id);
+        self.pending_visual_viewport_resize_documents
+            .retain(|id| *id != document_id);
+        self.pending_visual_viewport_scroll_documents
+            .retain(|id| *id != document_id);
         tree_ids.extend(self.retired_document_node_ids(document_id));
         for id in &tree_ids {
             self.nodes.remove(id);
@@ -3057,6 +3120,111 @@ impl HostState {
             width: parse_dimension("width", DEFAULT_IFRAME_VIEWPORT_WIDTH),
             height: parse_dimension("height", DEFAULT_IFRAME_VIEWPORT_HEIGHT),
         }
+    }
+
+    fn queue_document_once(queue: &mut Vec<usize>, document_id: usize) {
+        if !queue.contains(&document_id) {
+            queue.push(document_id);
+        }
+    }
+
+    fn queue_window_resize(&mut self, document_id: usize) {
+        Self::queue_document_once(&mut self.pending_window_resize_documents, document_id);
+    }
+
+    fn queue_visual_viewport_resize(&mut self, document_id: usize) {
+        Self::queue_document_once(
+            &mut self.pending_visual_viewport_resize_documents,
+            document_id,
+        );
+    }
+
+    fn queue_visual_viewport_scroll(&mut self, document_id: usize) {
+        Self::queue_document_once(
+            &mut self.pending_visual_viewport_scroll_documents,
+            document_id,
+        );
+    }
+
+    fn visual_viewport_for_document(&mut self, document: &NodeHandle) -> VisualViewportState {
+        if document.identity() == self.document.identity() {
+            return self.visual_viewport;
+        }
+        let viewport = self.viewport_for_document(document);
+        VisualViewportState {
+            width: viewport.width,
+            height: viewport.height,
+            offset_left: 0.0,
+            offset_top: 0.0,
+            scale: 1.0,
+        }
+    }
+
+    /// Samples every child browsing context that owns a Realm. Resizing the
+    /// iframe element changes both its Window and visual viewport; first
+    /// observation establishes the baseline and must not synthesize an event.
+    fn collect_iframe_viewport_resizes(&mut self) {
+        let documents: Vec<_> = self
+            .iframe_documents
+            .values()
+            .filter(|entry| entry.realm.is_some())
+            .map(|entry| entry.document.clone())
+            .collect();
+        for document in documents {
+            let document_id = document.identity();
+            let viewport = self.viewport_for_document(&document);
+            let next = (viewport.width, viewport.height);
+            match self.observed_iframe_viewports.insert(document_id, next) {
+                Some(previous) if previous != next => {
+                    self.queue_window_resize(document_id);
+                    self.queue_visual_viewport_resize(document_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn window_scroll_for_document(&mut self, document_id: usize) -> (f32, f32) {
+        if document_id == self.document.identity() {
+            let current = self.window_scroll;
+            if current != (0.0, 0.0) {
+                self.set_window_scroll(current.0, current.1);
+            }
+            self.window_scroll
+        } else {
+            self.iframe_window_scrolls
+                .get(&document_id)
+                .copied()
+                .unwrap_or((0.0, 0.0))
+        }
+    }
+
+    fn set_window_scroll_for_document(&mut self, document_id: usize, x: f32, y: f32) -> bool {
+        if document_id == self.document.identity() {
+            return self.set_window_scroll(x, y);
+        }
+        if !self
+            .iframe_documents
+            .values()
+            .any(|entry| entry.document.identity() == document_id)
+        {
+            return false;
+        }
+        // Child documents are not part of the top-level paint tree yet, so
+        // their scrollable overflow is unavailable here. Retain the requested
+        // positive offset instead of clamping it against the parent's extent.
+        let next = (x.max(0.0), y.max(0.0));
+        let current = self
+            .iframe_window_scrolls
+            .get(&document_id)
+            .copied()
+            .unwrap_or((0.0, 0.0));
+        if current == next {
+            return false;
+        }
+        self.iframe_window_scrolls.insert(document_id, next);
+        self.queue_scroll_target(document_id);
+        true
     }
 
     /// Rebuilds the main document's cached layout tree when needed, first
@@ -4286,12 +4454,44 @@ impl JsRuntime {
         let height = sanitize_viewport_dimension(height);
         {
             let mut state = self.host_state.borrow_mut();
+            let previous_viewport = state.viewport;
+            let previous_visual = state.visual_viewport;
             state.viewport = Rect {
                 x: 0.0,
                 y: 0.0,
                 width,
                 height,
             };
+            if state.visual_viewport_follows_layout {
+                state.visual_viewport.width = width;
+                state.visual_viewport.height = height;
+            } else {
+                state.visual_viewport.width = state.visual_viewport.width.min(width);
+                state.visual_viewport.height = state.visual_viewport.height.min(height);
+                state.visual_viewport.offset_left = state
+                    .visual_viewport
+                    .offset_left
+                    .min((width - state.visual_viewport.width).max(0.0));
+                state.visual_viewport.offset_top = state
+                    .visual_viewport
+                    .offset_top
+                    .min((height - state.visual_viewport.height).max(0.0));
+            }
+            let document_id = state.document.identity();
+            if previous_viewport.width != width || previous_viewport.height != height {
+                state.queue_window_resize(document_id);
+            }
+            if previous_visual.width != state.visual_viewport.width
+                || previous_visual.height != state.visual_viewport.height
+                || previous_visual.scale != state.visual_viewport.scale
+            {
+                state.queue_visual_viewport_resize(document_id);
+            }
+            if previous_visual.offset_left != state.visual_viewport.offset_left
+                || previous_visual.offset_top != state.visual_viewport.offset_top
+            {
+                state.queue_visual_viewport_scroll(document_id);
+            }
             // Every document shares this viewport for `vw`/`vh` resolution, so
             // invalidate all cached resolvers (and the main layout tree).
             state.mark_all_document_styles_dirty();
@@ -4320,6 +4520,56 @@ impl JsRuntime {
         // The bootstrap always defines these globals before any embedder call,
         // so this eval cannot fail in practice; ignore the result defensively.
         let _ = self.eval(&sync);
+    }
+
+    /// Updates the top-level visual viewport in CSS pixels.
+    ///
+    /// Embedders call this when pinch zoom or an on-screen keyboard changes the
+    /// visible portion of the layout viewport. Width and height are clamped to
+    /// the layout viewport, offsets are clamped to its remaining area, and an
+    /// invalid scale is normalized to `1`. Observable `resize` and `scroll`
+    /// events are coalesced until the next rendering opportunity.
+    pub fn set_visual_viewport(
+        &mut self,
+        width: f32,
+        height: f32,
+        offset_left: f32,
+        offset_top: f32,
+        scale: f32,
+    ) {
+        let width = sanitize_viewport_dimension(width);
+        let height = sanitize_viewport_dimension(height);
+        let offset_left = sanitize_viewport_dimension(offset_left);
+        let offset_top = sanitize_viewport_dimension(offset_top);
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        let mut state = self.host_state.borrow_mut();
+        let previous = state.visual_viewport;
+        let width = width.min(state.viewport.width);
+        let height = height.min(state.viewport.height);
+        state.visual_viewport = VisualViewportState {
+            width,
+            height,
+            offset_left: offset_left.min((state.viewport.width - width).max(0.0)),
+            offset_top: offset_top.min((state.viewport.height - height).max(0.0)),
+            scale,
+        };
+        state.visual_viewport_follows_layout = false;
+        let document_id = state.document.identity();
+        if previous.width != state.visual_viewport.width
+            || previous.height != state.visual_viewport.height
+            || previous.scale != state.visual_viewport.scale
+        {
+            state.queue_visual_viewport_resize(document_id);
+        }
+        if previous.offset_left != state.visual_viewport.offset_left
+            || previous.offset_top != state.visual_viewport.offset_top
+        {
+            state.queue_visual_viewport_scroll(document_id);
+        }
     }
 
     /// Sets the base URL used to resolve relative resource references such as
@@ -5787,8 +6037,17 @@ impl JsRuntime {
         self.run_worker_background_tasks();
         self.run_worklet_background_tasks();
         self.run_until_idle()?;
+        self.host_state
+            .borrow_mut()
+            .collect_iframe_viewport_resizes();
+        if self.has_pending_viewport_resize_steps() {
+            self.flush_pending_viewport_resize_events()?;
+        }
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
+        }
+        if self.has_pending_visual_viewport_scroll_steps() {
+            self.flush_pending_visual_viewport_scroll_events()?;
         }
 
         let (timestamp, callback_ids) = self
@@ -5884,8 +6143,17 @@ impl JsRuntime {
         self.run_worker_background_tasks();
         self.run_worklet_background_tasks();
         self.run_until_idle_async().await?;
+        self.host_state
+            .borrow_mut()
+            .collect_iframe_viewport_resizes();
+        if self.has_pending_viewport_resize_steps() {
+            self.flush_pending_viewport_resize_events()?;
+        }
         if self.has_pending_scroll_steps() {
             self.flush_pending_scroll_events()?;
+        }
+        if self.has_pending_visual_viewport_scroll_steps() {
+            self.flush_pending_visual_viewport_scroll_events()?;
         }
         let (timestamp, callback_ids) = self
             .host_state
@@ -5971,6 +6239,53 @@ impl JsRuntime {
         Ok(callbacks_run)
     }
 
+    /// Dispatches coalesced Window and VisualViewport events for this rendering
+    /// opportunity. Window resize precedes VisualViewport resize for each
+    /// browsing context, as required by CSSOM View's event ordering.
+    fn flush_pending_viewport_resize_events(&mut self) -> JsResult<usize> {
+        let (window_resize, visual_resize) = {
+            let mut state = self.host_state.borrow_mut();
+            (
+                std::mem::take(&mut state.pending_window_resize_documents),
+                std::mem::take(&mut state.pending_visual_viewport_resize_documents),
+            )
+        };
+        let mut documents = Vec::new();
+        for document_id in window_resize.iter().chain(&visual_resize).copied() {
+            if !documents.contains(&document_id) {
+                documents.push(document_id);
+            }
+        }
+        for document_id in &documents {
+            self.eval_in_document_realm(
+                *document_id,
+                &format!(
+                    "__omoikane_dispatch_viewport_events({}, {}, {})",
+                    window_resize.contains(document_id),
+                    visual_resize.contains(document_id),
+                    false,
+                ),
+            )?;
+        }
+        Ok(documents.len())
+    }
+
+    fn flush_pending_visual_viewport_scroll_events(&mut self) -> JsResult<usize> {
+        let documents = std::mem::take(
+            &mut self
+                .host_state
+                .borrow_mut()
+                .pending_visual_viewport_scroll_documents,
+        );
+        for document_id in &documents {
+            self.eval_in_document_realm(
+                *document_id,
+                "__omoikane_dispatch_viewport_events(false, false, true)",
+            )?;
+        }
+        Ok(documents.len())
+    }
+
     /// Runs CSSOM View's pending scroll steps for this rendering opportunity.
     /// Taking the set before dispatch ensures a listener that scrolls again
     /// queues work for the next frame instead of recursively dispatching.
@@ -5987,10 +6302,28 @@ impl JsRuntime {
         };
         let count = targets.len();
         for node_id in targets {
-            self.eval(&format!(
-                "__omoikane_dispatch_scroll_event({node_id}, {})",
-                node_id == document_id
-            ))?;
+            let (owner_document_id, viewport) = {
+                let state = self.host_state.borrow();
+                let node = state.get_node(node_id);
+                let viewport = node
+                    .as_ref()
+                    .is_some_and(|node| node.node_type() == NodeType::Document);
+                let owner_document_id = node
+                    .as_ref()
+                    .and_then(|node| {
+                        if viewport {
+                            Some(node.identity())
+                        } else {
+                            document_root_for_node(node).map(|document| document.identity())
+                        }
+                    })
+                    .unwrap_or(document_id);
+                (owner_document_id, viewport)
+            };
+            self.eval_in_document_realm(
+                owner_document_id,
+                &format!("__omoikane_dispatch_scroll_event({node_id}, {viewport})"),
+            )?;
         }
         Ok(count)
     }
@@ -6008,6 +6341,24 @@ impl JsRuntime {
         !state.pending_scroll_targets.is_empty() || !state.scroll_offsets_before_layout.is_empty()
     }
 
+    fn has_pending_viewport_steps(&self) -> bool {
+        self.has_pending_viewport_resize_steps() || self.has_pending_visual_viewport_scroll_steps()
+    }
+
+    fn has_pending_viewport_resize_steps(&self) -> bool {
+        let state = self.host_state.borrow();
+        !state.pending_window_resize_documents.is_empty()
+            || !state.pending_visual_viewport_resize_documents.is_empty()
+    }
+
+    fn has_pending_visual_viewport_scroll_steps(&self) -> bool {
+        !self
+            .host_state
+            .borrow()
+            .pending_visual_viewport_scroll_documents
+            .is_empty()
+    }
+
     /// Drives a bounded number of rendering opportunities until no callback is pending.
     ///
     /// Callback errors are logged when script diagnostics are enabled and do
@@ -6016,7 +6367,10 @@ impl JsRuntime {
     pub fn run_animation_frames(&mut self, max_frames: usize, frame_interval_ms: u64) -> usize {
         let mut callbacks_run = 0;
         for _ in 0..max_frames {
-            if !self.has_pending_animation_frames() && !self.has_pending_scroll_steps() {
+            if !self.has_pending_animation_frames()
+                && !self.has_pending_scroll_steps()
+                && !self.has_pending_viewport_steps()
+            {
                 break;
             }
             match self.run_animation_frame(frame_interval_ms) {
@@ -8080,7 +8434,15 @@ fn ensure_iframe_realm(
         .filter(|entry| entry.document.identity() == document_id)
         .ok_or_else(|| JsNativeError::reference().with_message("iframe document was replaced"))?;
     entry.realm = Some(realm.clone());
+    let document = entry.document.clone();
     drop(state);
+    let viewport = host_state
+        .borrow_mut()
+        .visual_viewport_for_document(&document);
+    host_state
+        .borrow_mut()
+        .observed_iframe_viewports
+        .insert(document_id, (viewport.width, viewport.height));
     form_state::restore_pending_document(host_state, document_id, context)?;
     Ok(realm)
 }
@@ -8956,6 +9318,11 @@ fn register_host_bindings(
             js_string!("__omoikane_set_element_scroll"),
             3,
             NativeFunction::from_copy_closure(set_element_scroll_native),
+        ),
+        (
+            js_string!("__omoikane_visual_viewport_state"),
+            0,
+            NativeFunction::from_copy_closure(visual_viewport_state_native),
         ),
         (
             js_string!("__omoikane_window_scroll_offset"),
@@ -11072,16 +11439,54 @@ fn set_element_scroll_native(
     })
 }
 
-/// Returns the top-level Window scroll offset as a JSON object.
-fn window_scroll_offset_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+fn context_document_id(context: &Context, state: &HostState) -> usize {
+    context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|document| document.0)
+        .unwrap_or_else(|| state.document.identity())
+}
+
+/// Returns the visual viewport for the Window Realm making the call.
+fn visual_viewport_state_native(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let document_id = context_document_id(context, &state);
+        let document = state
+            .get_node(document_id)
+            .filter(|node| node.node_type() == NodeType::Document)
+            .unwrap_or_else(|| state.document.clone());
+        let viewport = state.visual_viewport_for_document(&document);
+        if document_id != state.document.identity() {
+            let next = (viewport.width, viewport.height);
+            if let Some(previous) = state.observed_iframe_viewports.insert(document_id, next)
+                && previous != next
+            {
+                state.queue_window_resize(document_id);
+                state.queue_visual_viewport_resize(document_id);
+            }
+        }
+        let scroll = state.window_scroll_for_document(document_id);
+        Ok(js_string!(viewport.json(scroll)).into())
+    })
+}
+
+/// Returns the calling Window's scroll offset as a JSON object.
+fn window_scroll_offset_native(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     with_host_state(|state| {
         let (x, y) = {
             let mut state = state.borrow_mut();
-            let current = state.window_scroll;
-            if current != (0.0, 0.0) {
-                state.set_window_scroll(current.0, current.1);
-            }
-            state.window_scroll
+            let document_id = context_document_id(context, &state);
+            state.window_scroll_for_document(document_id)
         };
         let json = format!("{{\"x\":{},\"y\":{}}}", json_number(x), json_number(y));
         Ok(js_string!(json).into())
@@ -11101,7 +11506,9 @@ fn set_window_scroll_native(
     let x = coordinate(args.first(), context)?;
     let y = coordinate(args.get(1), context)?;
     with_host_state(|state| {
-        state.borrow_mut().set_window_scroll(x, y);
+        let mut state = state.borrow_mut();
+        let document_id = context_document_id(context, &state);
+        state.set_window_scroll_for_document(document_id, x, y);
         Ok(JsValue::undefined())
     })
 }
