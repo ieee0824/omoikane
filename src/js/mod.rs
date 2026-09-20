@@ -323,6 +323,8 @@ impl<F: Future> Future for ActiveDocumentFuture<F> {
 const DOM_BOOTSTRAP: &str = concat!(
     include_str!("dom_bootstrap.js"),
     "\n",
+    include_str!("xpath.js"),
+    "\n",
     include_str!("font_loading.js")
 );
 

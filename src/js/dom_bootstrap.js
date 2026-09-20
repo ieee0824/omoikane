@@ -231,6 +231,7 @@
   const wrapperNodeIds = canonicalNodeIds;
   const canonicalCdataNodes = new WeakMap();
   const attributeNodeStates = new WeakMap();
+  const attributeNodeCache = new WeakMap();
   const canonicalCharacterDataOverrides = new WeakMap();
   const wrapperLocalNames = new WeakMap();
   const ownerDocumentIds = new WeakMap();
@@ -989,6 +990,7 @@
   // qualified names.
   const XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace";
   const XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/";
+  const XLINK_NAMESPACE = "http://www.w3.org/1999/xlink";
 
   function isValidXmlName(value) {
     return __omoikane_is_valid_xml_name(value);
@@ -2246,6 +2248,20 @@
       return __omoikane_get_attribute(this.__id, String(name));
     }
 
+    getAttributeNode(name) {
+      return this.attributes.getNamedItem(String(name));
+    }
+
+    getAttributeNodeNS(namespace, localName) {
+      const ns = namespace == null || namespace === "" ? null : String(namespace);
+      const local = String(localName);
+      for (let index = 0; index < this.attributes.length; index++) {
+        const attribute = this.attributes[index];
+        if (attribute.namespaceURI === ns && attribute.localName === local) return attribute;
+      }
+      return null;
+    }
+
     setAttribute(name, value) {
       const attr = String(name);
       const oldValue = __omoikane_get_attribute(this.__id, attr);
@@ -2543,6 +2559,19 @@
 
     set innerHTML(value) {
       const html = value == null ? "" : String(value);
+      if (this instanceof HTMLHtmlElement && this.ownerDocument &&
+          this.ownerDocument.contentType === "text/html" && /<(?:head|body)(?:\s|>)/i.test(html)) {
+        const headMatch = /<head(?:\s[^>]*)?>([\s\S]*?)<\/head\s*>/i.exec(html);
+        const bodyMatch = /<body(?:\s[^>]*)?>([\s\S]*?)<\/body\s*>/i.exec(html);
+        while (this.firstChild) this.removeChild(this.firstChild);
+        const head = this.ownerDocument.createElement("head");
+        const body = this.ownerDocument.createElement("body");
+        if (headMatch) head.innerHTML = headMatch[1];
+        if (bodyMatch) body.innerHTML = bodyMatch[1];
+        this.appendChild(head);
+        this.appendChild(body);
+        return;
+      }
       const wasConnected = this.isConnected;
       const removedNodes = this.childNodes.slice();
       for (const child of removedNodes.slice().reverse()) preRemove(this, child);
@@ -2636,7 +2665,30 @@
     }
 
     getElementsByTagName(tag) {
-      return this.querySelectorAll(String(tag));
+      const requested = String(tag);
+      try {
+        return this.querySelectorAll(requested);
+      } catch (_) {
+        // The native selector parser intentionally accepts CSS identifiers,
+        // which are narrower than XML names. Fall back only for names that
+        // cannot be represented by that parser (for example `dØdd`).
+      }
+      const htmlDocument = (this.nodeType === 9 ? this : this.ownerDocument).contentType === "text/html";
+      const result = [];
+      const visit = node => {
+        for (const child of node.childNodes) {
+          if (child.nodeType === 1) {
+            const htmlElement = htmlDocument && child instanceof HTMLElement;
+            const matches = requested === "*" || (htmlElement
+              ? asciiLowercase(child.localName) === asciiLowercase(requested)
+              : child.localName === requested);
+            if (matches) result.push(child);
+          }
+          visit(child);
+        }
+      };
+      visit(this);
+      return makeNodeList(result);
     }
 
     getElementsByClassName(cls) {
@@ -2842,6 +2894,10 @@
       this.textContent = value;
     }
 
+    get outerHTML() {
+      return new XMLSerializer().serializeToString(this);
+    }
+
     get isConnected() {
       // Nodes retained from a destroyed iframe generation remain rooted in
       // their (now inactive) Document, so DOM's shadow-including-root test
@@ -2854,36 +2910,66 @@
 
     get attributes() {
       const node = this;
-      const names = () => __omoikane_attribute_names(node.__id) || [];
-      const makeAttr = name => {
-        const attr = { name, localName: name, specified: true, expando: false };
-        Object.defineProperty(attr, "value", {
-          enumerable: true,
-          get() { return node.getAttribute(name); },
-          set(value) { node.setAttribute(name, value); },
-        });
+      const records = () => nativeAttributeRecords(node.__id) || [];
+      const makeAttr = record => {
+        let entries = safeWeakMapGet(attributeNodeCache, node);
+        if (!entries) {
+          entries = new Map();
+          safeWeakMapSet(attributeNodeCache, node, entries);
+        }
+        let namespace = record[1];
+        let localName = record[2];
+        if (namespace === null && record[0].startsWith("xlink:")) {
+          namespace = XLINK_NAMESPACE;
+          localName = record[0].slice(6);
+        } else if (namespace === null && (record[0] === "xmlns" || record[0].startsWith("xmlns:"))) {
+          namespace = XMLNS_NAMESPACE;
+          localName = record[0] === "xmlns" ? "xmlns" : record[0].slice(6);
+        }
+        const key = String(namespace) + "\u0000" + localName;
+        let attr = safeMapGet(entries, key);
+        if (!attr) {
+          const colon = record[0].indexOf(":");
+          attr = new Attr(ATTR_CONSTRUCTION, {
+            name: record[0],
+            namespace,
+            prefix: colon < 0 ? null : record[0].slice(0, colon),
+            localName,
+            value: record[3],
+            ownerDocument: node.ownerDocument,
+            ownerElement: node,
+          });
+          safeMapSet(entries, key, attr);
+        }
         return attr;
       };
       return new Proxy([], {
         get(_target, prop) {
-          const list = names();
+          const list = records();
           if (prop === "length") return list.length;
           if (prop === "item") return index => list[Number(index)] === undefined ? null : makeAttr(list[Number(index)]);
-          if (prop === "getNamedItem") return name => node.hasAttribute(name) ? makeAttr(String(name)) : null;
+          if (prop === "getNamedItem") return name => {
+            const entry = list.find(record => record[0] === String(name));
+            return entry ? makeAttr(entry) : null;
+          };
           if (prop === "setNamedItem") return attr => { node.setAttribute(attr.name, attr.value); return attr; };
           if (prop === "removeNamedItem") return name => {
             name = String(name);
             if (!node.hasAttribute(name)) {
               throw new DOMException("The requested attribute does not exist.", "NotFoundError");
             }
-            const old = makeAttr(name);
+            const entry = list.find(record => record[0] === name);
+            const old = makeAttr(entry);
             node.removeAttribute(name);
             return old;
           };
           if (typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop)) {
             return list[Number(prop)] === undefined ? undefined : makeAttr(list[Number(prop)]);
           }
-          if (typeof prop === "string" && node.hasAttribute(prop)) return makeAttr(prop);
+          if (typeof prop === "string") {
+            const entry = list.find(record => record[0] === prop);
+            if (entry) return makeAttr(entry);
+          }
           return Array.prototype[prop];
         }
       });
@@ -4483,10 +4569,22 @@
     get namespaceURI() { return safeWeakMapGet(attributeNodeStates, this).namespace; }
     get prefix() { return safeWeakMapGet(attributeNodeStates, this).prefix; }
     get ownerDocument() { return safeWeakMapGet(attributeNodeStates, this).ownerDocument; }
-    get ownerElement() { return null; }
+    get ownerElement() { return safeWeakMapGet(attributeNodeStates, this).ownerElement || null; }
     get specified() { return true; }
-    get value() { return safeWeakMapGet(attributeNodeStates, this).value; }
-    set value(value) { safeWeakMapGet(attributeNodeStates, this).value = String(value); }
+    get value() {
+      const state = safeWeakMapGet(attributeNodeStates, this);
+      if (!state.ownerElement) return state.value;
+      return state.namespace === null
+        ? (state.ownerElement.getAttribute(state.name) ?? state.value)
+        : (state.ownerElement.getAttributeNS(state.namespace, state.localName) ?? state.value);
+    }
+    set value(value) {
+      const state = safeWeakMapGet(attributeNodeStates, this);
+      state.value = String(value);
+      if (!state.ownerElement) return;
+      if (state.namespace === null) state.ownerElement.setAttribute(state.name, state.value);
+      else state.ownerElement.setAttributeNS(state.namespace, state.name, state.value);
+    }
     get nodeValue() { return this.value; }
     set nodeValue(value) { this.value = value == null ? "" : value; }
     get textContent() { return this.value; }
@@ -5645,7 +5743,7 @@
     }
 
     get body() {
-      return this.querySelector("body");
+      return this.getElementsByTagName("body")[0] || null;
     }
 
     // The element focused in this document. With nothing focused — on load,
@@ -5659,7 +5757,7 @@
     }
 
     get head() {
-      return this.querySelector("head");
+      return this.getElementsByTagName("head")[0] || null;
     }
 
     get documentElement() {
@@ -15970,6 +16068,11 @@
   globalThis.sessionStorage = storageForDocument("session", document, globalThis);
 
   const mutationObservers = [];
+  let xpathMutationHook = null;
+  globalThis.__omoikane_install_xpath_mutation_hook = hook => {
+    xpathMutationHook = hook;
+    delete globalThis.__omoikane_install_xpath_mutation_hook;
+  };
 
   class MutationRecord {
     constructor(type, target, init = {}) {
@@ -15986,6 +16089,7 @@
   }
 
   function queueMutation(target, type, init = {}) {
+    if (xpathMutationHook) xpathMutationHook(target);
     if (type === "childList") customFormChildrenChanged(target, init);
     for (const observer of mutationObservers) {
       let matched = false;

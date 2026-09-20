@@ -830,6 +830,13 @@
       "baseline_supported": true
     },
     {
+      "id": "dom.xpath",
+      "area": "dom",
+      "description": "XPath 1.0 evaluates namespaced paths and exposes typed DOM XPath results",
+      "probe": "(() => { try { const doc = new DOMParser().parseFromString('<r xmlns=\"urn:r\"><n v=\"2\"/><n v=\"3\"/></r>', 'application/xml'); const resolver = prefix => prefix === 'r' ? 'urn:r' : null; const expression = doc.createExpression('sum(/r:r/r:n/@v)', resolver); const result = expression.evaluate(doc, XPathResult.NUMBER_TYPE, null); return typeof XPathEvaluator === 'function' && result.numberValue === 5 && new XPathEvaluator().createNSResolver(doc.documentElement) === doc.documentElement; } catch (_) { return false; } })()",
+      "baseline_supported": false
+    },
+    {
       "id": "dom.xml-serializer",
       "area": "dom",
       "description": "XMLSerializer preserves namespaces, escaping, CDATA sections, and required-argument errors across an XML round trip",
