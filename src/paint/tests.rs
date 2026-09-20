@@ -10590,6 +10590,59 @@ fn fixed_descendant_stays_put_while_its_scroll_container_scrolls() {
 }
 
 #[test]
+fn transformed_fixed_client_rects_and_hit_testing_follow_scroll() {
+    use crate::js::JsRuntime;
+    let document = TreeBuilder::parse("<style>body {margin:0;height:400px} \
+        #sc {position:absolute;left:20px;top:20px;width:100px;height:80px;overflow:hidden;transform:translate(5px,0px)} \
+        #flow {width:200px;height:200px} #pin {position:fixed;left:10px;top:15px;width:20px;height:20px;background:blue} \
+        #nested {position:fixed;left:40px;top:45px;width:10px;height:10px;background:red} \
+        #viewport {position:fixed;left:3px;top:3px;width:5px;height:5px;background:lime} \
+        </style><div id=sc><div id=flow></div><div id=pin><div id=nested></div></div></div><div id=viewport></div>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime.set_viewport(160.0, 160.0);
+    assert!(runtime.eval(r#"(() => {
+        const at = id => {const r=document.getElementById(id).getBoundingClientRect();return [r.x,r.y].join(',')};
+        if ([at('pin'),at('nested'),at('viewport')].join('|') !== '35,35|65,65|3,3') return false;
+        scrollTo(0,5);const sc=document.getElementById('sc');sc.scrollLeft=10;sc.scrollTop=12;
+        return [at('pin'),at('nested'),at('viewport')].join('|') === '25,18|55,48|3,3'
+;
+    })()"#).unwrap().to_boolean());
+    for (x, y, id) in [
+        (26.0, 19.0, "pin"),
+        (56.0, 49.0, "nested"),
+        (4.0, 4.0, "viewport"),
+    ] {
+        let target = runtime.hit_test(x, y).expect("painted box must be hit");
+        assert_eq!(target.get_attribute("id").as_deref(), Some(id));
+    }
+}
+
+#[test]
+fn transformed_fixed_descendants_follow_the_containing_blocks_scroll_chain() {
+    let html = "<html><head><style>body { margin:0; height:400px } \
+        #sc { position:absolute; left:20px; top:20px; width:100px; height:80px; \
+              overflow:hidden; transform:translate(5px, 0px) } \
+        #flow { width:200px; height:200px } \
+        #pin { position:fixed; left:10px; top:15px; width:20px; height:20px; background:blue } \
+        #nested { position:fixed; left:40px; top:45px; width:10px; height:10px; background:red } \
+        #viewport { position:fixed; left:3px; top:3px; width:5px; height:5px; background:lime } \
+        </style></head><body><div id=sc><div id=flow></div><div id=pin><div id=nested></div></div></div><div id=viewport></div></body></html>";
+    let blue = Some(Color::rgb(0, 0, 255));
+    let red = Some(Color::rgb(255, 0, 0));
+    let green = Some(Color::rgb(0, 255, 0));
+    let before = render_with_scroll(html, 160.0, &[], (0.0, 0.0));
+    assert_eq!(before.pixel(36, 36), blue);
+    assert_eq!(before.pixel(36, 50), blue);
+    assert_eq!(before.pixel(66, 66), red);
+    assert_eq!(before.pixel(4, 4), green);
+    let after = render_with_scroll(html, 160.0, &[("#sc", 10.0, 12.0)], (0.0, 5.0));
+    assert_eq!(after.pixel(26, 19), blue);
+    assert_eq!(after.pixel(56, 49), red);
+    assert_eq!(after.pixel(4, 4), green);
+    assert_eq!(after.pixel(36, 50).unwrap().a, 0);
+}
+
+#[test]
 fn scroll_container_inside_a_fixed_subtree_still_scrolls_its_content() {
     let html = "<html><head><style>\
          body { margin: 0; height: 400px } \

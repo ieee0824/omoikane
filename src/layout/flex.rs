@@ -48,7 +48,7 @@ pub(super) fn layout_flex_container(
     x: f32,
     y: f32,
     width: f32,
-    viewport: Rect,
+    viewport: super::LayoutViewport,
     containing_height: f32,
     used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
@@ -395,7 +395,7 @@ pub(super) fn layout_flex_container(
                 FlexDirection::Row => (main_cursor, cross_cursor + cross_offset),
                 FlexDirection::Column => (x + cross_offset, main_cursor),
             };
-            translate_layout_box_to_outer(&mut child, outer_x, outer_y);
+            translate_layout_box_to_outer(&mut child, outer_x, outer_y, resolver);
             children.push(child);
 
             main_cursor += child_main_size;
@@ -445,6 +445,7 @@ pub(super) fn layout_flex_container(
         border,
         margin,
     };
+    let viewport = viewport.after_sizing(&style, dimensions, &mut children, resolver);
     for (child, style) in positioned_children {
         if let Some(positioned) = layout_positioned_child(
             &child,
@@ -864,7 +865,7 @@ fn layout_item(
     item: &FlexItemSpec,
     resolver: &mut StyleResolver,
     containing: Rect,
-    viewport: Rect,
+    viewport: super::LayoutViewport,
     used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
     if !item.text_nodes.is_empty() {

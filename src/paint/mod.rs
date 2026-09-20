@@ -1624,8 +1624,8 @@ fn paint_transformed_box(
 /// positioned containing block. A scroll container's own inline content and
 /// in-flow children move by its offset, so the border box stays put and its
 /// content slides underneath the clip its `overflow` already installs. A
-/// `position: fixed` box drops the accumulated offset, because it is anchored to
-/// the viewport; a scroll container inside it still scrolls its own content.
+/// `position: fixed` uses its fixed containing block's scroll chain, or zero
+/// for the viewport. A scroll container inside it still scrolls its own content.
 pub(crate) fn apply_scroll_offsets(
     layout: &mut LayoutBox,
     resolver: &mut StyleResolver,
@@ -1644,6 +1644,7 @@ pub(crate) fn apply_scroll_offsets(
         resolver,
         window_offset,
         window_offset,
+        (0.0, 0.0),
         viewport,
         None,
     );
@@ -1921,6 +1922,7 @@ fn translate_layout_for_scroll(
     resolver: &mut StyleResolver,
     offset: (f32, f32),
     positioned_offset: (f32, f32),
+    fixed_offset: (f32, f32),
     sticky_scrollport: Rect,
     containing_block: Option<Rect>,
 ) {
@@ -1938,7 +1940,7 @@ fn translate_layout_for_scroll(
         offset
     };
     let (mut dx, mut dy) = if is_fixed_for_paint(&style) {
-        (0.0, 0.0)
+        fixed_offset
     } else {
         offset
     };
@@ -1988,6 +1990,11 @@ fn translate_layout_for_scroll(
     } else {
         positioned_offset
     };
+    let fixed_offset = if crate::layout::establishes_fixed_containing_block(&style) {
+        (content_dx, content_dy)
+    } else {
+        fixed_offset
+    };
     let child_containing_block = Rect {
         x: layout.dimensions.content.x - scroll_x,
         y: layout.dimensions.content.y - scroll_y,
@@ -2005,6 +2012,7 @@ fn translate_layout_for_scroll(
             resolver,
             (content_dx, content_dy),
             positioned_offset,
+            fixed_offset,
             child_sticky_scrollport,
             Some(child_containing_block),
         );
@@ -2115,17 +2123,10 @@ fn is_absolute_for_paint(style: &ComputedStyle) -> bool {
 }
 
 fn establishes_containing_block_for_paint(style: &ComputedStyle) -> bool {
-    matches!(
-        style.get("position"),
-        Some(ComputedValue::Keyword(keyword))
-            if keyword.eq_ignore_ascii_case("relative")
-                || keyword.eq_ignore_ascii_case("absolute")
-                || keyword.eq_ignore_ascii_case("fixed")
-                || keyword.eq_ignore_ascii_case("sticky")
-    )
+    crate::layout::establishes_positioned_containing_block(style)
 }
 
-/// Whether a box is anchored to the viewport rather than to scrolled content.
+/// Whether a box uses the fixed-position containing block's scroll chain.
 fn is_fixed_for_paint(style: &ComputedStyle) -> bool {
     matches!(
         style.get("position"),

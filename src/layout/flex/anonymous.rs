@@ -22,12 +22,12 @@ fn lines(
         super::super::direction_is_rtl(style),
         None,
         0.0,
-        Rect {
+        super::super::LayoutViewport::new(Rect {
             x: 0.0,
             y: 0.0,
             width,
             height: 0.0,
-        },
+        }),
         None,
         false,
     )

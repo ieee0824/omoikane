@@ -1010,7 +1010,13 @@ pub fn layout_tree(
     containing_block: Rect,
 ) -> Option<LayoutBox> {
     let _margin_scope = margins::Scope::new();
-    let mut layout = layout_node(node, resolver, containing_block, containing_block, None)?;
+    let mut layout = layout_node(
+        node,
+        resolver,
+        containing_block,
+        LayoutViewport::new(containing_block),
+        None,
+    )?;
     if resolver.has_container_queries() {
         for _ in 0..4 {
             let mut contexts = HashMap::new();
@@ -1018,7 +1024,13 @@ pub fn layout_tree(
             if !resolver.set_container_contexts(contexts) {
                 break;
             }
-            layout = layout_node(node, resolver, containing_block, containing_block, None)?;
+            layout = layout_node(
+                node,
+                resolver,
+                containing_block,
+                LayoutViewport::new(containing_block),
+                None,
+            )?;
         }
     }
     populate_layout_transforms(
@@ -1167,11 +1179,59 @@ impl UsedHeight {
     }
 }
 
+// Keep the viewport separate from the nearest fixed-position containing block.
+// This context follows the layout traversal, including through static wrappers.
+#[derive(Clone, Copy)]
+struct LayoutViewport {
+    rect: Rect,
+    fixed: Option<Rect>,
+}
+
+impl LayoutViewport {
+    fn new(rect: Rect) -> Self {
+        Self { rect, fixed: None }
+    }
+
+    fn after_sizing(
+        self,
+        style: &ComputedStyle,
+        dimensions: BoxDimensions,
+        children: &mut [LayoutBox],
+        resolver: &mut StyleResolver,
+    ) -> Self {
+        let final_context = self.for_descendants(style, dimensions);
+        // Fixed boxes do not contribute to normal-flow sizing. An auto-sized
+        // containing block can therefore resolve their final percentage sizes
+        // and bottom/right insets once its in-flow children have been laid out.
+        // Definite, unchanged containing blocks require no additional walk.
+        if final_context.fixed != self.fixed {
+            relayout_fixed_descendants(children, resolver, final_context);
+        }
+        final_context
+    }
+
+    fn for_descendants(self, style: &ComputedStyle, dimensions: BoxDimensions) -> Self {
+        if establishes_fixed_containing_block(style) {
+            Self {
+                fixed: Some(Rect {
+                    x: dimensions.content.x - dimensions.padding.left,
+                    y: dimensions.content.y - dimensions.padding.top,
+                    width: dimensions.content.width + dimensions.padding.horizontal(),
+                    height: dimensions.content.height + dimensions.padding.vertical(),
+                }),
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+}
+
 fn layout_node(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
 ) -> Option<LayoutBox> {
     layout_node_with_subgrid(
@@ -1188,7 +1248,7 @@ fn layout_node_with_subgrid(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     subgrid: Option<grid::SubgridContext>,
 ) -> Option<LayoutBox> {
@@ -1220,7 +1280,7 @@ fn layout_document(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
 ) -> Option<LayoutBox> {
     let mut children = Vec::new();
@@ -1279,7 +1339,7 @@ fn layout_document(
     };
 
     let initial_containing_block = BoxDimensions {
-        content: viewport,
+        content: viewport.rect,
         ..BoxDimensions::default()
     };
     for (child, style, static_position) in positioned_children {
@@ -1306,8 +1366,8 @@ fn layout_document(
             resolver,
             &style,
             initial_containing_block,
-            viewport,
-            viewport,
+            viewport.rect,
+            LayoutViewport::new(viewport.rect),
             true,
         ) {
             layout.z_index = i32::MAX;
@@ -1366,7 +1426,7 @@ fn flush_pending_inline_nodes(
     x: f32,
     width: f32,
     containing_height: f32,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     lines: &mut Vec<LineBox>,
     children: &mut Vec<LayoutBox>,
@@ -1460,7 +1520,7 @@ fn layout_float_child(
     child_y: f32,
     x: f32,
     width: f32,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     float_regions: &mut Vec<FloatRegion>,
     children: &mut Vec<LayoutBox>,
@@ -1501,7 +1561,7 @@ fn layout_float_child(
                     FloatSide::Right => x + width - offsets.right - layout_child.total_width(),
                     FloatSide::None => x + offsets.left,
                 };
-                translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y);
+                translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y, resolver);
                 float_regions.push(FloatRegion {
                     outer: Rect {
                         x: outer_x,
@@ -1582,7 +1642,7 @@ fn layout_element(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     subgrid: Option<grid::SubgridContext>,
     used_height: Option<UsedHeight>,
@@ -1605,7 +1665,7 @@ fn layout_element_with_cell(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     subgrid: Option<grid::SubgridContext>,
     used_height: Option<UsedHeight>,
@@ -1667,6 +1727,33 @@ fn layout_element_with_cell(
     }
     let x = containing_block.x + margin.left + border.left + padding.left;
     let y = containing_block.y + margin.top + border.top + padding.top;
+    let viewport = if establishes_fixed_containing_block(&style) {
+        viewport.for_descendants(
+            &style,
+            BoxDimensions {
+                content: Rect {
+                    x,
+                    y,
+                    width,
+                    height: used_height.map(|height| height.value).unwrap_or_else(|| {
+                        resolve_content_height(
+                            &style,
+                            containing_block.height,
+                            padding,
+                            border,
+                            y,
+                            y,
+                        )
+                    }),
+                },
+                padding,
+                border,
+                margin,
+            },
+        )
+    } else {
+        viewport
+    };
 
     // Replaced elements that participate as block or flex/grid items still
     // paint their image payload. Previously only inline formatting collected
@@ -1765,7 +1852,7 @@ fn layout_element_with_cell(
                 children: Vec::new(),
                 marker: None,
             };
-            apply_relative_offset(&mut layout, &style);
+            apply_relative_offset(&mut layout, &style, resolver);
             return Some(layout);
         }
     }
@@ -1837,7 +1924,7 @@ fn layout_element_with_cell(
                 children: Vec::new(),
                 marker: None,
             };
-            apply_relative_offset(&mut layout, &style);
+            apply_relative_offset(&mut layout, &style, resolver);
             return Some(layout);
         }
     }
@@ -1952,6 +2039,7 @@ fn layout_element_with_cell(
             correction + margin_delta,
             resolver,
             establishes_positioned_containing_block(&style),
+            establishes_fixed_containing_block(&style),
         );
     }
     margins::shift_lines(&mut lines, margin_delta);
@@ -1983,6 +2071,8 @@ fn layout_element_with_cell(
         margin,
     };
 
+    let viewport = viewport.after_sizing(&style, dimensions, &mut children, resolver);
+
     // Resolve positioned children using the final dimensions (content_height is
     // now known, which is required for absolute positioning relative to this box).
     let next_pos_ancestor = if establishes_positioned_containing_block(&style) {
@@ -1996,7 +2086,7 @@ fn layout_element_with_cell(
             resolver,
             &cs,
             next_pos_ancestor.unwrap_or(BoxDimensions {
-                content: viewport,
+                content: viewport.rect,
                 ..BoxDimensions::default()
             }),
             static_position,
@@ -2021,7 +2111,7 @@ fn layout_element_with_cell(
         children,
         marker,
     };
-    apply_relative_offset(&mut layout, &style);
+    apply_relative_offset(&mut layout, &style, resolver);
     Some(layout)
 }
 
@@ -2048,7 +2138,7 @@ fn layout_block_children(
     y: f32,
     width: f32,
     containing_height: f32,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     used_height: Option<UsedHeight>,
 ) -> BlockChildrenResult {
@@ -2105,7 +2195,7 @@ fn layout_vertical_block_children(
     y: f32,
     width: f32,
     containing_height: f32,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     used_height: Option<UsedHeight>,
 ) -> BlockChildrenResult {
@@ -2208,7 +2298,7 @@ fn layout_vertical_block_children(
         } else {
             cursor_x
         };
-        translate_layout_box_to_outer(&mut layout_child, outer_x, y);
+        translate_layout_box_to_outer(&mut layout_child, outer_x, y, resolver);
         if vertical_rl {
             cursor_x = outer_x;
         } else {
@@ -2259,7 +2349,7 @@ fn flush_pending_vertical_inline_nodes(
     y: f32,
     width: f32,
     height: f32,
-    viewport: Rect,
+    viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     cursor_x: &mut f32,
     vertical_rl: bool,
@@ -2834,14 +2924,22 @@ fn is_out_of_flow_positioned(style: &ComputedStyle) -> bool {
     )
 }
 
-fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
+pub(crate) fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
     matches!(
         position_scheme(style),
         PositionScheme::Relative
             | PositionScheme::Sticky
             | PositionScheme::Absolute
             | PositionScheme::Fixed
-    ) || has_containment(style, "layout")
+    ) || establishes_fixed_containing_block(style)
+}
+
+/// Whether this box anchors fixed descendants instead of the viewport.
+/// Identity transforms still establish a containing block.
+pub(crate) fn establishes_fixed_containing_block(style: &ComputedStyle) -> bool {
+    ["transform", "perspective"].iter().any(|property| {
+        computed_keyword(style, property).is_some_and(|value| !value.eq_ignore_ascii_case("none"))
+    }) || has_containment(style, "layout")
         || has_containment(style, "paint")
 }
 
@@ -3220,7 +3318,11 @@ fn z_index(style: &ComputedStyle) -> i32 {
     }
 }
 
-fn apply_relative_offset(layout: &mut LayoutBox, style: &ComputedStyle) {
+fn apply_relative_offset(
+    layout: &mut LayoutBox,
+    style: &ComputedStyle,
+    resolver: &mut StyleResolver,
+) {
     if position_scheme(style) != PositionScheme::Relative {
         return;
     }
@@ -3231,7 +3333,7 @@ fn apply_relative_offset(layout: &mut LayoutBox, style: &ComputedStyle) {
         - explicit_length(style, "bottom").unwrap_or(0.0);
 
     if dx != 0.0 || dy != 0.0 {
-        translate_layout_box(layout, dx, dy);
+        translate_layout_box(layout, dx, dy, resolver);
     }
 }
 
@@ -3243,7 +3345,7 @@ fn layout_positioned_child(
     style: &ComputedStyle,
     parent_box: BoxDimensions,
     containing_block: Rect,
-    viewport: Rect,
+    viewport: LayoutViewport,
 ) -> Option<LayoutBox> {
     layout_positioned_child_mode(
         child,
@@ -3256,24 +3358,10 @@ fn layout_positioned_child(
     )
 }
 
-fn layout_positioned_child_mode(
-    child: &NodeHandle,
-    resolver: &mut StyleResolver,
+fn positioned_insets(
     style: &ComputedStyle,
-    parent_box: BoxDimensions,
-    containing_block: Rect,
-    viewport: Rect,
-    top_layer_root: bool,
-) -> Option<LayoutBox> {
-    let position = position_scheme(style);
-    let origin = match position {
-        PositionScheme::Fixed => viewport,
-        PositionScheme::Absolute => parent_box.content,
-        PositionScheme::Static => containing_block,
-        PositionScheme::Relative => containing_block,
-        PositionScheme::Sticky => containing_block,
-    };
-
+    origin: Rect,
+) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
     let rtl = direction_is_rtl(style);
     let (left_logical, right_logical, top_logical, bottom_logical) = if is_vertical_writing(style) {
         // In vertical writing the inline axis is physical y.  Direction
@@ -3313,6 +3401,28 @@ fn layout_positioned_child_mode(
     let right = resolved_length(style, "right", origin.width).or(right_logical);
     let top = resolved_length(style, "top", origin.height).or(top_logical);
     let bottom = resolved_length(style, "bottom", origin.height).or(bottom_logical);
+    (left, right, top, bottom)
+}
+
+fn layout_positioned_child_mode(
+    child: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    parent_box: BoxDimensions,
+    containing_block: Rect,
+    viewport: LayoutViewport,
+    top_layer_root: bool,
+) -> Option<LayoutBox> {
+    let position = position_scheme(style);
+    let origin = match position {
+        PositionScheme::Fixed => viewport.fixed.unwrap_or(viewport.rect),
+        PositionScheme::Absolute => parent_box.content,
+        PositionScheme::Static => containing_block,
+        PositionScheme::Relative => containing_block,
+        PositionScheme::Sticky => containing_block,
+    };
+
+    let (left, right, top, bottom) = positioned_insets(style, origin);
     let static_outer = containing_block;
     let specified_width = resolved_length(style, "width", origin.width);
     let child_width = if specified_width.is_none() {
@@ -3391,9 +3501,52 @@ fn layout_positioned_child_mode(
     } else {
         static_outer.y
     };
-    translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y);
+    translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y, resolver);
     layout_child.z_index = z_index(style);
     Some(layout_child)
+}
+
+fn relayout_fixed_descendants(
+    children: &mut [LayoutBox],
+    resolver: &mut StyleResolver,
+    viewport: LayoutViewport,
+) {
+    for child in children {
+        let style = resolver.computed_style(&child.node);
+        if position_scheme(&style) == PositionScheme::Fixed {
+            let dimensions = child.dimensions;
+            // Preserve the already-placed hypothetical position on auto axes.
+            let static_position = Rect {
+                x: dimensions.content.x
+                    - dimensions.padding.left
+                    - dimensions.border.left
+                    - dimensions.margin.left,
+                y: dimensions.content.y
+                    - dimensions.padding.top
+                    - dimensions.border.top
+                    - dimensions.margin.top,
+                width: child.total_width(),
+                height: child.total_height(),
+            };
+            if let Some(resolved) = layout_positioned_child(
+                &child.node,
+                resolver,
+                &style,
+                BoxDimensions {
+                    content: viewport.rect,
+                    ..BoxDimensions::default()
+                },
+                static_position,
+                viewport,
+            ) {
+                *child = resolved;
+            }
+            // The replacement has already laid out its own descendants with
+            // the final inherited context; do not lay them out a second time.
+        } else if !establishes_fixed_containing_block(&style) {
+            relayout_fixed_descendants(&mut child.children, resolver, viewport);
+        }
+    }
 }
 
 fn sort_children_by_z_index(children: &mut [LayoutBox]) {
@@ -3402,7 +3555,12 @@ fn sort_children_by_z_index(children: &mut [LayoutBox]) {
 
 // ── Box translation helpers ─────────────────────────────────────────────────
 
-fn translate_layout_box_to_outer(layout: &mut LayoutBox, outer_x: f32, outer_y: f32) {
+fn translate_layout_box_to_outer(
+    layout: &mut LayoutBox,
+    outer_x: f32,
+    outer_y: f32,
+    resolver: &mut StyleResolver,
+) {
     let current_outer_x = layout.dimensions.content.x
         - layout.dimensions.padding.left
         - layout.dimensions.border.left
@@ -3411,16 +3569,101 @@ fn translate_layout_box_to_outer(layout: &mut LayoutBox, outer_x: f32, outer_y: 
         - layout.dimensions.padding.top
         - layout.dimensions.border.top
         - layout.dimensions.margin.top;
-    translate_layout_box(layout, outer_x - current_outer_x, outer_y - current_outer_y);
+    translate_layout_box(
+        layout,
+        outer_x - current_outer_x,
+        outer_y - current_outer_y,
+        resolver,
+    );
 }
 
-fn translate_layout_box(layout: &mut LayoutBox, dx: f32, dy: f32) {
+fn translate_layout_box(layout: &mut LayoutBox, dx: f32, dy: f32, resolver: &mut StyleResolver) {
+    if (dx, dy) == (0.0, 0.0) {
+        return;
+    }
+    let style = resolver.computed_style(&layout.node);
     layout.dimensions.content.x += dx;
     layout.dimensions.content.y += dy;
-    translate_layout_contents(layout, dx, dy);
+    translate_contents_in_context(
+        layout,
+        dx,
+        dy,
+        resolver,
+        establishes_positioned_containing_block(&style),
+        establishes_fixed_containing_block(&style),
+    );
 }
 
-fn translate_layout_contents(layout: &mut LayoutBox, dx: f32, dy: f32) {
+// Moving content within a box (e.g. table-cell vertical-align) does not move
+// the box's containing block. Auto insets still follow their static position.
+fn translate_layout_contents(
+    layout: &mut LayoutBox,
+    dx: f32,
+    dy: f32,
+    resolver: &mut StyleResolver,
+) {
+    translate_contents_in_context(layout, dx, dy, resolver, false, false);
+}
+
+fn translate_inherited_box(
+    layout: &mut LayoutBox,
+    mut dx: f32,
+    mut dy: f32,
+    resolver: &mut StyleResolver,
+    absolute_moves: bool,
+    fixed_moves: bool,
+) {
+    if (dx, dy) == (0.0, 0.0) {
+        return;
+    }
+    let style = resolver.computed_style(&layout.node);
+    let outside = match position_scheme(&style) {
+        PositionScheme::Fixed => !fixed_moves,
+        PositionScheme::Absolute => !absolute_moves,
+        _ => false,
+    };
+    if outside {
+        let (left, right, top, bottom) = positioned_insets(
+            &style,
+            Rect {
+                width: 1.0,
+                height: 1.0,
+                ..Rect::default()
+            },
+        );
+        if left.is_some() || right.is_some() {
+            dx = 0.0;
+        }
+        if top.is_some() || bottom.is_some() {
+            dy = 0.0;
+        }
+    }
+    if (dx, dy) == (0.0, 0.0) {
+        return;
+    }
+    layout.dimensions.content.x += dx;
+    layout.dimensions.content.y += dy;
+    translate_contents_in_context(
+        layout,
+        dx,
+        dy,
+        resolver,
+        absolute_moves || establishes_positioned_containing_block(&style),
+        fixed_moves || establishes_fixed_containing_block(&style),
+    );
+}
+
+fn translate_contents_in_context(
+    layout: &mut LayoutBox,
+    dx: f32,
+    dy: f32,
+    resolver: &mut StyleResolver,
+    absolute_moves: bool,
+    fixed_moves: bool,
+) {
+    if (dx, dy) == (0.0, 0.0) {
+        return;
+    }
     for line in &mut layout.lines {
         line.rect.x += dx;
         line.rect.y += dy;
@@ -3431,7 +3674,7 @@ fn translate_layout_contents(layout: &mut LayoutBox, dx: f32, dy: f32) {
         }
     }
     for child in &mut layout.children {
-        translate_layout_box(child, dx, dy);
+        translate_inherited_box(child, dx, dy, resolver, absolute_moves, fixed_moves);
     }
     if let Some(marker) = &mut layout.marker {
         marker.x += dx;

@@ -75,7 +75,14 @@ pixels in `anonymized-form-validity/states.html`. Set
 `OMOIKANE_FORM_VALIDITY_IMAGES=<artifact-directory>` to save the initial,
 changed, and disabled frames for visual review; it never updates a baseline.
 The fixture uses normal flow to isolate validity styling. Nested fixed-position
-translation observed during review is separately tracked in #773.
+translation observed during review is covered by the `fixed_position` target
+(#773). Its `anonymized-nested-fixed/states.html` fixture preserves the original
+absolute form / fixed fieldset / nested fixed controls. It checks the three
+validity states at viewport 320x180; set `OMOIKANE_FIXED_IMAGES=<artifact-directory>`
+to save the frames without updating a baseline. Pure layout tests also cover
+transformed/perspective/contained ancestors, percentage and logical insets,
+auto-height containing blocks, and flex/grid/table/inline/float placement.
+Paint tests cover scroll offsets, CSSOM client rectangles, and native hit testing.
 
 The initial job is intentionally a small PR smoke gate. Expansion toward the full WPT suite and official `wpt run` integration is tracked in GitHub issue #150.
 

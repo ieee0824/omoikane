@@ -31,7 +31,7 @@ pub(super) fn layout_table_container(
     x: f32,
     y: f32,
     width: f32,
-    viewport: Rect,
+    viewport: super::LayoutViewport,
     shrink_to_fit: bool,
     used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
@@ -144,7 +144,7 @@ pub(super) fn layout_table_container(
         let dy = cursor_y - row_box.dimensions.content.y;
         if dy.abs() > 0.01 {
             let row_x = row_box.dimensions.content.x;
-            translate_layout_box_to_outer(&mut row_box, row_x, cursor_y);
+            translate_layout_box_to_outer(&mut row_box, row_x, cursor_y, resolver);
         }
         // Assign final content heights once, after the row tracks are settled.
         // Vertical alignment depends on the used contents, even when an explicit
@@ -166,7 +166,7 @@ pub(super) fn layout_table_container(
                 _ => 0.0,
             };
             if offset != 0.0 {
-                translate_layout_contents(child, 0.0, offset);
+                translate_layout_contents(child, 0.0, offset, resolver);
             }
         }
         cursor_y += final_height + row_spacing;
@@ -236,19 +236,21 @@ pub(super) fn layout_table_container(
         let max_h = super::border_box_adjust_height(&style, max_height, &padding, &border);
         content_height = content_height.min(max_h);
     }
+    let dimensions = BoxDimensions {
+        content: Rect {
+            x,
+            y,
+            width,
+            height: content_height,
+        },
+        padding,
+        border,
+        margin,
+    };
+    viewport.after_sizing(&style, dimensions, &mut children, resolver);
     Some(LayoutBox {
         node: node.clone(),
-        dimensions: BoxDimensions {
-            content: Rect {
-                x,
-                y,
-                width,
-                height: content_height,
-            },
-            padding,
-            border,
-            margin,
-        },
+        dimensions,
         visibility: visibility(&style),
         overflow: overflow(&style),
         z_index: z_index(&style),
@@ -453,7 +455,7 @@ fn layout_table_row_entry(
     column_widths: &[f32],
     column_offsets: &[f32],
     spacing: f32,
-    viewport: Rect,
+    viewport: super::LayoutViewport,
     collapsed: bool,
 ) -> Option<(LayoutBox, f32, Vec<RowspanCellInfo>)> {
     let mut measured = Vec::new();
@@ -522,7 +524,7 @@ fn layout_table_row_entry(
     for (column_start, mut cell) in measured {
         let outer_x = x + column_offsets[column_start];
         let outer_y = y;
-        translate_layout_box_to_outer(&mut cell, outer_x, outer_y);
+        translate_layout_box_to_outer(&mut cell, outer_x, outer_y, resolver);
         children.push(cell);
     }
 
