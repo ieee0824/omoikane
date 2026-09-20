@@ -613,6 +613,9 @@ impl Array {
         };
 
         // 5. If usingIterator is not undefined, then
+        // GetMethod may have returned a fresh function from a getter. Keep it
+        // alive while the destination constructor or ArrayCreate can collect.
+        let using_iterator = using_iterator.root();
 
         // a. If IsConstructor(C) is true, then
         //     i. Let A be ? Construct(C).
