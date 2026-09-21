@@ -1,0 +1,16 @@
+[
+  {
+    "name": "anonymized-body-ua-margin-default",
+    "path": "default.html",
+    "width": 500,
+    "height": 160,
+    "fixture_sha256": "7cbd6cf3d91f19d5431d8e66cd1a82cbc52144ab6a49d31c61aee0d5753d80a1"
+  },
+  {
+    "name": "anonymized-body-ua-margin-author-zero",
+    "path": "author-zero.html",
+    "width": 500,
+    "height": 160,
+    "fixture_sha256": "ac06344bf27f43e9360ba08ba8e05a4e92bd14cf7963916827c541de5be367eb"
+  }
+]

@@ -1079,6 +1079,7 @@ impl StyleResolver {
     ) -> ComputedStyle {
         let mut candidates = Vec::new();
         let mut source_order = 0usize;
+        collect_builtin_ua_candidates(node, pseudo, &mut source_order, &mut candidates);
         let viewport_width = self.viewport_width;
         let viewport_height = self.viewport_height;
         let color_scheme_dark = self.color_scheme_dark;
@@ -7618,6 +7619,52 @@ fn apply_ua_defaults(
                 .or_insert(ComputedValue::Keyword("table-footer-group".to_string()));
         }
         _ => {}
+    }
+}
+
+fn collect_builtin_ua_candidates(
+    node: &NodeHandle,
+    pseudo: Option<PseudoElement>,
+    source_order: &mut usize,
+    candidates: &mut Vec<Candidate>,
+) {
+    if pseudo.is_some()
+        || node.node_type() != NodeType::Element
+        || !node
+            .tag_name()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("body"))
+    {
+        return;
+    }
+
+    // Keep browser defaults in the cascade as UA-origin declarations. Besides
+    // letting author rules win normally, this makes `revert` expose the UA
+    // value while keeping the rule out of the document's author CSSOM.
+    let layer_context = LayerContextKey {
+        origin: Origin::UserAgent,
+        scope_root: None,
+    };
+    for side in ["top", "right", "bottom", "left"] {
+        candidates.push(Candidate {
+            name: format!("margin-{side}"),
+            prefixed_alias: false,
+            value: Value::Length(8.0, "px".to_string()),
+            important: false,
+            origin: Origin::UserAgent,
+            inline: false,
+            specificity: Specificity {
+                ids: 0,
+                classes: 0,
+                elements: 1,
+            },
+            scope_proximity: None,
+            source_order: *source_order,
+            encapsulation_order: 0,
+            layer_context,
+            layer_path: None,
+            layer_order: vec![usize::MAX],
+        });
+        *source_order += 1;
     }
 }
 

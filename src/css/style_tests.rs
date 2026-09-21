@@ -6053,6 +6053,74 @@ fn author_css_overrides_heading_ua_margin() {
 }
 
 #[test]
+fn ua_defaults_body_has_eight_pixel_margin() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&body);
+
+    for side in ["top", "right", "bottom", "left"] {
+        assert_eq!(
+            style.get(&format!("margin-{side}")),
+            Some(&ComputedValue::Px(8.0)),
+            "the HTML body UA margin must be 8px on the {side} side"
+        );
+    }
+}
+
+#[test]
+fn author_css_overrides_body_ua_margin() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 1px 2px 3px 4px; }").unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+
+    for (side, expected) in [("top", 1.0), ("right", 2.0), ("bottom", 3.0), ("left", 4.0)] {
+        assert_eq!(
+            style.get(&format!("margin-{side}")),
+            Some(&ComputedValue::Px(expected)),
+            "author CSS must override the body UA margin on the {side} side"
+        );
+    }
+}
+
+#[test]
+fn author_revert_restores_body_ua_margin() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; margin: revert; }").unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+
+    for side in ["top", "right", "bottom", "left"] {
+        assert_eq!(
+            style.get(&format!("margin-{side}")),
+            Some(&ComputedValue::Px(8.0)),
+            "revert must expose the body UA margin on the {side} side"
+        );
+    }
+}
+
+#[test]
 fn ua_defaults_blockquote_has_margin() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
