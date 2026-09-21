@@ -63,6 +63,10 @@ pub(crate) struct PropagatedTextDecoration {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ComputedStyle {
     properties: BTreeMap<String, ComputedValue>,
+    /// Resolved component values for properties whose used value cannot be
+    /// recovered from their CSSOM serialization alone (for example generated
+    /// content containing strings and counter functions).
+    component_values: BTreeMap<String, Value>,
     custom_properties: BTreeMap<String, Value>,
     /// Tree scope captured by the declaration that supplied `animation-name`.
     animation_name_scope_root: Option<usize>,
@@ -81,6 +85,10 @@ impl ComputedStyle {
     /// Returns all computed properties.
     pub fn properties(&self) -> &BTreeMap<String, ComputedValue> {
         &self.properties
+    }
+
+    pub(crate) fn component_value(&self, name: &str) -> Option<&Value> {
+        self.component_values.get(name)
     }
 
     /// Replaces a computed property with a layout-resolved CSS pixel value.
@@ -178,6 +186,7 @@ pub struct StyleResolver {
     rule_indexes: Vec<StylesheetRuleIndex>,
     cache: HashMap<usize, ComputedStyle>,
     pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
+    counter_values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
     selector_match_cache: SelectorMatchCache,
     /// Root element's computed font-size in px (for `rem` unit resolution).
     root_font_size: f32,
@@ -465,6 +474,24 @@ struct UnsupportedCssConfig {
 }
 
 impl StyleResolver {
+    pub(crate) fn replace_counter_values(
+        &mut self,
+        values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
+    ) {
+        self.counter_values = values;
+    }
+
+    pub(crate) fn counter_values(
+        &self,
+        node: &NodeHandle,
+        pseudo: PseudoElement,
+        name: &str,
+    ) -> Option<&[i32]> {
+        self.counter_values
+            .get(&(node.identity(), Some(pseudo)))?
+            .get(name)
+            .map(Vec::as_slice)
+    }
     /// Creates a new style resolver.
     pub fn new() -> Self {
         Self::default()
@@ -1177,6 +1204,7 @@ impl StyleResolver {
         remove_reverted_candidates(&mut candidates, Some(&custom_properties));
 
         let mut properties: BTreeMap<String, ComputedValue> = BTreeMap::new();
+        let mut component_values: BTreeMap<String, Value> = BTreeMap::new();
 
         // Effective root font-size for rem resolution: use the resolver's configured value,
         // falling back to the CSS default of 16px.
@@ -1255,6 +1283,7 @@ impl StyleResolver {
             // handling), never overriding an earlier valid declaration.
             match validate_declaration(&candidate.name, &resolved_value) {
                 DeclarationValidation::Valid(computed) => {
+                    record_component_value(&mut component_values, &candidate.name, &resolved_value);
                     if candidate.name.eq_ignore_ascii_case("animation-name") {
                         animation_name_scope_root = animation_reference_scope_root(
                             &resolved_value,
@@ -1314,6 +1343,7 @@ impl StyleResolver {
                 continue;
             }
             let computed = compute_value(&resolved_value, &candidate.name, ctx);
+            record_component_value(&mut component_values, &candidate.name, &resolved_value);
             if candidate.name.eq_ignore_ascii_case("animation-name") {
                 animation_name_scope_root = animation_reference_scope_root(
                     &resolved_value,
@@ -1338,6 +1368,7 @@ impl StyleResolver {
         apply_presentational_hints(node, &mut properties, pseudo);
         resolve_current_color_on_color_property(&mut properties, parent_style);
         resolve_inherit_and_unset(&mut properties, parent_style);
+        resolve_component_css_wide_keywords(&mut component_values, parent_style);
         apply_inheritance(&mut properties, parent_style);
         resolve_initial_css_wide_keywords(&mut properties);
         apply_initial_values(&mut properties);
@@ -1370,6 +1401,7 @@ impl StyleResolver {
         );
         ComputedStyle {
             properties,
+            component_values,
             custom_properties,
             animation_name_scope_root,
             font_family_scope_root,
@@ -1553,6 +1585,45 @@ impl StyleResolver {
                 .and_then(|host| host.containing_shadow_root())
                 .as_ref()
                 .map(NodeHandle::identity);
+        }
+    }
+}
+
+fn record_component_value(
+    values: &mut BTreeMap<String, Value>,
+    property_name: &str,
+    value: &Value,
+) {
+    if !matches!(
+        property_name.to_ascii_lowercase().as_str(),
+        "content" | "counter-reset" | "counter-increment"
+    ) {
+        return;
+    }
+    let name = property_name.to_ascii_lowercase();
+    values.insert(name, value.clone());
+}
+
+fn resolve_component_css_wide_keywords(
+    values: &mut BTreeMap<String, Value>,
+    parent_style: Option<&ComputedStyle>,
+) {
+    for name in ["content", "counter-reset", "counter-increment"] {
+        let Some(Value::Keyword(keyword)) = values.get(name) else {
+            continue;
+        };
+        if keyword.eq_ignore_ascii_case("inherit") {
+            if let Some(inherited) = parent_style.and_then(|style| style.component_value(name)) {
+                values.insert(name.to_string(), inherited.clone());
+            } else {
+                values.remove(name);
+            }
+        } else if is_css_wide_keyword(&keyword.to_ascii_lowercase()) {
+            // These three properties are not inherited. `initial` and `unset`
+            // therefore resolve to their initial keyword, which needs no
+            // structured representation. Revert candidates were already
+            // removed during cascade selection.
+            values.remove(name);
         }
     }
 }
@@ -2075,6 +2146,31 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // never accepts a top-level comma-separated list.
     if is_color_property(name) {
         return validate_color_value(value);
+    }
+    if name.eq_ignore_ascii_case("counter-reset") || name.eq_ignore_ascii_case("counter-increment")
+    {
+        if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return DeclarationValidation::Unvalidated;
+        }
+        let default = if name.eq_ignore_ascii_case("counter-reset") {
+            0
+        } else {
+            1
+        };
+        return match counter_pairs(value, default) {
+            Some(pairs) if pairs.is_empty() => {
+                DeclarationValidation::Valid(ComputedValue::Keyword("none".to_string()))
+            }
+            Some(pairs) => DeclarationValidation::Valid(ComputedValue::Keyword(
+                pairs
+                    .iter()
+                    .map(|(name, value)| format!("{name} {value}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )),
+            None => DeclarationValidation::Invalid,
+        };
     }
     if let Some(validation) = validate_multicol_declaration(name, value) {
         return validation;
@@ -5304,6 +5400,8 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "column-width",
     "columns",
     "content",
+    "counter-increment",
+    "counter-reset",
     "cursor",
     "display",
     "direction",
@@ -5622,6 +5720,13 @@ fn resolve_time_calc(value: &Value) -> Option<f32> {
 }
 
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if property_name.eq_ignore_ascii_case("content") {
+        return match value {
+            Value::String(value) => ComputedValue::String(value.clone()),
+            Value::Keyword(value) => ComputedValue::Keyword(value.clone()),
+            _ => ComputedValue::Keyword(render_content_value(value)),
+        };
+    }
     if matches!(
         property_name,
         "border-width"
@@ -5827,6 +5932,80 @@ fn compute_background_layer_value(
             .join(" ");
     }
     computed_value_css_text(&compute_value(value, property_name, ctx))
+}
+
+fn render_content_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        }
+        Value::Function { name, arguments } => format!(
+            "{name}({})",
+            arguments
+                .iter()
+                .map(render_content_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::List(values) => values
+            .iter()
+            .map(render_content_value)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(render_content_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => render_value(value),
+    }
+}
+
+pub(crate) fn counter_pairs(value: &Value, default: i32) -> Option<Vec<(String, i32)>> {
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none")) {
+        return Some(Vec::new());
+    }
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut result = Vec::new();
+    let mut index = 0usize;
+    while index < values.len() {
+        let Value::Keyword(name) = &values[index] else {
+            return None;
+        };
+        let lower = name.to_ascii_lowercase();
+        if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "none" | "default") {
+            return None;
+        }
+        index += 1;
+        let amount = match values.get(index).and_then(counter_integer) {
+            Some(amount) => {
+                index += 1;
+                amount
+            }
+            None => default,
+        };
+        result.push((name.clone(), amount));
+    }
+    Some(result)
+}
+
+fn counter_integer(value: &Value) -> Option<i32> {
+    let number = match value {
+        Value::Number(number) if number.is_finite() && number.fract() == 0.0 => *number,
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            let quantity = evaluate_calc(arguments, ResolutionContext::default())?;
+            if quantity.unit != CalcUnit::Unitless || !quantity.value.is_finite() {
+                return None;
+            }
+            quantity.value.round()
+        }
+        _ => return None,
+    };
+    (number >= i32::MIN as f32 && number <= i32::MAX as f32).then_some(number as i32)
 }
 
 fn clamp_sizing_computed_value(property_name: &str, value: ComputedValue) -> ComputedValue {
@@ -7368,6 +7547,11 @@ fn apply_ua_defaults(
 }
 
 fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
+    for property in ["counter-reset", "counter-increment"] {
+        properties
+            .entry(property.to_string())
+            .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    }
     properties
         .entry("background-clip".to_string())
         .or_insert_with(|| ComputedValue::Keyword("border-box".to_string()));

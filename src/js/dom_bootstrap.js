@@ -360,6 +360,7 @@
     "content-visibility", "contain-intrinsic-size", "contain-intrinsic-width",
     "contain-intrinsic-height", "contain-intrinsic-inline-size",
     "contain-intrinsic-block-size",
+    "counter-reset", "counter-increment",
   ]);
   const styleShorthandLonghands = Object.freeze({
     "columns": ["column-width", "column-count"],

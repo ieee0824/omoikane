@@ -255,6 +255,8 @@
     { "path": "css/css-multicol/parsing/column-rule-color-valid.html" },
     { "path": "css/css-multicol/parsing/column-rule-color-invalid.html" },
     { "path": "css/css-multicol/parsing/column-rule-color-computed.html" },
-    { "path": "css/css-multicol/parsing/column-rule-shorthand.html" }
+    { "path": "css/css-multicol/parsing/column-rule-shorthand.html" },
+    { "path": "css/css-lists/parsing/counter-reset-invalid.html" },
+    { "path": "css/css-lists/parsing/counter-increment-invalid.html" }
   ]
 }

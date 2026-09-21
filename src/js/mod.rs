@@ -13227,6 +13227,8 @@ fn normalize_style_value_native(
                 | "break-inside"
                 | "orphans"
                 | "widows"
+                | "counter-reset"
+                | "counter-increment"
         )
     {
         crate::css::supports_declaration(&property, &value).then(|| {
@@ -24806,6 +24808,41 @@ b</textarea></form>"#,
         );
 
         assert_eq!(result, "|hidden||5px|auto 1px|2em 3px");
+    }
+
+    #[test]
+    fn style_counter_properties_ignore_invalid_assignments() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div);
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"
+                const target = document.querySelector("div");
+                target.style.counterReset = "chapter 2";
+                target.style.counterReset = "none chapter";
+                target.style.setProperty("counter-increment", "chapter 3");
+                target.style.setProperty("counter-increment", "3 chapter");
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "JSON.stringify([target.style.counterReset, target.style.counterIncrement])",
+            ),
+            r#"["chapter 2","chapter 3"]"#,
+        );
+        assert!(
+            !runtime
+                .eval("CSS.supports('counter-reset', 'none chapter')")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]

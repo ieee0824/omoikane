@@ -141,6 +141,9 @@ git_wpt sparse-checkout add \
   "/common/rendering-utils.js" \
   "/css/css-sizing/contain-intrinsic-size/parsing/"
 git_wpt sparse-checkout add \
+  "/css/css-lists/parsing/counter-reset-invalid.html" \
+  "/css/css-lists/parsing/counter-increment-invalid.html"
+git_wpt sparse-checkout add \
   "/storage/storagemanager-estimate.https.any.js" \
   "/storage/storagemanager-persisted.https.any.js" \
   "/storage/storagemanager-persist.https.window.js" \

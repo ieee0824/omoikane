@@ -6,7 +6,7 @@ use std::sync::Arc;
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver};
+use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver, Value};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
     Font, FontFallbackCandidate, FontFamilyKey, FontStyle, FontVariantKey, FontWeight,
@@ -1294,7 +1294,13 @@ pub(super) fn generated_inline_segments(
     let wb = word_break(&style);
     let ow = overflow_wrap(&style);
 
-    match generated_content_value(content) {
+    match generated_content_value(
+        content,
+        style.component_value("content"),
+        resolver,
+        node,
+        pseudo,
+    ) {
         Some(GeneratedContent::Text(text)) => vec![InlineSegment {
             node: node.clone(),
             content: if text.is_empty() {
@@ -1341,7 +1347,18 @@ enum GeneratedContent {
     Image(Image),
 }
 
-fn generated_content_value(value: &ComputedValue) -> Option<GeneratedContent> {
+fn generated_content_value(
+    value: &ComputedValue,
+    components: Option<&Value>,
+    resolver: &StyleResolver,
+    node: &NodeHandle,
+    pseudo: PseudoElement,
+) -> Option<GeneratedContent> {
+    if let Some(components) = components
+        && let Some(text) = generated_counter_text(components, resolver, node, pseudo)
+    {
+        return Some(GeneratedContent::Text(text));
+    }
     match value {
         ComputedValue::String(text) => Some(GeneratedContent::Text(text.clone())),
         ComputedValue::Keyword(keyword)
@@ -1351,6 +1368,87 @@ fn generated_content_value(value: &ComputedValue) -> Option<GeneratedContent> {
         }
         ComputedValue::Keyword(keyword) => parse_generated_content_keyword(keyword),
         _ => None,
+    }
+}
+
+fn generated_counter_text(
+    value: &Value,
+    resolver: &StyleResolver,
+    node: &NodeHandle,
+    pseudo: PseudoElement,
+) -> Option<String> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut output = String::new();
+    for value in values {
+        match value {
+            Value::String(text) => output.push_str(text),
+            Value::Function { name, arguments } if name.eq_ignore_ascii_case("counter") => {
+                let counter_name = match arguments.first() {
+                    Some(Value::Keyword(name)) => name,
+                    _ => return None,
+                };
+                let style = match arguments.get(1) {
+                    Some(Value::Keyword(style)) => style.as_str(),
+                    None => "decimal",
+                    _ => return None,
+                };
+                let value = resolver
+                    .counter_values(node, pseudo, counter_name)
+                    .and_then(|values| values.last().copied())
+                    .unwrap_or(0);
+                output.push_str(&format_counter(value, style));
+            }
+            Value::Function { name, arguments } if name.eq_ignore_ascii_case("counters") => {
+                let counter_name = match arguments.first() {
+                    Some(Value::Keyword(name)) => name,
+                    _ => return None,
+                };
+                let separator = match arguments.get(1) {
+                    Some(Value::String(separator)) => separator,
+                    _ => return None,
+                };
+                let style = match arguments.get(2) {
+                    Some(Value::Keyword(style)) => style.as_str(),
+                    None => "decimal",
+                    _ => return None,
+                };
+                let formatted = resolver
+                    .counter_values(node, pseudo, counter_name)
+                    .unwrap_or(&[0])
+                    .iter()
+                    .map(|value| format_counter(*value, style))
+                    .collect::<Vec<_>>()
+                    .join(separator);
+                output.push_str(&formatted);
+            }
+            _ => return None,
+        }
+    }
+    Some(output)
+}
+
+fn format_counter(value: i32, style: &str) -> String {
+    match style.to_ascii_lowercase().as_str() {
+        "none" => String::new(),
+        "decimal-leading-zero" => {
+            if (-9..=9).contains(&value) {
+                if value < 0 {
+                    format!("-{:02}", value.unsigned_abs())
+                } else {
+                    format!("{value:02}")
+                }
+            } else {
+                value.to_string()
+            }
+        }
+        "lower-roman" if (1..=3999).contains(&value) => super::to_roman_lower(value as usize),
+        "upper-roman" if (1..=3999).contains(&value) => super::to_roman_upper(value as usize),
+        "lower-alpha" | "lower-latin" if value > 0 => super::to_alpha_lower(value as usize),
+        "upper-alpha" | "upper-latin" if value > 0 => super::to_alpha_upper(value as usize),
+        _ => value.to_string(),
     }
 }
 

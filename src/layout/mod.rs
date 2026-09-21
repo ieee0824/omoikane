@@ -20,6 +20,7 @@ use crate::http::{Client, Url};
 use crate::paint::Image;
 use rusqlite::{Connection, params};
 
+mod counters;
 mod flex;
 mod grid;
 mod inline;
@@ -1098,6 +1099,7 @@ pub(crate) fn layout_tree_with_content_visibility(
         report: report.clone(),
     });
     let _margin_scope = margins::Scope::new();
+    counters::prepare_counter_values(node, resolver);
     let Some(mut layout) = layout_node(
         node,
         resolver,
@@ -1117,6 +1119,7 @@ pub(crate) fn layout_tree_with_content_visibility(
                 break;
             }
             *report.borrow_mut() = ContentVisibilityLayoutReport::default();
+            counters::prepare_counter_values(node, resolver);
             let Some(next_layout) = layout_node(
                 node,
                 resolver,
@@ -4372,12 +4375,12 @@ fn list_item_ordinal(node: &NodeHandle) -> usize {
 }
 
 /// Converts a number to lowercase Roman numerals.
-fn to_roman_lower(n: usize) -> String {
+pub(super) fn to_roman_lower(n: usize) -> String {
     to_roman_inner(n).to_ascii_lowercase()
 }
 
 /// Converts a number to uppercase Roman numerals.
-fn to_roman_upper(n: usize) -> String {
+pub(super) fn to_roman_upper(n: usize) -> String {
     to_roman_inner(n)
 }
 
@@ -4411,12 +4414,12 @@ fn to_roman_inner(mut n: usize) -> String {
 }
 
 /// Converts a 1-based number to a lowercase Latin letter (a, b, ..., z, aa, ...).
-fn to_alpha_lower(n: usize) -> String {
+pub(super) fn to_alpha_lower(n: usize) -> String {
     to_alpha_inner(n).to_ascii_lowercase()
 }
 
 /// Converts a 1-based number to an uppercase Latin letter (A, B, ..., Z, AA, ...).
-fn to_alpha_upper(n: usize) -> String {
+pub(super) fn to_alpha_upper(n: usize) -> String {
     to_alpha_inner(n)
 }
 

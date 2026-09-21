@@ -893,6 +893,14 @@
       "baseline_supported": false
     },
     {
+      "id": "css.generated-counters",
+      "area": "cssom",
+      "description": "CSS counter properties validate, compute, and ignore invalid CSSOM assignments",
+      "setup": "globalThis.__counterTarget = document.createElement('span'); __counterTarget.style.counterReset = 'chapter 2'; __counterTarget.style.counterIncrement = 'chapter'; document.body.appendChild(__counterTarget)",
+      "probe": "(() => { __counterTarget.style.counterIncrement = 'chapter 3'; __counterTarget.style.counterIncrement = 'none chapter'; const style = getComputedStyle(__counterTarget); return CSS.supports('counter-reset', 'chapter 2') && CSS.supports('counter-increment', 'chapter') && !CSS.supports('counter-reset', 'none chapter') && style.counterReset === 'chapter 2' && style.counterIncrement === 'chapter 3' && __counterTarget.style.counterIncrement === 'chapter 3'; })()",
+      "baseline_supported": false
+    },
+    {
       "id": "network.text-streams",
       "area": "network",
       "description": "TextEncoderStream and TextDecoderStream preserve split Unicode characters through a pipeline",
