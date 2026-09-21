@@ -181,6 +181,322 @@ fn vertical_logical_padding_maps_inline_to_y_and_block_to_x() {
     assert_eq!(card_box.dimensions.padding.left, 11.0);
 }
 
+#[test]
+fn vertical_floats_use_inline_edges_and_clear_advances_past_the_float() {
+    for (writing_mode, float_side, expected_y, expected_clear_x) in [
+        ("vertical-rl", "left", 0.0, 130.0),
+        ("vertical-rl", "right", 120.0, 130.0),
+        ("vertical-lr", "left", 0.0, 40.0),
+        ("vertical-lr", "right", 120.0, 40.0),
+    ] {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let floated = NodeHandle::element("div");
+        let cleared = NodeHandle::element("section");
+        floated.set_attribute("class", "floated");
+        cleared.set_attribute("class", "cleared");
+        document.append_child(body.clone());
+        body.append_child(floated.clone());
+        body.append_child(cleared.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; writing-mode:{writing_mode}; width:200px; height:180px; }} \
+                 .floated {{ float:{float_side}; width:40px; height:60px; }} \
+                 .cleared {{ clear:{float_side}; width:30px; height:50px; }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 180.0,
+            },
+        )
+        .unwrap();
+        let float_box = find_layout_box(&layout, &floated).unwrap();
+        let cleared_box = find_layout_box(&layout, &cleared).unwrap();
+        assert_eq!(
+            float_box.dimensions.border_box().y,
+            expected_y,
+            "{writing_mode} float:{float_side}"
+        );
+        assert_eq!(
+            cleared_box.dimensions.border_box().x,
+            expected_clear_x,
+            "{writing_mode} clear:{float_side}"
+        );
+        assert_eq!(cleared_box.dimensions.border_box().y, 0.0);
+    }
+}
+
+#[test]
+fn vertical_floats_share_a_column_then_advance_when_inline_space_is_exhausted() {
+    for (writing_mode, first_column_x, next_column_x) in
+        [("vertical-rl", 160.0, 120.0), ("vertical-lr", 0.0, 40.0)]
+    {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let first = NodeHandle::element("div");
+        let second = NodeHandle::element("div");
+        let third = NodeHandle::element("div");
+        for child in [&first, &second, &third] {
+            child.set_attribute("class", "floated");
+            body.append_child(child.clone());
+        }
+        document.append_child(body.clone());
+
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; writing-mode:{writing_mode}; width:200px; height:180px; }} \
+                 .floated {{ float:left; width:40px; height:70px; }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 180.0,
+            },
+        )
+        .unwrap();
+        let first = find_layout_box(&layout, &first)
+            .unwrap()
+            .dimensions
+            .border_box();
+        let second = find_layout_box(&layout, &second)
+            .unwrap()
+            .dimensions
+            .border_box();
+        let third = find_layout_box(&layout, &third)
+            .unwrap()
+            .dimensions
+            .border_box();
+        assert_eq!((first.x, first.y), (first_column_x, 0.0));
+        assert_eq!((second.x, second.y), (first_column_x, 70.0));
+        assert_eq!((third.x, third.y), (next_column_x, 0.0));
+    }
+}
+
+#[test]
+fn vertical_right_float_uses_the_containing_content_box_inline_size() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let floated = NodeHandle::element("div");
+    floated.set_attribute("class", "floated");
+    document.append_child(body.clone());
+    body.append_child(floated.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0; writing-mode:vertical-lr; box-sizing:border-box; \
+                     width:200px; height:180px; padding:5px 0; \
+                     border-top:1px solid; border-bottom:1px solid; } \
+             .floated { float:right; width:40px; height:60px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 180.0,
+        },
+    )
+    .unwrap();
+    let float_box = find_layout_box(&layout, &floated).unwrap();
+
+    assert_eq!(layout.dimensions.content.height, 168.0);
+    assert_eq!(float_box.dimensions.border_box().y, 114.0);
+}
+
+#[test]
+fn vertical_explicit_height_block_keeps_its_inline_position_beside_a_float() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let floated = NodeHandle::element("div");
+    let block = NodeHandle::element("section");
+    floated.set_attribute("class", "floated");
+    block.set_attribute("class", "block");
+    document.append_child(body.clone());
+    body.append_child(floated);
+    body.append_child(block.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0; writing-mode:vertical-lr; width:200px; height:180px; } \
+             .floated { float:left; width:40px; height:60px; } \
+             .block { width:30px; height:100px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 180.0,
+        },
+    )
+    .unwrap();
+    let block_box = find_layout_box(&layout, &block)
+        .unwrap()
+        .dimensions
+        .border_box();
+
+    assert_eq!((block_box.x, block_box.y), (0.0, 0.0));
+    assert_eq!((block_box.width, block_box.height), (30.0, 100.0));
+}
+
+fn vertical_lines_around_shape(shape: &str, side: &str) -> Vec<LineBox> {
+    vertical_lines_around_shape_with(shape, side, "vertical-rl", "0")
+}
+
+fn vertical_lines_around_shape_with(
+    shape: &str,
+    side: &str,
+    writing_mode: &str,
+    shape_margin: &str,
+) -> Vec<LineBox> {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let floated = NodeHandle::element("div");
+    floated.set_attribute("class", "shape");
+    document.append_child(body.clone());
+    body.append_child(floated);
+    body.append_child(NodeHandle::text("A ".repeat(120)));
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(&format!(
+            "body {{ margin:0; writing-mode:{writing_mode}; width:200px; height:200px; \
+                     font-size:10px; line-height:20px; }} \
+             .shape {{ float:{side}; width:100px; height:100px; shape-outside:{shape}; \
+                       shape-margin:{shape_margin}; }}"
+        ))
+        .unwrap(),
+    );
+    layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        },
+    )
+    .unwrap()
+    .lines
+}
+
+#[test]
+fn vertical_float_constrains_columns_on_the_inline_axis() {
+    let left = vertical_lines_around_shape("none", "left");
+    let right = vertical_lines_around_shape("none", "right");
+    assert!(left.len() > 2 && right.len() > 2);
+    assert_eq!(left[0].rect.y, 100.0);
+    assert_eq!(right[0].rect.y, 0.0);
+    assert!(left[0].rect.height <= 100.0);
+    assert!(right[0].rect.height <= 100.0);
+}
+
+#[test]
+fn vertical_circle_shape_changes_the_exclusion_per_column() {
+    let circle = vertical_lines_around_shape("circle(50%)", "left");
+    let rectangle = vertical_lines_around_shape("none", "left");
+    assert!(circle[0].rect.y < rectangle[0].rect.y);
+    assert!(circle[0].rect.y > 50.0);
+    assert!(circle[1].rect.y > circle[0].rect.y);
+}
+
+#[test]
+fn vertical_inset_polygon_and_shape_margin_change_column_exclusions() {
+    let inset = vertical_lines_around_shape("inset(0 0 40% 0)", "left");
+    assert!((inset[0].rect.y - 60.0).abs() < 0.01);
+
+    let polygon = vertical_lines_around_shape("polygon(0 0,100% 50%,0 100%)", "left");
+    assert!(polygon[0].rect.y > 50.0 && polygon[0].rect.y < 70.0);
+    assert!(polygon[1].rect.y > polygon[0].rect.y);
+
+    let without_margin = vertical_lines_around_shape("circle(35%)", "left");
+    let with_margin = vertical_lines_around_shape_with("circle(35%)", "left", "vertical-rl", "15%");
+    assert!(with_margin[0].rect.y > without_margin[0].rect.y);
+    assert!(with_margin[0].rect.y <= 100.0);
+}
+
+#[test]
+fn vertical_lr_right_float_uses_shape_to_release_inline_space() {
+    let circle = vertical_lines_around_shape_with("circle(50%)", "right", "vertical-lr", "0");
+    let rectangle = vertical_lines_around_shape_with("none", "right", "vertical-lr", "0");
+    assert_eq!(circle[0].rect.y, 0.0);
+    assert!(circle[0].rect.height > rectangle[0].rect.height);
+}
+
+fn vertical_rtl_lines_around_float(side: &str) -> Vec<LineBox> {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let floated = NodeHandle::element("div");
+    floated.set_attribute("class", "floated");
+    document.append_child(body.clone());
+    body.append_child(floated);
+    body.append_child(NodeHandle::text("A A A"));
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(&format!(
+            "body {{ margin:0; writing-mode:vertical-lr; direction:rtl; \
+                     width:200px; height:180px; font-size:10px; line-height:20px; }} \
+             .floated {{ float:{side}; width:100px; height:60px; }}"
+        ))
+        .unwrap(),
+    );
+    layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 180.0,
+        },
+    )
+    .unwrap()
+    .lines
+}
+
+#[test]
+fn vertical_rtl_text_aligns_to_the_inline_end_of_float_constrained_columns() {
+    let left = vertical_rtl_lines_around_float("left");
+    let right = vertical_rtl_lines_around_float("right");
+
+    assert!((left[0].rect.y + left[0].rect.height - 180.0).abs() < 0.01);
+    assert!((right[0].rect.y + right[0].rect.height - 120.0).abs() < 0.01);
+}
+
 fn multicol_text_fixture(style: &str, line_count: usize) -> (LayoutBox, NodeHandle) {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

@@ -5,5 +5,12 @@
     "width": 640,
     "height": 360,
     "fixture_sha256": "4f2f713669dcd4629a0955c41e3e43d26030d12f0f9687eafa109ce6ce9d0230"
+  },
+  {
+    "name": "shape-outside-vertical",
+    "path": "vertical.html",
+    "width": 640,
+    "height": 360,
+    "fixture_sha256": "96e6b0976eba1c9dd3617407e1c2ea8c101fa8a2d96da1848b6994bba3e155f7"
   }
 ]
