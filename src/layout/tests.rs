@@ -4,6 +4,15 @@ use crate::css::{ComputedValue, Origin, parse_stylesheet};
 use crate::dom::ShadowRootMode;
 use crate::layout::*;
 
+fn resolver_without_body_ua_margin() -> StyleResolver {
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin: 0; }").unwrap(),
+    );
+    resolver
+}
+
 fn sample_tree() -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
@@ -510,7 +519,7 @@ fn multicol_text_fixture(style: &str, line_count: usize) -> (LayoutBox, NodeHand
         }
     }
     container.set_attribute("style", style);
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     let layout = layout_tree(
         &body,
         &mut resolver,
@@ -575,7 +584,7 @@ fn multicol_balance_grows_to_keep_indivisible_blocks_in_the_requested_columns() 
         })
         .collect::<Vec<_>>();
     container.set_attribute("style", "width:220px;columns:2;column-gap:20px");
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     let layout = layout_tree(
         &body,
         &mut resolver,
@@ -623,7 +632,7 @@ fn multicol_fragments_block_lines_and_honors_orphans_widows_and_avoid() {
             "style",
             &format!("margin:0;font-size:10px;line-height:20px;{paragraph_style}"),
         );
-        let mut resolver = StyleResolver::new();
+        let mut resolver = resolver_without_body_ua_margin();
         let layout = layout_tree(
             &body,
             &mut resolver,
@@ -688,7 +697,7 @@ fn multicol_honors_forced_column_breaks_and_full_width_spanners() {
     second.set_attribute("style", "height:20px;break-before:column");
     spanner.set_attribute("style", "height:10px;column-span:all");
     after.set_attribute("style", "height:20px");
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     let layout = layout_tree(
         &body,
         &mut resolver,
@@ -730,7 +739,7 @@ fn multicol_measures_spanner_height_at_the_full_container_width() {
         "column-span:all;margin:0;font-size:10px;line-height:20px",
     );
     after.set_attribute("style", "height:10px");
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     let layout = layout_tree(
         &body,
         &mut resolver,
@@ -1022,7 +1031,7 @@ fn adjacent_bidi_isolates_do_not_merge_into_one_reversed_run() {
 #[test]
 fn auto_width_fills_remaining_space() {
     let (_document, _html, body, _card) = sample_tree();
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -1051,7 +1060,7 @@ fn auto_width_fills_remaining_space() {
 #[test]
 fn auto_margins_center_fixed_width_blocks() {
     let (_document, _html, body, _card) = sample_tree();
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet("div { width: 80px; margin-left: auto; margin-right: auto; }").unwrap(),
@@ -1077,7 +1086,7 @@ fn auto_margins_center_fixed_width_blocks() {
 #[test]
 fn logical_auto_margins_center_fixed_width_blocks() {
     let (_document, _html, body, _card) = sample_tree();
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -1106,7 +1115,7 @@ fn logical_auto_margins_center_fixed_width_blocks() {
 #[test]
 fn logical_auto_margins_center_with_max_width() {
     let (_document, _html, body, _card) = sample_tree();
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -1240,7 +1249,7 @@ fn keeps_visibility_hidden_boxes_in_layout() {
 #[test]
 fn transform_translate_is_paint_time_and_does_not_move_layout_box() {
     let (_document, _html, body, _card) = sample_tree();
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet("div { width: 50px; height: 20px; transform: translate(10px, 6px); }")
@@ -1268,7 +1277,7 @@ fn transform_translate_is_paint_time_and_does_not_move_layout_box() {
 #[test]
 fn transform_translate_function_variants_and_matrix_accumulate_offsets() {
     let (_document, _html, body, _card) = sample_tree();
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -1690,7 +1699,7 @@ fn collapses_vertical_margins_between_siblings() {
     body.append_child(first.clone());
     body.append_child(second.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -3426,7 +3435,7 @@ fn lays_out_basic_table_rows_and_cells() {
     row.append_child(first);
     row.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -3601,7 +3610,7 @@ fn rowspan_keeps_following_row_cells_in_later_columns() {
     second_row.append_child(bottom_left_padding);
     second_row.append_child(bottom_right);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -3698,7 +3707,7 @@ fn lays_out_flex_row_with_center_justification() {
     container.append_child(first);
     container.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5327,7 +5336,7 @@ fn lays_out_flex_column() {
     container.append_child(first);
     container.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5371,7 +5380,7 @@ fn flex_column_uses_height_as_main_axis_for_justify_content_and_gap() {
     container.append_child(first);
     container.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5412,7 +5421,7 @@ fn flex_column_main_auto_margin_absorbs_space_before_justify_content() {
     container.append_child(first);
     container.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5455,7 +5464,7 @@ fn flex_row_splits_space_across_multiple_main_auto_margins() {
     container.append_child(first);
     container.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5498,7 +5507,7 @@ fn flex_main_auto_margin_is_zero_when_items_overflow() {
     container.append_child(first);
     container.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5576,7 +5585,7 @@ fn wraps_flex_items_across_multiple_lines() {
     document.append_child(body.clone());
     body.append_child(container);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5619,7 +5628,7 @@ fn aligns_flex_items_with_align_items_and_align_self() {
     container.append_child(first);
     container.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5658,7 +5667,7 @@ fn column_flex_aligns_items_against_the_container_width() {
     body.append_child(main.clone());
     main.append_child(span);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5694,7 +5703,7 @@ fn flex_row_aligns_items_within_min_height() {
     body.append_child(container.clone());
     container.append_child(child);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -5836,7 +5845,7 @@ fn logical_margin_inline_start_offsets_flex_item() {
     container.append_child(first);
     container.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -6076,7 +6085,7 @@ fn flex_row_honors_column_gap_between_items() {
     container.append_child(first);
     container.append_child(second);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -6119,7 +6128,7 @@ fn wrapped_flex_rows_honor_row_gap() {
     container.append_child(second);
     container.append_child(third);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -6163,7 +6172,7 @@ fn absolutely_positions_child_relative_to_parent_content_box() {
     container.append_child(flow);
     container.append_child(absolute);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
             Origin::Author,
             parse_stylesheet(
@@ -6415,7 +6424,7 @@ fn absolute_uses_nearest_positioned_ancestor_content_box() {
     outer.append_child(middle.clone());
     middle.append_child(absolute);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
             Origin::Author,
             parse_stylesheet(
@@ -6456,7 +6465,7 @@ fn absolute_percentage_insets_resolve_against_positioned_ancestor() {
     body.append_child(parent.clone());
     parent.append_child(child);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -6499,7 +6508,7 @@ fn absolute_auto_offsets_use_static_position() {
     container.append_child(first);
     container.append_child(absolute.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -6545,7 +6554,7 @@ fn relative_position_offsets_visual_box_without_changing_flow_height() {
     body.append_child(relative.clone());
     body.append_child(sibling.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -6964,7 +6973,7 @@ fn grid_justify_items_center_shrink_wraps_auto_width_item() {
     grid.append_child(item.clone());
     item.append_child(content);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -7153,7 +7162,7 @@ fn float_left_and_right_reduce_available_block_width() {
     body.append_child(right);
     body.append_child(block.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -7214,7 +7223,7 @@ fn layout_lines_around_shape_with_margin(
     body.append_child(floated);
     body.append_child(NodeHandle::text("word ".repeat(120)));
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(&format!(
@@ -7341,7 +7350,7 @@ fn clear_both_moves_block_below_floats() {
     body.append_child(float);
     body.append_child(cleared.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -7381,7 +7390,7 @@ fn clear_both_positions_border_edge_below_float_not_margin_edge() {
     body.append_child(float);
     body.append_child(cleared.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -7420,7 +7429,7 @@ fn float_preserves_negative_top_margin_offset() {
     body.append_child(before);
     body.append_child(floated.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -7459,7 +7468,7 @@ fn negative_margin_float_fits_beside_full_width_float() {
     body.append_child(main.clone());
     body.append_child(sidebar.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -7506,7 +7515,7 @@ fn empty_element_collapses_own_margins_through() {
     body.append_child(empty);
     body.append_child(after.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -7555,7 +7564,7 @@ fn empty_element_with_negative_child_margin_collapses_through() {
     empty.append_child(inner);
     body.append_child(after.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -7646,7 +7655,7 @@ fn whitespace_between_blocks_does_not_create_line_box() {
     body.append_child(whitespace);
     body.append_child(second.clone());
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
@@ -8868,7 +8877,7 @@ fn overflow_wrap_break_word_wraps_long_word() {
     body.append_child(p.clone());
     p.append_child(text);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet("p { overflow-wrap: break-word; line-height: 20px; }").unwrap(),
@@ -8905,7 +8914,7 @@ fn overflow_wrap_break_word_never_splits_extended_grapheme_clusters() {
     body.append_child(paragraph.clone());
     paragraph.append_child(text);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet("p { overflow-wrap: break-word; line-height: 20px; }").unwrap(),
@@ -8943,7 +8952,7 @@ fn word_wrap_alias_behaves_like_overflow_wrap() {
     body.append_child(p.clone());
     p.append_child(text);
 
-    let mut resolver = StyleResolver::new();
+    let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet("p { word-wrap: break-word; line-height: 20px; }").unwrap(),

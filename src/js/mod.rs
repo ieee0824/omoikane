@@ -28165,6 +28165,44 @@ b</textarea></form>"#,
     }
 
     #[test]
+    fn body_ua_margin_is_computed_but_not_exposed_as_an_author_stylesheet() {
+        for html in [
+            "<!doctype html><html><head></head><body></body></html>",
+            "<html><head></head><body></body></html>",
+        ] {
+            let doc = crate::html::TreeBuilder::parse(html).document();
+            let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+            assert_eq!(eval_num(&mut runtime, "document.styleSheets.length"), 0.0);
+            assert_eq!(
+                eval_str(
+                    &mut runtime,
+                    "JSON.stringify([getComputedStyle(document.body).marginTop, getComputedStyle(document.body).marginRight, getComputedStyle(document.body).marginBottom, getComputedStyle(document.body).marginLeft])"
+                ),
+                r#"["8px","8px","8px","8px"]"#
+            );
+        }
+
+        let doc = crate::html::TreeBuilder::parse(
+            "<!doctype html><style>body { margin: 0; }</style><body></body>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert_eq!(eval_num(&mut runtime, "document.styleSheets.length"), 1.0);
+        assert_eq!(
+            eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"),
+            1.0
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "JSON.stringify([getComputedStyle(document.body).marginTop, getComputedStyle(document.body).marginRight, getComputedStyle(document.body).marginBottom, getComputedStyle(document.body).marginLeft].map(parseFloat))"
+            ),
+            "[0,0,0,0]"
+        );
+    }
+
+    #[test]
     fn cssom_drops_invalid_style_rules_without_breaking_font_face_set() {
         let doc = crate::html::TreeBuilder::parse(
             "<html><head><style>[class=second two] { color: red; } p { color: blue; }</style></head><body><p class='second two'></p></body></html>",
@@ -43811,8 +43849,9 @@ b</textarea></form>"#,
     /// width and has zero laid-out height.
     #[test]
     fn iframe_computed_style_uses_configured_viewport() {
-        let mut runtime =
-            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
+        let mut runtime = runtime_from_html(
+            r#"<html><style>body { margin: 0; }</style><body><iframe id="f"></iframe></body></html>"#,
+        );
         runtime.set_viewport(800.0, 600.0);
         runtime
             .eval(
@@ -43874,8 +43913,9 @@ b</textarea></form>"#,
     /// invalidates it, so a re-query resolves `vw`/`vh` against the new size.
     #[test]
     fn set_viewport_invalidates_existing_iframe_resolver() {
-        let mut runtime =
-            runtime_from_html(r#"<html><body><iframe id="f"></iframe></body></html>"#);
+        let mut runtime = runtime_from_html(
+            r#"<html><style>body { margin: 0; }</style><body><iframe id="f"></iframe></body></html>"#,
+        );
         runtime.set_viewport(800.0, 600.0);
         runtime
             .eval(
