@@ -13193,6 +13193,8 @@ fn normalize_style_value_native(
                 | "text-decoration-thickness"
                 | "clip-path"
                 | "-webkit-clip-path"
+                | "shape-outside"
+                | "shape-margin"
                 | "mask"
                 | "-webkit-mask"
                 | "mask-image"
@@ -13234,7 +13236,7 @@ fn normalize_style_value_native(
         crate::css::supports_declaration(&property, &value).then(|| {
             if matches!(
                 property.as_str(),
-                "column-width" | "column-gap" | "column-rule-width"
+                "column-width" | "column-gap" | "column-rule-width" | "shape-margin"
             ) && value.trim() == "0"
             {
                 "0px".to_string()
@@ -25012,6 +25014,40 @@ b</textarea></form>"#,
                 "getComputedStyle(document.querySelector('div')).maskMode"
             ),
             "luminance, alpha"
+        );
+    }
+
+    #[test]
+    fn shape_outside_cssom_validates_and_computes_basic_shapes() {
+        let doc = NodeHandle::document();
+        let div = NodeHandle::element("div");
+        doc.append_child(div);
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const el = document.querySelector('div');
+                el.style.shapeOutside = 'padding-box circle(40% at 25% 50%)';
+                el.style.shapeMargin = '12.5%';
+                el.style.shapeOutside = 'url(shape.png)';
+                const zero = document.createElement('div');
+                zero.style.shapeMargin = '0';
+                const style = getComputedStyle(el);
+                return JSON.stringify([
+                  CSS.supports('shape-outside', 'inset(10%) border-box'),
+                  CSS.supports('shape-outside', 'polygon(0 0,100% 0,0 100%)'),
+                  CSS.supports('shape-outside', 'ellipse(20% 40%)'),
+                  CSS.supports('shape-margin', '-1px'),
+                  style.shapeOutside,
+                  style.shapeMargin,
+                  el.style.shapeOutside,
+                  zero.style.shapeMargin
+                ]);
+            })()"#,
+        );
+        assert_eq!(
+            actual,
+            r#"[true,true,false,false,"circle(40% at 25% 50%) padding-box","12.5%","padding-box circle(40% at 25% 50%)","0px"]"#
         );
     }
 

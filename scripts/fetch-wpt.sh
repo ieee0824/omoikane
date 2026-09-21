@@ -144,6 +144,12 @@ git_wpt sparse-checkout add \
   "/css/css-lists/parsing/counter-reset-invalid.html" \
   "/css/css-lists/parsing/counter-increment-invalid.html"
 git_wpt sparse-checkout add \
+  "/css/css-shapes/parsing/shape-margin-valid.html" \
+  "/css/css-shapes/parsing/shape-margin-invalid.html" \
+  "/css/css-shapes/parsing/shape-margin-computed.html" \
+  "/css/support/parsing-testcommon.js" \
+  "/css/support/computed-testcommon.js"
+git_wpt sparse-checkout add \
   "/storage/storagemanager-estimate.https.any.js" \
   "/storage/storagemanager-persisted.https.any.js" \
   "/storage/storagemanager-persist.https.window.js" \

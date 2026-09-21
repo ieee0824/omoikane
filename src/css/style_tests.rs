@@ -4415,6 +4415,77 @@ fn canonicalizes_clip_path_inset_and_webkit_alias() {
 }
 
 #[test]
+fn validates_and_computes_shape_outside_properties() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { shape-outside: margin-box circle(40% at 25% 50%); \
+                     shape-margin: 10%; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("shape-outside"),
+        Some(&ComputedValue::Keyword(
+            "circle(40% at 25% 50%)".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("shape-margin"),
+        Some(&ComputedValue::Percentage(10.0))
+    );
+    assert!(is_supported_property("shape-outside"));
+    assert!(is_supported_property("shape-margin"));
+
+    for valid in [
+        "none",
+        "content-box",
+        "circle(50%)",
+        "circle() margin-box",
+        "circle(at 25% 50%)",
+        "circle(50%) border-box",
+        "padding-box inset(10% round 4px)",
+        "polygon(0% 0%, 100% 0%, 0% 100%) margin-box",
+    ] {
+        assert!(
+            supports_declaration("shape-outside", valid),
+            "expected valid shape-outside: {valid}"
+        );
+    }
+    for invalid in [
+        "ellipse(40% 20%)",
+        "url(shape.png)",
+        "circle(nope)",
+        "circle(50%) border-box content-box",
+        "circle(50%) inset(0)",
+    ] {
+        assert!(
+            !supports_declaration("shape-outside", invalid),
+            "expected invalid shape-outside: {invalid}"
+        );
+    }
+    assert!(supports_declaration("shape-margin", "12px"));
+    assert!(supports_declaration("shape-margin", "5%"));
+    assert!(!supports_declaration("shape-margin", "-1px"));
+    assert!(!supports_declaration("shape-margin", "auto"));
+}
+
+#[test]
+fn shape_outside_initial_values_are_exposed() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("shape-outside"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+    assert_eq!(style.get("shape-margin"), Some(&ComputedValue::Px(0.0)));
+}
+
+#[test]
 fn canonicalizes_clip_shape_and_mask_layer_values() {
     let (_document, body, _title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

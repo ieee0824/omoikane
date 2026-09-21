@@ -907,6 +907,14 @@
       "setup": "globalThis.__textStreamProbe = { done: false, ok: false }; (async () => { const encoder = new TextEncoderStream(); const decoder = new TextDecoderStream('unicode-1-1-utf-8', {fatal: true}); const reader = encoder.readable.pipeThrough(decoder).getReader(); const reading = (async () => { let text = ''; for (;;) { const next = await reader.read(); if (next.done) return text; text += next.value; } })(); const writer = encoder.writable.getWriter(); await writer.write('水\\uD83D'); await writer.write('\\uDE00'); await writer.close(); __textStreamProbe = { done: true, ok: (await reading) === '水😀' && decoder.encoding === 'utf-8' && decoder.fatal === true }; })().catch(error => { __textStreamProbe = { done: true, ok: false, error: String(error) }; })",
       "probe": "__textStreamProbe.done && __textStreamProbe.ok",
       "baseline_supported": true
+    },
+    {
+      "id": "css.shape-outside-basic-shapes",
+      "area": "cssom",
+      "description": "shape-outside basic shapes and shape-margin validate and expose canonical computed values",
+      "setup": "globalThis.__shapeFloat = document.createElement('div'); __shapeFloat.style.cssText = 'float:left;width:100px;height:100px;shape-outside:padding-box circle(40% at 25% 50%);shape-margin:12.5%'; document.body.appendChild(__shapeFloat)",
+      "probe": "(() => { const style = getComputedStyle(__shapeFloat); return CSS.supports('shape-outside', 'inset(10%) border-box') && CSS.supports('shape-outside', 'polygon(0 0,100% 0,0 100%)') && !CSS.supports('shape-outside', 'ellipse(20% 40%)') && !CSS.supports('shape-margin', '-1px') && style.shapeOutside === 'circle(40% at 25% 50%) padding-box' && style.shapeMargin === '12.5%'; })()",
+      "baseline_supported": false
     }
   ]
 }

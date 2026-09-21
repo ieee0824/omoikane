@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS shape outside fixed fixture</title>
+<style>
+  @font-face {
+    font-family: ShapeFixture;
+    src: url("../acid2/LiberationSans-Regular.ttf") format("truetype");
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    width: 640px;
+    height: 360px;
+    overflow: hidden;
+    background: #fff;
+    color: #172033;
+    font: 14px/18px ShapeFixture, sans-serif;
+  }
+  .case {
+    width: 620px;
+    height: 110px;
+    margin: 8px 10px 0;
+    padding: 5px;
+    border: 1px solid #cbd5e1;
+    overflow: hidden;
+    background: #f8fafc;
+  }
+  .float {
+    width: 96px;
+    height: 96px;
+    background: #0e7490;
+  }
+  .circle {
+    float: left;
+    border-radius: 50%;
+    clip-path: circle(45% at 50% 50%);
+    shape-outside: circle(45% at 50% 50%);
+    shape-margin: 5px;
+  }
+  .polygon {
+    float: right;
+    background: #7c3aed;
+    clip-path: polygon(0 0, 100% 0, 100% 30%, 45% 30%, 45% 70%, 100% 70%, 100% 100%, 0 100%);
+    shape-outside: polygon(0 0, 100% 0, 100% 30%, 45% 30%, 45% 70%, 100% 70%, 100% 100%, 0 100%);
+  }
+  .inset {
+    float: left;
+    width: 116px;
+    padding: 8px;
+    border: 6px solid #be123c;
+    background: #fecdd3;
+    shape-outside: inset(10% 35% 10% 10% round 8px) border-box;
+    shape-margin: 2%;
+  }
+  .copy { color: #172033; }
+</style>
+<div class="case" id="circle-case" data-probe><div class="float circle" id="circle" data-probe></div><span class="copy" id="circle-copy" data-probe>Circle wrapping follows a changing edge on every line. The first and last lines reclaim space while the middle lines remain beside the widest part of the shape.</span></div>
+<div class="case" id="polygon-case" data-probe><div class="float polygon" id="polygon" data-probe></div><span class="copy" id="polygon-copy" data-probe>A right floated concave polygon exposes its center notch. Text on those middle lines extends farther right than text beside the upper and lower arms.</span></div>
+<div class="case" id="inset-case" data-probe><div class="float inset" id="inset" data-probe></div><span class="copy" id="inset-copy" data-probe>An inset shape uses the border box as its percentage reference. Shape margin expands the exclusion but remains clipped by the outer float margin box.</span></div>

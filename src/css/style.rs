@@ -2530,6 +2530,52 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             _ => DeclarationValidation::Invalid,
         };
     }
+    if name.eq_ignore_ascii_case("shape-outside") {
+        if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return DeclarationValidation::Unvalidated;
+        }
+        let rendered = render_value(value);
+        return if crate::paint::is_valid_shape_outside_value(&rendered) {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    if name.eq_ignore_ascii_case("shape-margin") {
+        return match value {
+            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => {
+                DeclarationValidation::Unvalidated
+            }
+            Value::Length(number, unit)
+                if *number >= 0.0
+                    && resolve_length_to_px(*number, unit, ResolutionContext::default())
+                        .is_some() =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            Value::Percentage(number) if *number >= 0.0 => DeclarationValidation::Unvalidated,
+            Value::Number(number) if *number == 0.0 => {
+                DeclarationValidation::Valid(ComputedValue::Px(0.0))
+            }
+            Value::Function { name: function, .. } if function.eq_ignore_ascii_case("calc") => {
+                match compute_value(value, name, ResolutionContext::default()) {
+                    ComputedValue::Px(number) | ComputedValue::Percentage(number)
+                        if number >= 0.0 =>
+                    {
+                        DeclarationValidation::Unvalidated
+                    }
+                    ComputedValue::CalcPxPercent(px, percentage)
+                        if px >= 0.0 && percentage >= 0.0 =>
+                    {
+                        DeclarationValidation::Unvalidated
+                    }
+                    _ => DeclarationValidation::Invalid,
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
     if name.eq_ignore_ascii_case("clip-path") {
         return match value {
             Value::Keyword(keyword)
@@ -3019,6 +3065,7 @@ fn is_non_negative_sizing_property(name: &str) -> bool {
             | "column-width"
             | "column-gap"
             | "column-rule-width"
+            | "shape-margin"
     )
 }
 
@@ -4405,6 +4452,7 @@ fn is_length_property(name: &str) -> bool {
             | "column-rule-width"
             | "outline-width"
             | "outline-offset"
+            | "shape-margin"
     )
 }
 
@@ -5380,6 +5428,8 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "clear",
     "clip-path",
     "-webkit-clip-path",
+    "shape-margin",
+    "shape-outside",
     "color",
     "contain",
     "contain-intrinsic-block-size",
@@ -5753,6 +5803,9 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         return resolve_time_seconds(value)
             .map(ComputedValue::Number)
             .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)));
+    }
+    if property_name.eq_ignore_ascii_case("shape-outside") {
+        return ComputedValue::Keyword(render_shape_outside_value(value, ctx));
     }
     if property_name.eq_ignore_ascii_case("clip-path") {
         return ComputedValue::Keyword(render_clip_path_value(value, ctx));
@@ -6479,6 +6532,28 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
             .join(", "),
         _ => render_value(value),
     }
+}
+
+fn render_shape_outside_value(value: &Value, ctx: ResolutionContext) -> String {
+    let Value::List(values) = value else {
+        return render_clip_path_value(value, ctx);
+    };
+    let shape = values
+        .iter()
+        .find(|value| matches!(value, Value::Function { .. }));
+    let reference_box = values.iter().find(|value| {
+        matches!(value, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "margin-box" | "border-box" | "padding-box" | "content-box"))
+    });
+    let reference_box = reference_box.filter(|value| {
+        shape.is_none()
+            || !matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("margin-box"))
+    });
+    [shape, reference_box]
+        .into_iter()
+        .flatten()
+        .map(|value| render_clip_path_value(value, ctx))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn render_grid_template_areas(value: &Value) -> String {
@@ -7552,6 +7627,12 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
             .entry(property.to_string())
             .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
     }
+    properties
+        .entry("shape-outside".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("shape-margin".to_string())
+        .or_insert(ComputedValue::Px(0.0));
     properties
         .entry("background-clip".to_string())
         .or_insert_with(|| ComputedValue::Keyword("border-box".to_string()));
