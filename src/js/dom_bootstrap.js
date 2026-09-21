@@ -1725,6 +1725,11 @@
   }
 
   function registerTraversal(doc, kind, value) {
+    // A browsing context with no NodeIterator or Range cannot need live
+    // boundary adjustment during removal. Keep this flag monotonic so child
+    // Realms and later removals conservatively retain the existing path once
+    // any traversal object has existed.
+    browsingInput.removalMayAffectTraversal = true;
     const entries = traversalState(doc)[kind];
     // WeakRef targets stay alive through the current ECMAScript job. Sweeping
     // every insertion would therefore be quadratic in createRange-heavy code;
@@ -1808,9 +1813,12 @@
   function preRemove(parent, removed) {
     if (internalParentNode(removed) === parent) {
       const id = internalNodeId(removed);
-      if (id !== undefined) nativePointerLockRemoving(id);
+      if (browsingInput.removalMayAffectPointerLock && id !== undefined) {
+        nativePointerLockRemoving(id);
+      }
       customFormSubtreeRemoving(removed);
     }
+    if (!browsingInput.removalMayAffectTraversal) return;
     const doc = nodeDocument(parent);
     const state = traversalByDocument.get(traversalDocumentKey(doc));
     if (!state) return;
@@ -1824,8 +1832,12 @@
 
   function notifyImplicitRemoval(node) {
     if (!node) return;
-    fullscreenSubtreeWillBeRemoved(node);
-    popoverSubtreeWillBeRemoved(node);
+    if (browsingInput.removalMayAffectFullscreen) {
+      fullscreenSubtreeWillBeRemoved(node);
+    }
+    if (browsingInput.removalMayAffectTopLayer) {
+      popoverSubtreeWillBeRemoved(node);
+    }
     const parent = internalParentNode(node);
     if (!parent) return;
     const previousSibling = internalPreviousSibling(node);
@@ -3805,6 +3817,10 @@
         return Promise.reject(new TypeError("PointerLockOptions must be a dictionary"));
       }
       const doc = internalOwnerDocument(element);
+      // Removal only needs to consult the native pointer-lock state after a
+      // request has been made in this browsing context. A failed request may
+      // leave this enabled, which is conservative and keeps later semantics.
+      browsingInput.removalMayAffectPointerLock = true;
       return new Promise((resolve, reject) => {
         let settled = false;
         nativeRequestPointerLock(id, internalNodeId(doc), Boolean(options?.unadjustedMovement), error => {
@@ -4164,6 +4180,7 @@
       if (popoverType(element) === "auto") closeUnrelatedAutoPopovers(element, source);
       data.source = source;
       data.previouslyFocused = focusedElementOf(element.ownerDocument);
+      browsingInput.removalMayAffectTopLayer = true;
       data.topLayerOrder = nativeSetPopoverOpen(element.__id, true);
       if (popoverType(element) === "auto") autoPopoverStack(element.ownerDocument).push(element);
       focusPopover(element);
@@ -4388,6 +4405,7 @@
       internalIsConnected(element) && !invalidElement &&
       nativeFullscreenEnabled(documentId) && fullscreenTransientActivation;
     if (initiallyAllowed) {
+      browsingInput.removalMayAffectFullscreen = true;
       fullscreenTransientActivation = false;
       nativePointerLockActivation(false, 0);
     }
@@ -4492,6 +4510,7 @@
       this.__dialogPreviouslyFocused = focusedElementOf(this.ownerDocument);
       this.__dialogModal = true;
       this.open = true;
+      browsingInput.removalMayAffectTopLayer = true;
       this.__dialogTopLayerOrder = nativeSetModalDialog(this.__id, true);
       modalDialogStack(this.ownerDocument).push(this);
       focusDialog(this);
@@ -7240,7 +7259,7 @@
     iframe.__contentWindowRefresh = null;
   }
   function retireIframeWindowProxies(root) {
-    if (!root) return;
+    if (!root || !browsingInput.removalMayAffectIframeWindowProxy) return;
     if (root.nodeType === 1 &&
         asciiLowercase(internalNodeLocalName(root) || "") === "iframe") {
       retireIframeWindowProxy(root);
@@ -7329,6 +7348,10 @@
       // reconnect creates a new browsing context and therefore a new proxy.
       if (this.__id === null || !this.isConnected) return null;
       if (!this.__contentWindowFacade) {
+        // Before the first WindowProxy exists, subtree removal cannot have an
+        // iframe proxy to retire. Keep the shared flag enabled thereafter so
+        // all Realms continue to use the established recursive cleanup path.
+        browsingInput.removalMayAffectIframeWindowProxy = true;
         const iframe = this;
         let retired = false;
         let expectedContext = null;
