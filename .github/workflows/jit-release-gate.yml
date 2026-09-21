@@ -24,8 +24,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Verify incomplete or mismatched evidence cannot pass
-        run: python3 -m unittest discover -s scripts/tests -p test_jit_gate5.py
+      - name: Verify rerun selection and incomplete or mismatched evidence cannot pass
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_select_gate_artifacts.py
+          python3 -m unittest discover -s scripts/tests -p test_jit_gate5.py
       - name: Resolve one dependency set for all six jobs
         run: python3 scripts/jit-gate5.py prepare .artifacts/jit-gate5/inputs
       - uses: actions/upload-artifact@v4
@@ -101,7 +103,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: jit-gate5-${{ matrix.target }}-${{ matrix.kind }}
+          name: jit-gate5-${{ matrix.target }}-${{ matrix.kind }}-attempt-${{ github.run_attempt }}
           path: |
             .artifacts/jit-gate5/
             !.artifacts/jit-gate5/inputs/**
@@ -119,16 +121,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: jit-gate5-*
-          path: .artifacts/jit-gate5/
-          merge-multiple: true
-      - name: Restore the shared identity directory
-        run: |
-          mkdir -p .artifacts/jit-gate5/inputs
-          if test -f .artifacts/jit-gate5/identity.json; then
-            mv .artifacts/jit-gate5/identity.json .artifacts/jit-gate5/inputs/
-            mv .artifacts/jit-gate5/Cargo.lock .artifacts/jit-gate5/inputs/
-          fi
+          name: jit-gate5-inputs
+          path: .artifacts/jit-gate5/inputs/
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jit-gate5-*-attempt-*
+          path: .artifacts/gate5-attempts/
+      - name: Select the latest attempt for each target and kind
+        run: >-
+          python3 scripts/select-gate-artifacts.py
+          .artifacts/gate5-attempts
+          .artifacts/jit-gate5
+          --prefix jit-gate5-
       - name: Require all targets, compatibility reports and actual native execution
         if: always()
         env:
