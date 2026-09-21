@@ -594,6 +594,72 @@ fn skips_hidden_boxes() {
 }
 
 #[test]
+fn hit_test_skips_hidden_inline_fragments_and_finds_visible_descendants() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let hidden = NodeHandle::element("span");
+    let hidden_text = NodeHandle::text("A");
+    let visible = NodeHandle::element("b");
+    let visible_text = NodeHandle::text("B");
+    document.append_child(body.clone());
+    body.append_child(hidden.clone());
+    hidden.append_child(hidden_text.clone());
+    hidden.append_child(visible.clone());
+    visible.append_child(visible_text.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body{margin:0;font:20px/20px sans-serif}span{visibility:hidden}\
+             b{visibility:visible}",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    fn fragment_for(layout: &LayoutBox, node: &NodeHandle) -> Option<Rect> {
+        layout
+            .lines
+            .iter()
+            .flat_map(|line| &line.fragments)
+            .find(|fragment| &fragment.node == node)
+            .map(|fragment| fragment.rect)
+            .or_else(|| {
+                layout
+                    .children
+                    .iter()
+                    .find_map(|child| fragment_for(child, node))
+            })
+    }
+    let hidden_rect = fragment_for(&layout, &hidden_text).expect("hidden text fragment");
+    let visible_rect = fragment_for(&layout, &visible_text).expect("visible text fragment");
+    let hidden_target = hit_test_layout(
+        &layout,
+        &mut resolver,
+        viewport,
+        hidden_rect.x + 1.0,
+        hidden_rect.y + 1.0,
+    );
+    assert_ne!(hidden_target.as_ref(), Some(&hidden));
+    assert_eq!(
+        hit_test_layout(
+            &layout,
+            &mut resolver,
+            viewport,
+            visible_rect.x + 1.0,
+            visible_rect.y + 1.0,
+        ),
+        Some(visible)
+    );
+}
+
+#[test]
 fn paints_inline_text_fragments() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

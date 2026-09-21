@@ -203,6 +203,9 @@ pub(crate) fn paint_text_with_registry(
         // line; descendants cannot substitute their own font or underline data.
         let mut decorations = HashMap::new();
         for fragment in fragments {
+            if fragment.style.visibility == crate::layout::Visibility::Hidden {
+                continue;
+            }
             let fragment_rect = offset.rect(fragment.rect);
             match &fragment.content {
                 InlineFragmentContent::Text(text) => {
@@ -383,6 +386,8 @@ pub(crate) fn paint_text_with_registry(
                         );
                     }
                 }
+                InlineFragmentContent::InlineSpacing(_)
+                | InlineFragmentContent::InlineEdge(_, _) => {}
                 InlineFragmentContent::Image(image, style) => {
                     paint_inline_image_fragment(
                         canvas,

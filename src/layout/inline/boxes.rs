@@ -76,7 +76,7 @@ pub(super) fn finish(
     if !lines.iter().any(|line| {
         line.fragments
             .iter()
-            .any(|fragment| matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
+            .any(|fragment| matches!(fragment.content, InlineFragmentContent::InlineEdge(_, _)))
     }) {
         return;
     }
@@ -105,34 +105,47 @@ pub(super) fn finish(
         let empty = line.rect.height == 0.0;
         let mut baseline = (strut_height - strut_ascent - strut_descent) / 2.0 + strut_ascent;
         for fragment in &line.fragments {
-            if matches!(fragment.content, InlineFragmentContent::InlineBox(_)) {
+            if matches!(
+                fragment.content,
+                InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+            ) {
                 continue;
             }
             if let InlineFragmentContent::Text(_) = &fragment.content {
                 let (a, d) = metrics_for(fragment.metrics);
-                baseline = baseline.max((fragment.rect.height - a - d) / 2.0 + a);
+                let above = (fragment.rect.height - a - d) / 2.0 + a;
+                match fragment.vertical_align {
+                    VerticalAlign::Baseline => baseline = baseline.max(above),
+                    VerticalAlign::Length(shift) => baseline = baseline.max(above + shift),
+                    VerticalAlign::Top | VerticalAlign::Middle | VerticalAlign::Bottom => {}
+                }
             }
         }
         baseline += line.rect.y;
         let last_ink = line.fragments.iter().rposition(|fragment| {
-            !matches!(fragment.content, InlineFragmentContent::InlineBox(_))
-                && !collapsible_space(fragment, resolver)
+            !matches!(
+                fragment.content,
+                InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+            ) && !collapsible_space(fragment, resolver)
         });
         let mut regions: Vec<(usize, Rect)> = Vec::new();
         let mut indices = HashMap::new();
         for (index, fragment) in line.fragments.iter().enumerate() {
+            if matches!(fragment.content, InlineFragmentContent::InlineSpacing(_)) {
+                continue;
+            }
             if collapsible_space(fragment, resolver) && last_ink.is_none_or(|last| index > last) {
                 continue;
             }
             let chain = chains
                 .entry((
                     fragment.node.identity(),
-                    matches!(fragment.content, InlineFragmentContent::InlineBox(_)),
+                    matches!(fragment.content, InlineFragmentContent::InlineEdge(_, _)),
                 ))
                 .or_insert_with(|| {
                     let mut chain = Vec::new();
                     let mut current =
-                        if matches!(fragment.content, InlineFragmentContent::InlineBox(_)) {
+                        if matches!(fragment.content, InlineFragmentContent::InlineEdge(_, _)) {
                             Some(fragment.node.clone())
                         } else {
                             fragment.node.parent_node()
@@ -225,11 +238,12 @@ pub(super) fn finish(
             });
             emitted_owners.insert(id);
         }
-        fragments.extend(
-            line.fragments
-                .drain(..)
-                .filter(|f| !matches!(f.content, InlineFragmentContent::InlineBox(_))),
-        );
+        fragments.extend(line.fragments.drain(..).filter(|f| {
+            !matches!(
+                f.content,
+                InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+            )
+        }));
         line.fragments = fragments;
     }
 }

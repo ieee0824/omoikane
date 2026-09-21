@@ -17,7 +17,7 @@ use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
-    BoxDimensions, FontMetrics, FragmentStyle, HTTP_CLIENT, IMAGE_ANIMATION_CACHE,
+    BoxDimensions, EdgeSizes, FontMetrics, FragmentStyle, HTTP_CLIENT, IMAGE_ANIMATION_CACHE,
     IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE, InlineFragment, InlineFragmentContent,
     LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState, TextOverflowPaint,
     VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length, is_border_box,
@@ -183,6 +183,10 @@ fn layout_inline_nodes_impl(
         collect_inline_segments(node, resolver, &mut segments, context, &mut atomic_boxes);
     }
     coalesce_adjacent_text_segments(&mut segments);
+    let strut_metrics = nodes
+        .first()
+        .and_then(NodeHandle::parent_node)
+        .map(|parent| font_metrics(&resolver.computed_style(&parent)));
 
     let (line_start_x, line_available_width) = line_constraints
         .map(|constraints| constraints(start_y, strut_line_height))
@@ -194,6 +198,7 @@ fn layout_inline_nodes_impl(
         line_available_width,
         align,
         strut_line_height,
+        strut_metrics,
         direction_rtl,
         line_constraints,
     );
@@ -288,6 +293,7 @@ pub(super) fn layout_vertical_inline_nodes(
         line_height,
         layout_align,
         strut_line_height,
+        None,
         false,
         local_constraints,
     );
@@ -2386,6 +2392,7 @@ struct InlineCursor {
     start_x: f32,
     available_width: f32,
     strut_line_height: f32,
+    strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
 }
 
@@ -2395,6 +2402,7 @@ impl InlineCursor {
         start_y: f32,
         available_width: f32,
         strut_line_height: f32,
+        strut_metrics: Option<FontMetrics>,
         direction_rtl: bool,
     ) -> Self {
         Self {
@@ -2404,6 +2412,7 @@ impl InlineCursor {
             start_x,
             available_width,
             strut_line_height,
+            strut_metrics,
             direction_rtl,
         }
     }
@@ -2417,7 +2426,7 @@ impl InlineCursor {
         line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
     ) {
         let effective_height = self.line_height.max(segment_line_height);
-        push_line(
+        let used_height = push_line(
             lines,
             fragments,
             self.start_x,
@@ -2427,8 +2436,10 @@ impl InlineCursor {
             self.available_width,
             align,
             self.direction_rtl,
+            self.strut_line_height,
+            self.strut_metrics,
         );
-        self.y += effective_height;
+        self.y += used_height;
         if let Some(constraints) = line_constraints {
             (self.start_x, self.available_width) = constraints(self.y, self.strut_line_height);
         }
@@ -2513,6 +2524,7 @@ fn layout_inline_segments(
     available_width: f32,
     align: TextAlign,
     strut_line_height: f32,
+    strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
     line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
 ) -> Vec<LineBox> {
@@ -2523,6 +2535,7 @@ fn layout_inline_segments(
         start_y,
         available_width,
         strut_line_height,
+        strut_metrics,
         direction_rtl,
     );
 
@@ -2577,7 +2590,11 @@ fn layout_inline_segments(
                     is_first_piece_in_segment = false;
 
                     if can_wrap
-                        && !matches!(content, InlineFragmentContent::InlineBox(_))
+                        && !matches!(
+                            content,
+                            InlineFragmentContent::InlineEdge(_, _)
+                                | InlineFragmentContent::InlineSpacing(_)
+                        )
                         && cursor.x > cursor.start_x
                         && exceeds_available_inline_width(
                             cursor.x + width - cursor.start_x,
@@ -2590,6 +2607,8 @@ fn layout_inline_segments(
                         if collapsible_whitespace {
                             continue;
                         }
+                        let pending_starts =
+                            take_trailing_inline_starts(&mut current_fragments, &mut cursor.x);
                         cursor.wrap_line(
                             &mut lines,
                             &mut current_fragments,
@@ -2597,6 +2616,12 @@ fn layout_inline_segments(
                             align,
                             line_constraints,
                         );
+                        for mut fragment in pending_starts {
+                            fragment.rect.x = cursor.x;
+                            fragment.rect.y = cursor.y;
+                            cursor.x += fragment.rect.width;
+                            current_fragments.push(fragment);
+                        }
                     }
 
                     if needs_character_break(
@@ -2645,8 +2670,10 @@ fn layout_inline_segments(
 
     if !current_fragments.is_empty() {
         let final_height = if current_fragments.iter().all(|fragment| {
-            matches!(fragment.content, InlineFragmentContent::InlineBox(_))
-                && fragment.rect.width == 0.0
+            matches!(
+                fragment.content,
+                InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+            ) && fragment.rect.width == 0.0
         }) {
             0.0
         } else {
@@ -2662,6 +2689,8 @@ fn layout_inline_segments(
             cursor.available_width,
             align,
             direction_rtl,
+            strut_line_height,
+            strut_metrics,
         );
     }
 
@@ -2677,6 +2706,41 @@ enum InlinePiece {
     },
 }
 
+fn inline_edge_size(style: &ComputedStyle, edges: EdgeSizes, start: bool) -> f32 {
+    if super::is_vertical_writing(style) {
+        match (super::direction_is_rtl(style), start) {
+            (false, true) | (true, false) => edges.top,
+            (false, false) | (true, true) => edges.bottom,
+        }
+    } else {
+        match (super::direction_is_rtl(style), start) {
+            (false, true) | (true, false) => edges.left,
+            (false, false) | (true, true) => edges.right,
+        }
+    }
+}
+
+fn take_trailing_inline_starts(
+    fragments: &mut Vec<InlineFragment>,
+    cursor_x: &mut f32,
+) -> Vec<InlineFragment> {
+    let mut split = fragments.len();
+    while split > 0
+        && matches!(
+            fragments[split - 1].content,
+            InlineFragmentContent::InlineEdge(_, true) | InlineFragmentContent::InlineSpacing(true)
+        )
+    {
+        split -= 1;
+    }
+    let pending = fragments.split_off(split);
+    *cursor_x -= pending
+        .iter()
+        .map(|fragment| fragment.rect.width)
+        .sum::<f32>();
+    pending
+}
+
 fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     match &segment.content {
         InlineSegmentContent::Text(text) => split_text_segment(
@@ -2687,17 +2751,27 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
             segment.white_space_mode,
         ),
         InlineSegmentContent::InlineEdge(style, start) => {
-            let padding = edge_sizes(style, "padding");
-            let border = edge_sizes(style, "border");
-            vec![InlinePiece::Fragment {
-                content: InlineFragmentContent::InlineBox(style.clone()),
-                width: if *start {
-                    padding.left + border.left
-                } else {
-                    padding.right + border.right
-                },
+            let margin = inline_edge_size(style, edge_sizes(style, "margin"), *start);
+            let border_box_edge = InlinePiece::Fragment {
+                content: InlineFragmentContent::InlineEdge(style.clone(), *start),
+                width: inline_edge_size(style, edge_sizes(style, "padding"), *start)
+                    + inline_edge_size(style, edge_sizes(style, "border"), *start),
                 height: 0.0,
-            }]
+            };
+            if margin == 0.0 {
+                vec![border_box_edge]
+            } else {
+                let margin = InlinePiece::Fragment {
+                    content: InlineFragmentContent::InlineSpacing(*start),
+                    width: margin,
+                    height: 0.0,
+                };
+                if *start {
+                    vec![margin, border_box_edge]
+                } else {
+                    vec![border_box_edge, margin]
+                }
+            }
         }
         InlineSegmentContent::AtomicInline(width, height, baseline) => {
             vec![InlinePiece::Fragment {
@@ -3024,11 +3098,13 @@ fn push_line(
     x: f32,
     y: f32,
     width: f32,
-    height: f32,
+    mut height: f32,
     available_width: f32,
     align: TextAlign,
     direction_rtl: bool,
-) {
+    strut_line_height: f32,
+    strut_metrics: Option<FontMetrics>,
+) -> f32 {
     let physical_align = match align {
         TextAlign::Start if direction_rtl => TextAlign::Right,
         TextAlign::Start => TextAlign::Left,
@@ -3051,38 +3127,87 @@ fn push_line(
     let has_atomic_inline = fragments
         .iter()
         .any(|fragment| matches!(fragment.content, InlineFragmentContent::AtomicInline(_)));
+    let initial_height = height;
     let fragment_ascent = |fragment: &InlineFragment| match &fragment.content {
         InlineFragmentContent::AtomicInline(baseline) => *baseline,
         InlineFragmentContent::Image(_, _) | InlineFragmentContent::FormControl(_, _, _)
-            if fragment.rect.height >= height =>
+            if fragment.rect.height >= initial_height =>
         {
             fragment.rect.height
         }
         _ => fragment.metrics.ascent,
     };
-    let baseline = fragments
-        .iter()
-        .filter_map(|fragment| match fragment.vertical_align {
-            VerticalAlign::Baseline | VerticalAlign::Length(_) => {
-                let ascent = fragment_ascent(fragment);
-                match &fragment.content {
-                    InlineFragmentContent::Text(_) => {
-                        let leading =
-                            (fragment.rect.height - ascent - fragment.metrics.descent) / 2.0;
-                        Some(leading + ascent)
-                    }
-                    InlineFragmentContent::AtomicInline(_)
-                    | InlineFragmentContent::Image(_, _)
-                    | InlineFragmentContent::FormControl(_, _, _) => Some(ascent),
-                    InlineFragmentContent::InlineBox(_)
-                    | InlineFragmentContent::GeneratedBox(_)
-                    | InlineFragmentContent::IconFormControl(_, _, _, _) => None,
-                }
+    let fragment_extents = |fragment: &InlineFragment| {
+        let ascent = fragment_ascent(fragment);
+        match &fragment.content {
+            InlineFragmentContent::Text(_) => {
+                let leading = (fragment.rect.height - ascent - fragment.metrics.descent) / 2.0;
+                Some((leading + ascent, leading + fragment.metrics.descent))
             }
-            _ => None,
-        })
-        .reduce(f32::max)
-        .unwrap_or(if has_atomic_inline { 0.0 } else { height * 0.8 });
+            InlineFragmentContent::AtomicInline(_)
+            | InlineFragmentContent::Image(_, _)
+            | InlineFragmentContent::FormControl(_, _, _) => {
+                Some((ascent, fragment.rect.height - ascent))
+            }
+            InlineFragmentContent::InlineEdge(_, _)
+            | InlineFragmentContent::InlineSpacing(_)
+            | InlineFragmentContent::InlineBox(_)
+            | InlineFragmentContent::GeneratedBox(_)
+            | InlineFragmentContent::IconFormControl(_, _, _, _) => None,
+        }
+    };
+    let baseline = if let Some(metrics) = strut_metrics.filter(|_| height > 0.0) {
+        let half_leading = (strut_line_height - metrics.ascent - metrics.descent) / 2.0;
+        let mut above = half_leading + metrics.ascent;
+        let mut below = half_leading + metrics.descent;
+        let rounded_ascent = metrics.ascent.ceil();
+        let rounded_descent = metrics.descent.ceil();
+        let rounded_half_leading = (strut_line_height - rounded_ascent - rounded_descent) / 2.0;
+        let mut extent_above = rounded_half_leading + rounded_ascent;
+        let mut extent_below = rounded_half_leading + rounded_descent;
+        for fragment in fragments.iter() {
+            let Some((fragment_above, fragment_below)) = fragment_extents(fragment) else {
+                continue;
+            };
+            let (fragment_extent_above, fragment_extent_below) =
+                if matches!(fragment.content, InlineFragmentContent::Text(_)) {
+                    let ascent = fragment.metrics.ascent.ceil();
+                    let descent = fragment.metrics.descent.ceil();
+                    let leading = (fragment.rect.height - ascent - descent) / 2.0;
+                    (leading + ascent, leading + descent)
+                } else {
+                    (fragment_above, fragment_below)
+                };
+            match fragment.vertical_align {
+                VerticalAlign::Baseline => {
+                    above = above.max(fragment_above);
+                    below = below.max(fragment_below);
+                    extent_above = extent_above.max(fragment_extent_above);
+                    extent_below = extent_below.max(fragment_extent_below);
+                }
+                VerticalAlign::Length(shift) => {
+                    above = above.max(fragment_above + shift);
+                    below = below.max(fragment_below - shift);
+                    extent_above = extent_above.max(fragment_extent_above + shift);
+                    extent_below = extent_below.max(fragment_extent_below - shift);
+                }
+                VerticalAlign::Top | VerticalAlign::Middle | VerticalAlign::Bottom => {}
+            }
+        }
+        height = height.max(extent_above + extent_below);
+        above
+    } else {
+        fragments
+            .iter()
+            .filter_map(|fragment| match fragment.vertical_align {
+                VerticalAlign::Baseline | VerticalAlign::Length(_) => {
+                    fragment_extents(fragment).map(|(above, _)| above)
+                }
+                _ => None,
+            })
+            .reduce(f32::max)
+            .unwrap_or(if has_atomic_inline { 0.0 } else { height * 0.8 })
+    };
 
     for fragment in fragments.iter_mut() {
         fragment.rect.y = match fragment.vertical_align {
@@ -3111,6 +3236,7 @@ fn push_line(
         fragments: std::mem::take(fragments),
         text_overflow: None,
     });
+    height
 }
 
 /// Resolves adjacent inline fragments as one UAX#9 line while retaining the

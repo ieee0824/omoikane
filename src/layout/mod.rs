@@ -525,6 +525,10 @@ impl Overflow {
 /// text run is split into many pieces (e.g. word-wrapped lines).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FragmentStyle {
+    /// Computed CSS `visibility` for this fragment. Hidden fragments continue
+    /// to participate in layout and CSSOM geometry, but paint and hit testing
+    /// skip them independently from their containing block.
+    pub visibility: Visibility,
     /// CSS `color` value (raw keyword or color string) from the computed style.
     /// May come from an explicit declaration, inheritance, or an initial value.
     pub color: Option<String>,
@@ -592,6 +596,7 @@ impl FragmentStyle {
         });
 
         Self {
+            visibility: visibility(style),
             color: extract_str("color"),
             text_transform: normalize_lower("text-transform"),
             text_decoration_line: normalize_lower("text-decoration-line"),
@@ -632,6 +637,10 @@ pub struct InlineFragment {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InlineFragmentContent {
     Text(String),
+    /// Paint-free inline-axis spacing used for non-replaced inline margins.
+    InlineSpacing(bool),
+    /// Temporary start/end edge marker retained while lines are wrapped.
+    InlineEdge(ComputedStyle, bool),
     /// The border area of a non-replaced inline element on one line.
     InlineBox(ComputedStyle),
     /// Placement marker for an atomic inline-level box stored in the owning
