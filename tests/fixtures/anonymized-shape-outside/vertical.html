@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS vertical shape outside fixed fixture</title>
+<style>
+  @font-face {
+    font-family: ShapeFixture;
+    src: url("../acid2/LiberationSans-Regular.ttf") format("truetype");
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    width: 640px;
+    height: 360px;
+    overflow: hidden;
+    background: #fff;
+    color: #172033;
+    font: 14px/18px ShapeFixture, sans-serif;
+  }
+  .case {
+    position: absolute;
+    top: 10px;
+    width: 145px;
+    height: 340px;
+    padding: 5px;
+    border: 1px solid #cbd5e1;
+    overflow: hidden;
+    background: #f8fafc;
+  }
+  .rl { writing-mode: vertical-rl; }
+  .lr { writing-mode: vertical-lr; }
+  .rtl { direction: rtl; }
+  #circle-left-case { left: 10px; }
+  #polygon-right-case { left: 165px; }
+  #inset-left-case { left: 320px; }
+  #circle-right-case { left: 475px; }
+  .float { width: 82px; height: 96px; }
+  .circle-left {
+    float: left;
+    background: #0e7490;
+    clip-path: circle(42% at 50% 50%);
+    shape-outside: circle(42% at 50% 50%);
+    shape-margin: 5px;
+  }
+  .polygon-right {
+    float: right;
+    background: #7c3aed;
+    clip-path: polygon(0 0, 100% 0, 100% 35%, 45% 35%, 45% 65%, 100% 65%, 100% 100%, 0 100%);
+    shape-outside: polygon(0 0, 100% 0, 100% 35%, 45% 35%, 45% 65%, 100% 65%, 100% 100%, 0 100%);
+  }
+  .inset-left {
+    float: left;
+    padding: 6px;
+    border: 5px solid #be123c;
+    background: #fecdd3;
+    clip-path: inset(8% 12% 34% 12% round 8px);
+    shape-outside: inset(8% 12% 34% 12% round 8px) border-box;
+    shape-margin: 3px;
+  }
+  .circle-right {
+    float: right;
+    background: #047857;
+    clip-path: circle(40% at 50% 50%);
+    shape-outside: circle(40% at 50% 50%);
+    shape-margin: 4px;
+  }
+  .copy { color: #172033; }
+</style>
+<div class="case rl" id="circle-left-case" data-probe><div class="float circle-left" id="vertical-circle-left" data-probe></div><span class="copy" id="vertical-circle-left-copy" data-probe>Circle left float wraps vertical text around its curved lower edge with shape margin.</span></div>
+<div class="case rl rtl" id="polygon-right-case" data-probe><div class="float polygon-right" id="vertical-polygon-right" data-probe></div><span class="copy" id="vertical-polygon-right-copy" data-probe>Polygon right float exposes a center notch while columns approach from above.</span></div>
+<div class="case lr" id="inset-left-case" data-probe><div class="float inset-left" id="vertical-inset-left" data-probe></div><span class="copy" id="vertical-inset-left-copy" data-probe>Inset left float uses its border box and advances columns from left to right.</span></div>
+<div class="case lr rtl" id="circle-right-case" data-probe><div class="float circle-right" id="vertical-circle-right" data-probe></div><span class="copy" id="vertical-circle-right-copy" data-probe>Circle right float anchors at the lower inline edge and releases space by column.</span></div>

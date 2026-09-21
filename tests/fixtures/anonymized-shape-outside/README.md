@@ -22,3 +22,12 @@ python3 scripts/summarize-firefox-rendering.py \
 The manifest pins the HTML hash. Screenshots, repeat captures, metrics, library
 hashes, and comparison JSON are retained as review artifacts rather than
 checked-in baselines.
+
+`vertical.html` adds `vertical-rl` and `vertical-lr` containers. It fixes left
+floats at the physical top and right floats at the physical bottom, uses RTL
+inline flow for the right-float cases, then checks circle, inset, polygon, and
+`shape-margin` exclusions along successive columns.
+Its cases correspond to the vertical-writing coverage in the pinned WPT
+`shape-outside-circle-048/051`, `shape-outside-inset-022/025`, and
+`shape-outside-polygon-020/023` series; the local fixture uses text and DOMRect
+probes so both geometry and painting can be compared with Firefox.

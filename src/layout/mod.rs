@@ -824,6 +824,12 @@ struct FloatOffsets {
     right: f32,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct VerticalFloatOffsets {
+    top: f32,
+    bottom: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClearSide {
     None,
@@ -1759,6 +1765,92 @@ fn layout_float_child(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn layout_vertical_float_child(
+    child: &NodeHandle,
+    child_style: &ComputedStyle,
+    resolver: &mut StyleResolver,
+    side: FloatSide,
+    cursor_x: &mut f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    vertical_rl: bool,
+    viewport: LayoutViewport,
+    positioned_ancestor: Option<BoxDimensions>,
+    float_regions: &mut Vec<FloatRegion>,
+    children: &mut Vec<LayoutBox>,
+) {
+    loop {
+        let remaining_width = if vertical_rl {
+            (*cursor_x - x).max(0.0)
+        } else {
+            (x + width - *cursor_x).max(0.0)
+        };
+        let provisional_x = if vertical_rl {
+            *cursor_x - remaining_width
+        } else {
+            *cursor_x
+        };
+        let containing = Rect {
+            x: provisional_x,
+            y,
+            width: remaining_width,
+            height,
+        };
+        let Some(mut layout_child) =
+            layout_node(child, resolver, containing, viewport, positioned_ancestor)
+        else {
+            return;
+        };
+        let outer_width = layout_child.total_width();
+        let outer_height = layout_child.total_height();
+        let outer_x = if vertical_rl {
+            *cursor_x - outer_width
+        } else {
+            *cursor_x
+        };
+        let offsets = active_vertical_float_offsets(float_regions, outer_x, outer_width, y, height);
+        let available_height = (height - offsets.top - offsets.bottom).max(0.0);
+        if outer_height > available_height + 0.5
+            && let Some(next_x) = next_vertical_float_boundary(
+                float_regions,
+                *cursor_x,
+                outer_x,
+                outer_width,
+                vertical_rl,
+            )
+        {
+            if next_x == *cursor_x {
+                return;
+            }
+            *cursor_x = next_x;
+            continue;
+        }
+
+        let outer_y = match side {
+            FloatSide::Left => y + offsets.top,
+            FloatSide::Right => (y + height - offsets.bottom - outer_height).max(y),
+            FloatSide::None => y + offsets.top,
+        };
+        translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y, resolver);
+        let shape = shapes::ShapeOutside::from_style(child_style, layout_child.dimensions, height);
+        float_regions.push(FloatRegion {
+            outer: Rect {
+                x: outer_x,
+                y: outer_y,
+                width: outer_width,
+                height: outer_height,
+            },
+            side,
+            shape,
+        });
+        children.push(layout_child);
+        return;
+    }
+}
+
 /// Computes the containing block for a child element, accounting for float offsets.
 fn child_containing_rect(
     child_style: &ComputedStyle,
@@ -2628,6 +2720,7 @@ fn layout_vertical_block_children(
     let mut positioned_children = Vec::new();
     let mut lines = Vec::new();
     let mut pending_inline_nodes = Vec::new();
+    let mut float_regions = Vec::new();
     let mut cursor_x = if vertical_rl { x + width } else { x };
     let mut inline_bottom = y;
     // An auto-height root often enters layout with a zero containing height.
@@ -2636,7 +2729,10 @@ fn layout_vertical_block_children(
     // content can establish the auto height naturally.
     let available_inline_height = used_height
         .and_then(UsedHeight::percentage_basis)
-        .or_else(|| resolved_length(style, "height", containing_height))
+        .or_else(|| {
+            resolved_length(style, "height", containing_height)
+                .map(|height| border_box_adjust_height(style, height, &padding, &border))
+        })
         .or_else(|| (containing_height > 0.0).then_some(containing_height))
         .unwrap_or(1_000_000.0);
 
@@ -2653,6 +2749,7 @@ fn layout_vertical_block_children(
             &mut pending_inline_nodes,
             resolver,
             style,
+            &float_regions,
             x,
             y,
             width,
@@ -2674,18 +2771,44 @@ fn layout_vertical_block_children(
             continue;
         };
 
+        apply_vertical_clear(&mut cursor_x, &child_style, &float_regions, vertical_rl);
+
         // Positioned descendants are resolved after the containing block's
         // final dimensions are known, just as in the horizontal path.
+        let estimated_width = resolved_length(&child_style, "width", width)
+            .unwrap_or_else(|| line_height(&child_style))
+            .max(0.01)
+            .min(width);
         let provisional_x = if vertical_rl {
-            cursor_x - width
+            cursor_x - estimated_width
         } else {
             cursor_x
         };
+        let offsets = active_vertical_float_offsets(
+            &float_regions,
+            provisional_x,
+            estimated_width,
+            y,
+            available_inline_height,
+        );
+        let has_explicit_height = explicit_length(&child_style, "height").is_some();
         let child_containing = Rect {
             x: provisional_x,
-            y,
-            width,
-            height: available_inline_height,
+            y: if has_explicit_height {
+                y
+            } else {
+                y + offsets.top
+            },
+            width: if vertical_rl {
+                (cursor_x - x).max(0.0)
+            } else {
+                (x + width - cursor_x).max(0.0)
+            },
+            height: if has_explicit_height {
+                available_inline_height
+            } else {
+                (available_inline_height - offsets.top - offsets.bottom).max(0.0)
+            },
         };
         if is_out_of_flow_positioned(&child_style) {
             positioned_children.push((child, child_style, child_containing));
@@ -2707,6 +2830,26 @@ fn layout_vertical_block_children(
         } else {
             positioned_ancestor
         };
+        let side = float_side(&child_style);
+        if side != FloatSide::None {
+            layout_vertical_float_child(
+                &child,
+                &child_style,
+                resolver,
+                side,
+                &mut cursor_x,
+                x,
+                y,
+                width,
+                available_inline_height,
+                vertical_rl,
+                viewport,
+                next_pos_ancestor,
+                &mut float_regions,
+                &mut children,
+            );
+            continue;
+        }
         let Some(mut layout_child) = layout_node(
             &child,
             resolver,
@@ -2722,13 +2865,13 @@ fn layout_vertical_block_children(
         } else {
             cursor_x
         };
-        translate_layout_box_to_outer(&mut layout_child, outer_x, y, resolver);
+        translate_layout_box_to_outer(&mut layout_child, outer_x, child_containing.y, resolver);
         if vertical_rl {
             cursor_x = outer_x;
         } else {
             cursor_x = outer_x + layout_child.total_width();
         }
-        inline_bottom = inline_bottom.max(y + layout_child.total_height());
+        inline_bottom = inline_bottom.max(child_containing.y + layout_child.total_height());
         children.push(layout_child);
     }
 
@@ -2736,6 +2879,7 @@ fn layout_vertical_block_children(
         &mut pending_inline_nodes,
         resolver,
         style,
+        &float_regions,
         x,
         y,
         width,
@@ -2757,7 +2901,10 @@ fn layout_vertical_block_children(
         // the existing height resolver can still apply explicit/min/max
         // height declarations without a second sizing pipeline.
         cursor_y: inline_bottom,
-        float_bottom: inline_bottom,
+        float_bottom: float_regions
+            .iter()
+            .map(|region| region.outer.y + region.outer.height)
+            .fold(inline_bottom, f32::max),
         positioned_children,
         margin_info: None,
         child_shifts: Vec::new(),
@@ -2770,6 +2917,7 @@ fn flush_pending_vertical_inline_nodes(
     pending: &mut Vec<NodeHandle>,
     resolver: &mut StyleResolver,
     style: &ComputedStyle,
+    float_regions: &[FloatRegion],
     x: f32,
     y: f32,
     width: f32,
@@ -2795,22 +2943,33 @@ fn flush_pending_vertical_inline_nodes(
     let inline::InlineLayoutResult {
         lines: inline_lines,
         atomic_boxes,
-    } = layout_vertical_inline_nodes(
-        pending,
-        resolver,
-        region_x,
-        y,
-        region_width,
-        height,
-        text_align(style),
-        line_height(style),
-        vertical_rl,
-        direction_is_rtl(style),
-        (text_overflow_is_ellipsis(style) && overflow(style).clips_y()).then_some(style),
-        width,
-        viewport,
-        positioned_ancestor,
-    );
+    } = {
+        let column_constraints = |column_x: f32, column_width: f32| {
+            let offsets =
+                vertical_float_offsets_for_column(float_regions, column_x, column_width, y, height);
+            (
+                y + offsets.top,
+                (height - offsets.top - offsets.bottom).max(0.0),
+            )
+        };
+        layout_vertical_inline_nodes(
+            pending,
+            resolver,
+            region_x,
+            y,
+            region_width,
+            height,
+            text_align(style),
+            line_height(style),
+            vertical_rl,
+            direction_is_rtl(style),
+            (text_overflow_is_ellipsis(style) && overflow(style).clips_y()).then_some(style),
+            width,
+            viewport,
+            positioned_ancestor,
+            Some(&column_constraints),
+        )
+    };
     if let Some(last_line) = inline_lines
         .iter()
         .map(|line| line.rect.y + line.rect.height)
@@ -3190,6 +3349,144 @@ fn float_offsets_for_line(
         }
     }
     offsets
+}
+
+fn active_vertical_float_offsets(
+    regions: &[FloatRegion],
+    x: f32,
+    column_width: f32,
+    y: f32,
+    height: f32,
+) -> VerticalFloatOffsets {
+    let mut offsets = VerticalFloatOffsets::default();
+    let column_right = x + column_width.max(0.01);
+    for region in regions {
+        if column_right <= region.outer.x || x >= region.outer.x + region.outer.width {
+            continue;
+        }
+        match region.side {
+            FloatSide::Left => {
+                offsets.top = offsets
+                    .top
+                    .max((region.outer.y + region.outer.height - y).clamp(0.0, height));
+            }
+            FloatSide::Right => {
+                offsets.bottom = offsets
+                    .bottom
+                    .max((y + height - region.outer.y).clamp(0.0, height));
+            }
+            FloatSide::None => {}
+        }
+    }
+    offsets
+}
+
+/// Computes float exclusions for one vertical line (column) band. Rectangle
+/// placement and `clear` use [`active_vertical_float_offsets`]; a
+/// `shape-outside` only changes the inline-axis space available to text.
+fn vertical_float_offsets_for_column(
+    regions: &[FloatRegion],
+    x: f32,
+    column_width: f32,
+    y: f32,
+    height: f32,
+) -> VerticalFloatOffsets {
+    let mut offsets = VerticalFloatOffsets::default();
+    for region in regions {
+        let bounds = if let Some(shape) = &region.shape {
+            shape.vertical_bounds(x, column_width)
+        } else if x + column_width.max(0.01) > region.outer.x
+            && x < region.outer.x + region.outer.width
+        {
+            Some((region.outer.y, region.outer.y + region.outer.height))
+        } else {
+            None
+        };
+        let Some((min_y, max_y)) = bounds else {
+            continue;
+        };
+        match region.side {
+            FloatSide::Left => {
+                offsets.top = offsets.top.max((max_y - y).clamp(0.0, height));
+            }
+            FloatSide::Right => {
+                offsets.bottom = offsets.bottom.max((y + height - min_y).clamp(0.0, height));
+            }
+            FloatSide::None => {}
+        }
+    }
+    offsets
+}
+
+fn vertical_clear_cursor_for_side(
+    cursor_x: f32,
+    regions: &[FloatRegion],
+    side: FloatSide,
+    vertical_rl: bool,
+) -> f32 {
+    regions
+        .iter()
+        .filter(|region| region.side == side)
+        .fold(cursor_x, |cursor, region| {
+            if vertical_rl {
+                cursor.min(region.outer.x)
+            } else {
+                cursor.max(region.outer.x + region.outer.width)
+            }
+        })
+}
+
+fn apply_vertical_clear(
+    cursor_x: &mut f32,
+    child_style: &ComputedStyle,
+    regions: &[FloatRegion],
+    vertical_rl: bool,
+) {
+    match clear_side(child_style) {
+        ClearSide::Left => {
+            *cursor_x =
+                vertical_clear_cursor_for_side(*cursor_x, regions, FloatSide::Left, vertical_rl);
+        }
+        ClearSide::Right => {
+            *cursor_x =
+                vertical_clear_cursor_for_side(*cursor_x, regions, FloatSide::Right, vertical_rl);
+        }
+        ClearSide::Both => {
+            *cursor_x =
+                vertical_clear_cursor_for_side(*cursor_x, regions, FloatSide::Left, vertical_rl);
+            *cursor_x =
+                vertical_clear_cursor_for_side(*cursor_x, regions, FloatSide::Right, vertical_rl);
+        }
+        ClearSide::None => {}
+    }
+}
+
+fn next_vertical_float_boundary(
+    regions: &[FloatRegion],
+    cursor_x: f32,
+    band_x: f32,
+    band_width: f32,
+    vertical_rl: bool,
+) -> Option<f32> {
+    let band_right = band_x + band_width;
+    let boundaries = regions.iter().filter_map(|region| {
+        let overlaps = band_right > region.outer.x && band_x < region.outer.x + region.outer.width;
+        if !overlaps {
+            return None;
+        }
+        let boundary = if vertical_rl {
+            region.outer.x
+        } else {
+            region.outer.x + region.outer.width
+        };
+        ((vertical_rl && boundary < cursor_x) || (!vertical_rl && boundary > cursor_x))
+            .then_some(boundary)
+    });
+    if vertical_rl {
+        boundaries.max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    } else {
+        boundaries.min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    }
 }
 
 fn next_float_boundary_after(regions: &[FloatRegion], y: f32) -> Option<f32> {

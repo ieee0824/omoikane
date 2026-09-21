@@ -240,6 +240,7 @@ pub(super) fn layout_vertical_inline_nodes(
     containing_width: f32,
     viewport: super::LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
+    column_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
 ) -> InlineLayoutResult {
     let context = InlineLayoutContext {
         start_x,
@@ -260,15 +261,35 @@ pub(super) fn layout_vertical_inline_nodes(
     // Horizontal layout's x axis is the vertical inline axis in this local
     // coordinate system.  A local origin of zero makes the transpose below
     // independent of the containing block's absolute position.
+    let local_constraints = |column_offset: f32, column_width: f32| {
+        let column_x = if vertical_rl {
+            start_x + (available_width - column_offset - column_width).max(0.0)
+        } else {
+            start_x + column_offset
+        };
+        let (line_y, line_height) =
+            column_constraints.expect("column constraints must be present")(column_x, column_width);
+        ((line_y - start_y).max(0.0), line_height.max(0.0))
+    };
+    let local_constraints =
+        column_constraints.map(|_| &local_constraints as &dyn Fn(f32, f32) -> (f32, f32));
+    let (line_start, line_height) = local_constraints
+        .map(|constraints| constraints(0.0, strut_line_height))
+        .unwrap_or((0.0, available_height.max(0.0)));
+    let layout_align = match (align, direction_rtl) {
+        (TextAlign::Start, true) => TextAlign::Right,
+        (TextAlign::End, true) => TextAlign::Left,
+        (align, _) => align,
+    };
     let mut horizontal_lines = layout_inline_segments(
         &segments,
+        line_start,
         0.0,
-        0.0,
-        available_height.max(0.0),
-        align,
+        line_height,
+        layout_align,
         strut_line_height,
         false,
-        None,
+        local_constraints,
     );
 
     boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
@@ -308,10 +329,11 @@ pub(super) fn layout_vertical_inline_nodes(
                     x: column_x + cross_offset,
                     y: if direction_rtl {
                         start_y
+                            + line.rect.x
                             + (original_inline_extent - inline_offset - fragment.rect.width)
                                 .max(0.0)
                     } else {
-                        start_y + inline_offset
+                        start_y + line.rect.x + inline_offset
                     },
                     width: fragment.rect.height,
                     height: fragment.rect.width,
@@ -325,9 +347,11 @@ pub(super) fn layout_vertical_inline_nodes(
                         x: column_x + cross_offset,
                         y: if direction_rtl {
                             start_y
-                                + (available_height - inline_offset - fragment.rect.width).max(0.0)
+                                + line.rect.x
+                                + (original_inline_extent - inline_offset - fragment.rect.width)
+                                    .max(0.0)
                         } else {
-                            start_y + inline_offset
+                            start_y + line.rect.x + inline_offset
                         },
                         width: fragment.rect.height,
                         height: fragment.rect.width,
