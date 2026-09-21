@@ -1985,14 +1985,14 @@ fn generated_css_counters_follow_element_and_pseudo_order() {
         Rect {
             x: 0.0,
             y: 0.0,
-            width: 400.0,
+            width: 1000.0,
             height: 0.0,
         },
     )
     .unwrap();
 
     assert_eq!(generated_text_for_node(&layout, &first), "Chapter 1: ");
-    assert_eq!(generated_text_for_node(&layout, &second), "Chapter 2:");
+    assert_eq!(generated_text_for_node(&layout, &second), "Chapter 2: ");
 }
 
 #[test]
