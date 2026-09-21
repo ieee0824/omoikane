@@ -231,7 +231,7 @@ HTTP クライアントの現状仕様:
 
 ### Docker サンドボックス
 
-ホスト環境を汚さずに omoikane のビルド・テスト・Claude Code / Codex CLI 実行ができる開発用コンテナを用意しています。CI と同一のフォント構成に加えて日本語フォント（Noto CJK / IPA ゴシック・明朝）を含み、ビルドに必要な `cmake` などに加え、開発用に `vim`・`ripgrep`（`rg`）・GitHub CLI（`gh`）・[Codex CLI](https://learn.chatgpt.com/docs/codex/cli)（`codex`）もインストール済みです。
+ホスト環境を汚さずに omoikane のビルド・テスト・Claude Code / Codex CLI 実行ができる開発用コンテナを用意しています。CI と同一のフォント構成に加えて日本語フォント（Noto CJK / IPA ゴシック・明朝）を含み、ビルドに必要な `cmake` などに加え、開発用に `vim`・`ripgrep`（`rg`）・GitHub CLI（`gh`）・[Codex CLI](https://learn.chatgpt.com/docs/codex/cli)（`codex`）もインストール済みです。Linux x86_64 / aarch64のRustビルドにはlldを使います。同一条件のclean test buildではGNU ld比でx86_64は24.2%、aarch64は5.4%短縮し、通常・baseline JIT・releaseのリンクと実行を両アーキテクチャで確認しています。
 
 ```bash
 # イメージをビルド
