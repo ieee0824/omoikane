@@ -5831,10 +5831,13 @@ mod tests {
         );
 
         session.dispatch("Accessibility.enable", json!({})).unwrap();
+        // This test observes the AX focus state, not focus-driven scrolling.
+        // Avoid coupling it to a synchronous layout while the full lib suite
+        // is contending for CI runner CPU time.
         session
             .dispatch(
                 "Runtime.evaluate",
-                json!({ "expression": "document.querySelector('#save').focus()" }),
+                json!({ "expression": "document.querySelector('#save').focus({ preventScroll: true })" }),
             )
             .unwrap();
         let full = session
