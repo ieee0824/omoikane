@@ -1825,7 +1825,14 @@ fn hit_test_box(
     }
     for line in layout.lines.iter().rev() {
         for fragment in line.fragments.iter().rev() {
-            if matches!(fragment.content, InlineFragmentContent::AtomicInline(_)) {
+            if fragment.style.visibility == Visibility::Hidden
+                || matches!(
+                    fragment.content,
+                    InlineFragmentContent::AtomicInline(_)
+                        | InlineFragmentContent::InlineSpacing(_)
+                        | InlineFragmentContent::InlineEdge(_, _)
+                )
+            {
                 continue;
             }
             if rect_contains_point(fragment.rect, local_point.0, local_point.1) {
