@@ -16,6 +16,7 @@ use crate::font::{
 use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, Rect};
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_vo::{Orientation, char_orientation};
 
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
 use super::color::{Color, parse_color};
@@ -343,7 +344,7 @@ pub(crate) fn paint_text_with_registry(
                             frag_color,
                             clip,
                             fragment.metrics.letter_spacing,
-                            vertical_mode,
+                            vertical_mode.map(|mode| mode.direction_rtl),
                         );
                     }
 
@@ -1026,16 +1027,61 @@ pub(crate) fn paint_text_with_font_refs(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VerticalGlyphMode {
+    Mixed,
+    SidewaysClockwise,
+    SidewaysCounterClockwise,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VerticalPaintMode {
+    glyphs: VerticalGlyphMode,
+    direction_rtl: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlyphRotation {
+    Upright,
+    Clockwise,
+    CounterClockwise,
+}
+
 /// Returns the vertical paint mode carried by an inline fragment.
 ///
-/// The first flag selects the vertical-rl glyph rotation (clockwise); the
-/// second flag selects the inline base direction.  `None` keeps the existing
-/// horizontal paint path byte-for-byte.
-fn vertical_paint_mode(style: &FragmentStyle) -> Option<(bool, bool)> {
+/// Block progression (`vertical-rl` versus `vertical-lr`), glyph orientation,
+/// and inline direction are independent. `None` keeps the horizontal paint
+/// path byte-for-byte.
+fn vertical_paint_mode(style: &FragmentStyle) -> Option<VerticalPaintMode> {
     let writing_mode = style.writing_mode.as_deref()?;
-    let vertical_rl = matches!(writing_mode, "vertical-rl" | "sideways-rl");
-    let vertical = vertical_rl || matches!(writing_mode, "vertical-lr" | "sideways-lr");
-    vertical.then_some((vertical_rl, style.direction.as_deref() == Some("rtl")))
+    let glyphs = match writing_mode {
+        "vertical-rl" | "vertical-lr" => VerticalGlyphMode::Mixed,
+        "sideways-rl" => VerticalGlyphMode::SidewaysClockwise,
+        "sideways-lr" => VerticalGlyphMode::SidewaysCounterClockwise,
+        _ => return None,
+    };
+    Some(VerticalPaintMode {
+        glyphs,
+        direction_rtl: style.direction.as_deref() == Some("rtl"),
+    })
+}
+
+fn vertical_glyph_rotation(
+    mode: VerticalGlyphMode,
+    ch: char,
+    previous_base: Option<GlyphRotation>,
+) -> GlyphRotation {
+    if is_zero_advance_character(ch) {
+        return previous_base.unwrap_or(GlyphRotation::Upright);
+    }
+    match mode {
+        VerticalGlyphMode::SidewaysClockwise => GlyphRotation::Clockwise,
+        VerticalGlyphMode::SidewaysCounterClockwise => GlyphRotation::CounterClockwise,
+        VerticalGlyphMode::Mixed => match char_orientation(ch) {
+            Orientation::Rotated | Orientation::TransformedOrRotated => GlyphRotation::Clockwise,
+            Orientation::Upright | Orientation::TransformedOrUpright => GlyphRotation::Upright,
+        },
+    }
 }
 
 /// Resolves the text and physical inline axis as one paint-time decision.
@@ -1045,7 +1091,7 @@ fn vertical_paint_mode(style: &FragmentStyle) -> Option<(bool, bool)> {
 fn fragment_text_for_paint<'a>(
     text: &'a str,
     style: &FragmentStyle,
-) -> (Cow<'a, str>, Option<(bool, bool)>) {
+) -> (Cow<'a, str>, Option<VerticalPaintMode>) {
     (bidi_visual_text(text, style), vertical_paint_mode(style))
 }
 
@@ -1260,9 +1306,9 @@ fn paint_fragment_text(
     color: Color,
     clip: Option<Rect>,
     letter_spacing: f32,
-    vertical_mode: Option<(bool, bool)>,
+    vertical_mode: Option<VerticalPaintMode>,
 ) {
-    if let Some((vertical_rl, direction_rtl)) = vertical_mode {
+    if let Some(vertical_mode) = vertical_mode {
         paint_text_vertical_with_candidates(
             canvas,
             rect,
@@ -1273,8 +1319,7 @@ fn paint_fragment_text(
             color,
             clip,
             letter_spacing,
-            vertical_rl,
-            direction_rtl,
+            vertical_mode,
         );
     } else {
         paint_text_with_candidates(
@@ -1477,9 +1522,9 @@ fn paint_text_vertical_with_candidates(
     color: Color,
     clip: Option<Rect>,
     letter_spacing: f32,
-    vertical_rl: bool,
-    direction_rtl: bool,
+    mode: VerticalPaintMode,
 ) {
+    let direction_rtl = mode.direction_rtl;
     let chars = fallback_paint_characters(text, direction_rtl, fonts);
 
     let mut cursor_y = if direction_rtl {
@@ -1487,14 +1532,15 @@ fn paint_text_vertical_with_candidates(
     } else {
         rect.y
     };
-    let clockwise = vertical_rl;
     let mut previous_cell = None;
+    let mut previous_rotation = None;
     let mut remaining_non_zero = chars
         .iter()
         .filter(|(ch, _)| !is_zero_advance_character(*ch))
         .count();
     for (ch, font_index) in chars {
         let zero_advance = is_zero_advance_character(ch);
+        let rotation = vertical_glyph_rotation(mode.glyphs, ch, previous_rotation);
         let (_, glyph, advance_x) =
             rasterize_with_fallback_refs(&[fonts[font_index].font], ch, font_size);
         let glyph = (!is_invisible_shaping_control(ch))
@@ -1518,21 +1564,39 @@ fn paint_text_vertical_with_candidates(
             && glyph.height > 0
             && !glyph.bitmap.is_empty()
         {
-            let rotated_width = glyph.height as f32;
-            let rotated_height = glyph.width as f32;
-            let glyph_x = rect.x + ((rect.width - rotated_width) * 0.5).max(0.0);
-            let glyph_y = cell_start + ((paint_advance - rotated_height) * 0.5).max(0.0);
-            draw_rotated_glyph_mask(
-                canvas,
-                glyph_x,
-                glyph_y,
-                glyph.width,
-                glyph.height,
-                &glyph.bitmap,
-                clockwise,
-                color,
-                clip,
-            );
+            match rotation {
+                GlyphRotation::Upright => {
+                    let glyph_x = rect.x + ((rect.width - glyph.width as f32) * 0.5).max(0.0);
+                    let glyph_y =
+                        cell_start + ((paint_advance - glyph.height as f32) * 0.5).max(0.0);
+                    canvas.draw_glyph_mask(
+                        glyph_x,
+                        glyph_y,
+                        glyph.width,
+                        glyph.height,
+                        &glyph.bitmap,
+                        color,
+                        clip,
+                    );
+                }
+                GlyphRotation::Clockwise | GlyphRotation::CounterClockwise => {
+                    let rotated_width = glyph.height as f32;
+                    let rotated_height = glyph.width as f32;
+                    let glyph_x = rect.x + ((rect.width - rotated_width) * 0.5).max(0.0);
+                    let glyph_y = cell_start + ((paint_advance - rotated_height) * 0.5).max(0.0);
+                    draw_rotated_glyph_mask(
+                        canvas,
+                        glyph_x,
+                        glyph_y,
+                        glyph.width,
+                        glyph.height,
+                        &glyph.bitmap,
+                        rotation == GlyphRotation::Clockwise,
+                        color,
+                        clip,
+                    );
+                }
+            }
         }
 
         let spacing = if !zero_advance && remaining_non_zero > 1 {
@@ -1550,13 +1614,13 @@ fn paint_text_vertical_with_candidates(
         );
         if !zero_advance {
             previous_cell = Some((cell_start, advance, font_index));
+            previous_rotation = Some(rotation);
             remaining_non_zero -= 1;
         }
     }
 }
 
-/// Rotates a single-channel glyph mask without changing the canvas API.  A
-/// vertical-rl column uses clockwise rotation; vertical-lr uses the inverse.
+/// Rotates a single-channel glyph mask without changing the canvas API.
 fn draw_rotated_glyph_mask(
     canvas: &mut Canvas,
     x: f32,
@@ -1875,9 +1939,9 @@ pub(crate) fn paint_text_placeholder_with_mode(
     color: Color,
     clip: Option<Rect>,
     letter_spacing: f32,
-    vertical_mode: Option<(bool, bool)>,
+    vertical_direction_rtl: Option<bool>,
 ) {
-    let Some((_vertical_rl, direction_rtl)) = vertical_mode else {
+    let Some(direction_rtl) = vertical_direction_rtl else {
         paint_text_placeholder(canvas, rect, text, font_size, color, clip, letter_spacing);
         return;
     };
@@ -2307,9 +2371,10 @@ pub(crate) fn text_prefix_by_utf16_offset(value: &str, offset: usize) -> &str {
 #[cfg(test)]
 mod bidi_tests {
     use super::{
-        FragmentStyle, bidi_visual_text, fallback_paint_characters, fragment_text_for_paint,
-        horizontal_glyph_origin, is_invisible_shaping_control, vertical_cursor_after,
-        vertical_glyph_cell, vertical_paint_characters,
+        FragmentStyle, GlyphRotation, VerticalGlyphMode, VerticalPaintMode, bidi_visual_text,
+        fallback_paint_characters, fragment_text_for_paint, horizontal_glyph_origin,
+        is_invisible_shaping_control, vertical_cursor_after, vertical_glyph_cell,
+        vertical_glyph_rotation, vertical_paint_characters,
     };
     use crate::font::{Font, FontFallbackCandidate, UnicodeRangeSet};
 
@@ -2342,7 +2407,13 @@ mod bidi_tests {
             ..FragmentStyle::default()
         };
         let (visual_text, vertical_mode) = fragment_text_for_paint("abc אבג", &style);
-        assert_eq!(vertical_mode, Some((true, false)));
+        assert_eq!(
+            vertical_mode,
+            Some(VerticalPaintMode {
+                glyphs: VerticalGlyphMode::Mixed,
+                direction_rtl: false,
+            })
+        );
         assert_eq!(visual_text, "abc גבא");
     }
 
@@ -2355,7 +2426,13 @@ mod bidi_tests {
             ..FragmentStyle::default()
         };
         let (visual_text, vertical_mode) = fragment_text_for_paint("abc אבג", &style);
-        assert_eq!(vertical_mode, Some((false, true)));
+        assert_eq!(
+            vertical_mode,
+            Some(VerticalPaintMode {
+                glyphs: VerticalGlyphMode::Mixed,
+                direction_rtl: true,
+            })
+        );
         assert_eq!(visual_text, "גבא abc");
     }
 
@@ -2401,7 +2478,13 @@ mod bidi_tests {
         };
         let (visual_text, vertical_mode) = fragment_text_for_paint("a\u{301}b", &style);
         assert_eq!(visual_text, "ba\u{301}");
-        assert_eq!(vertical_mode, Some((true, true)));
+        assert_eq!(
+            vertical_mode,
+            Some(VerticalPaintMode {
+                glyphs: VerticalGlyphMode::Mixed,
+                direction_rtl: true,
+            })
+        );
         assert_eq!(
             vertical_paint_characters(visual_text.as_ref(), true),
             vec!['a', '\u{301}', 'b']
@@ -2476,7 +2559,80 @@ mod bidi_tests {
         };
         let (visual_text, vertical_mode) = fragment_text_for_paint("abc אבג", &style);
         assert_eq!(visual_text, "abc גבא");
-        assert_eq!(vertical_mode, Some((false, true)));
+        assert_eq!(
+            vertical_mode,
+            Some(VerticalPaintMode {
+                glyphs: VerticalGlyphMode::Mixed,
+                direction_rtl: true,
+            })
+        );
+    }
+
+    #[test]
+    fn vertical_mixed_orientation_rotates_latin_clockwise_in_both_block_directions() {
+        for writing_mode in ["vertical-rl", "vertical-lr"] {
+            let style = FragmentStyle {
+                writing_mode: Some(writing_mode.to_string()),
+                ..FragmentStyle::default()
+            };
+            let mode = super::vertical_paint_mode(&style).unwrap();
+            assert_eq!(mode.glyphs, VerticalGlyphMode::Mixed);
+            assert_eq!(
+                vertical_glyph_rotation(mode.glyphs, 'A', None),
+                GlyphRotation::Clockwise
+            );
+        }
+    }
+
+    #[test]
+    fn vertical_mixed_orientation_keeps_cjk_and_emoji_upright() {
+        for ch in ['本', 'あ', '한', '😀', '、'] {
+            assert_eq!(
+                vertical_glyph_rotation(VerticalGlyphMode::Mixed, ch, None),
+                GlyphRotation::Upright,
+                "{ch}"
+            );
+        }
+        assert_eq!(
+            vertical_glyph_rotation(VerticalGlyphMode::Mixed, 'ー', None),
+            GlyphRotation::Clockwise,
+            "Tr characters use their rotated fallback until vertical glyph substitution is available"
+        );
+    }
+
+    #[test]
+    fn combining_marks_follow_their_base_glyph_orientation() {
+        assert_eq!(
+            vertical_glyph_rotation(
+                VerticalGlyphMode::Mixed,
+                '\u{301}',
+                Some(GlyphRotation::Clockwise)
+            ),
+            GlyphRotation::Clockwise
+        );
+        assert_eq!(
+            vertical_glyph_rotation(
+                VerticalGlyphMode::Mixed,
+                '\u{301}',
+                Some(GlyphRotation::Upright)
+            ),
+            GlyphRotation::Upright
+        );
+    }
+
+    #[test]
+    fn sideways_modes_keep_their_physical_rotation_direction() {
+        for (writing_mode, expected) in [
+            ("sideways-rl", GlyphRotation::Clockwise),
+            ("sideways-lr", GlyphRotation::CounterClockwise),
+        ] {
+            let style = FragmentStyle {
+                writing_mode: Some(writing_mode.to_string()),
+                ..FragmentStyle::default()
+            };
+            let mode = super::vertical_paint_mode(&style).unwrap();
+            assert_eq!(vertical_glyph_rotation(mode.glyphs, '本', None), expected);
+        }
     }
 
     #[test]
