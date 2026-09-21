@@ -1940,6 +1940,247 @@ fn generated_before_and_after_content_participate_in_inline_layout() {
     assert_eq!(rendered, "pre core post");
 }
 
+fn generated_text_for_node(layout: &LayoutBox, node: &NodeHandle) -> String {
+    let mut text = String::new();
+    for line in &layout.lines {
+        for fragment in &line.fragments {
+            if fragment.node == *node
+                && let Some(value) = fragment.text()
+            {
+                text.push_str(value);
+            }
+        }
+    }
+    for child in &layout.children {
+        text.push_str(&generated_text_for_node(child, node));
+    }
+    text
+}
+
+#[test]
+fn generated_css_counters_follow_element_and_pseudo_order() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let first = NodeHandle::element("h1");
+    let second = NodeHandle::element("h1");
+    first.append_child(NodeHandle::text("First"));
+    second.append_child(NodeHandle::text("Second"));
+    document.append_child(body.clone());
+    body.append_child(first.clone());
+    body.append_child(second.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { counter-reset: chapter; } \
+             h1 { counter-increment: chapter; display: inline; } \
+             h1::before { content: \"Chapter \" counter(chapter) \": \"; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generated_text_for_node(&layout, &first), "Chapter 1: ");
+    assert_eq!(generated_text_for_node(&layout, &second), "Chapter 2:");
+}
+
+#[test]
+fn pseudo_counter_properties_run_before_and_after_element_children() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let host = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    document.append_child(body.clone());
+    body.append_child(host.clone());
+    host.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { counter-reset: step; } \
+             div, span { display: inline; } \
+             div::before, div::after, span { counter-increment: step; } \
+             div::before, div::after, span::before { content: counter(step); }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generated_text_for_node(&layout, &host), "13");
+    assert_eq!(generated_text_for_node(&layout, &child), "2");
+}
+
+#[test]
+fn nested_counters_use_outermost_to_innermost_values() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let outer = NodeHandle::element("ol");
+    let outer_item = NodeHandle::element("li");
+    let inner = NodeHandle::element("ol");
+    let first_inner = NodeHandle::element("li");
+    let second_inner = NodeHandle::element("li");
+    outer_item.append_child(NodeHandle::text("Outer"));
+    first_inner.append_child(NodeHandle::text("First"));
+    second_inner.append_child(NodeHandle::text("Second"));
+    document.append_child(body.clone());
+    body.append_child(outer.clone());
+    outer.append_child(outer_item.clone());
+    outer_item.append_child(inner.clone());
+    inner.append_child(first_inner.clone());
+    inner.append_child(second_inner.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "ol { counter-reset: item; display: inline; } \
+             li { counter-increment: item; display: inline; } \
+             li::before { content: counters(item, \".\"); }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generated_text_for_node(&layout, &outer_item), "1");
+    assert_eq!(generated_text_for_node(&layout, &first_inner), "1.1");
+    assert_eq!(generated_text_for_node(&layout, &second_inner), "1.2");
+}
+
+#[test]
+fn sibling_counter_reset_does_not_replace_an_ancestor_counter_for_later_siblings() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let scope = NodeHandle::element("div");
+    let items = (0..4)
+        .map(|_| NodeHandle::element("span"))
+        .collect::<Vec<_>>();
+    items[2].set_attribute("class", "local-reset");
+    document.append_child(body.clone());
+    body.append_child(scope.clone());
+    for item in &items {
+        scope.append_child(item.clone());
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { counter-reset: c; } \
+             span { counter-increment: c; } \
+             span::before { content: counter(c); } \
+             .local-reset { counter-reset: c 98; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let rendered = items
+        .iter()
+        .map(|item| generated_text_for_node(&layout, item))
+        .collect::<Vec<_>>();
+    assert_eq!(rendered, ["1", "2", "99", "3"]);
+}
+
+#[test]
+fn hidden_and_dynamic_counter_items_recompute_in_tree_order() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let visible = NodeHandle::element("span");
+    let display_none = NodeHandle::element("span");
+    display_none.set_attribute("class", "none");
+    let visibility_hidden = NodeHandle::element("span");
+    visibility_hidden.set_attribute("class", "hidden");
+    document.append_child(body.clone());
+    body.append_child(visible.clone());
+    body.append_child(display_none);
+    body.append_child(visibility_hidden.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { counter-reset: item; } \
+             span { counter-increment: item; } \
+             span::before { content: counter(item); } \
+             .none { display: none; } .hidden { visibility: hidden; }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 400.0,
+        height: 0.0,
+    };
+    let first_layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(generated_text_for_node(&first_layout, &visible), "1");
+    assert_eq!(
+        generated_text_for_node(&first_layout, &visibility_hidden),
+        "2"
+    );
+
+    let inserted = NodeHandle::element("span");
+    body.insert_before(inserted.clone(), &visibility_hidden)
+        .unwrap();
+    resolver.invalidate_style_cache_for_test();
+    let second_layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(generated_text_for_node(&second_layout, &inserted), "2");
+    assert_eq!(
+        generated_text_for_node(&second_layout, &visibility_hidden),
+        "3"
+    );
+
+    body.remove_child(&inserted).unwrap();
+    resolver.invalidate_style_cache_for_test();
+    let third_layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(generated_text_for_node(&third_layout, &visible), "1");
+    assert_eq!(
+        generated_text_for_node(&third_layout, &visibility_hidden),
+        "2"
+    );
+}
+
 #[test]
 fn generated_empty_content_creates_a_zero_width_fragment() {
     let document = NodeHandle::document();

@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS generated counters fixed fixture</title>
+<style>
+  @font-face {
+    font-family: CounterFixture;
+    src: url("../acid2/LiberationSans-Regular.ttf") format("truetype");
+  }
+  html, body {
+    margin: 0;
+    width: 520px;
+    height: 240px;
+    overflow: hidden;
+    background: #ffffff;
+    color: #111111;
+    font: 20px/1.5 CounterFixture, sans-serif;
+  }
+  .row {
+    display: block;
+    height: 48px;
+    padding: 6px 10px;
+    box-sizing: border-box;
+    border-bottom: 1px solid #d8d8d8;
+    white-space: nowrap;
+  }
+  .chapters { counter-reset: chapter; }
+  .chapters .item { counter-increment: chapter; }
+  .chapters .item::before { content: "Chapter " counter(chapter) ": "; color: #075985; }
+  .chapters .item + .item { padding-left: 18px; }
+
+  .outline { counter-reset: section; }
+  .outline .section { counter-increment: section; }
+  .outline .section::before { content: counters(section, ".") " "; color: #7c2d12; }
+  .outline .nested { counter-reset: section; padding-left: 14px; }
+  .outline .nested .section + .section { padding-left: 10px; }
+
+  .visibility { counter-reset: visible 4; }
+  .visibility .item { counter-increment: visible; }
+  .visibility .item::before { content: "[" counter(visible, decimal-leading-zero) "] "; color: #166534; }
+  .visibility .none { display: none; }
+  .visibility .hidden,
+  .visibility .hidden::before { visibility: hidden; color: transparent; }
+  .visibility .item + .item { padding-left: 8px; }
+
+  .dynamic { counter-reset: dynamic 8; }
+  .dynamic .item { counter-increment: dynamic; }
+  .dynamic .item::before { content: counter(dynamic) ". "; color: #5b21b6; }
+  .dynamic .item + .item { padding-left: 14px; }
+</style>
+<div class="row chapters" data-probe id="chapters"><span class="item">Alpha</span><span class="item">Beta</span></div>
+<div class="row outline" data-probe id="outline"><span class="section">Outer<span class="nested"><span class="section">Inner A</span><span class="section">Inner B</span></span></span><span class="section">Next</span></div>
+<div class="row visibility" data-probe id="visibility"><span class="item">Shown</span><span class="item none">None</span><span class="item hidden">Hidden</span><span class="item">After</span></div>
+<div class="row dynamic" data-probe id="dynamic"><span class="item" id="dynamic-first">First</span><span class="item" id="dynamic-last">Last</span></div>
+<script>
+  const inserted = document.createElement("span");
+  inserted.className = "item";
+  inserted.textContent = "Inserted";
+  document.getElementById("dynamic").insertBefore(inserted, document.getElementById("dynamic-last"));
+</script>

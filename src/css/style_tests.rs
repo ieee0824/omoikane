@@ -2567,6 +2567,80 @@ fn resolves_computed_style_for_pseudo_elements() {
 }
 
 #[test]
+fn computes_and_validates_css_counter_properties() {
+    let (_document, body, _title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { counter-reset: chapter section 4; counter-increment: chapter 2 section; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&body);
+    assert_eq!(
+        style.get("counter-reset"),
+        Some(&ComputedValue::Keyword("chapter 0 section 4".to_string()))
+    );
+    assert_eq!(
+        style.get("counter-increment"),
+        Some(&ComputedValue::Keyword("chapter 2 section 1".to_string()))
+    );
+    assert!(supports_declaration("counter-reset", "chapter 3 section"));
+    assert!(supports_declaration("counter-increment", "chapter -2"));
+    assert!(!supports_declaration("counter-reset", "chapter 1.5"));
+    assert!(!supports_declaration("counter-increment", "none chapter"));
+    assert!(!supports_declaration(
+        "counter-reset",
+        "chapter 1, section 2"
+    ));
+}
+
+#[test]
+fn preserves_compound_generated_content_for_counter_resolution() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1::before { content: \"Chapter \" counter(chapter) \". \"; }").unwrap(),
+    );
+
+    let style = resolver
+        .computed_pseudo_style(&title, PseudoElement::Before)
+        .unwrap();
+    assert_eq!(
+        style.get("content"),
+        Some(&ComputedValue::Keyword(
+            "\"Chapter \" counter(chapter) \". \"".to_string()
+        ))
+    );
+    assert!(matches!(
+        style.component_value("content"),
+        Some(Value::List(values)) if values.len() == 3
+    ));
+}
+
+#[test]
+fn inherits_structured_counter_values_for_explicit_inherit() {
+    let (_document, body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { counter-reset: section 7; } h1 { counter-reset: inherit; }")
+            .unwrap(),
+    );
+
+    let parent = resolver.computed_style(&body);
+    let child = resolver.computed_style(&title);
+    assert_eq!(child.get("counter-reset"), parent.get("counter-reset"));
+    assert_eq!(
+        child.component_value("counter-reset"),
+        parent.component_value("counter-reset")
+    );
+}
+
+#[test]
 fn resolves_explicit_inherit_keyword_from_parent() {
     let (_document, body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
