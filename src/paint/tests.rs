@@ -1523,6 +1523,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
     let generated_style = resolver.computed_style(&generated);
     let layout = LayoutBox {
         node: root,
+        pseudo: None,
         dimensions: BoxDimensions {
             content: Rect {
                 x: 0.0,
@@ -1544,6 +1545,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
         children: vec![
             LayoutBox {
                 node: float,
+                pseudo: None,
                 dimensions: BoxDimensions {
                     content: Rect {
                         x: 0.0,
@@ -1567,6 +1569,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
             },
             LayoutBox {
                 node: overlay,
+                pseudo: None,
                 dimensions: BoxDimensions {
                     content: Rect {
                         x: 0.0,
@@ -1696,6 +1699,7 @@ fn float_grandchild_paints_above_block_uncle() {
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
     let layout = LayoutBox {
         node: root,
+        pseudo: None,
         dimensions: BoxDimensions {
             content: Rect {
                 x: 0.0,
@@ -1717,6 +1721,7 @@ fn float_grandchild_paints_above_block_uncle() {
         children: vec![
             LayoutBox {
                 node: wrapper,
+                pseudo: None,
                 dimensions: BoxDimensions {
                     content: Rect {
                         x: 0.0,
@@ -1737,6 +1742,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 lines: Vec::new(),
                 children: vec![LayoutBox {
                     node: floated,
+                    pseudo: None,
                     dimensions: BoxDimensions {
                         content: Rect {
                             x: 0.0,
@@ -1762,6 +1768,7 @@ fn float_grandchild_paints_above_block_uncle() {
             },
             LayoutBox {
                 node: block,
+                pseudo: None,
                 dimensions: BoxDimensions {
                     content: Rect {
                         x: 0.0,
@@ -10192,6 +10199,7 @@ fn form_control_label_uses_web_font_variant() {
     };
     let layout = LayoutBox {
         node: button.clone(),
+        pseudo: None,
         dimensions: BoxDimensions {
             content: viewport,
             ..BoxDimensions::default()
@@ -10309,6 +10317,7 @@ fn focused_text_control_paints_selection_and_caret() {
     };
     let layout = |fragment| LayoutBox {
         node: input.clone(),
+        pseudo: None,
         dimensions: BoxDimensions {
             content: viewport,
             ..BoxDimensions::default()

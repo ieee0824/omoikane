@@ -112,6 +112,7 @@ pub(super) fn layout(
     );
     LayoutBox {
         node: item.node.clone(),
+        pseudo: None,
         dimensions: BoxDimensions {
             content: Rect {
                 x: 0.0,

@@ -37,6 +37,20 @@ fn find_layout_box<'a>(layout: &'a LayoutBox, node: &NodeHandle) -> Option<&'a L
         .find_map(|child| find_layout_box(child, node))
 }
 
+fn find_pseudo_box<'a>(
+    layout: &'a LayoutBox,
+    node: &NodeHandle,
+    pseudo: PseudoElement,
+) -> Option<&'a LayoutBox> {
+    if &layout.node == node && layout.pseudo == Some(pseudo) {
+        return Some(layout);
+    }
+    layout
+        .children
+        .iter()
+        .find_map(|child| find_pseudo_box(child, node, pseudo))
+}
+
 fn find_layout_box_by_tag<'a>(layout: &'a LayoutBox, tag: &str) -> Option<&'a LayoutBox> {
     if layout.node.tag_name().as_deref() == Some(tag) {
         return Some(layout);
@@ -108,6 +122,312 @@ fn computes_block_box_dimensions_from_inline_style() {
     assert_eq!(child.dimensions.padding.right, 10.0);
     assert_eq!(child.dimensions.padding.bottom, 10.0);
     assert_eq!(child.dimensions.padding.left, 10.0);
+}
+
+#[test]
+fn block_before_generated_box_participates_in_normal_flow() {
+    let (_document, _html, body, host) = sample_tree();
+    let child = NodeHandle::element("div");
+    host.append_child(child.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".host::before { display: block; content: \"\"; height: 60px; } \
+             .host > div { height: 10px; }",
+        )
+        .unwrap(),
+    );
+    host.set_attribute("class", "host");
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let host_box = find_layout_box(&layout, &host).expect("host must be laid out");
+    let child_box = find_layout_box(&layout, &child).expect("child must be laid out");
+    assert_eq!(host_box.dimensions.content.height, 70.0);
+    assert_eq!(
+        child_box.dimensions.content.y,
+        host_box.dimensions.content.y + 60.0
+    );
+    let before = find_pseudo_box(host_box, &host, PseudoElement::Before)
+        .expect("before must have layout geometry");
+    assert_eq!(before.dimensions.content.height, 60.0);
+}
+
+#[test]
+fn block_after_generated_box_follows_children_and_contributes_box_model() {
+    let (_document, _html, body, host) = sample_tree();
+    let child = NodeHandle::element("div");
+    host.append_child(child.clone());
+    host.set_attribute("class", "host");
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".host::after { display: block; content: \"\"; width: 40px; height: 20px; \
+               padding: 3px 4px; border: 2px solid; } \
+             .host > div { height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let host_box = find_layout_box(&layout, &host).expect("host must be laid out");
+    let child_box = find_layout_box(&layout, &child).expect("child must be laid out");
+    let after = find_pseudo_box(host_box, &host, PseudoElement::After)
+        .expect("after must have layout geometry");
+    assert_eq!(
+        child_box.dimensions.content.y,
+        host_box.dimensions.content.y
+    );
+    assert_eq!(
+        after.dimensions.border_box().y,
+        child_box.dimensions.content.y + 10.0
+    );
+    assert_eq!(after.dimensions.content.width, 40.0);
+    assert_eq!(after.dimensions.border_box().width, 52.0);
+    assert_eq!(after.dimensions.border_box().height, 30.0);
+    assert_eq!(host_box.dimensions.content.height, 40.0);
+}
+
+#[test]
+fn inline_generated_content_of_block_host_joins_its_line_box() {
+    let (_document, _html, body, host) = sample_tree();
+    host.set_attribute("class", "host");
+    host.append_child(NodeHandle::text("body"));
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".host::before { display: inline; content: \"before \"; } \
+             .host::after { display: inline-block; content: \"\"; width: 12px; height: 7px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let host_box = find_layout_box(&layout, &host).expect("host must be laid out");
+    let fragments = &host_box.lines[0].fragments;
+    let text = fragments
+        .iter()
+        .filter_map(|fragment| match &fragment.content {
+            InlineFragmentContent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(text, "before body");
+    let generated = fragments
+        .iter()
+        .find(|fragment| matches!(fragment.content, InlineFragmentContent::GeneratedBox(_)))
+        .expect("inline-block after must produce a generated fragment");
+    assert_eq!(generated.rect.width, 12.0);
+    assert_eq!(generated.rect.height, 7.0);
+}
+
+#[test]
+fn positioned_block_pseudo_does_not_advance_normal_flow() {
+    let (_document, _html, body, host) = sample_tree();
+    let child = NodeHandle::element("div");
+    host.append_child(child.clone());
+    host.set_attribute("class", "host");
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".host { position: relative; width: 100px; } \
+             .host::before { position: absolute; content: \"\"; \
+               left: 7px; top: 5px; width: 20px; height: 60px; } \
+             .host > div { height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let host_box = find_layout_box(&layout, &host).expect("host must be laid out");
+    let child_box = find_layout_box(&layout, &child).expect("child must be laid out");
+    let before = find_pseudo_box(host_box, &host, PseudoElement::Before)
+        .expect("positioned before must be laid out");
+    assert_eq!(host_box.dimensions.content.height, 10.0);
+    assert_eq!(
+        child_box.dimensions.content.y,
+        host_box.dimensions.content.y
+    );
+    assert_eq!(
+        before.dimensions.border_box().x,
+        host_box.dimensions.content.x + 7.0
+    );
+    assert_eq!(
+        before.dimensions.border_box().y,
+        host_box.dimensions.content.y + 5.0
+    );
+}
+
+#[test]
+fn block_pseudo_uses_vertical_writing_mode_flow_axis() {
+    let (_document, _html, body, host) = sample_tree();
+    let child = NodeHandle::element("div");
+    host.append_child(child.clone());
+    host.set_attribute("class", "host");
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".host { writing-mode: vertical-rl; width: 100px; height: 80px; } \
+             .host::before { display: block; content: \"\"; width: 20px; height: 30px; } \
+             .host > div { width: 10px; height: 30px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let host_box = find_layout_box(&layout, &host).expect("host must be laid out");
+    let child_box = find_layout_box(&layout, &child).expect("child must be laid out");
+    let before =
+        find_pseudo_box(host_box, &host, PseudoElement::Before).expect("before must be laid out");
+    assert_eq!(before.dimensions.content.width, 20.0);
+    assert_eq!(child_box.dimensions.content.width, 10.0);
+    assert_eq!(
+        before.dimensions.border_box().x,
+        host_box.dimensions.content.x + 80.0
+    );
+    assert_eq!(
+        child_box.dimensions.border_box().x,
+        host_box.dimensions.content.x + 70.0
+    );
+}
+
+#[test]
+fn block_pseudo_margins_and_overflow_use_layout_geometry() {
+    let (_document, _html, body, host) = sample_tree();
+    let child = NodeHandle::element("div");
+    host.append_child(child.clone());
+    host.set_attribute("class", "host");
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".host { overflow: hidden; } \
+             .host::before { display: block; content: \"\"; height: 20px; \
+               margin-top: 5px; margin-bottom: 7px; } \
+             .host > div { height: 10px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let host_box = find_layout_box(&layout, &host).expect("host must be laid out");
+    let child_box = find_layout_box(&layout, &child).expect("child must be laid out");
+    let before =
+        find_pseudo_box(host_box, &host, PseudoElement::Before).expect("before must be laid out");
+    assert_eq!(
+        before.dimensions.border_box().y,
+        host_box.dimensions.content.y + 5.0
+    );
+    assert_eq!(
+        child_box.dimensions.content.y,
+        host_box.dimensions.content.y + 32.0
+    );
+    assert_eq!(host_box.dimensions.content.height, 42.0);
+    assert_eq!(host_box.scrollable_overflow().1, 42.0);
+}
+
+#[test]
+fn display_none_pseudo_does_not_generate_a_layout_box() {
+    let (_document, _html, body, host) = sample_tree();
+    let child = NodeHandle::element("div");
+    host.append_child(child.clone());
+    host.set_attribute("class", "host");
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".host::before { display: none; content: \"\"; height: 60px; } \
+             .host > div { height: 10px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let host_box = find_layout_box(&layout, &host).expect("host must be laid out");
+    assert_eq!(host_box.dimensions.content.height, 10.0);
+    assert!(find_pseudo_box(host_box, &host, PseudoElement::Before).is_none());
 }
 
 #[test]
@@ -10132,6 +10452,9 @@ fn flush_pending_inline_nodes_clears_whitespace_only() {
     let mut children = Vec::new();
     flush_pending_inline_nodes(
         &mut pending,
+        &body,
+        false,
+        false,
         &mut resolver,
         &style,
         &[],

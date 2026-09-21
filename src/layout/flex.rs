@@ -463,6 +463,7 @@ pub(super) fn layout_flex_container(
 
     Some(LayoutBox {
         node: node.clone(),
+        pseudo: None,
         dimensions,
         visibility: visibility(&style),
         overflow: overflow(&style),

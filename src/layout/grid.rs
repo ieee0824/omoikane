@@ -507,6 +507,7 @@ pub(super) fn layout_grid_container(
     sort_children_by_z_index(&mut children);
     Some(LayoutBox {
         node: node.clone(),
+        pseudo: None,
         dimensions,
         visibility: visibility(&style),
         overflow: overflow(&style),
