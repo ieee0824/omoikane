@@ -5,8 +5,9 @@ use crate::dom::{Node, NodeHandle, NodeType};
 
 use super::{
     BoxDimensions, EdgeSizes, LayoutBox, Overflow, Rect, VerticalAlign, Visibility,
-    explicit_length, intrinsic_width, normalized_min_max_lengths, overflow, resolved_length,
-    translate_layout_box_to_outer, translate_layout_contents, vertical_align, visibility, z_index,
+    explicit_length, intrinsic_width, layout_box_style, normalized_min_max_lengths, overflow,
+    resolved_length, translate_layout_box_to_outer, translate_layout_contents, vertical_align,
+    visibility, z_index,
 };
 
 mod columns;
@@ -160,7 +161,7 @@ pub(super) fn layout_table_container(
                 (height - child.dimensions.padding.vertical() - child.dimensions.border.vertical())
                     .max(0.0);
             let extra = (child.dimensions.content.height - used).max(0.0);
-            let offset = match vertical_align(&resolver.computed_style(&child.node)) {
+            let offset = match vertical_align(&layout_box_style(child, resolver)) {
                 VerticalAlign::Bottom => extra,
                 VerticalAlign::Middle => extra / 2.0,
                 _ => 0.0,
@@ -250,6 +251,7 @@ pub(super) fn layout_table_container(
     viewport.after_sizing(&style, dimensions, &mut children, resolver);
     Some(LayoutBox {
         node: node.clone(),
+        pseudo: None,
         dimensions,
         visibility: visibility(&style),
         overflow: overflow(&style),
@@ -534,6 +536,7 @@ fn layout_table_row_entry(
         column_widths.iter().sum::<f32>() + column_count.saturating_sub(1) as f32 * spacing;
     let row_box = LayoutBox {
         node: entry.row_node.clone(),
+        pseudo: None,
         dimensions: BoxDimensions {
             content: Rect {
                 x,
@@ -845,6 +848,7 @@ fn build_row_group_box(
 
     LayoutBox {
         node,
+        pseudo: None,
         dimensions: BoxDimensions {
             content: Rect {
                 x,

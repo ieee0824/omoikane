@@ -74,6 +74,9 @@ pub(super) fn remember(node: &NodeHandle, info: Info) {
     });
 }
 fn take(layout: &LayoutBox) -> Info {
+    if layout.pseudo.is_some() {
+        return Info::new(layout.dimensions.margin);
+    }
     EDGES
         .with(|edges| {
             edges
@@ -189,6 +192,9 @@ pub(super) fn layout_children(
     let mut positioned_children = Vec::new();
     let mut child_shifts = Vec::new();
     let mut inline_nodes = Vec::new();
+    let mut include_inline_before =
+        generated_inline_pseudo_exists(node, resolver, PseudoElement::Before);
+    let include_inline_after = generated_inline_pseudo_exists(node, resolver, PseudoElement::After);
     let mut float_regions = Vec::new();
     let child_height_basis = used_height
         .and_then(UsedHeight::percentage_basis)
@@ -198,21 +204,25 @@ pub(super) fn layout_children(
         })
         .unwrap_or(0.0);
 
-    for child in node.layout_child_nodes() {
+    for source in block_flow_sources(node, resolver) {
+        let child = source.node().clone();
         if child.node_type() == NodeType::Comment {
             continue;
         }
-        let cs = (child.node_type() == NodeType::Element).then(|| resolver.computed_style(&child));
+        let cs = source.style(resolver);
         if cs.as_ref().is_some_and(is_display_none) || is_non_rendered_html_element(&child) {
             continue;
         }
-        if is_inline_child(&child, resolver) {
+        if matches!(&source, LayoutSource::Node(_)) && is_inline_child(&child, resolver) {
             inline_nodes.push(child);
             continue;
         }
         let previous_lines = lines.len();
         flush_pending_inline_nodes(
             &mut inline_nodes,
+            node,
+            std::mem::take(&mut include_inline_before),
+            false,
             resolver,
             style,
             &float_regions,
@@ -277,13 +287,13 @@ pub(super) fn layout_children(
         let containing =
             child_containing_rect(&cs, child_y, &offsets, x, width, child_height_basis);
         if is_out_of_flow_positioned(&cs) {
-            positioned_children.push((child, cs, containing));
+            positioned_children.push((source, cs, containing));
             continue;
         }
         let side = float_side(&cs);
         if side != FloatSide::None {
             layout_float_child(
-                &child,
+                &source,
                 &cs,
                 resolver,
                 side,
@@ -312,8 +322,7 @@ pub(super) fn layout_children(
         } else {
             positioned_ancestor
         };
-        if let Some(layout) = layout_node(&child, resolver, containing, viewport, next_pos_ancestor)
-        {
+        if let Some(layout) = source.layout(resolver, containing, viewport, next_pos_ancestor) {
             let child_info = take(&layout);
             let actual_delta = if top_open {
                 child_info.top.value()
@@ -348,6 +357,9 @@ pub(super) fn layout_children(
     let previous_lines = lines.len();
     flush_pending_inline_nodes(
         &mut inline_nodes,
+        node,
+        include_inline_before,
+        include_inline_after,
         resolver,
         style,
         &float_regions,

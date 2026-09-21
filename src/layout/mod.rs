@@ -867,6 +867,9 @@ pub struct ListMarker {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutBox {
     pub node: NodeHandle,
+    /// The generated pseudo-element represented by this box. `None` denotes
+    /// the principal box for `node`.
+    pub(crate) pseudo: Option<PseudoElement>,
     pub dimensions: BoxDimensions,
     pub visibility: Visibility,
     pub overflow: Overflow,
@@ -902,6 +905,15 @@ pub(crate) struct PaintScrollGeometry {
 pub(crate) struct MultiColumnLayout {
     pub(crate) overflow: Rect,
     pub(crate) rules: Vec<Rect>,
+}
+
+/// Returns the style that produced a layout box. Generated boxes use their
+/// pseudo-element style while principal boxes use the originating DOM node.
+pub(crate) fn layout_box_style(layout: &LayoutBox, resolver: &mut StyleResolver) -> ComputedStyle {
+    layout
+        .pseudo
+        .and_then(|pseudo| resolver.computed_pseudo_style(&layout.node, pseudo))
+        .unwrap_or_else(|| resolver.computed_style(&layout.node))
 }
 
 impl LayoutBox {
@@ -1179,7 +1191,7 @@ fn collect_content_visibility_remembered_sizes(
     ancestor_skipped: bool,
 ) {
     let node_id = layout.node.identity();
-    let style = resolver.computed_style(&layout.node);
+    let style = layout_box_style(layout, resolver);
     let has_auto_intrinsic_size = ["contain-intrinsic-width", "contain-intrinsic-height"]
         .iter()
         .any(|property| {
@@ -1215,7 +1227,7 @@ fn populate_layout_transforms(
     root_font_size: f32,
     parent_perspective: AffineTransform,
 ) {
-    let style = resolver.computed_style(&layout.node);
+    let style = layout_box_style(layout, resolver);
     let transform = computed_keyword(&style, "transform").unwrap_or("none");
     let origin = computed_keyword(&style, "transform-origin").unwrap_or("50% 50%");
     let perspective_box = layout.dimensions.border_box();
@@ -1315,7 +1327,7 @@ fn collect_container_contexts(
     resolver: &mut StyleResolver,
     contexts: &mut HashMap<usize, ContainerContext>,
 ) {
-    let style = resolver.computed_style(&layout.node);
+    let style = layout_box_style(layout, resolver);
     let container_type = match style.get("container-type") {
         Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
         _ => "normal".to_string(),
@@ -1453,6 +1465,96 @@ fn layout_node_with_subgrid(
     }
 }
 
+#[derive(Clone)]
+enum LayoutSource {
+    Node(NodeHandle),
+    Generated {
+        host: NodeHandle,
+        pseudo: PseudoElement,
+    },
+}
+
+impl LayoutSource {
+    fn from_layout_box(layout: &LayoutBox) -> Self {
+        layout.pseudo.map_or_else(
+            || Self::Node(layout.node.clone()),
+            |pseudo| Self::Generated {
+                host: layout.node.clone(),
+                pseudo,
+            },
+        )
+    }
+
+    fn node(&self) -> &NodeHandle {
+        match self {
+            Self::Node(node) => node,
+            Self::Generated { host, .. } => host,
+        }
+    }
+
+    fn style(&self, resolver: &mut StyleResolver) -> Option<ComputedStyle> {
+        match self {
+            Self::Node(node) if node.node_type() == NodeType::Element => {
+                Some(resolver.computed_style(node))
+            }
+            Self::Generated { host, pseudo } => generated_pseudo_style(host, resolver, *pseudo),
+            Self::Node(_) => None,
+        }
+    }
+
+    fn layout(
+        &self,
+        resolver: &mut StyleResolver,
+        containing_block: Rect,
+        viewport: LayoutViewport,
+        positioned_ancestor: Option<BoxDimensions>,
+    ) -> Option<LayoutBox> {
+        match self {
+            Self::Node(node) => layout_node(
+                node,
+                resolver,
+                containing_block,
+                viewport,
+                positioned_ancestor,
+            ),
+            Self::Generated { host, pseudo } => {
+                let style = generated_pseudo_style(host, resolver, *pseudo)?;
+                Some(layout_generated_pseudo_box(
+                    host,
+                    *pseudo,
+                    resolver,
+                    &style,
+                    containing_block,
+                    viewport,
+                    positioned_ancestor,
+                ))
+            }
+        }
+    }
+}
+
+fn block_flow_sources(node: &NodeHandle, resolver: &mut StyleResolver) -> Vec<LayoutSource> {
+    let mut sources = Vec::new();
+    if generated_block_pseudo_style(node, resolver, PseudoElement::Before).is_some() {
+        sources.push(LayoutSource::Generated {
+            host: node.clone(),
+            pseudo: PseudoElement::Before,
+        });
+    }
+    sources.extend(
+        node.layout_child_nodes()
+            .into_iter()
+            .map(LayoutSource::Node),
+    );
+    if generated_block_pseudo_style(node, resolver, PseudoElement::After).is_some() {
+        sources.push(LayoutSource::Generated {
+            host: node.clone(),
+            pseudo: PseudoElement::After,
+        });
+    }
+    sources
+}
+
 fn layout_document(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -1554,6 +1656,7 @@ fn layout_document(
 
     Some(LayoutBox {
         node: node.clone(),
+        pseudo: None,
         dimensions,
         visibility: Visibility::Visible,
         overflow: Overflow::Visible,
@@ -1598,6 +1701,9 @@ fn all_whitespace_only(nodes: &[NodeHandle]) -> bool {
 /// Clears `pending` after processing.
 fn flush_pending_inline_nodes(
     pending: &mut Vec<NodeHandle>,
+    generated_owner: &NodeHandle,
+    include_before: bool,
+    include_after: bool,
     resolver: &mut StyleResolver,
     style: &ComputedStyle,
     float_regions: &[FloatRegion],
@@ -1610,7 +1716,7 @@ fn flush_pending_inline_nodes(
     lines: &mut Vec<LineBox>,
     children: &mut Vec<LayoutBox>,
 ) {
-    if pending.is_empty() || all_whitespace_only(pending) {
+    if !include_before && !include_after && (pending.is_empty() || all_whitespace_only(pending)) {
         pending.clear();
         return;
     }
@@ -1638,6 +1744,9 @@ fn flush_pending_inline_nodes(
         viewport,
         positioned_ancestor,
         true,
+        Some(generated_owner),
+        include_before,
+        include_after,
         &line_constraints,
     );
     if let Some(last_line) = inline_lines.last() {
@@ -1699,7 +1808,7 @@ fn apply_clear(
 /// registering the float region. Returns `true` when the child was
 /// consumed (always; provided for control flow clarity).
 fn layout_float_child(
-    child: &NodeHandle,
+    source: &LayoutSource,
     child_style: &ComputedStyle,
     resolver: &mut StyleResolver,
     side: FloatSide,
@@ -1716,7 +1825,7 @@ fn layout_float_child(
         - active_float_offsets(float_regions, child_y, x, width).right)
         .max(0.0);
     let float_width = resolved_length(child_style, "width", available)
-        .unwrap_or_else(|| shrink_to_fit_width(child, resolver, width));
+        .unwrap_or_else(|| shrink_to_fit_width(source.node(), resolver, width));
     let mut float_y = child_y;
     loop {
         let offsets = active_float_offsets(float_regions, float_y, x, width);
@@ -1727,13 +1836,9 @@ fn layout_float_child(
             width: float_available_width.max(float_width),
             height: 0.0,
         };
-        if let Some(mut layout_child) = layout_node(
-            child,
-            resolver,
-            float_containing,
-            viewport,
-            positioned_ancestor,
-        ) {
+        if let Some(mut layout_child) =
+            source.layout(resolver, float_containing, viewport, positioned_ancestor)
+        {
             // Float placement uses the margin box. In particular, a negative
             // margin can make a specified-width float fit beside an earlier
             // float (a common legacy two-column layout technique).
@@ -1776,7 +1881,7 @@ fn layout_float_child(
 
 #[allow(clippy::too_many_arguments)]
 fn layout_vertical_float_child(
-    child: &NodeHandle,
+    source: &LayoutSource,
     child_style: &ComputedStyle,
     resolver: &mut StyleResolver,
     side: FloatSide,
@@ -1809,7 +1914,7 @@ fn layout_vertical_float_child(
             height,
         };
         let Some(mut layout_child) =
-            layout_node(child, resolver, containing, viewport, positioned_ancestor)
+            source.layout(resolver, containing, viewport, positioned_ancestor)
         else {
             return;
         };
@@ -2103,6 +2208,7 @@ fn skipped_content_visibility_box(
     });
     let mut layout = LayoutBox {
         node: node.clone(),
+        pseudo: None,
         dimensions: BoxDimensions {
             content: Rect {
                 x,
@@ -2123,6 +2229,136 @@ fn skipped_content_visibility_box(
         paint_scroll: None,
         multicol: None,
         lines: Vec::new(),
+        children: Vec::new(),
+        marker: None,
+    };
+    apply_relative_offset(&mut layout, style, resolver);
+    layout
+}
+
+fn pseudo_generates_content(style: &ComputedStyle) -> bool {
+    match style.get("content") {
+        None => false,
+        Some(ComputedValue::Keyword(value)) => {
+            !value.eq_ignore_ascii_case("none") && !value.eq_ignore_ascii_case("normal")
+        }
+        Some(_) => true,
+    }
+}
+
+fn generated_inline_pseudo_exists(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    pseudo: PseudoElement,
+) -> bool {
+    resolver
+        .computed_pseudo_style(node, pseudo)
+        .is_some_and(|style| {
+            !is_display_none(&style)
+                && pseudo_generates_content(&style)
+                && !is_out_of_flow_positioned(&style)
+                && float_side(&style) == FloatSide::None
+                && matches!(
+                    style.get("display"),
+                    Some(ComputedValue::Keyword(value))
+                        if value.eq_ignore_ascii_case("inline")
+                            || value.eq_ignore_ascii_case("inline-block")
+                )
+        })
+}
+
+fn generated_pseudo_style(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    pseudo: PseudoElement,
+) -> Option<ComputedStyle> {
+    let style = resolver.computed_pseudo_style(node, pseudo)?;
+    if is_display_none(&style) || !pseudo_generates_content(&style) {
+        return None;
+    }
+    Some(style)
+}
+
+fn generated_block_pseudo_style(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    pseudo: PseudoElement,
+) -> Option<ComputedStyle> {
+    let style = generated_pseudo_style(node, resolver, pseudo)?;
+    (is_out_of_flow_positioned(&style)
+        || float_side(&style) != FloatSide::None
+        || matches!(
+            style.get("display"),
+            Some(ComputedValue::Keyword(value))
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "block" | "flow-root" | "flex" | "grid" | "table" | "list-item"
+                )
+        ))
+    .then_some(style)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_generated_pseudo_box(
+    node: &NodeHandle,
+    pseudo: PseudoElement,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    containing_block: Rect,
+    _viewport: LayoutViewport,
+    _positioned_ancestor: Option<BoxDimensions>,
+) -> LayoutBox {
+    let padding = edge_sizes(style, "padding");
+    let border = edge_sizes(style, "border");
+    let mut margin = edge_sizes(style, "margin");
+    let width = compute_width(
+        node,
+        resolver,
+        style,
+        containing_block.width,
+        padding,
+        border,
+        &mut margin,
+    );
+    let x = containing_block.x + margin.left + border.left + padding.left;
+    let y = containing_block.y + margin.top + border.top + padding.top;
+    let lines = inline::layout_block_pseudo_content(node, resolver, pseudo, style, x, y, width);
+    let cursor_y = lines
+        .last()
+        .map(|line| line.rect.y + line.rect.height)
+        .unwrap_or(y);
+    let content_height = resolve_content_height(
+        node,
+        style,
+        containing_block.height,
+        padding,
+        border,
+        y,
+        cursor_y,
+    );
+    let mut layout = LayoutBox {
+        node: node.clone(),
+        pseudo: Some(pseudo),
+        dimensions: BoxDimensions {
+            content: Rect {
+                x,
+                y,
+                width,
+                height: content_height,
+            },
+            padding,
+            border,
+            margin,
+        },
+        visibility: visibility(style),
+        overflow: overflow(style),
+        z_index: z_index(style),
+        transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
+        paint_scroll: None,
+        multicol: None,
+        lines,
         children: Vec::new(),
         marker: None,
     };
@@ -2329,6 +2565,7 @@ fn layout_element_with_cell(
             });
             let mut layout = LayoutBox {
                 node: node.clone(),
+                pseudo: None,
                 dimensions: BoxDimensions {
                     content: Rect {
                         x,
@@ -2414,6 +2651,7 @@ fn layout_element_with_cell(
             }
             let mut layout = LayoutBox {
                 node: node.clone(),
+                pseudo: None,
                 dimensions,
                 visibility: visibility(&style),
                 overflow: overflow(&style),
@@ -2585,9 +2823,9 @@ fn layout_element_with_cell(
     } else {
         positioned_ancestor
     };
-    for (child, cs, static_position) in positioned_children {
-        if let Some(positioned) = layout_positioned_child(
-            &child,
+    for (source, cs, static_position) in positioned_children {
+        if let Some(positioned) = layout_positioned_source(
+            &source,
             resolver,
             &cs,
             next_pos_ancestor.unwrap_or(BoxDimensions {
@@ -2605,6 +2843,7 @@ fn layout_element_with_cell(
     let marker = build_list_marker(node, &style, x, y);
     let mut layout = LayoutBox {
         node: node.clone(),
+        pseudo: None,
         dimensions,
         visibility: visibility(&style),
         overflow: overflow(&style),
@@ -2627,7 +2866,7 @@ struct BlockChildrenResult {
     lines: Vec<LineBox>,
     cursor_y: f32,
     float_bottom: f32,
-    positioned_children: Vec<(NodeHandle, ComputedStyle, Rect)>,
+    positioned_children: Vec<(LayoutSource, ComputedStyle, Rect)>,
     margin_info: Option<margins::Info>,
     child_shifts: Vec<(usize, f32)>,
     multicol: Option<MultiColumnLayout>,
@@ -2729,6 +2968,9 @@ fn layout_vertical_block_children(
     let mut positioned_children = Vec::new();
     let mut lines = Vec::new();
     let mut pending_inline_nodes = Vec::new();
+    let mut include_inline_before =
+        generated_inline_pseudo_exists(node, resolver, PseudoElement::Before);
+    let include_inline_after = generated_inline_pseudo_exists(node, resolver, PseudoElement::After);
     let mut float_regions = Vec::new();
     let mut cursor_x = if vertical_rl { x + width } else { x };
     let mut inline_bottom = y;
@@ -2745,17 +2987,21 @@ fn layout_vertical_block_children(
         .or_else(|| (containing_height > 0.0).then_some(containing_height))
         .unwrap_or(1_000_000.0);
 
-    for child in node.layout_child_nodes() {
+    for source in block_flow_sources(node, resolver) {
+        let child = source.node().clone();
         if child.node_type() == NodeType::Comment {
             continue;
         }
-        if is_inline_child(&child, resolver) {
+        if matches!(&source, LayoutSource::Node(_)) && is_inline_child(&child, resolver) {
             pending_inline_nodes.push(child);
             continue;
         }
 
         flush_pending_vertical_inline_nodes(
             &mut pending_inline_nodes,
+            node,
+            std::mem::take(&mut include_inline_before),
+            false,
             resolver,
             style,
             &float_regions,
@@ -2772,10 +3018,7 @@ fn layout_vertical_block_children(
             &mut children,
         );
 
-        let child_style = match child.node_type() {
-            NodeType::Element => Some(resolver.computed_style(&child)),
-            _ => None,
-        };
+        let child_style = source.style(resolver);
         let Some(child_style) = child_style else {
             continue;
         };
@@ -2820,7 +3063,7 @@ fn layout_vertical_block_children(
             },
         };
         if is_out_of_flow_positioned(&child_style) {
-            positioned_children.push((child, child_style, child_containing));
+            positioned_children.push((source, child_style, child_containing));
             continue;
         }
 
@@ -2842,7 +3085,7 @@ fn layout_vertical_block_children(
         let side = float_side(&child_style);
         if side != FloatSide::None {
             layout_vertical_float_child(
-                &child,
+                &source,
                 &child_style,
                 resolver,
                 side,
@@ -2859,13 +3102,9 @@ fn layout_vertical_block_children(
             );
             continue;
         }
-        let Some(mut layout_child) = layout_node(
-            &child,
-            resolver,
-            child_containing,
-            viewport,
-            next_pos_ancestor,
-        ) else {
+        let Some(mut layout_child) =
+            source.layout(resolver, child_containing, viewport, next_pos_ancestor)
+        else {
             continue;
         };
 
@@ -2886,6 +3125,9 @@ fn layout_vertical_block_children(
 
     flush_pending_vertical_inline_nodes(
         &mut pending_inline_nodes,
+        node,
+        include_inline_before,
+        include_inline_after,
         resolver,
         style,
         &float_regions,
@@ -2924,6 +3166,9 @@ fn layout_vertical_block_children(
 #[allow(clippy::too_many_arguments)]
 fn flush_pending_vertical_inline_nodes(
     pending: &mut Vec<NodeHandle>,
+    generated_owner: &NodeHandle,
+    include_before: bool,
+    include_after: bool,
     resolver: &mut StyleResolver,
     style: &ComputedStyle,
     float_regions: &[FloatRegion],
@@ -2939,7 +3184,7 @@ fn flush_pending_vertical_inline_nodes(
     inline_bottom: &mut f32,
     children: &mut Vec<LayoutBox>,
 ) {
-    if pending.is_empty() || all_whitespace_only(pending) {
+    if !include_before && !include_after && (pending.is_empty() || all_whitespace_only(pending)) {
         pending.clear();
         return;
     }
@@ -2976,6 +3221,9 @@ fn flush_pending_vertical_inline_nodes(
             width,
             viewport,
             positioned_ancestor,
+            Some(generated_owner),
+            include_before,
+            include_after,
             Some(&column_constraints),
         )
     };
@@ -3832,7 +4080,7 @@ fn auto_width_from_layout(
             .children
             .iter()
             .filter_map(|child| {
-                let style = resolver.computed_style(&child.node);
+                let style = layout_box_style(child, resolver);
                 (!is_out_of_flow_positioned(&style) && !is_inline_child(&child.node, resolver))
                     .then(|| child.total_width())
             })
@@ -4129,6 +4377,66 @@ fn apply_relative_offset(
 
 // ── Positioned child layout ─────────────────────────────────────────────────
 
+fn layout_positioned_source(
+    source: &LayoutSource,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    parent_box: BoxDimensions,
+    containing_block: Rect,
+    viewport: LayoutViewport,
+) -> Option<LayoutBox> {
+    if let LayoutSource::Node(node) = source {
+        return layout_positioned_child(
+            node,
+            resolver,
+            style,
+            parent_box,
+            containing_block,
+            viewport,
+        );
+    }
+
+    let origin = match position_scheme(style) {
+        PositionScheme::Fixed => viewport.fixed.unwrap_or(viewport.rect),
+        PositionScheme::Absolute => parent_box.content,
+        PositionScheme::Static | PositionScheme::Relative | PositionScheme::Sticky => {
+            containing_block
+        }
+    };
+    let (left, right, top, bottom) = positioned_insets(style, origin);
+    let mut layout = source.layout(
+        resolver,
+        Rect {
+            x: origin.x,
+            y: origin.y,
+            width: origin.width,
+            height: origin.height,
+        },
+        viewport,
+        Some(parent_box),
+    )?;
+    let outer_width = layout.total_width();
+    let outer_height = layout.total_height();
+    let outer_x = left.map_or_else(
+        || {
+            right.map_or(containing_block.x, |right| {
+                origin.x + origin.width - outer_width - right
+            })
+        },
+        |left| origin.x + left,
+    );
+    let outer_y = top.map_or_else(
+        || {
+            bottom.map_or(containing_block.y, |bottom| {
+                origin.y + origin.height - outer_height - bottom
+            })
+        },
+        |top| origin.y + top,
+    );
+    translate_layout_box_to_outer(&mut layout, outer_x, outer_y, resolver);
+    Some(layout)
+}
+
 fn layout_positioned_child(
     child: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -4309,7 +4617,7 @@ fn relayout_fixed_descendants(
     viewport: LayoutViewport,
 ) {
     for child in children {
-        let style = resolver.computed_style(&child.node);
+        let style = layout_box_style(child, resolver);
         if position_scheme(&style) == PositionScheme::Fixed {
             let dimensions = child.dimensions;
             // Preserve the already-placed hypothetical position on auto axes.
@@ -4325,8 +4633,9 @@ fn relayout_fixed_descendants(
                 width: child.total_width(),
                 height: child.total_height(),
             };
-            if let Some(resolved) = layout_positioned_child(
-                &child.node,
+            let source = LayoutSource::from_layout_box(child);
+            if let Some(resolved) = layout_positioned_source(
+                &source,
                 resolver,
                 &style,
                 BoxDimensions {
@@ -4378,7 +4687,7 @@ fn translate_layout_box(layout: &mut LayoutBox, dx: f32, dy: f32, resolver: &mut
     if (dx, dy) == (0.0, 0.0) {
         return;
     }
-    let style = resolver.computed_style(&layout.node);
+    let style = layout_box_style(layout, resolver);
     layout.dimensions.content.x += dx;
     layout.dimensions.content.y += dy;
     translate_contents_in_context(
@@ -4413,7 +4722,7 @@ fn translate_inherited_box(
     if (dx, dy) == (0.0, 0.0) {
         return;
     }
-    let style = resolver.computed_style(&layout.node);
+    let style = layout_box_style(layout, resolver);
     let outside = match position_scheme(&style) {
         PositionScheme::Fixed => !fixed_moves,
         PositionScheme::Absolute => !absolute_moves,

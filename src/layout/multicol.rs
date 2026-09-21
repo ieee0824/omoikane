@@ -272,7 +272,7 @@ pub(super) fn layout_multicol_children(
         if atomic_line_by_node.contains_key(&child.node.identity()) {
             continue;
         }
-        let child_style = resolver.computed_style(&child.node);
+        let child_style = layout_box_style(child, resolver);
         let outer_top = child.dimensions.content.y
             - child.dimensions.padding.top
             - child.dimensions.border.top
@@ -603,7 +603,7 @@ fn layout_vertical_multicol_children(
         if atomic_line_by_node.contains_key(&child.node.identity()) {
             continue;
         }
-        let child_style = resolver.computed_style(&child.node);
+        let child_style = layout_box_style(child, resolver);
         let outer_left = child.dimensions.content.x
             - child.dimensions.padding.left
             - child.dimensions.border.left

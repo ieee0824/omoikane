@@ -113,6 +113,9 @@ pub(super) fn layout_inline_nodes(
         positioned_ancestor,
         allow_atomic_boxes,
         None,
+        false,
+        false,
+        None,
     )
 }
 
@@ -131,6 +134,9 @@ pub(super) fn layout_inline_nodes_with_line_constraints(
     viewport: super::LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     allow_atomic_boxes: bool,
+    generated_owner: Option<&NodeHandle>,
+    include_before: bool,
+    include_after: bool,
     line_constraints: &dyn Fn(f32, f32) -> (f32, f32),
 ) -> InlineLayoutResult {
     layout_inline_nodes_impl(
@@ -147,6 +153,9 @@ pub(super) fn layout_inline_nodes_with_line_constraints(
         viewport,
         positioned_ancestor,
         allow_atomic_boxes,
+        generated_owner,
+        include_before,
+        include_after,
         Some(line_constraints),
     )
 }
@@ -166,6 +175,9 @@ fn layout_inline_nodes_impl(
     viewport: super::LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     allow_atomic_boxes: bool,
+    generated_owner: Option<&NodeHandle>,
+    include_before: bool,
+    include_after: bool,
     line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
 ) -> InlineLayoutResult {
     let context = InlineLayoutContext {
@@ -179,8 +191,22 @@ fn layout_inline_nodes_impl(
     };
     let mut segments = Vec::new();
     let mut atomic_boxes = Vec::new();
+    if include_before && let Some(owner) = generated_owner {
+        segments.extend(generated_inline_segments(
+            owner,
+            resolver,
+            PseudoElement::Before,
+        ));
+    }
     for node in nodes {
         collect_inline_segments(node, resolver, &mut segments, context, &mut atomic_boxes);
+    }
+    if include_after && let Some(owner) = generated_owner {
+        segments.extend(generated_inline_segments(
+            owner,
+            resolver,
+            PseudoElement::After,
+        ));
     }
     coalesce_adjacent_text_segments(&mut segments);
     let strut_metrics = nodes
@@ -245,6 +271,9 @@ pub(super) fn layout_vertical_inline_nodes(
     containing_width: f32,
     viewport: super::LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
+    generated_owner: Option<&NodeHandle>,
+    include_before: bool,
+    include_after: bool,
     column_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
 ) -> InlineLayoutResult {
     let context = InlineLayoutContext {
@@ -258,8 +287,22 @@ pub(super) fn layout_vertical_inline_nodes(
     };
     let mut segments = Vec::new();
     let mut atomic_boxes = Vec::new();
+    if include_before && let Some(owner) = generated_owner {
+        segments.extend(generated_inline_segments(
+            owner,
+            resolver,
+            PseudoElement::Before,
+        ));
+    }
     for node in nodes {
         collect_inline_segments(node, resolver, &mut segments, context, &mut atomic_boxes);
+    }
+    if include_after && let Some(owner) = generated_owner {
+        segments.extend(generated_inline_segments(
+            owner,
+            resolver,
+            PseudoElement::After,
+        ));
     }
     coalesce_adjacent_text_segments(&mut segments);
 
@@ -1443,6 +1486,38 @@ pub(super) fn generated_inline_segments(
         }],
         None => Vec::new(),
     }
+}
+
+/// Lays out the generated payload of a block-level pseudo-element inside its
+/// own content box. An empty string creates the block box but no nested inline
+/// fragment; its explicit height, padding, and border are handled by block
+/// layout.
+pub(super) fn layout_block_pseudo_content(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    pseudo: PseudoElement,
+    style: &ComputedStyle,
+    start_x: f32,
+    start_y: f32,
+    available_width: f32,
+) -> Vec<LineBox> {
+    let mut segments = generated_inline_segments(node, resolver, pseudo);
+    segments.retain(|segment| !matches!(segment.content, InlineSegmentContent::GeneratedBox(_)));
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    coalesce_adjacent_text_segments(&mut segments);
+    layout_inline_segments(
+        &segments,
+        start_x,
+        start_y,
+        available_width,
+        text_align(style),
+        line_height(style),
+        Some(font_metrics(style)),
+        super::direction_is_rtl(style),
+        None,
+    )
 }
 
 // ── Generated content ───────────────────────────────────────────────────────

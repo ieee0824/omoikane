@@ -136,7 +136,7 @@ use crate::css::{
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
-use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility};
+use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility, layout_box_style};
 
 // Re-export public types from submodules
 pub use color::Color;
@@ -1691,7 +1691,7 @@ fn hit_test_box(
     if !local_point.0.is_finite() || !local_point.1.is_finite() {
         return None;
     }
-    let style = resolver.computed_style(&layout.node);
+    let style = layout_box_style(layout, resolver);
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
     let clip_shape = clip_path_shape(&style, border_box);
@@ -1751,7 +1751,7 @@ fn hit_test_box(
     let mut auto_positioned = Vec::new();
     let mut positive = Vec::new();
     for child in &layout.children {
-        let child_style = resolver.computed_style(&child.node);
+        let child_style = layout_box_style(child, resolver);
         if is_positioned_for_paint(&child_style) {
             if child.z_index < 0 {
                 negative.push(child);
@@ -1940,7 +1940,7 @@ fn translate_layout_for_scroll(
         ((0.0, 0.0), None)
     };
     layout.paint_scroll = scroll_geometry;
-    let style = resolver.computed_style(&layout.node);
+    let style = layout_box_style(layout, resolver);
     let offset = if is_absolute_for_paint(&style) {
         positioned_offset
     } else {
@@ -2156,7 +2156,7 @@ fn paint_box_internal_untransformed(
         return;
     }
 
-    let style = resolver.computed_style(&layout.node);
+    let style = layout_box_style(layout, resolver);
     let border_box = offset.rect(border_box_rect(layout));
     let padding_box = offset.rect(padding_box_rect(layout));
     let clip_shape = clip_path_shape(&style, border_box);
@@ -2465,7 +2465,7 @@ fn subtree_paint_bounds(layout: &LayoutBox, resolver: &mut StyleResolver) -> Rec
         );
     }
 
-    let style = resolver.computed_style(&layout.node);
+    let style = layout_box_style(layout, resolver);
     let shadow_value = match style.get("box-shadow") {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             Some(value.as_str())
@@ -2987,22 +2987,6 @@ fn paint_box_internal_to(
     } else {
         paint_replaced_image_box(canvas, layout, style, inherited_clip, offset);
     }
-    if !has_paint_containment || paint_containment_clip.is_some() {
-        paint_block_generated_pseudo_box(
-            canvas,
-            layout,
-            resolver,
-            PseudoElement::Before,
-            if has_paint_containment {
-                paint_containment_clip
-            } else {
-                inherited_clip
-            },
-            viewport,
-            offset,
-        );
-    }
-
     border::paint_borders(canvas, layout, style, inherited_clip, offset);
 
     let clip = if has_paint_containment {
@@ -3038,7 +3022,7 @@ fn paint_box_internal_to(
         }) {
             continue;
         }
-        let child_style = resolver.computed_style(&child.node);
+        let child_style = layout_box_style(child, resolver);
         if is_positioned_for_paint(&child_style) {
             if include_phase_descendants {
                 if child.z_index < 0 {
@@ -3114,16 +3098,6 @@ fn paint_box_internal_to(
             canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts, offset,
         );
     }
-
-    paint_block_generated_pseudo_box(
-        canvas,
-        layout,
-        resolver,
-        PseudoElement::After,
-        clip,
-        viewport,
-        offset,
-    );
 }
 
 fn paint_column_rules(
@@ -3265,7 +3239,7 @@ fn collect_phase_descendants<'a>(
         return;
     }
     for child in &layout.children {
-        let child_style = resolver.computed_style(&child.node);
+        let child_style = layout_box_style(child, resolver);
         if is_positioned_for_paint(&child_style) {
             if child.z_index < 0 {
                 negative_positioned_children.push(child);
@@ -3359,80 +3333,6 @@ fn paint_generated_box(
     }
 
     border::paint_rect_borders(canvas, rect, style, border, clip);
-}
-
-fn paint_block_generated_pseudo_box(
-    canvas: &mut Canvas,
-    layout: &LayoutBox,
-    resolver: &mut StyleResolver,
-    pseudo: PseudoElement,
-    clip: Option<Rect>,
-    viewport: Rect,
-    offset: PaintOffset,
-) {
-    let Some(style) = resolver.computed_pseudo_style(&layout.node, pseudo) else {
-        return;
-    };
-    if !matches!(
-        style.get("content"),
-        Some(ComputedValue::String(content)) if content.is_empty()
-    ) {
-        return;
-    }
-    if !matches!(
-        style.get("display"),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("block")
-    ) {
-        return;
-    }
-
-    let border = border::EdgeSizesForPaint::from_style(&style);
-    let padding_left = length_property(&style, "padding-left")
-        .or_else(|| length_property(&style, "padding"))
-        .unwrap_or(0.0);
-    let padding_right = length_property(&style, "padding-right")
-        .or_else(|| length_property(&style, "padding"))
-        .unwrap_or(0.0);
-    let padding_top = length_property(&style, "padding-top")
-        .or_else(|| length_property(&style, "padding"))
-        .unwrap_or(0.0);
-    let padding_bottom = length_property(&style, "padding-bottom")
-        .or_else(|| length_property(&style, "padding"))
-        .unwrap_or(0.0);
-    let content_width = length_property(&style, "width").unwrap_or(
-        (layout.dimensions.content.width
-            - padding_left
-            - padding_right
-            - border.left
-            - border.right)
-            .max(0.0),
-    );
-    let content_height = length_property(&style, "height").unwrap_or(0.0);
-    let total_width = content_width + padding_left + padding_right + border.left + border.right;
-    let total_height = content_height + padding_top + padding_bottom + border.top + border.bottom;
-    if total_width <= 0.0 && total_height <= 0.0 {
-        return;
-    }
-
-    let y = match pseudo {
-        PseudoElement::Before => layout.dimensions.content.y,
-        PseudoElement::After => {
-            layout.dimensions.content.y + layout.dimensions.content.height - total_height
-        }
-        PseudoElement::Backdrop => return,
-    };
-    paint_generated_box(
-        canvas,
-        Rect {
-            x: layout.dimensions.content.x + offset.x,
-            y: y + offset.y,
-            width: total_width,
-            height: total_height,
-        },
-        &style,
-        clip,
-        viewport,
-    );
 }
 
 fn border_box_rect(layout: &LayoutBox) -> Rect {
