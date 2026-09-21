@@ -6,6 +6,7 @@ FROM rust:1-bookworm
 
 # aws-lc-sys（rustls 0.23 の依存）のビルドに cmake が必須。
 # build-essential / pkg-config は rusqlite（bundled SQLite）などのネイティブビルドに使う。
+# lld はLinux上のRust test/releaseリンクを短縮する。Cargoのtarget別RUSTFLAGSは後段で設定する。
 # build-essential / pkg-config / git / curl / ca-certificates / gpg / openssh-client は
 # rust:1-bookworm（buildpack-deps ベース）に既に含まれるが、ベースイメージの変化に備えて明示的に指定する。
 # openssh-client は SSH 鍵の生成・利用（ssh-keygen / ssh。README の SSH 鍵運用参照）に使う。
@@ -17,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         pkg-config \
         build-essential \
+        lld \
         git \
         curl \
         ca-certificates \
@@ -78,6 +80,12 @@ RUN rustup component add clippy rustfmt
 
 # ビルド成果物はホストの target/ と分離した専用の場所に出力する。
 ENV CARGO_TARGET_DIR=/target
+
+# Linux x86_64/aarch64の開発ビルドだけlldを使う。target別に設定し、将来この
+# コンテナから別targetへcross compileする場合のリンカー選択には影響させない。
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=lld" \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+
 RUN mkdir -p /target && chown ${USER_UID}:${USER_GID} /target
 
 # cargo の crates.io インデックス / crate ソース / git 依存キャッシュを named volume に
