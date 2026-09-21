@@ -426,6 +426,7 @@ pub(super) fn layout_flex_container(
     };
     let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
         super::resolve_content_height(
+            node,
             &style,
             containing_height,
             padding,
@@ -468,6 +469,7 @@ pub(super) fn layout_flex_container(
         z_index: z_index(&style),
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
         paint_scroll: None,
         multicol: None,
         lines: Vec::new(),

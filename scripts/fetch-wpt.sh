@@ -130,6 +130,17 @@ git_wpt sparse-checkout add "/visual-viewport/"
 git_wpt sparse-checkout add "/web-locks/"
 git_wpt sparse-checkout add "/css/css-multicol/parsing/" "/css/support/shorthand-testcommon.js"
 git_wpt sparse-checkout add \
+  "/css/css-contain/content-visibility/parsing/" \
+  "/css/css-contain/content-visibility/content-visibility-hidden-boundingbox-query.html" \
+  "/css/css-contain/content-visibility/content-visibility-auto-relevancy-updates.html" \
+  "/css/css-contain/content-visibility/content-visibility-050.html" \
+  "/css/css-contain/content-visibility/content-visibility-forced-layout-client-rects.html" \
+  "/css/css-contain/content-visibility/content-visibility-hidden-offsetTop-left-width-height.html" \
+  "/css/css-contain/content-visibility/content-visibility-hidden-scrollTop-left-width-height.html" \
+  "/css/css-contain/content-visibility/content-visibility-size-containment-001.html" \
+  "/common/rendering-utils.js" \
+  "/css/css-sizing/contain-intrinsic-size/parsing/"
+git_wpt sparse-checkout add \
   "/storage/storagemanager-estimate.https.any.js" \
   "/storage/storagemanager-persisted.https.any.js" \
   "/storage/storagemanager-persist.https.window.js" \

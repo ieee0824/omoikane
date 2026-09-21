@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Content visibility rendering states</title>
+<style>
+  html, body { margin: 0; background: white; }
+  body { position: relative; width: 420px; height: 280px; }
+  .card {
+    position: absolute;
+    width: 150px;
+    border: 4px solid #202020;
+  }
+  .payload { height: 60px; }
+  #visible { left: 24px; top: 24px; background: #f0c040; }
+  #visible .payload { background: #2878d0; }
+  #hidden {
+    left: 210px;
+    top: 24px;
+    content-visibility: hidden;
+    contain-intrinsic-size: 60px;
+    background: #30a050;
+  }
+  #hidden .payload { background: #d03030; }
+  #hidden::before { content: ""; display: block; height: 60px; background: #d03030; }
+  #automatic {
+    left: 24px;
+    top: 140px;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 50px;
+    background: #e07828;
+  }
+  #automatic .payload { height: 50px; background: #7040c0; }
+</style>
+<section id="visible" class="card" data-probe><div class="payload" data-probe></div></section>
+<section id="hidden" class="card" data-probe><div class="payload"></div></section>
+<section id="automatic" class="card" data-probe><div class="payload" data-probe></div></section>

@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::css::{
@@ -59,6 +60,52 @@ thread_local! {
     static LAYOUT_FONTS: RefCell<Option<LayoutFontContext>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
+    static CONTENT_VISIBILITY_LAYOUT: RefCell<Option<ContentVisibilityLayoutSession>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone)]
+struct ContentVisibilityLayoutSession {
+    input: ContentVisibilityLayoutInput,
+    report: Rc<RefCell<ContentVisibilityLayoutReport>>,
+}
+
+/// Runtime inputs needed to decide whether `content-visibility: auto` is close
+/// enough to the viewport to lay out its contents.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ContentVisibilityLayoutInput {
+    pub(crate) visible_rect: Rect,
+    pub(crate) forced_nodes: HashSet<usize>,
+    pub(crate) relevant_nodes: HashSet<usize>,
+    pub(crate) remembered_sizes: HashMap<usize, (f32, f32)>,
+}
+
+/// Observable results of one content-visibility-aware layout pass.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ContentVisibilityLayoutReport {
+    pub(crate) auto_nodes: HashSet<usize>,
+    pub(crate) skipped_nodes: HashSet<usize>,
+    pub(crate) visited_nodes: HashSet<usize>,
+    pub(crate) auto_intrinsic_nodes: HashSet<usize>,
+    pub(crate) remembered_sizes: HashMap<usize, (f32, f32)>,
+}
+
+struct ContentVisibilityLayoutScope {
+    previous: Option<ContentVisibilityLayoutSession>,
+}
+
+impl ContentVisibilityLayoutScope {
+    fn new(session: ContentVisibilityLayoutSession) -> Self {
+        let previous = CONTENT_VISIBILITY_LAYOUT.with(|current| current.replace(Some(session)));
+        Self { previous }
+    }
+}
+
+impl Drop for ContentVisibilityLayoutScope {
+    fn drop(&mut self) {
+        CONTENT_VISIBILITY_LAYOUT.with(|current| {
+            current.replace(self.previous.take());
+        });
+    }
 }
 
 /// Runs image resolution at a deterministic frame-scheduler timestamp.
@@ -811,6 +858,10 @@ pub struct LayoutBox {
     /// Whether this subtree can need paint-time scroll/sticky translation even
     /// when all currently stored scroll offsets are zero.
     pub(crate) needs_scroll_translation: bool,
+    /// Whether this box's contents are skipped by `content-visibility` for the
+    /// current layout pass. Geometry queries can force descendants into the
+    /// layout tree without making those descendants paintable.
+    pub(crate) content_visibility_contents_skipped: bool,
     /// Pre-translation scroll geometry consumed by paint-only features such as
     /// `background-attachment: local`. Kept separate from CSSOM layout data.
     pub(crate) paint_scroll: Option<PaintScrollGeometry>,
@@ -1022,14 +1073,42 @@ pub fn layout_tree(
     resolver: &mut StyleResolver,
     containing_block: Rect,
 ) -> Option<LayoutBox> {
+    layout_tree_with_content_visibility(
+        node,
+        resolver,
+        containing_block,
+        ContentVisibilityLayoutInput {
+            visible_rect: containing_block,
+            ..ContentVisibilityLayoutInput::default()
+        },
+    )
+    .0
+}
+
+/// Lays out a tree while tracking content-visibility decisions for the runtime.
+pub(crate) fn layout_tree_with_content_visibility(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    containing_block: Rect,
+    input: ContentVisibilityLayoutInput,
+) -> (Option<LayoutBox>, ContentVisibilityLayoutReport) {
+    let report = Rc::new(RefCell::new(ContentVisibilityLayoutReport::default()));
+    let scope = ContentVisibilityLayoutScope::new(ContentVisibilityLayoutSession {
+        input,
+        report: report.clone(),
+    });
     let _margin_scope = margins::Scope::new();
-    let mut layout = layout_node(
+    let Some(mut layout) = layout_node(
         node,
         resolver,
         containing_block,
         LayoutViewport::new(containing_block),
         None,
-    )?;
+    ) else {
+        drop(scope);
+        let snapshot = report.borrow().clone();
+        return (None, snapshot);
+    };
     if resolver.has_container_queries() {
         for _ in 0..4 {
             let mut contexts = HashMap::new();
@@ -1037,22 +1116,76 @@ pub fn layout_tree(
             if !resolver.set_container_contexts(contexts) {
                 break;
             }
-            layout = layout_node(
+            *report.borrow_mut() = ContentVisibilityLayoutReport::default();
+            let Some(next_layout) = layout_node(
                 node,
                 resolver,
                 containing_block,
                 LayoutViewport::new(containing_block),
                 None,
-            )?;
+            ) else {
+                drop(scope);
+                let snapshot = report.borrow().clone();
+                return (None, snapshot);
+            };
+            layout = next_layout;
         }
     }
+    mark_content_visibility_skipped(&mut layout, &report.borrow().skipped_nodes);
     populate_layout_transforms(
         &mut layout,
         resolver,
         resolver.root_font_size(),
         AffineTransform::identity(),
     );
-    Some(layout)
+    collect_content_visibility_remembered_sizes(&layout, &report, resolver, false);
+    drop(scope);
+    let report = report.borrow().clone();
+    (Some(layout), report)
+}
+
+fn mark_content_visibility_skipped(layout: &mut LayoutBox, skipped_nodes: &HashSet<usize>) {
+    layout.content_visibility_contents_skipped = skipped_nodes.contains(&layout.node.identity());
+    for child in &mut layout.children {
+        mark_content_visibility_skipped(child, skipped_nodes);
+    }
+}
+
+fn collect_content_visibility_remembered_sizes(
+    layout: &LayoutBox,
+    report: &Rc<RefCell<ContentVisibilityLayoutReport>>,
+    resolver: &mut StyleResolver,
+    ancestor_skipped: bool,
+) {
+    let node_id = layout.node.identity();
+    let style = resolver.computed_style(&layout.node);
+    let has_auto_intrinsic_size = ["contain-intrinsic-width", "contain-intrinsic-height"]
+        .iter()
+        .any(|property| {
+            matches!(style.get(property), Some(ComputedValue::Keyword(value))
+                if value.eq_ignore_ascii_case("auto")
+                    || value.to_ascii_lowercase().starts_with("auto "))
+        });
+    let skipped = ancestor_skipped || report.borrow().skipped_nodes.contains(&node_id);
+    {
+        let mut report = report.borrow_mut();
+        report.visited_nodes.insert(node_id);
+        if has_auto_intrinsic_size {
+            report.auto_intrinsic_nodes.insert(node_id);
+        }
+    }
+    if has_auto_intrinsic_size && !skipped && !has_containment(&style, "size") {
+        report.borrow_mut().remembered_sizes.insert(
+            node_id,
+            (
+                layout.dimensions.content.width.max(0.0),
+                layout.dimensions.content.height.max(0.0),
+            ),
+        );
+    }
+    for child in &layout.children {
+        collect_content_visibility_remembered_sizes(child, report, resolver, skipped);
+    }
 }
 
 fn populate_layout_transforms(
@@ -1124,6 +1257,16 @@ fn computed_keyword<'a>(style: &'a ComputedStyle, property: &str) -> Option<&'a 
 
 /// Whether `contain` activates one of the core containment axes.
 pub(crate) fn has_containment(style: &ComputedStyle, keyword: &str) -> bool {
+    let implied_by_content_visibility = match content_visibility_mode(style) {
+        ContentVisibilityMode::Hidden => {
+            matches!(keyword, "layout" | "style" | "paint" | "size")
+        }
+        ContentVisibilityMode::Auto => matches!(keyword, "layout" | "style" | "paint"),
+        ContentVisibilityMode::Visible => false,
+    };
+    if implied_by_content_visibility {
+        return true;
+    }
     let Some(value) = computed_keyword(style, "contain") else {
         return false;
     };
@@ -1396,6 +1539,7 @@ fn layout_document(
         z_index: 0,
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
         paint_scroll: None,
         multicol: None,
         lines: Vec::new(),
@@ -1673,6 +1817,202 @@ fn layout_element(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentVisibilityMode {
+    Visible,
+    Auto,
+    Hidden,
+}
+
+fn content_visibility_mode(style: &ComputedStyle) -> ContentVisibilityMode {
+    match style.get("content-visibility") {
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto") => {
+            ContentVisibilityMode::Auto
+        }
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("hidden") => {
+            ContentVisibilityMode::Hidden
+        }
+        _ => ContentVisibilityMode::Visible,
+    }
+}
+
+fn content_visibility_layout_is_skipped(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    content_rect: Rect,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+) -> bool {
+    let mode = content_visibility_mode(style);
+    if mode == ContentVisibilityMode::Visible {
+        return false;
+    }
+    CONTENT_VISIBILITY_LAYOUT.with(|current| {
+        let current = current.borrow();
+        let Some(session) = current.as_ref() else {
+            return mode == ContentVisibilityMode::Hidden;
+        };
+        let node_id = node.identity();
+        if mode == ContentVisibilityMode::Auto {
+            session.report.borrow_mut().auto_nodes.insert(node_id);
+        }
+        let relevant =
+            mode == ContentVisibilityMode::Auto && session.input.relevant_nodes.contains(&node_id);
+        let semantic_skip = match mode {
+            ContentVisibilityMode::Visible => false,
+            ContentVisibilityMode::Hidden => true,
+            ContentVisibilityMode::Auto => {
+                !relevant
+                    && !content_visibility_box_is_close(
+                        content_rect,
+                        padding,
+                        border,
+                        session.input.visible_rect,
+                    )
+            }
+        };
+        if semantic_skip {
+            session.report.borrow_mut().skipped_nodes.insert(node_id);
+        }
+        semantic_skip && !session.input.forced_nodes.contains(&node_id)
+    })
+}
+
+fn content_visibility_box_is_close(
+    content_rect: Rect,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    visible_rect: Rect,
+) -> bool {
+    let box_rect = Rect {
+        x: content_rect.x - padding.left - border.left,
+        y: content_rect.y - padding.top - border.top,
+        width: content_rect.width + padding.horizontal() + border.horizontal(),
+        height: content_rect.height + padding.vertical() + border.vertical(),
+    };
+    // CSS Containment recommends a user-agent margin of 50% of the viewport.
+    let proximity = Rect {
+        x: visible_rect.x - visible_rect.width * 0.5,
+        y: visible_rect.y - visible_rect.height * 0.5,
+        width: visible_rect.width * 2.0,
+        height: visible_rect.height * 2.0,
+    };
+    box_rect.x <= proximity.x + proximity.width
+        && box_rect.x + box_rect.width >= proximity.x
+        && box_rect.y <= proximity.y + proximity.height
+        && box_rect.y + box_rect.height >= proximity.y
+}
+
+fn contain_intrinsic_axis_size(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    property: &str,
+    remembered_axis: usize,
+) -> f32 {
+    let mut use_remembered = false;
+    let fallback = match style.get(property) {
+        Some(ComputedValue::Px(value)) => Some(*value),
+        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
+        Some(ComputedValue::CalcPxPercent(px, percentage)) if *percentage == 0.0 => Some(*px),
+        Some(ComputedValue::Keyword(value)) => {
+            let value = value.trim().to_ascii_lowercase();
+            if let Some(fallback) = value.strip_prefix("auto ") {
+                use_remembered = true;
+                if fallback == "none" {
+                    None
+                } else {
+                    fallback
+                        .strip_suffix("px")
+                        .and_then(|value| value.trim().parse::<f32>().ok())
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+    .filter(|value| value.is_finite() && *value >= 0.0);
+
+    if use_remembered
+        && let Some(size) = CONTENT_VISIBILITY_LAYOUT.with(|current| {
+            current.borrow().as_ref().and_then(|session| {
+                session
+                    .input
+                    .remembered_sizes
+                    .get(&node.identity())
+                    .copied()
+            })
+        })
+    {
+        return if remembered_axis == 0 { size.0 } else { size.1 };
+    }
+    fallback.unwrap_or(0.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn skipped_content_visibility_box(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    containing_height: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    used_height: Option<UsedHeight>,
+    resolver: &mut StyleResolver,
+) -> LayoutBox {
+    let width = if resolved_length(style, "width", width).is_none()
+        && (matches!(computed_keyword(style, "display"), Some(value)
+            if value.eq_ignore_ascii_case("inline-block"))
+            || float_side(style) != FloatSide::None)
+    {
+        contain_intrinsic_axis_size(node, style, "contain-intrinsic-width", 0)
+    } else {
+        width
+    };
+    let placeholder = contain_intrinsic_axis_size(node, style, "contain-intrinsic-height", 1);
+    let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
+        let explicit = resolved_length(style, "height", containing_height)
+            .map(|height| border_box_adjust_height(style, height, &padding, &border));
+        clamp_content_height(
+            style,
+            explicit.unwrap_or(placeholder),
+            containing_height,
+            padding,
+            border,
+        )
+    });
+    let mut layout = LayoutBox {
+        node: node.clone(),
+        dimensions: BoxDimensions {
+            content: Rect {
+                x,
+                y,
+                width,
+                height: content_height,
+            },
+            padding,
+            border,
+            margin,
+        },
+        visibility: visibility(style),
+        overflow: overflow(style),
+        z_index: z_index(style),
+        transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
+        paint_scroll: None,
+        multicol: None,
+        lines: Vec::new(),
+        children: Vec::new(),
+        marker: None,
+    };
+    apply_relative_offset(&mut layout, style, resolver);
+    layout
+}
+
 // Table tracks assign the cell's border-box width, independently of its width
 // hint. Collapsed borders contribute half of the shared edge to that box.
 fn layout_element_with_cell(
@@ -1751,6 +2091,7 @@ fn layout_element_with_cell(
                     width,
                     height: used_height.map(|height| height.value).unwrap_or_else(|| {
                         resolve_content_height(
+                            node,
                             &style,
                             containing_block.height,
                             padding,
@@ -1768,6 +2109,31 @@ fn layout_element_with_cell(
     } else {
         viewport
     };
+
+    if content_visibility_mode(&style) != ContentVisibilityMode::Visible {
+        let skipped = skipped_content_visibility_box(
+            node,
+            &style,
+            containing_block.height,
+            x,
+            y,
+            width,
+            padding,
+            border,
+            margin,
+            used_height,
+            resolver,
+        );
+        if content_visibility_layout_is_skipped(
+            node,
+            &style,
+            skipped.dimensions.content,
+            padding,
+            border,
+        ) {
+            return Some(skipped);
+        }
+    }
 
     // Replaced elements that participate as block or flex/grid items still
     // paint their image payload. Previously only inline formatting collected
@@ -1835,6 +2201,7 @@ fn layout_element_with_cell(
                 .unwrap_or(y);
             let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
                 resolve_content_height(
+                    node,
                     &style,
                     containing_block.height,
                     padding,
@@ -1861,6 +2228,7 @@ fn layout_element_with_cell(
                 z_index: z_index(&style),
                 transform: AffineTransform::identity(),
                 needs_scroll_translation: false,
+                content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 multicol: None,
                 lines,
@@ -1900,6 +2268,7 @@ fn layout_element_with_cell(
                     .max(0.0);
             let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
                 resolve_content_height(
+                    node,
                     &style,
                     containing_block.height,
                     padding,
@@ -1934,6 +2303,7 @@ fn layout_element_with_cell(
                 z_index: z_index(&style),
                 transform: AffineTransform::identity(),
                 needs_scroll_translation: false,
+                content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 multicol: None,
                 lines,
@@ -2067,6 +2437,7 @@ fn layout_element_with_cell(
     let effective_cursor_y = cursor_y.max(float_bottom) + margin_delta;
     let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
         resolve_content_height(
+            node,
             &style,
             containing_block.height,
             padding,
@@ -2123,6 +2494,7 @@ fn layout_element_with_cell(
         z_index: z_index(&style),
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
         paint_scroll: None,
         multicol,
         lines,
@@ -2446,6 +2818,7 @@ fn flush_pending_vertical_inline_nodes(
 ///
 /// `cursor_y` is the bottom edge of all content (including floats).
 fn resolve_content_height(
+    node: &NodeHandle,
     style: &ComputedStyle,
     containing_height: f32,
     padding: EdgeSizes,
@@ -2456,7 +2829,7 @@ fn resolve_content_height(
     let border_box = is_border_box(style);
     let pb_vertical = padding.vertical() + border.vertical();
     let auto_height = if has_block_size_containment(style) {
-        0.0
+        contain_intrinsic_axis_size(node, style, "contain-intrinsic-height", 1)
     } else {
         (cursor_y - y).max(0.0)
     };
@@ -3187,7 +3560,10 @@ fn minimum_content_width_inner(
                 } else {
                     edge_sizes(&style, "margin").horizontal()
                 };
-                return padding.horizontal() + border.horizontal() + margin;
+                return contain_intrinsic_axis_size(node, &style, "contain-intrinsic-width", 0)
+                    + padding.horizontal()
+                    + border.horizontal()
+                    + margin;
             }
             // For images, use rendered size.
             if let Some((image_node, image)) = element_inline_image(node) {
@@ -3253,7 +3629,10 @@ fn intrinsic_width_inner(
                 } else {
                     edge_sizes(&style, "margin").horizontal()
                 };
-                return padding.horizontal() + border.horizontal() + margin;
+                return contain_intrinsic_axis_size(node, &style, "contain-intrinsic-width", 0)
+                    + padding.horizontal()
+                    + border.horizontal()
+                    + margin;
             }
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);

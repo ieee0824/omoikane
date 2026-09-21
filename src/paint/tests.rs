@@ -491,6 +491,70 @@ fn paint_containment_skips_before_pseudo_outside_ancestor_clip() {
 }
 
 #[test]
+fn skipped_content_visibility_paints_principal_box_but_not_forced_contents() {
+    for mode in ["hidden", "auto"] {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let skipped = NodeHandle::element("div");
+        skipped.set_attribute("id", "skipped");
+        let child = NodeHandle::element("span");
+        child.set_attribute("id", "child");
+        document.append_child(body.clone());
+        body.append_child(skipped.clone());
+        skipped.append_child(child);
+        let stylesheet = format!(
+            "body {{ margin: 0; }} \
+             #skipped {{ content-visibility: {mode}; width: 20px; height: 20px; \
+                         background: red; border: 1px solid black; }} \
+             #skipped::before {{ display: block; content: ''; width: 20px; height: 20px; background: green; }} \
+             #child {{ display: block; width: 10px; height: 10px; background: blue; }}"
+        );
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 30.0,
+            height: 30.0,
+        };
+        let (layout, report) = crate::layout::layout_tree_with_content_visibility(
+            &document,
+            &mut resolver,
+            viewport,
+            crate::layout::ContentVisibilityLayoutInput {
+                visible_rect: if mode == "auto" {
+                    Rect {
+                        y: 1000.0,
+                        ..viewport
+                    }
+                } else {
+                    viewport
+                },
+                forced_nodes: std::collections::HashSet::from([skipped.identity()]),
+                ..crate::layout::ContentVisibilityLayoutInput::default()
+            },
+        );
+        assert!(report.skipped_nodes.contains(&skipped.identity()));
+        let layout = layout.unwrap();
+        let skipped_layout = layout
+            .children
+            .iter()
+            .flat_map(|body| &body.children)
+            .find(|child| child.node == skipped)
+            .expect("forced skipped box");
+        assert!(skipped_layout.content_visibility_contents_skipped);
+        assert!(
+            !skipped_layout.children.is_empty(),
+            "forced contents for {mode}"
+        );
+        let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+        assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 0, 0)), "{mode}");
+        assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)), "{mode}");
+    }
+}
+
+#[test]
 fn skips_hidden_boxes() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -1407,6 +1471,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
         paint_scroll: None,
         multicol: None,
         lines: Vec::new(),
@@ -1427,6 +1492,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 multicol: None,
                 lines: Vec::new(),
@@ -1449,6 +1515,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 multicol: None,
                 lines: vec![LineBox {
@@ -1577,6 +1644,7 @@ fn float_grandchild_paints_above_block_uncle() {
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
         paint_scroll: None,
         multicol: None,
         lines: Vec::new(),
@@ -1597,6 +1665,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 multicol: None,
                 lines: Vec::new(),
@@ -1616,6 +1685,7 @@ fn float_grandchild_paints_above_block_uncle() {
                     z_index: 0,
                     transform: crate::css::AffineTransform::identity(),
                     needs_scroll_translation: false,
+                    content_visibility_contents_skipped: false,
                     paint_scroll: None,
                     multicol: None,
                     lines: Vec::new(),
@@ -1640,6 +1710,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 multicol: None,
                 lines: Vec::new(),
@@ -10080,6 +10151,7 @@ fn form_control_label_uses_web_font_variant() {
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
         paint_scroll: None,
         multicol: None,
         lines: vec![LineBox {
@@ -10196,6 +10268,7 @@ fn focused_text_control_paints_selection_and_caret() {
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        content_visibility_contents_skipped: false,
         paint_scroll: None,
         multicol: None,
         lines: vec![LineBox {

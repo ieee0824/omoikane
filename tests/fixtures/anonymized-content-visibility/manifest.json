@@ -1,0 +1,16 @@
+[
+  {
+    "name": "anonymized-content-visibility-states",
+    "path": "states.html",
+    "width": 500,
+    "height": 280,
+    "fixture_sha256": "5f115eba7fd748bfbcb41b03cea7ad3f0fdcdd68ba7b6802dd06becfae6ad831"
+  },
+  {
+    "name": "anonymized-content-visibility-auto-scroll",
+    "path": "auto-scroll.html",
+    "width": 500,
+    "height": 240,
+    "fixture_sha256": "0c4e9f0e6ef8813e84acbcc3f1a1338ba21bd40f0865e869d16f6586a60bf37d"
+  }
+]

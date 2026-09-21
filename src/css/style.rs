@@ -1802,6 +1802,8 @@ fn logical_box_property_physical_name(name: &str) -> Option<&'static str> {
         "margin-inline-end" => Some("margin-right"),
         "margin-block-start" => Some("margin-top"),
         "margin-block-end" => Some("margin-bottom"),
+        "contain-intrinsic-inline-size" => Some("contain-intrinsic-width"),
+        "contain-intrinsic-block-size" => Some("contain-intrinsic-height"),
         _ => None,
     }
 }
@@ -2076,6 +2078,31 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if let Some(validation) = validate_multicol_declaration(name, value) {
         return validation;
+    }
+    if name.eq_ignore_ascii_case("content-visibility") {
+        return match value {
+            Value::Keyword(keyword) => {
+                let keyword = keyword.to_ascii_lowercase();
+                if is_css_wide_keyword(&keyword)
+                    || matches!(keyword.as_str(), "visible" | "auto" | "hidden")
+                {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(keyword))
+                } else {
+                    DeclarationValidation::Invalid
+                }
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "contain-intrinsic-size"
+            | "contain-intrinsic-width"
+            | "contain-intrinsic-height"
+            | "contain-intrinsic-inline-size"
+            | "contain-intrinsic-block-size"
+    ) {
+        return validate_contain_intrinsic_size(value);
     }
     if name.eq_ignore_ascii_case("text-decoration-thickness") {
         return validate_text_decoration_thickness(value);
@@ -2727,6 +2754,47 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn validate_contain_intrinsic_size(value: &Value) -> DeclarationValidation {
+    if let Value::Keyword(keyword) = value
+        && is_css_wide_keyword(&keyword.to_ascii_lowercase())
+    {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()));
+    }
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let valid_fallback = |value: &Value| match value {
+        Value::Keyword(keyword) => keyword.eq_ignore_ascii_case("none"),
+        Value::Length(number, unit) => {
+            number.is_finite()
+                && *number >= 0.0
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some()
+        }
+        Value::Number(number) => *number == 0.0,
+        Value::Function { name, .. } => {
+            (name.eq_ignore_ascii_case("calc") || name.eq_ignore_ascii_case("clamp"))
+                && matches!(
+                    compute_value(value, "width", ResolutionContext::default()),
+                    ComputedValue::Px(number) if number.is_finite() && number >= 0.0
+                )
+        }
+        _ => false,
+    };
+    let valid = match values {
+        [fallback] => valid_fallback(fallback),
+        [Value::Keyword(auto), fallback] if auto.eq_ignore_ascii_case("auto") => {
+            valid_fallback(fallback)
+        }
+        _ => false,
+    };
+    if valid {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    }
 }
 
 fn validate_text_underline_position(value: &Value) -> DeclarationValidation {
@@ -5218,6 +5286,12 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "-webkit-clip-path",
     "color",
     "contain",
+    "contain-intrinsic-block-size",
+    "contain-intrinsic-height",
+    "contain-intrinsic-inline-size",
+    "contain-intrinsic-size",
+    "contain-intrinsic-width",
+    "content-visibility",
     "container-name",
     "container-type",
     "column-count",
@@ -5397,6 +5471,7 @@ fn is_shorthand_or_legacy_alias(name: &str) -> bool {
             | "grid-column-gap"
             | "columns"
             | "column-rule"
+            | "contain-intrinsic-size"
             | "grid-template"
             | "grid-area"
             | "grid-column"
@@ -5583,6 +5658,9 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
     if property_name.eq_ignore_ascii_case("aspect-ratio") {
         return ComputedValue::Keyword(render_aspect_ratio_value(value, ctx));
     }
+    if property_name.starts_with("contain-intrinsic-") {
+        return compute_contain_intrinsic_value(value, ctx);
+    }
     if property_name.eq_ignore_ascii_case("grid-template-areas") {
         return ComputedValue::Keyword(render_grid_template_areas(value));
     }
@@ -5711,6 +5789,28 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             ComputedValue::Keyword(rendered)
         }
         Value::CommaList(_) => ComputedValue::Keyword(render_value(value)),
+    }
+}
+
+fn compute_contain_intrinsic_value(value: &Value, ctx: ResolutionContext) -> ComputedValue {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let compute_fallback = |value: &Value| match value {
+        Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") => {
+            ComputedValue::Keyword("none".to_string())
+        }
+        Value::Number(number) if *number == 0.0 => ComputedValue::Px(0.0),
+        _ => compute_value(value, "width", ctx),
+    };
+    match values {
+        [fallback] => compute_fallback(fallback),
+        [Value::Keyword(auto), fallback] if auto.eq_ignore_ascii_case("auto") => {
+            let fallback = compute_fallback(fallback);
+            ComputedValue::Keyword(format!("auto {}", computed_value_css_text(&fallback)))
+        }
+        _ => ComputedValue::Keyword("none".to_string()),
     }
 }
 
@@ -7334,6 +7434,35 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("contain".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("content-visibility".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("visible".to_string()));
+    for property in [
+        "contain-intrinsic-width",
+        "contain-intrinsic-height",
+        "contain-intrinsic-inline-size",
+        "contain-intrinsic-block-size",
+    ] {
+        properties
+            .entry(property.to_string())
+            .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    }
+    let intrinsic_width = properties
+        .get("contain-intrinsic-width")
+        .map(computed_value_css_text)
+        .unwrap_or_else(|| "none".to_string());
+    let intrinsic_height = properties
+        .get("contain-intrinsic-height")
+        .map(computed_value_css_text)
+        .unwrap_or_else(|| "none".to_string());
+    properties.insert(
+        "contain-intrinsic-size".to_string(),
+        ComputedValue::Keyword(if intrinsic_width == intrinsic_height {
+            intrinsic_width
+        } else {
+            format!("{intrinsic_width} {intrinsic_height}")
+        }),
+    );
     properties
         .entry("container-name".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));

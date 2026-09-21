@@ -2958,6 +2958,15 @@ fn paint_box_internal_to(
         viewport,
         offset,
     );
+    if layout.content_visibility_contents_skipped {
+        // The principal box remains visible, but replaced content, generated
+        // boxes, line fragments and descendants are all skipped. Geometry
+        // queries may have forced those descendants into the layout tree, so
+        // paint suppression must be explicit rather than inferred from an
+        // empty child list.
+        border::paint_borders(canvas, layout, style, inherited_clip, offset);
+        return;
+    }
     if has_paint_containment {
         if paint_containment_clip.is_some() {
             paint_replaced_image_box(canvas, layout, style, paint_containment_clip, offset);

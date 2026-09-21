@@ -48,6 +48,26 @@
     { "path": "css/css-text-decor/text-underline-offset-invalid.html" },
     { "path": "css/css-text-decor/text-underline-offset-computed.html" },
     { "path": "css/css-text-decor/text-underline-offset-initial.html" },
+    { "path": "css/css-contain/content-visibility/parsing/content-visibility-valid.html" },
+    { "path": "css/css-contain/content-visibility/parsing/content-visibility-invalid.html" },
+    { "path": "css/css-contain/content-visibility/parsing/content-visibility-computed.html" },
+    { "path": "css/css-sizing/contain-intrinsic-size/parsing/contain-intrinsic-size-valid.html" },
+    { "path": "css/css-sizing/contain-intrinsic-size/parsing/contain-intrinsic-size-invalid.html" },
+    { "path": "css/css-sizing/contain-intrinsic-size/parsing/contain-intrinsic-size-computed.html" },
+    { "path": "css/css-contain/content-visibility/content-visibility-hidden-boundingbox-query.html", "known_failure": {
+      "status": "FAIL",
+      "reason": "UA stylesheet body margin is missing; an explicit 8px body margin passes the content-visibility containing-block assertion",
+      "issue": "#797",
+      "failed_subtests": [
+        "content-visibility hidden content returns uptodate geometry with sibling content requiring layout"
+      ]
+    } },
+    { "path": "css/css-contain/content-visibility/content-visibility-auto-relevancy-updates.html" },
+    { "path": "css/css-contain/content-visibility/content-visibility-050.html" },
+    { "path": "css/css-contain/content-visibility/content-visibility-forced-layout-client-rects.html" },
+    { "path": "css/css-contain/content-visibility/content-visibility-hidden-offsetTop-left-width-height.html" },
+    { "path": "css/css-contain/content-visibility/content-visibility-hidden-scrollTop-left-width-height.html" },
+    { "path": "css/css-contain/content-visibility/content-visibility-size-containment-001.html" },
     { "path": "css/css-cascade/layer-rules-cssom.html" },
     { "path": "css/css-cascade/parsing/layer.html" },
     { "path": "css/css-cascade/parsing/all-valid.html" },

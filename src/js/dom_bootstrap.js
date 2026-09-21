@@ -357,11 +357,44 @@
     "mask-composite", "-webkit-mask-composite",
     "transform-style", "backface-visibility", "mix-blend-mode", "isolation",
     "text-overflow",
+    "content-visibility", "contain-intrinsic-size", "contain-intrinsic-width",
+    "contain-intrinsic-height", "contain-intrinsic-inline-size",
+    "contain-intrinsic-block-size",
   ]);
   const styleShorthandLonghands = Object.freeze({
     "columns": ["column-width", "column-count"],
     "column-rule": ["column-rule-width", "column-rule-style", "column-rule-color"],
+    "contain-intrinsic-size": ["contain-intrinsic-width", "contain-intrinsic-height"],
   });
+
+  // CSSOM serializes the two physical contain-intrinsic-size axes back through
+  // their shorthand. Walk declarations in order so cssText assignments and
+  // later longhand writes produce the same live shorthand value.
+  function containIntrinsicSizeShorthand(declarations) {
+    let width = "", height = "";
+    for (const declaration of declarations) {
+      if (declaration.name === "contain-intrinsic-size") {
+        let expanded = [];
+        try {
+          expanded = JSON.parse(__omoikane_expand_style_shorthand(
+            declaration.name, declaration.value
+          ));
+        } catch (_) {}
+        const values = new Map(expanded);
+        if (values.has("contain-intrinsic-width") &&
+            values.has("contain-intrinsic-height")) {
+          width = values.get("contain-intrinsic-width");
+          height = values.get("contain-intrinsic-height");
+        }
+      } else if (declaration.name === "contain-intrinsic-width") {
+        width = declaration.value.replace(/\s*!\s*important\s*$/i, "");
+      } else if (declaration.name === "contain-intrinsic-height") {
+        height = declaration.value.replace(/\s*!\s*important\s*$/i, "");
+      }
+    }
+    if (!width || !height) return "";
+    return width === height ? width : width + " " + height;
+  }
   const customElementConstructionStack = [];
   const customElementDefinitionByConstructor = new Map();
   const customElementRegistryByDocument = new WeakMap();
@@ -1537,9 +1570,9 @@
     if (!(node instanceof Element) || node.nodeType !== 1) return false;
     if (!node.isConnected) return false;
     if (node.__isDisabledControl && node.__isDisabledControl()) return false;
-    if (!isRenderedForFocus(node)) return false;
-    return Boolean(node.__dialogFocusFallback || node.__popoverFocusFallback) || hasIntegerTabindex(node) ||
-      isInherentlyFocusable(node) || isEditingHost(node);
+    const focusable = Boolean(node.__dialogFocusFallback || node.__popoverFocusFallback) ||
+      hasIntegerTabindex(node) || isInherentlyFocusable(node) || isEditingHost(node);
+    return focusable && isRenderedForFocus(node);
   }
 
   // Returns the focusable areas participating in sequential focus navigation.
@@ -1599,6 +1632,7 @@
       return node;
     }
     doc.__focusedElementId = null;
+    __omoikane_set_content_visibility_focus(null);
     return null;
   }
 
@@ -2406,6 +2440,9 @@
       // Later declarations win, matching the inline cascade.
       const getValue = (kebab) => {
         const decls = parseDecls();
+        if (kebab === "contain-intrinsic-size") {
+          return containIntrinsicSizeShorthand(decls);
+        }
         for (let i = decls.length - 1; i >= 0; i--) {
           if (decls[i].name === kebab) return decls[i].value;
         }
@@ -2910,7 +2947,7 @@
     }
 
     get innerText() {
-      return this.textContent;
+      return __omoikane_content_visibility_skips_inner_text(this.__id) ? "" : this.textContent;
     }
 
     set innerText(value) {
@@ -3247,7 +3284,14 @@
         if (style.display === "none") return null;
         const tagName = ancestor.tagName;
         if (tagName === "BODY") fallbackBody = ancestor;
-        if (style.position !== "static" && style.position !== "") return ancestor;
+        const contain = String(style.contain || "").split(/\s+/);
+        const contained = contain.includes("layout") || contain.includes("paint") ||
+          contain.includes("content") || contain.includes("strict");
+        const contentVisibility = style.contentVisibility || "visible";
+        if ((style.position !== "static" && style.position !== "") || contained ||
+            contentVisibility === "hidden" || contentVisibility === "auto" ||
+            (style.transform && style.transform !== "none") ||
+            (style.perspective && style.perspective !== "none")) return ancestor;
         if (tagName === "TD" || tagName === "TH" || tagName === "TABLE") return ancestor;
       }
       return fallbackBody;
@@ -3259,8 +3303,37 @@
     //
     // A non-focusable target (disconnected, disabled, or not a focusable area)
     // is ignored, and re-focusing the already focused element dispatches
-    // nothing. `options.preventScroll` is accepted and ignored: focusing never
-    // scrolls because scrolling is not implemented.
+    // nothing. Unless `options.preventScroll` is set, an offscreen target is
+    // brought into the viewport after it becomes relevant to layout.
+    get tabIndex() {
+      const value = this.getAttribute("tabindex");
+      if (value !== null && hasIntegerTabindex(this)) return parseInt(value, 10);
+      return isInherentlyFocusable(this) || isEditingHost(this) ? 0 : -1;
+    }
+    set tabIndex(value) {
+      const number = Number(value);
+      this.setAttribute("tabindex", String(Number.isFinite(number) ? number >> 0 : 0));
+    }
+
+    scrollIntoView(options = true) {
+      if (!this.isConnected) return;
+      const composedParent = node => {
+        if (node?.assignedSlot) return node.assignedSlot;
+        if (node?.parentNode) return node.parentNode;
+        return node instanceof ShadowRoot ? node.host : null;
+      };
+      for (let ancestor = composedParent(this); ancestor; ancestor = composedParent(ancestor)) {
+        if (ancestor.nodeType === 1 &&
+            getComputedStyle(ancestor).contentVisibility === "hidden") return;
+      }
+      const view = this.ownerDocument?.defaultView;
+      if (!view) return;
+      const rect = this.getBoundingClientRect();
+      const alignEnd = options === false || (options && typeof options === "object" && options.block === "end");
+      const top = alignEnd ? rect.bottom - view.innerHeight : rect.top;
+      view.scrollBy(rect.left, top);
+    }
+
     focus(options) {
       if (!canBeFocused(this)) return;
       const doc = this.ownerDocument;
@@ -3318,6 +3391,13 @@
 
       doc.__focusedElementId = this.__id;
       browsingInput.focusedDocumentId = doc.__id;
+      __omoikane_set_content_visibility_focus(this.__id);
+      if (!options?.preventScroll) {
+        const view = doc.defaultView;
+        const rect = this.getBoundingClientRect();
+        if (view && rect.bottom > view.innerHeight) view.scrollBy(0, rect.top);
+        else if (view && rect.top < 0) view.scrollBy(0, rect.top);
+      }
       beginTextControlFocus(this);
       fireFocusEvent(this, "focus", crossesDocuments ? null : previous, false);
       fireFocusEvent(this, "focusin", crossesDocuments ? null : previous, true);
@@ -3332,6 +3412,7 @@
       if (!(doc instanceof Document)) return;
       if (focusedElementOf(doc) !== this) return;
       doc.__focusedElementId = null;
+      __omoikane_set_content_visibility_focus(null);
       fireFocusEvent(this, "blur", null, false);
       fireFocusEvent(this, "focusout", null, true);
       commitTextControlChange(this);
@@ -4480,7 +4561,7 @@
   distributePrototypeMembers(Node.prototype, [HTMLElement.prototype], [
     "title", "innerText",
     "offsetWidth", "offsetHeight", "offsetTop", "offsetLeft", "offsetParent",
-    "focus", "blur", "click", "hidden",
+    "focus", "blur", "click", "hidden", "tabIndex", "scrollIntoView",
     "__isDisabledControl", "__owningForm", "__runActivationBehavior",
   ]);
 
@@ -5194,7 +5275,17 @@
   const selectionByDocument = new WeakMap();
   const selectionChangeQueued = new WeakSet();
 
+  function syncContentVisibilitySelection(doc) {
+    const selection = selectionByDocument.get(doc);
+    const range = selection?.__range;
+    __omoikane_set_content_visibility_selection(
+      range?.startContainer?.__id ?? null,
+      range?.endContainer?.__id ?? null
+    );
+  }
+
   function queueSelectionChange(doc) {
+    syncContentVisibilitySelection(doc);
     if (!doc || selectionChangeQueued.has(doc)) return;
     selectionChangeQueued.add(doc);
     const deliver = () => {
@@ -5925,6 +6016,13 @@
       return "CSS1Compat";
     }
 
+    // Standards-mode documents use the root element as their viewport
+    // scroller. Omoikane currently exposes only standards mode, so there is no
+    // quirks-mode body fallback to select here.
+    get scrollingElement() {
+      return this.documentElement;
+    }
+
     get currentScript() {
       return this.__currentScript || null;
     }
@@ -6117,7 +6215,11 @@
     };
     const getValue = name => {
       const key = propertyName(name);
-      const found = declarations().filter(declaration => declaration.name === key);
+      const values = declarations();
+      if (key === "contain-intrinsic-size") {
+        return containIntrinsicSizeShorthand(values);
+      }
+      const found = values.filter(declaration => declaration.name === key);
       return found.length ? found[found.length - 1].value : "";
     };
     const setValue = (name, value, priority = "") => {

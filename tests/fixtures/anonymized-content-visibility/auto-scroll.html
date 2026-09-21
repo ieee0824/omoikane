@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Content visibility automatic relevancy</title>
+<style>
+  html, body { margin: 0; background: white; }
+  #spacer { height: 480px; }
+  #automatic {
+    width: 220px;
+    border: 5px solid #202020;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 40px;
+    background: #e07828;
+  }
+  #payload { height: 80px; background: #2878d0; }
+  #after { height: 300px; }
+</style>
+<div id="spacer"></div>
+<section id="automatic" data-probe><div id="payload" data-probe></div></section>
+<div id="after"></div>
+<script>
+  addEventListener("load", () => requestAnimationFrame(() => automatic.scrollIntoView()));
+</script>
