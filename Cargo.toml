@@ -115,5 +115,8 @@ opt-level = 2
 # debug assertions and overflow checks. Normal development builds stay at O0.
 [profile.test]
 opt-level = 1
+# Preserve file/line backtraces while avoiding full local-variable debug data
+# in every independently linked integration-test executable.
+debug = "line-tables-only"
 debug-assertions = true
 overflow-checks = true
