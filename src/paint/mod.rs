@@ -3906,7 +3906,7 @@ const MAX_CLIP_PATH_POLYGON_POINTS: usize = 256;
 /// border-box coordinate space; callers apply the same shape to descendants,
 /// hit testing, and transformed off-screen surfaces.
 #[derive(Clone, Debug)]
-enum ClipPathShape {
+pub(crate) enum ClipPathShape {
     RoundedRect {
         rect: Rect,
         radii: (f32, f32, f32, f32),
@@ -3928,7 +3928,7 @@ enum ClipPathShape {
 }
 
 impl ClipPathShape {
-    fn bounds(&self) -> Rect {
+    pub(crate) fn bounds(&self) -> Rect {
         match self {
             Self::RoundedRect { rect, .. } => *rect,
             Self::Circle { bounds, .. }
@@ -4062,6 +4062,14 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
         _ => return None,
     };
+    basic_shape_from_value(value, border_box)
+}
+
+/// Resolves a supported CSS basic shape against the supplied reference box.
+///
+/// `clip-path` and `shape-outside` deliberately share this parser so the two
+/// properties agree on percentages, positions, and polygon limits.
+pub(crate) fn basic_shape_from_value(value: &str, border_box: Rect) -> Option<ClipPathShape> {
     let open = value.find('(')?;
     if !value.ends_with(')') {
         return None;
@@ -4074,24 +4082,36 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
             let round_at = parts
                 .iter()
                 .position(|part| part.eq_ignore_ascii_case("round"));
-            let round_at = round_at?;
-            let before = parts[..round_at].join(" ");
-            let after = parts[round_at + 1..].join(" ");
+            let (before, after) = round_at.map_or_else(
+                || (body.to_string(), None),
+                |index| (parts[..index].join(" "), Some(parts[index + 1..].join(" "))),
+            );
             let rect =
                 parse_clip_path_inset_rect_geometry(&format!("inset({before})"), border_box)?;
-            let radii = parse_shape_radii(&after, rect)?;
+            let radii = after
+                .as_deref()
+                .map(|value| parse_shape_radii(value, rect))
+                .unwrap_or(Some((0.0, 0.0, 0.0, 0.0)))?;
             Some(ClipPathShape::RoundedRect { rect, radii })
         }
         "circle" => {
-            let (radius_text, position_text) =
-                if let Some(at) = body.to_ascii_lowercase().find(" at ") {
-                    (&body[..at], &body[at + 4..])
-                } else {
-                    (body, "center")
-                };
+            let trimmed = body.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            let (radius_text, position_text) = if lower.starts_with("at ") {
+                ("", &trimmed[3..])
+            } else if let Some(at) = lower.find(" at ") {
+                (&trimmed[..at], &trimmed[at + 4..])
+            } else {
+                (trimmed, "center")
+            };
             let center = shape_position(position_text.trim(), border_box)?;
             let radius_text = radius_text.trim();
-            let radius = match radius_text.to_ascii_lowercase().as_str() {
+            let radius_name = if radius_text.is_empty() {
+                "closest-side"
+            } else {
+                radius_text
+            };
+            let radius = match radius_name.to_ascii_lowercase().as_str() {
                 keyword @ ("closest-side" | "farthest-side" | "closest-corner"
                 | "farthest-corner") => {
                     let left = (center.0 - border_box.x).abs();
@@ -4116,7 +4136,12 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
                         distances.iter().copied().fold(f32::NEG_INFINITY, f32::max)
                     }
                 }
-                _ => shape_length(radius_text, border_box.width.min(border_box.height))?,
+                _ => shape_length(
+                    radius_name,
+                    (border_box.width * border_box.width + border_box.height * border_box.height)
+                        .sqrt()
+                        / std::f32::consts::SQRT_2,
+                )?,
             };
             let radius = radius.max(0.0);
             Some(ClipPathShape::Circle {
@@ -4198,6 +4223,39 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
         }
         _ => None,
     }
+}
+
+/// Validates the `shape-outside` subset implemented by layout. Image-derived
+/// shapes are intentionally excluded; this accepts a basic shape, an optional
+/// reference box, a reference box by itself, or `none`.
+pub(crate) fn is_valid_shape_outside_value(value: &str) -> bool {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return true;
+    }
+    let mut shape = None;
+    let mut reference_box = None;
+    for part in split_top_level_whitespace(value) {
+        let lower = part.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "margin-box" | "border-box" | "padding-box" | "content-box"
+        ) {
+            if reference_box.replace(lower).is_some() {
+                return false;
+            }
+        } else if lower.starts_with("circle(")
+            || lower.starts_with("inset(")
+            || lower.starts_with("polygon(")
+        {
+            if shape.replace(part).is_some() || !is_valid_clip_path_value(part) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    shape.is_some() || reference_box.is_some()
 }
 
 /// Validates the subset of CSS basic shapes supported by the paint pipeline.
@@ -4303,7 +4361,11 @@ fn valid_clip_path_inset_body(body: &str) -> bool {
 }
 
 fn split_shape_at(body: &str) -> Option<(&str, &str)> {
+    let body = body.trim();
     let lower = body.to_ascii_lowercase();
+    if lower.starts_with("at ") {
+        return Some(("", &body[3..]));
+    }
     let mut indices = lower.match_indices(" at ");
     let Some((index, _)) = indices.next() else {
         return Some((body, "center"));
@@ -4320,6 +4382,9 @@ fn valid_clip_path_circle_body(body: &str) -> bool {
     };
     let radius = radius_text.trim();
     let radius_parts = split_top_level_whitespace(radius);
+    if radius_parts.is_empty() {
+        return valid_clip_path_position(position_text);
+    }
     if radius_parts.len() != 1 {
         return false;
     }

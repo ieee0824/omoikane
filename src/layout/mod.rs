@@ -26,14 +26,16 @@ mod grid;
 mod inline;
 mod margins;
 mod multicol;
+mod shapes;
 mod table;
 
 use flex::{is_flex_container, layout_flex_container};
 use grid::{is_grid_container, layout_grid_container};
 use inline::{
     InlineSegmentContent, font_metrics, generated_inline_segments, layout_inline_nodes,
-    layout_vertical_inline_nodes, line_height, measure_text_width, normalize_text,
-    resolve_image_rendered_size, text_align, vertical_align, white_space,
+    layout_inline_nodes_with_line_constraints, layout_vertical_inline_nodes, line_height,
+    measure_text_width, normalize_text, resolve_image_rendered_size, text_align, vertical_align,
+    white_space,
 };
 use table::{
     collect_table_entries, is_table_container_element, layout_table_container, table_border_spacing,
@@ -809,10 +811,11 @@ enum FloatSide {
     Right,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct FloatRegion {
     outer: Rect,
     side: FloatSide,
+    shape: Option<shapes::ShapeOutside>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1596,16 +1599,22 @@ fn flush_pending_inline_nodes(
         pending.clear();
         return;
     }
-    let offsets = active_float_offsets(float_regions, *cursor_y, x, width);
+    let line_constraints = |line_y: f32, line_height: f32| {
+        let offsets = float_offsets_for_line(float_regions, line_y, line_height, x, width);
+        (
+            x + offsets.left,
+            (width - offsets.left - offsets.right).max(0.0),
+        )
+    };
     let inline::InlineLayoutResult {
         lines: inline_lines,
         atomic_boxes,
-    } = layout_inline_nodes(
+    } = layout_inline_nodes_with_line_constraints(
         pending,
         resolver,
-        x + offsets.left,
+        x,
         *cursor_y,
-        (width - offsets.left - offsets.right).max(0.0),
+        width,
         text_align(style),
         line_height(style),
         direction_is_rtl(style),
@@ -1614,6 +1623,7 @@ fn flush_pending_inline_nodes(
         viewport,
         positioned_ancestor,
         true,
+        &line_constraints,
     );
     if let Some(last_line) = inline_lines.last() {
         *cursor_y = last_line.rect.y + last_line.rect.height;
@@ -1723,6 +1733,8 @@ fn layout_float_child(
                     FloatSide::None => x + offsets.left,
                 };
                 translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y, resolver);
+                let shape =
+                    shapes::ShapeOutside::from_style(child_style, layout_child.dimensions, width);
                 float_regions.push(FloatRegion {
                     outer: Rect {
                         x: outer_x,
@@ -1731,6 +1743,7 @@ fn layout_float_child(
                         height: layout_child.total_height(),
                     },
                     side,
+                    shape,
                 });
                 children.push(layout_child);
                 break;
@@ -3136,6 +3149,42 @@ fn active_float_offsets(regions: &[FloatRegion], y: f32, x: f32, width: f32) -> 
             FloatSide::Right => {
                 let right_edge = x + width;
                 offsets.right = offsets.right.max((right_edge - region.outer.x).max(0.0));
+            }
+            FloatSide::None => {}
+        }
+    }
+    offsets
+}
+
+/// Computes float exclusions for one complete line band. A `shape-outside`
+/// changes this exclusion only; float placement and `clear` continue to use
+/// the rectangular margin box through `active_float_offsets`.
+fn float_offsets_for_line(
+    regions: &[FloatRegion],
+    y: f32,
+    line_height: f32,
+    x: f32,
+    width: f32,
+) -> FloatOffsets {
+    let mut offsets = FloatOffsets::default();
+    let band_bottom = y + line_height.max(0.01);
+    for region in regions {
+        let bounds = if let Some(shape) = &region.shape {
+            shape.horizontal_bounds(y, line_height)
+        } else if band_bottom > region.outer.y && y < region.outer.y + region.outer.height {
+            Some((region.outer.x, region.outer.x + region.outer.width))
+        } else {
+            None
+        };
+        let Some((min_x, max_x)) = bounds else {
+            continue;
+        };
+        match region.side {
+            FloatSide::Left => {
+                offsets.left = offsets.left.max((max_x - x).clamp(0.0, width));
+            }
+            FloatSide::Right => {
+                offsets.right = offsets.right.max((x + width - min_x).clamp(0.0, width));
             }
             FloatSide::None => {}
         }

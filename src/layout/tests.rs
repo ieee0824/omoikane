@@ -6880,6 +6880,138 @@ fn float_left_and_right_reduce_available_block_width() {
     assert_eq!(block_box.dimensions.content.width, 50.0);
 }
 
+fn layout_lines_around_shape(shape: &str, side: &str, tag: &str) -> Vec<LineBox> {
+    layout_lines_around_shape_with_margin(shape, side, tag, "0")
+}
+
+fn layout_lines_around_shape_with_margin(
+    shape: &str,
+    side: &str,
+    tag: &str,
+    shape_margin: &str,
+) -> Vec<LineBox> {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let floated = NodeHandle::element(tag);
+    floated.set_attribute("class", "shape");
+    document.append_child(body.clone());
+    body.append_child(floated);
+    body.append_child(NodeHandle::text("word ".repeat(120)));
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(&format!(
+            "body {{ margin:0; width:200px; font-size:10px; line-height:10px; }} \
+             .shape {{ float:{side}; width:100px; height:100px; \
+                       shape-outside:{shape}; shape-margin:{shape_margin}; }}"
+        ))
+        .unwrap(),
+    );
+    layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 300.0,
+        },
+    )
+    .unwrap()
+    .lines
+}
+
+#[test]
+fn circle_shape_outside_changes_left_float_offset_per_line() {
+    let lines = layout_lines_around_shape("circle(50%)", "left", "div");
+    let rectangular = layout_lines_around_shape("none", "left", "div");
+    assert!(lines.len() > 10);
+    assert_eq!(rectangular[0].rect.x, 100.0);
+    assert!(lines[0].rect.x > 70.0 && lines[0].rect.x < 100.0);
+    assert!(lines[4].rect.x > lines[0].rect.x);
+    let below = lines.iter().find(|line| line.rect.y >= 100.0).unwrap();
+    assert_eq!(below.rect.x, 0.0);
+}
+
+#[test]
+fn inset_and_reference_box_shape_outside_use_resolved_geometry() {
+    let inset = layout_lines_around_shape("inset(0 40% 0 0)", "left", "div");
+    assert!((inset[0].rect.x - 60.0).abs() < 0.01);
+
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let floated = NodeHandle::element("div");
+    floated.set_attribute("class", "shape");
+    document.append_child(body.clone());
+    body.append_child(floated);
+    body.append_child(NodeHandle::text("word ".repeat(20)));
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body{margin:0;width:200px;font-size:10px;line-height:10px} \
+             .shape{float:left;width:60px;height:60px;margin:5px;border:5px solid; \
+                    padding:10px;shape-outside:content-box}",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(layout.lines[0].rect.x, 0.0);
+    let content_band = layout
+        .lines
+        .iter()
+        .find(|line| line.rect.y >= 20.0 && line.rect.y < 30.0)
+        .unwrap();
+    assert!((content_band.rect.x - 80.0).abs() < 0.01);
+}
+
+#[test]
+fn concave_polygon_shape_outside_releases_space_in_the_notch() {
+    let lines = layout_lines_around_shape(
+        "polygon(0 0,100% 0,100% 30%,40% 30%,40% 70%,100% 70%,100% 100%,0 100%)",
+        "left",
+        "div",
+    );
+    let upper = lines.iter().find(|line| line.rect.y < 20.0).unwrap();
+    let notch = lines
+        .iter()
+        .find(|line| line.rect.y >= 40.0 && line.rect.y < 60.0)
+        .unwrap();
+    assert!(upper.rect.x > 90.0);
+    assert!((notch.rect.x - 40.0).abs() < 0.01);
+}
+
+#[test]
+fn shape_outside_margin_and_right_float_are_applied_and_clipped() {
+    let without_margin = layout_lines_around_shape("circle(40%)", "left", "div");
+    let with_margin = layout_lines_around_shape_with_margin("circle(40%)", "left", "div", "20%");
+    assert!(with_margin[0].rect.x > without_margin[0].rect.x);
+    assert!(with_margin[0].rect.x <= 100.0);
+
+    let right = layout_lines_around_shape("circle(50%)", "right", "div");
+    let rectangular_right = layout_lines_around_shape("none", "right", "div");
+    assert_eq!(right[0].rect.x, 0.0);
+    assert!(right[0].rect.width > rectangular_right[0].rect.width);
+    assert!(right[0].rect.width < 130.0);
+}
+
+#[test]
+fn image_float_accepts_basic_shape_outside() {
+    let lines = layout_lines_around_shape("inset(0 50% 0 0)", "left", "img");
+    assert!((lines[0].rect.x - 50.0).abs() < 0.01);
+}
+
 #[test]
 fn clear_both_moves_block_below_floats() {
     let document = NodeHandle::document();

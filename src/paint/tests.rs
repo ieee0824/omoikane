@@ -6883,10 +6883,12 @@ fn clip_path_shape_bounds_cover_geometry_outside_border_box() {
         (
             "circle(200% at center)",
             Rect {
-                x: 0.0,
-                y: 5.0,
-                width: 40.0,
-                height: 40.0,
+                // Circle percentages use the normalized diagonal of the
+                // reference box: sqrt(width² + height²) / sqrt(2).
+                x: -11.622776,
+                y: -6.622776,
+                width: 63.245552,
+                height: 63.245552,
             },
         ),
         (

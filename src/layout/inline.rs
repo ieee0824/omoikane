@@ -98,6 +98,76 @@ pub(super) fn layout_inline_nodes(
     positioned_ancestor: Option<BoxDimensions>,
     allow_atomic_boxes: bool,
 ) -> InlineLayoutResult {
+    layout_inline_nodes_impl(
+        nodes,
+        resolver,
+        start_x,
+        start_y,
+        available_width,
+        align,
+        strut_line_height,
+        direction_rtl,
+        text_overflow_style,
+        containing_height,
+        viewport,
+        positioned_ancestor,
+        allow_atomic_boxes,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn layout_inline_nodes_with_line_constraints(
+    nodes: &[NodeHandle],
+    resolver: &mut StyleResolver,
+    start_x: f32,
+    start_y: f32,
+    available_width: f32,
+    align: TextAlign,
+    strut_line_height: f32,
+    direction_rtl: bool,
+    text_overflow_style: Option<&ComputedStyle>,
+    containing_height: f32,
+    viewport: super::LayoutViewport,
+    positioned_ancestor: Option<BoxDimensions>,
+    allow_atomic_boxes: bool,
+    line_constraints: &dyn Fn(f32, f32) -> (f32, f32),
+) -> InlineLayoutResult {
+    layout_inline_nodes_impl(
+        nodes,
+        resolver,
+        start_x,
+        start_y,
+        available_width,
+        align,
+        strut_line_height,
+        direction_rtl,
+        text_overflow_style,
+        containing_height,
+        viewport,
+        positioned_ancestor,
+        allow_atomic_boxes,
+        Some(line_constraints),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_inline_nodes_impl(
+    nodes: &[NodeHandle],
+    resolver: &mut StyleResolver,
+    start_x: f32,
+    start_y: f32,
+    available_width: f32,
+    align: TextAlign,
+    strut_line_height: f32,
+    direction_rtl: bool,
+    text_overflow_style: Option<&ComputedStyle>,
+    containing_height: f32,
+    viewport: super::LayoutViewport,
+    positioned_ancestor: Option<BoxDimensions>,
+    allow_atomic_boxes: bool,
+    line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
+) -> InlineLayoutResult {
     let context = InlineLayoutContext {
         start_x,
         start_y,
@@ -114,14 +184,18 @@ pub(super) fn layout_inline_nodes(
     }
     coalesce_adjacent_text_segments(&mut segments);
 
+    let (line_start_x, line_available_width) = line_constraints
+        .map(|constraints| constraints(start_y, strut_line_height))
+        .unwrap_or((start_x, available_width));
     let mut lines = layout_inline_segments(
         &segments,
-        start_x,
+        line_start_x,
         start_y,
-        available_width,
+        line_available_width,
         align,
         strut_line_height,
         direction_rtl,
+        line_constraints,
     );
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
     if let Some(style) = text_overflow_style {
@@ -194,6 +268,7 @@ pub(super) fn layout_vertical_inline_nodes(
         align,
         strut_line_height,
         false,
+        None,
     );
 
     boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
@@ -2285,17 +2360,25 @@ struct InlineCursor {
     y: f32,
     line_height: f32,
     start_x: f32,
+    available_width: f32,
     strut_line_height: f32,
     direction_rtl: bool,
 }
 
 impl InlineCursor {
-    fn new(start_x: f32, start_y: f32, strut_line_height: f32, direction_rtl: bool) -> Self {
+    fn new(
+        start_x: f32,
+        start_y: f32,
+        available_width: f32,
+        strut_line_height: f32,
+        direction_rtl: bool,
+    ) -> Self {
         Self {
             x: start_x,
             y: start_y,
             line_height: strut_line_height,
             start_x,
+            available_width,
             strut_line_height,
             direction_rtl,
         }
@@ -2306,8 +2389,8 @@ impl InlineCursor {
         lines: &mut Vec<LineBox>,
         fragments: &mut Vec<InlineFragment>,
         segment_line_height: f32,
-        available_width: f32,
         align: TextAlign,
+        line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
     ) {
         let effective_height = self.line_height.max(segment_line_height);
         push_line(
@@ -2317,11 +2400,14 @@ impl InlineCursor {
             self.y,
             self.x - self.start_x,
             effective_height,
-            available_width,
+            self.available_width,
             align,
             self.direction_rtl,
         );
         self.y += effective_height;
+        if let Some(constraints) = line_constraints {
+            (self.start_x, self.available_width) = constraints(self.y, self.strut_line_height);
+        }
         self.x = self.start_x;
         self.line_height = self.strut_line_height;
     }
@@ -2365,15 +2451,18 @@ fn break_text_by_characters(
     cursor: &mut InlineCursor,
     lines: &mut Vec<LineBox>,
     fragments: &mut Vec<InlineFragment>,
-    available_width: f32,
     align: TextAlign,
+    line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
 ) {
     for ch_str in split_chars(text) {
         let ch_width = measure_text_width(&ch_str, segment.metrics);
         if cursor.x > cursor.start_x
-            && exceeds_available_inline_width(cursor.x + ch_width - cursor.start_x, available_width)
+            && exceeds_available_inline_width(
+                cursor.x + ch_width - cursor.start_x,
+                cursor.available_width,
+            )
         {
-            cursor.wrap_line(lines, fragments, 0.0, available_width, align);
+            cursor.wrap_line(lines, fragments, 0.0, align, line_constraints);
         }
         fragments.push(InlineFragment {
             node: segment.node.clone(),
@@ -2401,10 +2490,17 @@ fn layout_inline_segments(
     align: TextAlign,
     strut_line_height: f32,
     direction_rtl: bool,
+    line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
 ) -> Vec<LineBox> {
     let mut lines = Vec::new();
     let mut current_fragments = Vec::new();
-    let mut cursor = InlineCursor::new(start_x, start_y, strut_line_height, direction_rtl);
+    let mut cursor = InlineCursor::new(
+        start_x,
+        start_y,
+        available_width,
+        strut_line_height,
+        direction_rtl,
+    );
 
     let mut prev_segment_allows_wrapping = true;
     for segment in segments {
@@ -2433,8 +2529,8 @@ fn layout_inline_segments(
                         &mut lines,
                         &mut current_fragments,
                         segment.line_height,
-                        available_width,
                         align,
+                        line_constraints,
                     );
                 }
                 InlinePiece::Fragment {
@@ -2446,7 +2542,7 @@ fn layout_inline_segments(
                         && matches!(&content, InlineFragmentContent::Text(text) if text
                             .chars()
                             .all(|ch| ch != '\u{00A0}' && ch.is_whitespace()));
-                    if cursor.x == start_x && collapsible_whitespace {
+                    if cursor.x == cursor.start_x && collapsible_whitespace {
                         continue;
                     }
                     let can_wrap = if is_first_piece_in_segment {
@@ -2458,10 +2554,10 @@ fn layout_inline_segments(
 
                     if can_wrap
                         && !matches!(content, InlineFragmentContent::InlineBox(_))
-                        && cursor.x > start_x
+                        && cursor.x > cursor.start_x
                         && exceeds_available_inline_width(
-                            cursor.x + width - start_x,
-                            available_width,
+                            cursor.x + width - cursor.start_x,
+                            cursor.available_width,
                         )
                     {
                         // Collapsible whitespace at the end of a line is
@@ -2474,8 +2570,8 @@ fn layout_inline_segments(
                             &mut lines,
                             &mut current_fragments,
                             0.0,
-                            available_width,
                             align,
+                            line_constraints,
                         );
                     }
 
@@ -2484,9 +2580,9 @@ fn layout_inline_segments(
                         segment.word_break,
                         allows_wrapping,
                         cursor.x,
-                        start_x,
+                        cursor.start_x,
                         width,
-                        available_width,
+                        cursor.available_width,
                     ) && let InlineFragmentContent::Text(text) = content
                     {
                         break_text_by_characters(
@@ -2496,8 +2592,8 @@ fn layout_inline_segments(
                             &mut cursor,
                             &mut lines,
                             &mut current_fragments,
-                            available_width,
                             align,
+                            line_constraints,
                         );
                         continue;
                     }
@@ -2535,11 +2631,11 @@ fn layout_inline_segments(
         push_line(
             &mut lines,
             &mut current_fragments,
-            start_x,
+            cursor.start_x,
             cursor.y,
-            cursor.x - start_x,
+            cursor.x - cursor.start_x,
             final_height,
-            available_width,
+            cursor.available_width,
             align,
             direction_rtl,
         );
