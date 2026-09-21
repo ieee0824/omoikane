@@ -3,7 +3,7 @@
 //! This is a small HTML5-inspired tree builder that consumes tokenizer output
 //! and produces a DOM tree with implicit `html`, `head`, and `body` elements.
 
-use crate::dom::{Node, NodeHandle};
+use crate::dom::{Node, NodeHandle, ShadowRootMode};
 
 use super::{HtmlParseError, Token, Tokenizer};
 
@@ -225,6 +225,7 @@ struct Builder {
     write_boundary: Option<(NodeHandle, Option<NodeHandle>)>,
     created_nodes: Option<std::cell::RefCell<Vec<NodeHandle>>>,
     fragment: bool,
+    allow_declarative_shadow_roots: bool,
 }
 
 impl Builder {
@@ -239,12 +240,14 @@ impl Builder {
             write_boundary: None,
             created_nodes: None,
             fragment: false,
+            allow_declarative_shadow_roots: true,
         }
     }
 
     fn new_fragment(context: &NodeHandle) -> (Self, NodeHandle) {
         let mut builder = Self::new();
         builder.fragment = true;
+        builder.allow_declarative_shadow_roots = false;
         let mut ancestor = Some(context.clone());
         while let Some(node) = ancestor {
             if node.tag_name().as_deref() == Some("form") {
@@ -412,7 +415,11 @@ impl Builder {
                 "base" | "link" | "meta" | "title" | "style" | "script" | "template"
             ) =>
             {
-                let element = self.insert_element_with_attributes(&name, &attributes);
+                let element = if name == "template" {
+                    self.insert_template_with_attributes(&attributes)
+                } else {
+                    self.insert_element_with_attributes(&name, &attributes)
+                };
                 if name == "template" {
                     self.open_elements.push(element.clone());
                     self.template_insertion_modes.push(self.mode);
@@ -538,7 +545,7 @@ impl Builder {
                         );
                     }
                     "template" => {
-                        let template = self.insert_element_with_attributes("template", &attributes);
+                        let template = self.insert_template_with_attributes(&attributes);
                         self.open_elements.push(template);
                         self.template_insertion_modes.push(self.mode);
                     }
@@ -711,7 +718,7 @@ impl Builder {
                     }
                 }
                 "template" => {
-                    let template = self.insert_element_with_attributes("template", &attributes);
+                    let template = self.insert_template_with_attributes(&attributes);
                     if !self_closing {
                         self.open_elements.push(template);
                         self.template_insertion_modes.push(self.mode);
@@ -1266,6 +1273,48 @@ impl Builder {
         self.insert_into(&parent, name, attributes)
     }
 
+    fn insert_template_with_attributes(&mut self, attributes: &[super::Attribute]) -> NodeHandle {
+        let host = self.current_node();
+        let template = self.insert_element_with_attributes("template", attributes);
+        if !self.allow_declarative_shadow_roots {
+            return template;
+        }
+
+        let mode = attributes
+            .iter()
+            .find(|attribute| attribute.name().eq_ignore_ascii_case("shadowrootmode"))
+            .and_then(|attribute| {
+                if attribute.value().eq_ignore_ascii_case("open") {
+                    Some(ShadowRootMode::Open)
+                } else if attribute.value().eq_ignore_ascii_case("closed") {
+                    Some(ShadowRootMode::Closed)
+                } else {
+                    None
+                }
+            });
+        let Some(mode) = mode else {
+            return template;
+        };
+        if self.open_elements.first().is_some_and(|top| top == &host)
+            || !is_valid_shadow_host(&host)
+        {
+            return template;
+        }
+        let Some(root) = host.attach_shadow(mode) else {
+            return template;
+        };
+        if !template.set_template_content(root.clone()) {
+            return template;
+        }
+        if let Some(parent) = template.parent_node() {
+            let _ = parent.remove_child(&template);
+        }
+        if let Some(created) = &self.created_nodes {
+            created.borrow_mut().push(root);
+        }
+        template
+    }
+
     fn insert_into(
         &self,
         parent: &NodeHandle,
@@ -1490,6 +1539,50 @@ const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 const MATHML_NAMESPACE: &str = "http://www.w3.org/1998/Math/MathML";
 
+fn is_valid_shadow_host(node: &NodeHandle) -> bool {
+    if !node.is_html_element() {
+        return false;
+    }
+    let Some(name) = node.local_name() else {
+        return false;
+    };
+    if matches!(
+        name.as_str(),
+        "article"
+            | "aside"
+            | "blockquote"
+            | "body"
+            | "div"
+            | "footer"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "main"
+            | "nav"
+            | "p"
+            | "section"
+            | "span"
+    ) {
+        return true;
+    }
+    name.contains('-')
+        && !matches!(
+            name.as_str(),
+            "annotation-xml"
+                | "color-profile"
+                | "font-face"
+                | "font-face-src"
+                | "font-face-uri"
+                | "font-face-format"
+                | "font-face-name"
+                | "missing-glyph"
+        )
+}
+
 fn fragment_insertion_mode(context_name: &str) -> InsertionMode {
     match context_name.to_ascii_lowercase().as_str() {
         "head" => InsertionMode::InHead,
@@ -1682,6 +1775,103 @@ fn should_close_p_before_start_tag(tag_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::dom::Node;
+
+    use super::*;
+
+    #[test]
+    fn document_parser_builds_open_and_closed_declarative_shadow_roots() {
+        let document = TreeBuilder::parse(
+            "<div id='open'><template shadowrootmode='OPEN'><span id='inside'></span></template></div>\
+             <section id='closed'><template shadowrootmode='closed'><b id='secret'></b></template></section>",
+        )
+        .document();
+
+        let open_host = document.query_selector("#open").unwrap();
+        let open_root = open_host.shadow_root().unwrap();
+        assert_eq!(open_root.shadow_root_mode(), Some(ShadowRootMode::Open));
+        assert!(open_root.query_selector("#inside").is_some());
+        assert!(open_host.child_nodes().is_empty());
+
+        let closed_host = document.query_selector("#closed").unwrap();
+        let closed_root = closed_host.shadow_root().unwrap();
+        assert_eq!(closed_root.shadow_root_mode(), Some(ShadowRootMode::Closed));
+        assert!(closed_root.query_selector("#secret").is_some());
+        assert!(closed_host.child_nodes().is_empty());
+    }
+
+    #[test]
+    fn declarative_shadow_root_supports_nested_hosts() {
+        let document = TreeBuilder::parse(
+            "<div id='outer'><template shadowrootmode='open'>\
+               <section id='inner'><template shadowrootmode='closed'>\
+                 <span id='target'></span>\
+               </template></section>\
+             </template></div>",
+        )
+        .document();
+        let outer = document.query_selector("#outer").unwrap();
+        let outer_root = outer.shadow_root().unwrap();
+        let inner = outer_root.query_selector("#inner").unwrap();
+        let inner_root = inner.shadow_root().unwrap();
+        assert_eq!(inner_root.shadow_root_mode(), Some(ShadowRootMode::Closed));
+        assert!(inner_root.query_selector("#target").is_some());
+    }
+
+    #[test]
+    fn invalid_or_second_declarative_shadow_template_stays_in_light_dom() {
+        let document = TreeBuilder::parse(
+            "<div id='host'>\
+               <template shadowrootmode='invalid'><i id='invalid'></i></template>\
+               <template shadowrootmode='open'><i id='first'></i></template>\
+               <template shadowrootmode='closed'><i id='second'></i></template>\
+             </div>",
+        )
+        .document();
+        let host = document.query_selector("#host").unwrap();
+        let root = host.shadow_root().unwrap();
+        assert!(root.query_selector("#first").is_some());
+        let templates: Vec<_> = host
+            .child_nodes()
+            .into_iter()
+            .filter(|node| node.tag_name().as_deref() == Some("template"))
+            .collect();
+        assert_eq!(templates.len(), 2);
+        assert!(
+            templates[0]
+                .template_content()
+                .unwrap()
+                .query_selector("#invalid")
+                .is_some()
+        );
+        assert!(
+            templates[1]
+                .template_content()
+                .unwrap()
+                .query_selector("#second")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn fragment_parser_does_not_enable_declarative_shadow_roots() {
+        let context = NodeHandle::element("div");
+        let fragment = TreeBuilder::parse_fragment(
+            "<template shadowrootmode='open'><span id='inside'></span></template>",
+            &context,
+        )
+        .fragment();
+        let template = fragment.query_selector("template").unwrap();
+        assert!(context.shadow_root().is_none());
+        assert!(
+            template
+                .template_content()
+                .unwrap()
+                .query_selector("#inside")
+                .is_some()
+        );
+    }
+
     #[test]
     fn table_columns_stay_in_explicit_or_implicit_column_groups() {
         for columns in [
@@ -1712,10 +1902,6 @@ mod tests {
             );
         }
     }
-
-    use crate::dom::Node;
-
-    use super::*;
 
     #[test]
     fn inserts_implicit_html_head_and_body() {

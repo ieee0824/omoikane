@@ -629,6 +629,21 @@ impl NodeHandle {
         }
     }
 
+    /// Replaces the contents owner used while an HTML template is being
+    /// parsed. Declarative shadow DOM uses its newly attached shadow root as
+    /// that owner so subsequent tokens are inserted directly into the root.
+    pub(crate) fn set_template_content(&self, content: NodeHandle) -> bool {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return false;
+        };
+        if !element.tag_name.eq_ignore_ascii_case("template") {
+            return false;
+        }
+        element.template_content = Some(content);
+        true
+    }
+
     /// Creates and attaches a shadow root, returning `None` when this is not an
     /// element or it already owns one.
     pub fn attach_shadow(&self, mode: ShadowRootMode) -> Option<NodeHandle> {

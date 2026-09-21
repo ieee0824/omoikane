@@ -3,6 +3,7 @@
     { "path": "dom/nodes/Element-childElement-null.html" },
     { "path": "dom/nodes/Element-childElementCount-nochild.html" },
     { "path": "dom/nodes/Node-isConnected.html" },
+    { "path": "domxpath/xpath-shadow-dom.html" },
     { "path": "shadow-dom/Element-interface-attachShadow.html" },
     { "path": "shadow-dom/Element-interface-shadowRoot-attribute.html" },
     { "path": "shadow-dom/HTMLSlotElement-interface.html" },
