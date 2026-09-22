@@ -887,12 +887,41 @@ pub struct LayoutBox {
     /// Pre-translation scroll geometry consumed by paint-only features such as
     /// `background-attachment: local`. Kept separate from CSSOM layout data.
     pub(crate) paint_scroll: Option<PaintScrollGeometry>,
+    /// Physical fragments produced when this block is split across columns.
+    /// `source` remains in the ordinary-flow coordinate space, while `target`
+    /// is the fragment's final border-box geometry in document order.
+    pub(crate) block_fragments: Vec<BlockFragment>,
     /// Used multi-column overflow and the physical centers of column rules.
     pub(crate) multicol: Option<MultiColumnLayout>,
     pub lines: Vec<LineBox>,
     pub children: Vec<LayoutBox>,
     /// List marker for `display: list-item` elements.
     pub marker: Option<ListMarker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct BlockFragment {
+    /// Source-space slice replayed into this fragmentainer.
+    pub(crate) source: Rect,
+    /// Fragment border box exposed through CSSOM. It may have zero block size
+    /// when only overflow continues into a later fragmentainer.
+    pub(crate) target: Rect,
+    /// Final fragmentainer clip used while replaying source-space painting.
+    pub(crate) clip: Rect,
+    /// Whether this box owns the paint replay. Descendant entries propagated
+    /// for CSSOM geometry are painted by their nearest owning ancestor.
+    pub(crate) owns_paint: bool,
+    /// Content-area destination for `box-decoration-break: clone`. `None`
+    /// denotes the ordinary `slice` mapping where source and target are equal
+    /// sized border-box slices.
+    pub(crate) clone_content_target: Option<Rect>,
+}
+
+impl BlockFragment {
+    pub(crate) fn translation(self) -> (f32, f32) {
+        let target = self.clone_content_target.unwrap_or(self.clip);
+        (target.x - self.source.x, target.y - self.source.y)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1038,6 +1067,28 @@ fn expand_scrollable_overflow_axes(
         return;
     }
     for child in boxes {
+        if child
+            .block_fragments
+            .iter()
+            .any(|fragment| fragment.owns_paint)
+        {
+            for fragment in child
+                .block_fragments
+                .iter()
+                .filter(|fragment| fragment.owns_paint)
+            {
+                if include_x {
+                    *max_right = max_right.max(fragment.clip.x + fragment.clip.width);
+                }
+                if include_y {
+                    *max_bottom = max_bottom.max(fragment.clip.y + fragment.clip.height);
+                }
+            }
+            // Fragmented descendants are painted through each fragmentainer's
+            // clip. Their source-space boxes must not inflate the multicol
+            // container's scrollable area after they have been redistributed.
+            continue;
+        }
         let content = child.dimensions.content;
         let padding = child.dimensions.padding;
         let border = child.dimensions.border;
@@ -1665,6 +1716,7 @@ fn layout_document(
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol: None,
         lines: Vec::new(),
         children,
@@ -2233,6 +2285,7 @@ fn skipped_content_visibility_box(
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol: None,
         lines: Vec::new(),
         children: Vec::new(),
@@ -2363,6 +2416,7 @@ fn layout_generated_pseudo_box(
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol: None,
         lines,
         children: Vec::new(),
@@ -2590,6 +2644,7 @@ fn layout_element_with_cell(
                 needs_scroll_translation: false,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
+                block_fragments: Vec::new(),
                 multicol: None,
                 lines,
                 children: Vec::new(),
@@ -2666,6 +2721,7 @@ fn layout_element_with_cell(
                 needs_scroll_translation: false,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
+                block_fragments: Vec::new(),
                 multicol: None,
                 lines,
                 children: Vec::new(),
@@ -2858,6 +2914,7 @@ fn layout_element_with_cell(
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol,
         lines,
         children,
@@ -4693,6 +4750,7 @@ fn translate_layout_box(layout: &mut LayoutBox, dx: f32, dy: f32, resolver: &mut
     let style = layout_box_style(layout, resolver);
     layout.dimensions.content.x += dx;
     layout.dimensions.content.y += dy;
+    translate_block_fragments(layout, dx, dy);
     translate_contents_in_context(
         layout,
         dx,
@@ -4752,6 +4810,7 @@ fn translate_inherited_box(
     }
     layout.dimensions.content.x += dx;
     layout.dimensions.content.y += dy;
+    translate_block_fragments(layout, dx, dy);
     translate_contents_in_context(
         layout,
         dx,
@@ -4760,6 +4819,21 @@ fn translate_inherited_box(
         absolute_moves || establishes_positioned_containing_block(&style),
         fixed_moves || establishes_fixed_containing_block(&style),
     );
+}
+
+fn translate_block_fragments(layout: &mut LayoutBox, dx: f32, dy: f32) {
+    for fragment in &mut layout.block_fragments {
+        fragment.source.x += dx;
+        fragment.source.y += dy;
+        fragment.target.x += dx;
+        fragment.target.y += dy;
+        fragment.clip.x += dx;
+        fragment.clip.y += dy;
+        if let Some(target) = &mut fragment.clone_content_target {
+            target.x += dx;
+            target.y += dy;
+        }
+    }
 }
 
 fn translate_contents_in_context(

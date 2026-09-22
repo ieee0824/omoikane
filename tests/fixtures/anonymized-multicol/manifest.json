@@ -5,5 +5,26 @@
     "width": 500,
     "height": 320,
     "fixture_sha256": "32756cabafc4cba3d2ef346e95be0833b01d4837dcac68537e2ba0f102a12f06"
+  },
+  {
+    "name": "general-block-fragments",
+    "path": "general-block-fragments.html",
+    "width": 500,
+    "height": 80,
+    "fixture_sha256": "f1d78fc4bc292c195f1e8024b0d66819100574ae68435feff85b6d1e15af38e6"
+  },
+  {
+    "name": "multicol-box-decoration-break",
+    "path": "box-decoration-break.html",
+    "width": 500,
+    "height": 100,
+    "fixture_sha256": "9c4518ed5ef39a4dacb86e5e02a2f46c4b0230d046e1930f88412a3b376a043f"
+  },
+  {
+    "name": "multicol-overflow-fragments",
+    "path": "overflow-fragments.html",
+    "width": 500,
+    "height": 80,
+    "fixture_sha256": "31cfbfadfc8d2aacca9c94614d4bdbe7ea000cba43e27b869af6d9fcb2c9720d"
   }
 ]

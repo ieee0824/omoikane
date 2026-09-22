@@ -11306,31 +11306,48 @@ fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
 
     let (scroll_width, scroll_height) = layout.scrollable_overflow();
 
-    LayoutMetrics {
+    let client_rects = if layout.block_fragments.is_empty() {
+        vec![Rect {
+            x: border_x,
+            y: border_y,
+            width: border_width,
+            height: border_height,
+        }]
+    } else {
+        layout
+            .block_fragments
+            .iter()
+            .map(|fragment| fragment.target)
+            .collect()
+    };
+    let bounding = inline_rect_union(client_rects.iter().copied());
+    let offset_rect = client_rects.first().copied().unwrap_or(Rect {
         x: border_x,
         y: border_y,
         width: border_width,
         height: border_height,
+    });
+
+    LayoutMetrics {
+        x: bounding.x,
+        y: bounding.y,
+        width: bounding.width,
+        height: bounding.height,
         content_x: content.x,
         content_y: content.y,
         content_width: content.width,
         content_height: content.height,
         offset_width: border_width,
         offset_height: border_height,
-        offset_top: border_y,
-        offset_left: border_x,
+        offset_top: offset_rect.y,
+        offset_left: offset_rect.x,
         client_width,
         client_height,
         client_top: border.top,
         client_left: border.left,
         scroll_width,
         scroll_height,
-        client_rects: vec![Rect {
-            x: border_x,
-            y: border_y,
-            width: border_width,
-            height: border_height,
-        }],
+        client_rects,
         has_box: true,
     }
 }
@@ -11343,20 +11360,16 @@ fn compute_transformed_layout_metrics(
     if transform.is_identity() {
         return metrics;
     }
-    let transformed = transform_rect(
-        Rect {
-            x: metrics.x,
-            y: metrics.y,
-            width: metrics.width,
-            height: metrics.height,
-        },
-        transform,
-    );
+    metrics.client_rects = metrics
+        .client_rects
+        .into_iter()
+        .map(|rect| transform_rect(rect, transform))
+        .collect();
+    let transformed = inline_rect_union(metrics.client_rects.iter().copied());
     metrics.x = transformed.x;
     metrics.y = transformed.y;
     metrics.width = transformed.width;
     metrics.height = transformed.height;
-    metrics.client_rects = vec![transformed];
     metrics
 }
 
@@ -13412,6 +13425,7 @@ fn normalize_style_value_native(
                 | "break-before"
                 | "break-after"
                 | "break-inside"
+                | "box-decoration-break"
                 | "orphans"
                 | "widows"
                 | "counter-reset"
@@ -38369,6 +38383,87 @@ b</textarea></form>"#,
             ),
             0.0
         );
+    }
+
+    #[test]
+    fn multicol_block_fragments_expose_firefox_client_rects_and_union() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #columns { width: 340px; column-count: 3; column-gap: 20px; column-fill: balance; }
+            .item { height: 24px; }
+        </style></head><body>
+            <section id="columns"><div id="first" class="item"></div><div id="second" class="item"></div></section>
+        </body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const rect = r => [r.x, r.y, r.width, r.height].join(",");
+                const fragments = id => Array.from(
+                    document.getElementById(id).getClientRects(), rect).join("|");
+                const bounds = id => rect(document.getElementById(id).getBoundingClientRect());
+                return [fragments("first"), fragments("second"), bounds("first"),
+                    bounds("second"), bounds("columns")].join(";");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "0,0,100,16|120,0,100,8;120,8,100,8|240,0,100,16;\
+             0,0,220,16;120,0,220,16;0,0,340,16"
+        );
+    }
+
+    #[test]
+    fn multicol_visible_overflow_exposes_descendant_fragments_like_firefox() {
+        let html = r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #columns { width: 340px; column-count: 3; column-gap: 20px; column-fill: balance; }
+            #item, #second { height: 24px; }
+            #item { overflow: visible; }
+            #inner { width: 20px; height: 40px; }
+        </style></head><body><section id="columns">
+            <div id="item"><div id="inner"></div></div><div id="second"></div>
+        </section></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const rect = r => [r.x, r.y, r.width, r.height].join(",");
+                const fragments = id => Array.from(
+                    document.getElementById(id).getClientRects(), rect).join("|");
+                const bounds = id => rect(document.getElementById(id).getBoundingClientRect());
+                return [fragments("item"), fragments("inner"), fragments("second"),
+                    bounds("item"), bounds("inner"), bounds("second"), bounds("columns")].join(";");
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "0,0,100,16|120,0,100,8|240,0,100,0;\
+             0,0,20,16|120,0,20,16|240,0,20,8;\
+             120,8,100,8|240,0,100,16;0,0,220,16;0,0,260,16;\
+             120,0,220,16;0,0,340,16"
+        );
+    }
+
+    #[test]
+    fn cloned_multicol_decorations_expand_each_client_rect() {
+        let html = r#"<html><head><style>
+            * { margin: 0; }
+            #columns { width: 340px; height: 16px; column-count: 3; column-gap: 20px; column-fill: auto; }
+            #item { box-sizing: border-box; height: 24px; padding: 2px; border: 2px solid black;
+                    box-decoration-break: clone; }
+        </style></head><body><section id="columns"><div id="item"></div></section></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const item = document.getElementById("item");
+                const rect = r => [r.x, r.y, r.width, r.height].join(",");
+                return Array.from(item.getClientRects(), rect).join("|") + ";" +
+                    rect(item.getBoundingClientRect());
+            })()"#,
+        );
+        assert_eq!(result, "0,0,100,16|120,0,100,16;0,0,220,16");
     }
 
     #[test]

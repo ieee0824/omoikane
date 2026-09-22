@@ -9048,7 +9048,8 @@ fn multicol_properties_compute_and_supply_initial_values() {
         "style",
         "color: navy; columns: 120px 3; column-gap: 24px; column-fill: auto; \
          column-span: all; column-rule: 5px dashed red; break-before: column; \
-         break-after: avoid-column; break-inside: avoid-column; orphans: 3; widows: 4",
+         break-after: avoid-column; break-inside: avoid-column; box-decoration-break: clone; \
+         orphans: 3; widows: 4",
     );
     let mut resolver = StyleResolver::new();
     let style = resolver.computed_style(&target);
@@ -9081,6 +9082,10 @@ fn multicol_properties_compute_and_supply_initial_values() {
     );
     assert_eq!(style.get("orphans"), Some(&ComputedValue::Number(3.0)));
     assert_eq!(style.get("widows"), Some(&ComputedValue::Number(4.0)));
+    assert_eq!(
+        style.get("box-decoration-break"),
+        Some(&ComputedValue::Keyword("clone".into()))
+    );
 
     let initial = NodeHandle::element("div");
     let document = NodeHandle::document();
@@ -9114,6 +9119,10 @@ fn multicol_properties_compute_and_supply_initial_values() {
     assert_eq!(
         style.get("column-rule-color"),
         Some(&ComputedValue::Color("black".into()))
+    );
+    assert_eq!(
+        style.get("box-decoration-break"),
+        Some(&ComputedValue::Keyword("slice".into()))
     );
 }
 
@@ -9189,6 +9198,7 @@ fn multicol_shorthands_expand_and_invalid_values_do_not_win() {
         ("columns", "12px 2", "2 3"),
         ("break-before", "column", "always"),
         ("break-inside", "avoid-column", "column"),
+        ("box-decoration-break", "clone", "repeat"),
     ] {
         assert!(supports_declaration(property, valid), "{property}: {valid}");
         assert!(

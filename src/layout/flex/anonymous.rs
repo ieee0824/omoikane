@@ -129,6 +129,7 @@ pub(super) fn layout(
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol: None,
         lines,
         children: Vec::new(),

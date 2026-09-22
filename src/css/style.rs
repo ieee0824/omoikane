@@ -2347,6 +2347,7 @@ fn validate_multicol_declaration(name: &str, value: &Value) -> Option<Declaratio
             "avoid-column",
             "avoid-region",
         ]),
+        "box-decoration-break" => keyword(&["slice", "clone"]),
         "orphans" | "widows" => match value {
             Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => {
                 DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()))
@@ -5683,6 +5684,7 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "inset-block-start",
     "inset-block-end",
     "box-sizing",
+    "box-decoration-break",
     "clear",
     "clip-path",
     "-webkit-clip-path",
@@ -8216,6 +8218,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("column-span".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+    properties
+        .entry("box-decoration-break".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("slice".to_string()));
     properties
         .entry("column-rule-style".to_string())
         .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
