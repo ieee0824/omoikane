@@ -6644,10 +6644,23 @@
   // CSS syntax is accepted/rejected by the native engine parser. This scanner
   // only preserves each accepted top-level rule's source text for CSSOM
   // serialization; it understands strings, comments and nested blocks.
+  function cssRuleWithoutLeadingComments(source) {
+    let text = String(source || "").trim();
+    while (text.startsWith("/*")) {
+      const end = text.indexOf("*/", 2);
+      if (end < 0) break;
+      text = text.slice(end + 2).trim();
+    }
+    return text;
+  }
+
   function splitCssRules(source) {
     const css = String(source || "");
     try {
-      return JSON.parse(__omoikane_css_rule_sources(css));
+      return JSON.parse(__omoikane_css_rule_sources(css)).filter(rule =>
+        !/^@property(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
+        __omoikane_css_property_rule(rule) !== null
+      );
     } catch (error) {
       throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError");
     }
@@ -6843,6 +6856,34 @@
     get type() { return 5; }
     get cssText() { return "@font-face { " + this.style.cssText + " }"; }
     get style() { return this.__style; }
+  }
+
+  class CSSPropertyRule {
+    constructor(text, sheet = null, index = -1) {
+      const encoded = __omoikane_css_property_rule(String(text));
+      if (encoded === null) throw new DOMException("Invalid @property rule.", "SyntaxError");
+      const descriptors = JSON.parse(encoded);
+      this.__text = String(text).trim();
+      this.__sheet = sheet;
+      this.__index = index;
+      this.__name = descriptors.name;
+      this.__syntax = descriptors.syntax;
+      this.__inherits = descriptors.inherits;
+      this.__initialValue = descriptors.initialValue;
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get type() { return 0; }
+    get cssText() {
+      const syntax = JSON.stringify(this.__syntax);
+      const name = this.__name.replace(/[\0-\x1f\x7f]/g, ch => "\\" + ch.codePointAt(0).toString(16) + " ");
+      let text = `@property ${name} { syntax: ${syntax}; inherits: ${this.__inherits};`;
+      if (this.__initialValue !== null) text += ` initial-value: ${this.__initialValue};`;
+      return text + " }";
+    }
+    get name() { return this.__name; }
+    get syntax() { return this.__syntax; }
+    get inherits() { return this.__inherits; }
+    get initialValue() { return this.__initialValue; }
   }
 
   class CSSGroupingRule {
@@ -7186,19 +7227,22 @@
   }
 
   function createCssRule(text, sheet = null, index = -1) {
-    return /^\s*@font-face(?=\s|\/\*|\{)/i.test(text)
+    const ruleSource = cssRuleWithoutLeadingComments(text);
+    return /^@font-face(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSFontFaceRule(text, sheet, index)
-      : /^\s*@import(?=\s|\/\*)/i.test(text)
+      : /^@property(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSPropertyRule(text, sheet, index)
+      : /^@import(?=\s|\/\*)/i.test(ruleSource)
       ? new CSSImportRule(text, sheet, index)
-      : /^\s*@layer(?=\s|\/\*|\{|;)/i.test(text)
+      : /^@layer(?=\s|\/\*|\{|;)/i.test(ruleSource)
       ? (cssRuleBlockStart(text) >= 0
         ? new CSSLayerBlockRule(text, sheet, index)
         : new CSSLayerStatementRule(text, sheet, index))
-      : /^\s*@container(?=\s|\/\*|\()/i.test(text)
+      : /^@container(?=\s|\/\*|\()/i.test(ruleSource)
       ? new CSSContainerRule(text, sheet, index)
-      : /^\s*@scope(?=\s|\/\*|\(|\{)/i.test(text)
+      : /^@scope(?=\s|\/\*|\(|\{)/i.test(ruleSource)
       ? new CSSScopeRule(text, sheet, index)
-      : /^\s*@supports(?=\s|\/\*|\()/i.test(text)
+      : /^@supports(?=\s|\/\*|\()/i.test(ruleSource)
       ? new CSSSupportsRule(text, sheet, index)
       : new CSSStyleRule(text, sheet, index);
   }
@@ -7608,6 +7652,31 @@
   // Unsupported declarations conservatively report false so sites choose their
   // fallback path instead of aborting while probing browser capabilities.
   globalThis.CSS = {
+    registerProperty(descriptor) {
+      if (arguments.length === 0 || descriptor === null ||
+          (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+        throw new TypeError("CSS.registerProperty requires a descriptor dictionary.");
+      }
+      if (!("name" in descriptor)) {
+        throw new TypeError("CSS.registerProperty requires name.");
+      }
+      if (!("inherits" in descriptor)) {
+        throw new TypeError("CSS.registerProperty requires inherits.");
+      }
+      const name = String(descriptor.name);
+      const syntax = "syntax" in descriptor ? String(descriptor.syntax) : "*";
+      const inherits = Boolean(descriptor.inherits);
+      const initialValue = "initialValue" in descriptor
+        ? String(descriptor.initialValue)
+        : null;
+      const status = __omoikane_register_property(name, syntax, inherits, initialValue);
+      if (status === "duplicate") {
+        throw new DOMException("The custom property is already registered.", "InvalidModificationError");
+      }
+      if (status !== "ok") {
+        throw new DOMException("The custom property descriptor is invalid.", "SyntaxError");
+      }
+    },
     escape(value) {
       const input = String(value);
       let output = "";
@@ -14138,6 +14207,7 @@
   globalThis.MediaList = MediaList;
   globalThis.CSSStyleRule = CSSStyleRule;
   globalThis.CSSFontFaceRule = CSSFontFaceRule;
+  globalThis.CSSPropertyRule = CSSPropertyRule;
   globalThis.CSSImportRule = CSSImportRule;
   globalThis.CSSLayerBlockRule = CSSLayerBlockRule;
   globalThis.CSSLayerStatementRule = CSSLayerStatementRule;
