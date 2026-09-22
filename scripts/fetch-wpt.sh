@@ -64,6 +64,7 @@ git_wpt sparse-checkout add \
   "/css/css-cascade/parsing/supports-import-parsing.html"
 git_wpt sparse-checkout add "/fonts/Ahem.ttf" "/fonts/noto/noto-sans-v8-latin-regular.woff"
 git_wpt sparse-checkout add "/css/css-variables/variable-substitution-shorthands.html"
+git_wpt sparse-checkout add "/css/css-properties-values-api/register-property.html" "/css/css-properties-values-api/register-property-syntax-parsing.html" "/css/css-properties-values-api/at-property-cssom.html" "/css/css-properties-values-api/determine-registration.html" "/css/css-properties-values-api/registered-properties-inheritance.html" "/css/css-properties-values-api/registered-property-cssom.html" "/css/css-properties-values-api/resources/utils.js"
 git_wpt sparse-checkout add "/css/cssom/CSSContainerRule.tentative.html"
 git_wpt sparse-checkout add \
   "/css/css-font-loading/fontfaceset-has.html" \

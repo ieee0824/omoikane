@@ -574,7 +574,7 @@ fn interpolate_property(
     let mix = |start: f32, end: f32| start + (end - start) * progress;
     match (start, end) {
         (ComputedValue::Number(start), ComputedValue::Number(end))
-            if is_transitionable_number_property(property) =>
+            if property.starts_with("--") || is_transitionable_number_property(property) =>
         {
             Some(ComputedValue::Number(mix(*start, *end)))
         }
@@ -598,7 +598,9 @@ fn interpolate_property(
             })
         }
         (ComputedValue::Color(start), ComputedValue::Color(end))
-            if property == "color" || property.ends_with("-color") =>
+            if property.starts_with("--")
+                || property == "color"
+                || property.ends_with("-color") =>
         {
             let start = parse_color(start)?;
             let end = parse_color(end)?;
@@ -620,6 +622,15 @@ fn interpolate_property(
         }
         _ => None,
     }
+}
+
+pub(crate) fn interpolate_custom_property(
+    property: &str,
+    start: &ComputedValue,
+    end: &ComputedValue,
+    progress: f32,
+) -> Option<ComputedValue> {
+    interpolate_property(property, start, end, progress)
 }
 
 fn length_components(value: &ComputedValue) -> Option<(f32, f32)> {

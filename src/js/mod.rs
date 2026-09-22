@@ -1,7 +1,7 @@
 //! JavaScript engine embedding and DOM/Web API bindings.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -1199,6 +1199,10 @@ struct HostState {
     /// the document that node actually lives in — the main document's rules
     /// never leak into a sub-document and vice versa (issue 016-15).
     document_styles: HashMap<usize, DocumentStyleEntry>,
+    /// Registrations created by `CSS.registerProperty()`, isolated by the
+    /// currently executing Document and retained across stylesheet rebuilds.
+    registered_custom_properties:
+        HashMap<usize, BTreeMap<String, crate::css::style::RegisteredCustomProperty>>,
     font_loading: font_loading::FontStore,
     /// Cached layout tree for the **main** document, matching its entry in
     /// [`HostState::document_styles`]. Rebuilt lazily and only when a layout
@@ -1874,6 +1878,7 @@ impl HostState {
             pending_scroll_targets: Vec::new(),
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
+            registered_custom_properties: HashMap::new(),
             font_loading: Default::default(),
             layout_root: None,
             content_visibility_auto_nodes: HashSet::new(),
@@ -2500,6 +2505,7 @@ impl HostState {
         }
         self.event_loop.cancel_tasks_for_document(document_id);
         self.document_styles.remove(&document_id);
+        self.registered_custom_properties.remove(&document_id);
         self.font_loading.remove_document(document_id);
         self.write_parsers.remove(&document_id);
         self.written_script_queue
@@ -3131,6 +3137,12 @@ impl HostState {
                 }
             }
         }
+        resolver.set_script_registered_custom_properties(
+            self.registered_custom_properties
+                .get(&document_id)
+                .cloned()
+                .unwrap_or_default(),
+        );
         let active_font_rules = resolver.active_font_face_rules();
         let font_winners = resolver.resolved_font_face_rules();
         font_loading::sync_stylesheets(self, document, active_font_rules);
@@ -9714,6 +9726,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(css_declarations_native),
         ),
         (
+            js_string!("__omoikane_css_property_rule"),
+            1,
+            NativeFunction::from_copy_closure(css_property_rule_native),
+        ),
+        (
+            js_string!("__omoikane_register_property"),
+            4,
+            NativeFunction::from_copy_closure(register_property_native),
+        ),
+        (
             js_string!("__omoikane_css_scope_rules_valid"),
             1,
             NativeFunction::from_copy_closure(css_scope_rules_valid_native),
@@ -13249,6 +13271,95 @@ fn css_rule_sources_native(
     let rules = serde_json::to_string(&rules)
         .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
     Ok(js_string!(rules.as_str()).into())
+}
+
+/// Returns the validated descriptors of one `@property` rule, or `null` when
+/// the rule does not establish a registration.
+fn css_property_rule_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let css = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+    let registration = match sheet.rules.as_slice() {
+        [crate::css::Rule::At(rule)] => {
+            crate::css::style::registered_custom_property_from_rule(rule)
+        }
+        _ => None,
+    };
+    let Some(registration) = registration else {
+        return Ok(JsValue::null());
+    };
+    let initial_value = registration
+        .initial_value
+        .as_ref()
+        .map(crate::css::serialize_specified_value);
+    let encoded = serde_json::json!({
+        "name": registration.name,
+        "syntax": registration.syntax_text,
+        "inherits": registration.inherits,
+        "initialValue": initial_value,
+    })
+    .to_string();
+    Ok(js_string!(encoded.as_str()).into())
+}
+
+/// Registers a custom property for the currently executing Document.
+/// Returns a small status string so the JavaScript binding can create the
+/// Web-exposed DOMException with the required name.
+fn register_property_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let syntax = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| js_string!("*").into())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let inherits = args.get(2).is_some_and(JsValue::to_boolean);
+    let initial = args
+        .get(3)
+        .filter(|value| !value.is_null_or_undefined())
+        .map(|value| value.to_string(context))
+        .transpose()?
+        .map(|value| value.to_std_string_escaped());
+    let Some(registration) = crate::css::style::parse_registered_custom_property(
+        &name,
+        &syntax,
+        inherits,
+        initial.as_deref(),
+    ) else {
+        return Ok(js_string!("invalid").into());
+    };
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let document = state.csp_document_for_context(context)?;
+        let document_id = document.identity();
+        let registrations = state
+            .registered_custom_properties
+            .entry(document_id)
+            .or_default();
+        if registrations.contains_key(&name) {
+            return Ok(js_string!("duplicate").into());
+        }
+        registrations.insert(name, registration);
+        state.mark_document_style_dirty(&document);
+        Ok(js_string!("ok").into())
+    })
 }
 
 /// Returns source-preserving declarations for CSSOM descriptor blocks.
@@ -28674,6 +28785,69 @@ b</textarea></form>"#,
                 "document.styleSheets[0].cssRules[0].style.color"
             ),
             "red"
+        );
+    }
+
+    #[test]
+    fn css_registered_custom_properties_validate_cssom_and_computed_values() {
+        let doc = crate::html::TreeBuilder::parse(
+            "<html><head><style>@property --space { syntax: '<length>'; inherits: false; initial-value: 2px; } @property --bad { syntax: '<length>'; inherits: false; } #target { --space: 10px; }</style></head><body><div id='target'></div></body></html>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+        assert!(runtime
+            .eval("document.styleSheets[0].cssRules[0] instanceof CSSPropertyRule && document.styleSheets[0].cssRules.length === 2")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "[document.styleSheets[0].cssRules[0].name, document.styleSheets[0].cssRules[0].syntax, document.styleSheets[0].cssRules[0].inherits, document.styleSheets[0].cssRules[0].initialValue, document.styleSheets[0].cssRules[0].type].join('|')"
+            ),
+            "--space|<length>|false|2px|0"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const s = document.createElement('style'); s.textContent = '@property --colors { syntax: \\\"<color>#\\\"; inherits: false; initial-value: red, blue; }'; document.head.appendChild(s); return s.sheet.cssRules.length + ':' + (s.sheet.cssRules[0] && s.sheet.cssRules[0].name); })()"
+            ),
+            "1:--colors"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('target')).getPropertyValue('--space')"
+            ),
+            "10px"
+        );
+        assert!(runtime
+            .eval("CSS.registerProperty({name: '--ratio', syntax: '<number>', inherits: false, initialValue: '0'}); document.getElementById('target').style.setProperty('--ratio', '2'); getComputedStyle(document.getElementById('target')).getPropertyValue('--ratio') === '2'")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval("(() => { try { CSS.registerProperty({name: '--ratio', syntax: '<number>', inherits: false, initialValue: '0'}); return false; } catch (e) { return e.name === 'InvalidModificationError'; } })()")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval("(() => { try { CSS.registerProperty({name: '--bad-script', syntax: '<length>', inherits: false, initialValue: '1'}); return false; } catch (e) { return e.name === 'SyntaxError'; } })()")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+
+        let animated = crate::html::TreeBuilder::parse(
+            "<html><head><style>@property --progress { syntax: '<number>'; inherits: false; initial-value: 0; } @keyframes grow { from { --progress: 0; } to { --progress: 10; } } #target { animation-name: grow; animation-duration: 10s; animation-delay: -5s; animation-play-state: paused; }</style></head><body><div id='target'></div></body></html>",
+        )
+        .document();
+        let mut animated_runtime = JsRuntime::with_document(animated).unwrap();
+        assert_eq!(
+            eval_str(
+                &mut animated_runtime,
+                "getComputedStyle(document.getElementById('target')).getPropertyValue('--progress')"
+            ),
+            "5"
         );
     }
 
