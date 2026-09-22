@@ -234,6 +234,8 @@
   const canonicalCdataNodes = new WeakMap();
   const attributeNodeStates = new WeakMap();
   const attributeNodeCache = new WeakMap();
+  const namedNodeMapCache = new WeakMap();
+  const namedNodeMapElements = new WeakMap();
   const canonicalCharacterDataOverrides = new WeakMap();
   const wrapperLocalNames = new WeakMap();
   const ownerDocumentIds = new WeakMap();
@@ -765,14 +767,109 @@
     return cachedNode(id);
   }
 
+  function normalizedAttributeRecord(record) {
+    if (!record) return null;
+    let namespace = record[1];
+    let localName = record[2];
+    if (namespace === null && record[0].startsWith("xlink:")) {
+      namespace = XLINK_NAMESPACE;
+      localName = record[0].slice(6);
+    } else if (namespace === null && (record[0] === "xmlns" || record[0].startsWith("xmlns:"))) {
+      namespace = XMLNS_NAMESPACE;
+      localName = record[0] === "xmlns" ? "xmlns" : record[0].slice(6);
+    }
+    return [record[0], namespace, localName, record[3]];
+  }
+
   function namespacedAttributeRecord(id, namespace, localName) {
     const records = nativeAttributeRecords(id) || [];
     for (let index = 0; index < records.length; index += 1) {
-      if (records[index][1] === namespace && records[index][2] === localName) {
-        return records[index];
+      const record = normalizedAttributeRecord(records[index]);
+      if (record[1] === namespace && record[2] === localName) {
+        return record;
       }
     }
     return null;
+  }
+
+  function attributeRecordByName(element, qualifiedName) {
+    let name = String(qualifiedName);
+    if (isHtmlElementInHtmlDocument(element)) {
+      name = asciiLowercase(name);
+    }
+    const records = nativeAttributeRecords(element.__id) || [];
+    for (let index = 0; index < records.length; index += 1) {
+      if (records[index][0] === name) return normalizedAttributeRecord(records[index]);
+    }
+    return null;
+  }
+
+  function isHtmlElementInHtmlDocument(element) {
+    return element instanceof HTMLElement &&
+      element.ownerDocument && element.ownerDocument.contentType === "text/html";
+  }
+
+  function attributeCacheFor(element, namespace, create = true) {
+    let namespaces = safeWeakMapGet(attributeNodeCache, element);
+    if (!namespaces) {
+      if (!create) return null;
+      namespaces = new Map();
+      safeWeakMapSet(attributeNodeCache, element, namespaces);
+    }
+    let entries = safeMapGet(namespaces, namespace);
+    if (!entries && create) {
+      entries = new Map();
+      safeMapSet(namespaces, namespace, entries);
+    }
+    return entries || null;
+  }
+
+  function materializeAttribute(element, sourceRecord) {
+    const record = normalizedAttributeRecord(sourceRecord);
+    if (!record) return null;
+    const entries = attributeCacheFor(element, record[1]);
+    let attr = safeMapGet(entries, record[2]);
+    const colon = record[0].indexOf(":");
+    if (!attr) {
+      attr = new Attr(ATTR_CONSTRUCTION, {
+        name: record[0],
+        namespace: record[1],
+        prefix: colon < 0 ? null : record[0].slice(0, colon),
+        localName: record[2],
+        value: record[3],
+        ownerDocument: element.ownerDocument,
+        ownerElement: element,
+      });
+      safeMapSet(entries, record[2], attr);
+    } else {
+      const state = safeWeakMapGet(attributeNodeStates, attr);
+      state.name = record[0];
+      state.namespace = record[1];
+      state.prefix = colon < 0 ? null : record[0].slice(0, colon);
+      state.localName = record[2];
+      state.value = record[3];
+      state.ownerDocument = element.ownerDocument;
+      state.ownerElement = element;
+    }
+    return attr;
+  }
+
+  function detachMaterializedAttribute(element, record) {
+    record = normalizedAttributeRecord(record);
+    if (!record) return null;
+    const entries = attributeCacheFor(element, record[1], false);
+    if (!entries) return null;
+    const attr = safeMapGet(entries, record[2]);
+    if (!attr) return null;
+    const state = safeWeakMapGet(attributeNodeStates, attr);
+    state.name = record[0];
+    state.namespace = record[1];
+    state.prefix = record[0].includes(":") ? record[0].slice(0, record[0].indexOf(":")) : null;
+    state.localName = record[2];
+    state.value = record[3];
+    state.ownerElement = null;
+    safeMapDelete(entries, record[2]);
+    return attr;
   }
 
   function canonicalCharacterData(id, node) {
@@ -878,11 +975,24 @@
   // shadow roots ensures their detached ownerDocument remains the adopted one.
   function stampOwnerDoc(node, doc) {
     if (!node) return;
+    const attributeState = safeWeakMapGet(attributeNodeStates, node);
+    if (attributeState) {
+      attributeState.ownerDocument = doc;
+      return;
+    }
     const id = internalNodeId(node);
     if (id === undefined) return;
     const docId = internalNodeId(doc);
     if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
     if (__omoikane_node_type(id) === 1) {
+      const attributeNamespaces = safeWeakMapGet(attributeNodeCache, node);
+      if (attributeNamespaces) {
+        safeApply(mapForEachIntrinsic, attributeNamespaces, [attributes => {
+          safeApply(mapForEachIntrinsic, attributes, [attribute => {
+            stampOwnerDoc(attribute, doc);
+          }]);
+        }]);
+      }
       if (hasCanonicalWrapperId(canonicalHtmlElementIds, node) &&
           internalNodeLocalName(node) === "template") {
         stampOwnerDoc(
@@ -1040,9 +1150,54 @@
     return __omoikane_is_valid_xml_name(value);
   }
 
+  function isValidAttributeLocalName(value) {
+    return value.length > 0 && !/[\0\t\n\f\r \/=>]/.test(value);
+  }
+
+  function isValidNamespacePrefix(value) {
+    return value.length > 0 && !/[\0\t\n\f\r \/>]/.test(value);
+  }
+
+  function validateAndExtractAttributeNS(namespace, qname) {
+    const colon = qname.indexOf(":");
+    const prefix = colon < 0 ? null : qname.slice(0, colon);
+    const localName = colon < 0 ? qname : qname.slice(colon + 1);
+    if ((prefix !== null && !isValidNamespacePrefix(prefix)) ||
+        !isValidAttributeLocalName(localName)) {
+      throw new DOMException(
+        "The qualified name provided ('" + qname + "') is not valid.",
+        "InvalidCharacterError"
+      );
+    }
+    if (prefix !== null && namespace === null) {
+      throw new DOMException(
+        "A prefixed qualified name requires a non-null namespace.",
+        "NamespaceError"
+      );
+    }
+    if (prefix === "xml" && namespace !== XML_NAMESPACE) {
+      throw new DOMException(
+        "The 'xml' prefix must use the XML namespace.",
+        "NamespaceError"
+      );
+    }
+    if ((qname === "xmlns" || prefix === "xmlns") && namespace !== XMLNS_NAMESPACE) {
+      throw new DOMException(
+        "The 'xmlns' name/prefix must use the XMLNS namespace.",
+        "NamespaceError"
+      );
+    }
+    if (namespace === XMLNS_NAMESPACE && qname !== "xmlns" && prefix !== "xmlns") {
+      throw new DOMException(
+        "The XMLNS namespace requires the 'xmlns' name or prefix.",
+        "NamespaceError"
+      );
+    }
+    return { namespace, prefix, localName };
+  }
+
   // Validates a qualified name and splits it into prefix / localName. Throws an
-  // InvalidCharacterError if it is not an XML Name, or a NamespaceError if it is
-  // a malformed QName (empty/extra colon-delimited parts).
+  // InvalidCharacterError if it is not an XML Name or is a malformed QName.
   function validateQualifiedName(qname) {
     if (!isValidXmlName(qname)) {
       throw new DOMException(
@@ -2302,7 +2457,9 @@
     set title(value) { this.setAttribute("title", value); }
 
     getAttribute(name) {
-      return __omoikane_get_attribute(this.__id, String(name));
+      let attr = String(name);
+      if (isHtmlElementInHtmlDocument(this)) attr = asciiLowercase(attr);
+      return __omoikane_get_attribute(this.__id, attr);
     }
 
     getAttributeNode(name) {
@@ -2310,25 +2467,66 @@
     }
 
     getAttributeNodeNS(namespace, localName) {
-      const ns = namespace == null || namespace === "" ? null : String(namespace);
-      const local = String(localName);
-      for (let index = 0; index < this.attributes.length; index++) {
-        const attribute = this.attributes[index];
-        if (attribute.namespaceURI === ns && attribute.localName === local) return attribute;
+      return this.attributes.getNamedItemNS(namespace, localName);
+    }
+
+    setAttributeNode(attr) {
+      return this.attributes.setNamedItem(attr);
+    }
+
+    setAttributeNodeNS(attr) {
+      return this.attributes.setNamedItemNS(attr);
+    }
+
+    removeAttributeNode(attr) {
+      if (!safeWeakMapHas(attributeNodeStates, attr) || attr.ownerElement !== this) {
+        throw new DOMException("The requested attribute does not exist.", "NotFoundError");
       }
-      return null;
+      const current = this.getAttributeNodeNS(attr.namespaceURI, attr.localName);
+      if (current !== attr) {
+        throw new DOMException("The requested attribute does not exist.", "NotFoundError");
+      }
+      return this.attributes.removeNamedItemNS(attr.namespaceURI, attr.localName);
     }
 
     setAttribute(name, value) {
-      const attr = String(name);
-      const oldValue = __omoikane_get_attribute(this.__id, attr);
+      let attr = String(name);
+      if (!isValidAttributeLocalName(attr)) {
+        throw new DOMException(
+          "The attribute name provided ('" + attr + "') is not a valid name.",
+          "InvalidCharacterError"
+        );
+      }
+      if (isHtmlElementInHtmlDocument(this)) attr = asciiLowercase(attr);
+      const previous = attributeRecordByName(this, attr);
+      const oldValue = previous ? previous[3] : null;
       const newValue = String(value);
-      __omoikane_set_attribute(this.__id, attr, newValue);
-      queueMutation(this, "attributes", { attributeName: attr, oldValue });
-      const callbackName = (this.namespaceURI === null || this.namespaceURI === HTML_NAMESPACE)
-        ? attr.replace(/[A-Z]/g, letter => letter.toLowerCase())
-        : attr;
-      notifyCustomElementAttributeChanged(this, callbackName, oldValue, newValue, null);
+      if (isHtmlElementInHtmlDocument(this)) {
+        __omoikane_set_attribute(this.__id, attr, newValue);
+      } else {
+        nativeSetAttributeNS(
+          this.__id,
+          previous ? previous[1] : null,
+          previous ? previous[0] : attr,
+          previous ? previous[2] : attr,
+          newValue,
+          false
+        );
+      }
+      const current = previous
+        ? namespacedAttributeRecord(this.__id, previous[1], previous[2])
+        : namespacedAttributeRecord(this.__id, null, attr);
+      if (current) materializeAttribute(this, current);
+      const callbackName = current ? current[2] : attr;
+      const callbackNamespace = current ? current[1] : null;
+      queueMutation(this, "attributes", {
+        attributeName: callbackName,
+        attributeNamespace: callbackNamespace,
+        oldValue,
+      });
+      notifyCustomElementAttributeChanged(
+        this, callbackName, oldValue, newValue, callbackNamespace
+      );
       if (callbackName === "popover") popoverAttributeChanged(this, oldValue, newValue);
       if (callbackName === "popovertarget") clearPopoverTargetOverride(this);
       if (callbackName === "slot" ||
@@ -2858,25 +3056,46 @@
     }
 
     hasAttribute(name) {
-      return __omoikane_get_attribute(this.__id, String(name)) !== null;
+      let attr = String(name);
+      if (isHtmlElementInHtmlDocument(this)) attr = asciiLowercase(attr);
+      return __omoikane_get_attribute(this.__id, attr) !== null;
+    }
+
+    hasAttributeNS(namespace, localName) {
+      const ns = namespace == null || namespace === "" ? null : String(namespace);
+      return namespacedAttributeRecord(this.__id, ns, String(localName)) !== null;
+    }
+
+    getAttributeNames() {
+      return (nativeAttributeRecords(this.__id) || []).map(record => record[0]);
     }
 
     removeAttribute(name) {
-      const attr = String(name);
-      const oldValue = __omoikane_get_attribute(this.__id, attr);
-      __omoikane_remove_attribute(this.__id, attr);
-      if (oldValue !== null) {
-        queueMutation(this, "attributes", { attributeName: attr, oldValue });
-        const callbackName = (this.namespaceURI === null || this.namespaceURI === HTML_NAMESPACE)
-          ? attr.replace(/[A-Z]/g, letter => letter.toLowerCase())
-          : attr;
-        notifyCustomElementAttributeChanged(this, callbackName, oldValue, null, null);
-        if (callbackName === "popover") popoverAttributeChanged(this, oldValue, null);
-        if (callbackName === "popovertarget") clearPopoverTargetOverride(this);
-        if (callbackName === "slot" ||
-            (callbackName === "name" && this instanceof HTMLSlotElement)) {
-          refreshSlotAssignments();
-        }
+      let attr = String(name);
+      if (isHtmlElementInHtmlDocument(this)) attr = asciiLowercase(attr);
+      const record = attributeRecordByName(this, attr);
+      if (!record) {
+        if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
+        return;
+      }
+      const oldValue = record[3];
+      if (isHtmlElementInHtmlDocument(this)) {
+        __omoikane_remove_attribute(this.__id, record[0]);
+      } else {
+        nativeRemoveAttributeNS(this.__id, record[1], record[2], record[0]);
+      }
+      detachMaterializedAttribute(this, record);
+      queueMutation(this, "attributes", {
+        attributeName: record[2],
+        attributeNamespace: record[1],
+        oldValue,
+      });
+      notifyCustomElementAttributeChanged(this, record[2], oldValue, null, record[1]);
+      if (record[2] === "popover") popoverAttributeChanged(this, oldValue, null);
+      if (record[2] === "popovertarget") clearPopoverTargetOverride(this);
+      if (record[2] === "slot" ||
+          (record[2] === "name" && this instanceof HTMLSlotElement)) {
+        refreshSlotAssignments();
       }
       // Removing an `on*` content attribute detaches the listener it wired.
       if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
@@ -2884,6 +3103,12 @@
 
     toggleAttribute(name, force) {
       const attr = String(name);
+      if (!isValidAttributeLocalName(attr)) {
+        throw new DOMException(
+          "The attribute name provided ('" + attr + "') is not a valid name.",
+          "InvalidCharacterError"
+        );
+      }
       const present = this.hasAttribute(attr);
       if (arguments.length < 2) {
         if (present) {
@@ -2904,26 +3129,12 @@
     setAttributeNS(namespace, qualifiedName, value) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       const name = String(qualifiedName);
-      const { localName } = validateAndExtractNS(ns, name);
-      if (ns === null) {
-        this.setAttribute(name, value);
-        return;
-      }
-      const id = canonicalNodeId(requireNodeReceiver(this));
-      const previous = namespacedAttributeRecord(id, ns, localName);
-      const oldValue = previous ? previous[3] : null;
-      if (previous && previous[0] !== name) {
-        nativeRemoveAttributeNS(id, previous[0]);
-      }
-      const newValue = String(value);
-      nativeSetAttributeNS(id, ns, name, localName, newValue);
-      queueMutation(this, "attributes", { attributeName: localName, attributeNamespace: ns, oldValue });
-      notifyCustomElementAttributeChanged(this, localName, oldValue, newValue, ns);
+      const { localName } = validateAndExtractAttributeNS(ns, name);
+      setAttributeValueNS(this, ns, name, localName, String(value), false);
     }
 
     getAttributeNS(namespace, localName) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
-      if (ns === null) return this.getAttribute(localName);
       const id = canonicalNodeId(requireNodeReceiver(this));
       const entry = namespacedAttributeRecord(id, ns, String(localName));
       return entry ? entry[3] : null;
@@ -2931,16 +3142,22 @@
 
     removeAttributeNS(namespace, localName) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
-      if (ns === null) {
-        this.removeAttribute(localName);
-        return;
-      }
       const id = canonicalNodeId(requireNodeReceiver(this));
       const entry = namespacedAttributeRecord(id, ns, String(localName));
       if (!entry) return;
-      nativeRemoveAttributeNS(id, entry[0]);
+      nativeRemoveAttributeNS(id, ns, entry[2], entry[0]);
+      detachMaterializedAttribute(this, entry);
       queueMutation(this, "attributes", { attributeName: entry[2], attributeNamespace: ns, oldValue: entry[3] });
       notifyCustomElementAttributeChanged(this, entry[2], entry[3], null, ns);
+      if (ns === null) {
+        if (entry[2] === "popover") popoverAttributeChanged(this, entry[3], null);
+        if (entry[2] === "popovertarget") clearPopoverTargetOverride(this);
+        if (entry[2] === "slot" ||
+            (entry[2] === "name" && this instanceof HTMLSlotElement)) {
+          refreshSlotAssignments();
+        }
+        if (/^on./i.test(entry[0])) applyInlineHandlerAttribute(this, entry[0]);
+      }
     }
 
     get tagName() {
@@ -2983,70 +3200,12 @@
     }
 
     get attributes() {
-      const node = this;
-      const records = () => nativeAttributeRecords(node.__id) || [];
-      const makeAttr = record => {
-        let entries = safeWeakMapGet(attributeNodeCache, node);
-        if (!entries) {
-          entries = new Map();
-          safeWeakMapSet(attributeNodeCache, node, entries);
-        }
-        let namespace = record[1];
-        let localName = record[2];
-        if (namespace === null && record[0].startsWith("xlink:")) {
-          namespace = XLINK_NAMESPACE;
-          localName = record[0].slice(6);
-        } else if (namespace === null && (record[0] === "xmlns" || record[0].startsWith("xmlns:"))) {
-          namespace = XMLNS_NAMESPACE;
-          localName = record[0] === "xmlns" ? "xmlns" : record[0].slice(6);
-        }
-        const key = String(namespace) + "\u0000" + localName;
-        let attr = safeMapGet(entries, key);
-        if (!attr) {
-          const colon = record[0].indexOf(":");
-          attr = new Attr(ATTR_CONSTRUCTION, {
-            name: record[0],
-            namespace,
-            prefix: colon < 0 ? null : record[0].slice(0, colon),
-            localName,
-            value: record[3],
-            ownerDocument: node.ownerDocument,
-            ownerElement: node,
-          });
-          safeMapSet(entries, key, attr);
-        }
-        return attr;
-      };
-      return new Proxy([], {
-        get(_target, prop) {
-          const list = records();
-          if (prop === "length") return list.length;
-          if (prop === "item") return index => list[Number(index)] === undefined ? null : makeAttr(list[Number(index)]);
-          if (prop === "getNamedItem") return name => {
-            const entry = list.find(record => record[0] === String(name));
-            return entry ? makeAttr(entry) : null;
-          };
-          if (prop === "setNamedItem") return attr => { node.setAttribute(attr.name, attr.value); return attr; };
-          if (prop === "removeNamedItem") return name => {
-            name = String(name);
-            if (!node.hasAttribute(name)) {
-              throw new DOMException("The requested attribute does not exist.", "NotFoundError");
-            }
-            const entry = list.find(record => record[0] === name);
-            const old = makeAttr(entry);
-            node.removeAttribute(name);
-            return old;
-          };
-          if (typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop)) {
-            return list[Number(prop)] === undefined ? undefined : makeAttr(list[Number(prop)]);
-          }
-          if (typeof prop === "string") {
-            const entry = list.find(record => record[0] === prop);
-            if (entry) return makeAttr(entry);
-          }
-          return Array.prototype[prop];
-        }
-      });
+      let map = safeWeakMapGet(namedNodeMapCache, this);
+      if (!map) {
+        map = createNamedNodeMap(this);
+        safeWeakMapSet(namedNodeMapCache, this, map);
+      }
+      return map;
     }
 
     get dataset() {
@@ -4699,16 +4858,13 @@
     get value() {
       const state = safeWeakMapGet(attributeNodeStates, this);
       if (!state.ownerElement) return state.value;
-      return state.namespace === null
-        ? (state.ownerElement.getAttribute(state.name) ?? state.value)
-        : (state.ownerElement.getAttributeNS(state.namespace, state.localName) ?? state.value);
+      return state.ownerElement.getAttributeNS(state.namespace, state.localName) ?? state.value;
     }
     set value(value) {
       const state = safeWeakMapGet(attributeNodeStates, this);
       state.value = String(value);
       if (!state.ownerElement) return;
-      if (state.namespace === null) state.ownerElement.setAttribute(state.name, state.value);
-      else state.ownerElement.setAttributeNS(state.namespace, state.name, state.value);
+      state.ownerElement.setAttributeNS(state.namespace, state.name, state.value);
     }
     get nodeValue() { return this.value; }
     set nodeValue(value) { this.value = value == null ? "" : value; }
@@ -4724,7 +4880,7 @@
     get isConnected() { return false; }
     cloneNode() {
       const state = safeWeakMapGet(attributeNodeStates, this);
-      return new Attr(ATTR_CONSTRUCTION, { ...state });
+      return new Attr(ATTR_CONSTRUCTION, { ...state, ownerElement: null });
     }
     isSameNode(other) { return this === other; }
     isEqualNode(other) {
@@ -4733,6 +4889,198 @@
         && other.localName === this.localName
         && other.value === this.value;
     }
+  }
+
+  const NAMED_NODE_MAP_CONSTRUCTION = {};
+
+  function requireNamedNodeMap(map) {
+    const element = safeWeakMapGet(namedNodeMapElements, map);
+    if (!element) throw new TypeError("NamedNodeMap method called on an incompatible receiver");
+    return element;
+  }
+
+  function setAttributeValueNS(element, namespace, name, localName, value, replaceName) {
+    const id = canonicalNodeId(requireNodeReceiver(element));
+    const previous = namespacedAttributeRecord(id, namespace, localName);
+    const oldValue = previous ? previous[3] : null;
+    nativeSetAttributeNS(id, namespace, name, localName, value, replaceName);
+    const current = namespacedAttributeRecord(id, namespace, localName);
+    if (current) materializeAttribute(element, current);
+    queueMutation(element, "attributes", {
+      attributeName: localName,
+      attributeNamespace: namespace,
+      oldValue,
+    });
+    notifyCustomElementAttributeChanged(element, localName, oldValue, value, namespace);
+    if (namespace === null) {
+      if (localName === "popover") popoverAttributeChanged(element, oldValue, value);
+      if (localName === "popovertarget") clearPopoverTargetOverride(element);
+      if (localName === "slot" ||
+          (localName === "name" && element instanceof HTMLSlotElement)) {
+        refreshSlotAssignments();
+      }
+      if (/^on./i.test(name)) applyInlineHandlerAttribute(element, name);
+    }
+  }
+
+  function setAttributeNodeOnElement(element, attr) {
+    if (!safeWeakMapHas(attributeNodeStates, attr)) {
+      throw new TypeError("The provided value is not an Attr");
+    }
+    const state = safeWeakMapGet(attributeNodeStates, attr);
+    if (state.ownerElement && state.ownerElement !== element) {
+      throw new DOMException("The attribute is already in use.", "InUseAttributeError");
+    }
+    const oldRecord = namespacedAttributeRecord(element.__id, state.namespace, state.localName);
+    const oldAttr = oldRecord ? materializeAttribute(element, oldRecord) : null;
+    if (oldAttr === attr) return attr;
+
+    const oldState = oldAttr ? safeWeakMapGet(attributeNodeStates, oldAttr) : null;
+    const oldSnapshot = oldState ? { ...oldState, value: oldAttr.value } : null;
+    const value = attr.value;
+    setAttributeValueNS(
+      element, state.namespace, state.name, state.localName, value, true
+    );
+
+    if (oldState) {
+      Object.assign(oldState, oldSnapshot);
+      oldState.ownerElement = null;
+    }
+    state.value = value;
+    state.ownerDocument = element.ownerDocument;
+    state.ownerElement = element;
+    safeMapSet(attributeCacheFor(element, state.namespace), state.localName, attr);
+    return oldAttr;
+  }
+
+  function removeAttributeRecordFromElement(element, record) {
+    const attr = materializeAttribute(element, record);
+    element.removeAttributeNS(record[1], record[2]);
+    return attr;
+  }
+
+  class NamedNodeMap {
+    constructor(construction, element) {
+      if (construction !== NAMED_NODE_MAP_CONSTRUCTION) {
+        throw new TypeError("Illegal constructor");
+      }
+      safeWeakMapSet(namedNodeMapElements, this, element);
+    }
+
+    get length() {
+      const element = requireNamedNodeMap(this);
+      return (nativeAttributeRecords(element.__id) || []).length;
+    }
+
+    item(index) {
+      const element = requireNamedNodeMap(this);
+      const records = nativeAttributeRecords(element.__id) || [];
+      const record = records[Number(index) >>> 0];
+      return record ? materializeAttribute(element, record) : null;
+    }
+
+    getNamedItem(qualifiedName) {
+      const element = requireNamedNodeMap(this);
+      const record = attributeRecordByName(element, qualifiedName);
+      return record ? materializeAttribute(element, record) : null;
+    }
+
+    getNamedItemNS(namespace, localName) {
+      const element = requireNamedNodeMap(this);
+      const ns = namespace == null || namespace === "" ? null : String(namespace);
+      const record = namespacedAttributeRecord(element.__id, ns, String(localName));
+      return record ? materializeAttribute(element, record) : null;
+    }
+
+    setNamedItem(attr) {
+      return setAttributeNodeOnElement(requireNamedNodeMap(this), attr);
+    }
+
+    setNamedItemNS(attr) {
+      return setAttributeNodeOnElement(requireNamedNodeMap(this), attr);
+    }
+
+    removeNamedItem(qualifiedName) {
+      const element = requireNamedNodeMap(this);
+      const record = attributeRecordByName(element, qualifiedName);
+      if (!record) {
+        throw new DOMException("The requested attribute does not exist.", "NotFoundError");
+      }
+      return removeAttributeRecordFromElement(element, record);
+    }
+
+    removeNamedItemNS(namespace, localName) {
+      const element = requireNamedNodeMap(this);
+      const ns = namespace == null || namespace === "" ? null : String(namespace);
+      const record = namespacedAttributeRecord(element.__id, ns, String(localName));
+      if (!record) {
+        throw new DOMException("The requested attribute does not exist.", "NotFoundError");
+      }
+      return removeAttributeRecordFromElement(element, record);
+    }
+
+    *[Symbol.iterator]() {
+      for (let index = 0; index < this.length; index++) yield this.item(index);
+    }
+
+    get [Symbol.toStringTag]() { return "NamedNodeMap"; }
+  }
+
+  function namedNodeMapPropertyNames(element, target) {
+    const records = nativeAttributeRecords(element.__id) || [];
+    const names = [];
+    const htmlNamesOnly = isHtmlElementInHtmlDocument(element);
+    for (const record of records) {
+      const name = record[0];
+      if (htmlNamesOnly && name !== asciiLowercase(name)) continue;
+      if (names.includes(name) || name in target) continue;
+      names.push(name);
+    }
+    return names;
+  }
+
+  function createNamedNodeMap(element) {
+    const target = new NamedNodeMap(NAMED_NODE_MAP_CONSTRUCTION, element);
+    const map = new Proxy(target, {
+      get(target, property) {
+        if (typeof property === "symbol" || property in target) return target[property];
+        if (/^(?:0|[1-9]\d*)$/.test(property)) {
+          const item = target.item(Number(property));
+          return item === null ? undefined : item;
+        }
+        const item = target.getNamedItem(property);
+        return item === null ? undefined : item;
+      },
+      has(target, property) {
+        if (property in target) return true;
+        if (typeof property !== "string") return false;
+        if (/^(?:0|[1-9]\d*)$/.test(property)) return Number(property) < target.length;
+        return target.getNamedItem(property) !== null;
+      },
+      ownKeys(target) {
+        const indices = [];
+        for (let index = 0; index < target.length; index++) indices.push(String(index));
+        return indices.concat(namedNodeMapPropertyNames(element, target));
+      },
+      getOwnPropertyDescriptor(target, property) {
+        const own = Object.getOwnPropertyDescriptor(target, property);
+        if (own) return own;
+        if (typeof property !== "string") return undefined;
+        if (/^(?:0|[1-9]\d*)$/.test(property)) {
+          const value = target.item(Number(property));
+          return value === null ? undefined : {
+            configurable: true, enumerable: true, writable: true, value,
+          };
+        }
+        if (!namedNodeMapPropertyNames(element, target).includes(property)) return undefined;
+        const value = target.getNamedItem(property);
+        return value === null ? undefined : {
+          configurable: true, enumerable: false, writable: true, value,
+        };
+      },
+    });
+    safeWeakMapSet(namedNodeMapElements, map, element);
+    return map;
   }
 
   distributePrototypeMembers(Node.prototype, [Element.prototype, Text.prototype], [
@@ -5662,7 +6010,7 @@
     createAttribute(localName) {
       if (arguments.length < 1) throw new TypeError("createAttribute requires 1 argument");
       let name = String(localName);
-      if (!isValidXmlName(name)) {
+      if (!isValidAttributeLocalName(name)) {
         throw new DOMException(
           "The attribute name provided ('" + name + "') is not a valid name.",
           "InvalidCharacterError"
@@ -5683,7 +6031,7 @@
       if (arguments.length < 2) throw new TypeError("createAttributeNS requires 2 arguments");
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       const name = String(qualifiedName);
-      const info = validateAndExtractNS(ns, name);
+      const info = validateAndExtractAttributeNS(ns, name);
       return new Attr(ATTR_CONSTRUCTION, {
         name,
         namespace: info.namespace,
@@ -13304,6 +13652,7 @@
   globalThis.Comment = Comment;
   globalThis.ProcessingInstruction = ProcessingInstruction;
   globalThis.Attr = Attr;
+  globalThis.NamedNodeMap = NamedNodeMap;
   globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.ShadowRoot = ShadowRoot;

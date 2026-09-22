@@ -49,6 +49,14 @@
       "baseline_supported": false
     },
     {
+      "id": "dom.attr-named-node-map",
+      "area": "dom",
+      "description": "Attr nodes keep stable identity through a live NamedNodeMap and support namespace-aware attachment",
+      "setup": "globalThis.__attrHost = document.createElement('div'); globalThis.__attrMap = __attrHost.attributes; globalThis.__attrNode = document.createAttributeNS('urn:surface', 's:item'); __attrNode.value = 'value'; __attrMap.setNamedItemNS(__attrNode)",
+      "probe": "typeof Attr === 'function' && typeof NamedNodeMap === 'function' && __attrMap === __attrHost.attributes && __attrMap instanceof NamedNodeMap && __attrMap.getNamedItemNS('urn:surface', 'item') === __attrNode && __attrNode.ownerElement === __attrHost && __attrHost.getAttributeNodeNS('urn:surface', 'item') === __attrNode && __attrHost.getAttributeNS('urn:surface', 'item') === 'value'",
+      "baseline_supported": false
+    },
+    {
       "id": "css.compositing-properties",
       "area": "css",
       "description": "3D and compositing CSS properties validate through CSS.supports and computed style",

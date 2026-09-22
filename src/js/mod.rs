@@ -13519,17 +13519,50 @@ fn set_attribute_ns_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let replace_qualified_name = args.get(5).and_then(JsValue::as_boolean).unwrap_or(false);
     let is_name_attribute = namespace.is_none() && qualified_name == "name";
+    let is_style_attribute = namespace.is_none() && qualified_name == "style";
     with_host_state(|state| {
         let node = state
             .borrow()
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        node.set_xml_attribute_ns(qualified_name, namespace, local_name, value);
+        let resource_attr = namespace.as_ref().is_none().then(|| {
+            node.tag_name().and_then(|tag| {
+                if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
+                    Some("srcdoc")
+                } else if (tag.eq_ignore_ascii_case("iframe") || tag.eq_ignore_ascii_case("script"))
+                    && qualified_name == "src"
+                {
+                    Some("src")
+                } else if tag.eq_ignore_ascii_case("object") && qualified_name == "data" {
+                    Some("data")
+                } else {
+                    None
+                }
+            })
+        });
+        if replace_qualified_name {
+            node.replace_xml_attribute_ns(qualified_name, namespace, local_name, value);
+        } else {
+            node.set_xml_attribute_ns(qualified_name, namespace, local_name, value);
+        }
         if is_name_attribute {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
-        state.borrow_mut().invalidate_style_cache_for_node(&node);
+        if is_style_attribute {
+            state.borrow_mut().refresh_csp_inline_style_nodes(&node);
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
+            state.borrow_mut().mark_style_dirty_for_node(&node);
+        } else {
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
+        if let Some(Some(resource_attr)) = resource_attr {
+            state
+                .borrow_mut()
+                .schedule_resource_load_on_attribute_change(&node, resource_attr);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -16592,23 +16625,63 @@ fn remove_attribute_ns_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
-    let qualified_name = args
-        .get(1)
+    let namespace = match args.get(1) {
+        Some(value) if !value.is_null() && !value.is_undefined() => {
+            Some(value.to_string(context)?.to_std_string_escaped())
+        }
+        _ => None,
+    };
+    let local_name = args
+        .get(2)
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let qualified_name = args
+        .get(3)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let is_style_attribute = namespace.is_none() && qualified_name == "style";
     with_host_state(|state| {
         let node = state
             .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let resource_attr = namespace.as_ref().is_none().then(|| {
+            node.tag_name().and_then(|tag| {
+                if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
+                    Some("srcdoc")
+                } else if (tag.eq_ignore_ascii_case("iframe") || tag.eq_ignore_ascii_case("script"))
+                    && qualified_name == "src"
+                {
+                    Some("src")
+                } else if tag.eq_ignore_ascii_case("object") && qualified_name == "data" {
+                    Some("data")
+                } else {
+                    None
+                }
+            })
+        });
         let removed_name = qualified_name == "name" && node.get_attribute("name").is_some();
-        node.remove_xml_attribute(&qualified_name);
+        node.remove_xml_attribute_ns(namespace.as_deref(), &local_name);
         if removed_name {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
-        state.borrow_mut().invalidate_style_cache_for_node(&node);
+        if is_style_attribute {
+            state.borrow_mut().refresh_csp_inline_style_nodes(&node);
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
+            state.borrow_mut().mark_style_dirty_for_node(&node);
+        } else {
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
+        if let Some(Some(resource_attr)) = resource_attr {
+            state
+                .borrow_mut()
+                .schedule_resource_load_on_attribute_change(&node, resource_attr);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -27527,7 +27600,8 @@ b</textarea></form>"#,
                 const ns = "https://example.test/ns";
                 element.setAttributeNS(ns, "old:item", "first");
                 element.setAttributeNS(ns, "new:item", "second");
-                const oldPrefixRemoved = !element.hasAttribute("old:item");
+                const prefixPreserved = element.hasAttribute("old:item") &&
+                    !element.hasAttribute("new:item");
                 const namespacedValue = element.getAttributeNS(ns, "item");
 
                 let namespaceError;
@@ -27540,7 +27614,7 @@ b</textarea></form>"#,
                 return [
                     insertError, parent.childNodes.length, observer.takeRecords().length,
                     nullNamespaceValue, !element.hasAttribute("plain"),
-                    oldPrefixRemoved, namespacedValue, namespaceError, namedItemError
+                    prefixPreserved, namespacedValue, namespaceError, namedItemError
                 ].join("|");
             })()"#,
         );
