@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::paint::color::{Color, parse_color};
 
-use super::{ComputedValue, Declaration, Value};
+use super::{ComputedValue, Declaration, LengthPercentageMath, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 struct TransitionDescriptor {
@@ -584,20 +584,18 @@ fn interpolate_property(
         (ComputedValue::Percentage(start), ComputedValue::Percentage(end)) => {
             Some(ComputedValue::Percentage(mix(*start, *end)))
         }
-        (
-            ComputedValue::CalcPxPercent(start_px, start_percent),
-            ComputedValue::CalcPxPercent(end_px, end_percent),
-        ) => Some(ComputedValue::CalcPxPercent(
-            mix(*start_px, *end_px),
-            mix(*start_percent, *end_percent),
-        )),
         _ if length_components(start).is_some() && length_components(end).is_some() => {
             let (start_px, start_percent) = length_components(start)?;
             let (end_px, end_percent) = length_components(end)?;
-            Some(ComputedValue::CalcPxPercent(
-                mix(start_px, end_px),
-                mix(start_percent, end_percent),
-            ))
+            let px = mix(start_px, end_px);
+            let percentage = mix(start_percent, end_percent);
+            Some(if percentage == 0.0 {
+                ComputedValue::Px(px)
+            } else if px == 0.0 {
+                ComputedValue::Percentage(percentage)
+            } else {
+                ComputedValue::LengthPercentage(LengthPercentageMath::Linear { px, percentage })
+            })
         }
         (ComputedValue::Color(start), ComputedValue::Color(end))
             if property == "color" || property.ends_with("-color") =>
@@ -625,12 +623,7 @@ fn interpolate_property(
 }
 
 fn length_components(value: &ComputedValue) -> Option<(f32, f32)> {
-    match value {
-        ComputedValue::Px(px) => Some((*px, 0.0)),
-        ComputedValue::Percentage(percent) => Some((0.0, *percent)),
-        ComputedValue::CalcPxPercent(px, percent) => Some((*px, *percent)),
-        _ => None,
-    }
+    value.linear_length_percentage_components()
 }
 
 fn is_transitionable_number_property(property: &str) -> bool {

@@ -566,16 +566,22 @@ fn object_fit_keyword(style: &ComputedStyle) -> String {
 /// how a percentage picks the slice `cover` keeps: `100%` then shifts the object
 /// left by exactly its overflow.
 fn object_position_offsets(style: &ComputedStyle, free_x: f32, free_y: f32) -> (f32, f32) {
-    let Some(ComputedValue::Keyword(value)) = style.get("object-position") else {
-        return (free_x * 0.5, free_y * 0.5);
-    };
-    let mut components = value.split_whitespace();
-    let x = components.next();
-    let y = components.next();
-    (
-        resolve_object_position_component(x, free_x),
-        resolve_object_position_component(y, free_y),
-    )
+    match style.get("object-position") {
+        Some(ComputedValue::Position { x, y }) => (
+            x.resolve_length_percentage(free_x).unwrap_or(free_x * 0.5),
+            y.resolve_length_percentage(free_y).unwrap_or(free_y * 0.5),
+        ),
+        // Retain the legacy keyword form for callers that construct a
+        // `ComputedStyle` directly rather than through the style resolver.
+        Some(ComputedValue::Keyword(value)) => {
+            let mut components = value.split_whitespace();
+            (
+                resolve_object_position_component(components.next(), free_x),
+                resolve_object_position_component(components.next(), free_y),
+            )
+        }
+        _ => (free_x * 0.5, free_y * 0.5),
+    }
 }
 
 /// Resolves one computed `object-position` component. Computed values are always

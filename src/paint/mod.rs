@@ -2034,15 +2034,7 @@ fn is_sticky_for_paint(style: &ComputedStyle) -> bool {
 }
 
 fn sticky_inset(style: &ComputedStyle, side: &str, reference: f32) -> Option<f32> {
-    match style.get(side) {
-        Some(ComputedValue::Px(value)) => Some(*value),
-        Some(ComputedValue::Percentage(value)) => Some(reference * *value / 100.0),
-        Some(ComputedValue::CalcPxPercent(px, percentage)) => {
-            Some(*px + reference * *percentage / 100.0)
-        }
-        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
-        _ => None,
-    }
+    style.get(side)?.resolve_length_percentage(reference)
 }
 
 fn sticky_translation(
@@ -3553,9 +3545,10 @@ fn computed_style_layer_text(value: Option<&ComputedValue>, index: usize) -> Opt
         Some(ComputedValue::Px(value)) => return Some(format!("{value}px")),
         Some(ComputedValue::Percentage(value)) => return Some(format!("{value}%")),
         Some(ComputedValue::Number(value)) => return Some(value.to_string()),
-        Some(ComputedValue::CalcPxPercent(px, percentage)) => {
-            return Some(format!("calc({px}px + {percentage}%)"));
+        Some(value @ ComputedValue::LengthPercentage(_)) => {
+            return Some(value.css_text());
         }
+        Some(value @ ComputedValue::Position { .. }) => return Some(value.css_text()),
         None => return None,
     };
     let values = crate::css::split_top_level_commas(value)
@@ -3730,13 +3723,13 @@ fn resolve_image_position(
     image_size: f32,
 ) -> f32 {
     let is_x = property.ends_with("-x");
+    if let Some(value) = style
+        .get(property)
+        .and_then(|value| value.resolve_length_percentage(container_size - image_size))
+    {
+        return value;
+    }
     match style.get(property) {
-        Some(ComputedValue::Px(v)) => *v,
-        Some(ComputedValue::Number(v)) if *v == 0.0 => 0.0,
-        Some(ComputedValue::Percentage(p)) => (container_size - image_size) * p / 100.0,
-        Some(ComputedValue::CalcPxPercent(px, percentage)) => {
-            px + (container_size - image_size) * percentage / 100.0
-        }
         Some(ComputedValue::Keyword(k)) => match k.to_ascii_lowercase().as_str() {
             "center" => (container_size - image_size) * 0.5,
             "right" if is_x => container_size - image_size,
@@ -5626,8 +5619,8 @@ fn background_list(style: &ComputedStyle, property: &str, default: &str) -> Vec<
         Some(ComputedValue::Px(value)) => return vec![format!("{value}px")],
         Some(ComputedValue::Percentage(value)) => return vec![format!("{value}%")],
         Some(ComputedValue::Number(value)) => return vec![value.to_string()],
-        Some(ComputedValue::CalcPxPercent(px, percentage)) => {
-            return vec![format!("calc({px}px + {percentage}%)")];
+        Some(value @ ComputedValue::LengthPercentage(_)) => {
+            return vec![value.css_text()];
         }
         _ => return vec![default.to_string()],
     };

@@ -676,15 +676,14 @@ pub(crate) fn used_text_decoration_thickness(
     font_size: f32,
     font: Option<&Font>,
 ) -> f32 {
-    let thickness = match value {
-        ComputedValue::Px(value) => *value,
-        ComputedValue::Percentage(value) => font_size * value / 100.0,
-        ComputedValue::CalcPxPercent(px, percentage) => px + font_size * percentage / 100.0,
-        ComputedValue::Keyword(value) if value.eq_ignore_ascii_case("from-font") => font
-            .and_then(|font| font.underline_thickness(font_size))
-            .unwrap_or(font_size * 0.075),
-        _ => font_size * 0.075,
-    };
+    let thickness = value
+        .resolve_length_percentage(font_size)
+        .unwrap_or_else(|| match value {
+            ComputedValue::Keyword(value) if value.eq_ignore_ascii_case("from-font") => font
+                .and_then(|font| font.underline_thickness(font_size))
+                .unwrap_or(font_size * 0.075),
+            _ => font_size * 0.075,
+        });
     // CSS Text Decoration rounds the actual thickness to the nearest device
     // pixel and keeps a visible decoration at least one device pixel wide.
     if thickness.is_finite() {
@@ -752,14 +751,10 @@ impl DecorationGeometry {
                 .unwrap_or((decoration.font_size * 0.8, decoration.font_size * 0.2));
             (baseline - ascent, baseline + descent)
         };
-        let offset = match &decoration.underline_offset {
-            ComputedValue::Px(value) => *value,
-            ComputedValue::Percentage(value) => decoration.font_size * value / 100.0,
-            ComputedValue::CalcPxPercent(px, percent) => {
-                px + decoration.font_size * percent / 100.0
-            }
-            _ => 0.0,
-        };
+        let offset = decoration
+            .underline_offset
+            .resolve_length_percentage(decoration.font_size)
+            .unwrap_or(0.0);
         let has = |keyword| {
             decoration
                 .underline_position

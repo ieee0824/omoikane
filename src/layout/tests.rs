@@ -10197,6 +10197,67 @@ fn calc_percent_minus_px_resolves_width_at_layout() {
 }
 
 #[test]
+fn length_percentage_math_resolves_sizing_and_position_at_layout() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let minimum = NodeHandle::element("section");
+    let maximum = NodeHandle::element("article");
+    let clamped = NodeHandle::element("aside");
+    let positioned = NodeHandle::element("nav");
+    container.set_attribute("class", "container");
+    minimum.set_attribute("class", "minimum");
+    maximum.set_attribute("class", "maximum");
+    clamped.set_attribute("class", "clamped");
+    positioned.set_attribute("class", "positioned");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    for child in [&minimum, &maximum, &clamped, &positioned] {
+        container.append_child(child.clone());
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0; } \
+             .container { position: relative; width: 400px; height: 100px; } \
+             .minimum { width: min(80px, 50%); height: 1px; } \
+             .maximum { width: max(calc(10% + 5px), 60px); height: 1px; } \
+             .clamped { width: clamp(10px, 25%, 80px); height: 1px; } \
+             .positioned { position: absolute; left: clamp(10px, 25%, 80px); \
+                           width: 1px; height: 1px; }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    for (node, expected) in [(&minimum, 80.0), (&maximum, 60.0), (&clamped, 80.0)] {
+        let layout_box = find_layout_box(&layout, node).unwrap();
+        assert_eq!(layout_box.dimensions.content.width, expected);
+    }
+    assert_eq!(
+        find_layout_box(&layout, &positioned)
+            .unwrap()
+            .dimensions
+            .content
+            .x,
+        80.0
+    );
+}
+
+#[test]
 fn flex_wrap_child_calc_width_resolves_correctly() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

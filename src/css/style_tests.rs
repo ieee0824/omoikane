@@ -4379,7 +4379,7 @@ fn canonicalizes_grid_calc_multiplication_and_mixed_percentages() {
     let style = resolver.computed_style(&body);
     assert_eq!(
         style.get("grid-template-rows"),
-        Some(&ComputedValue::Keyword("60px calc(10px + 25%)".to_string()))
+        Some(&ComputedValue::Keyword("60px calc(25% + 10px)".to_string()))
     );
 }
 
@@ -4400,7 +4400,7 @@ fn canonicalizes_clip_path_inset_and_webkit_alias() {
     assert_eq!(
         body_style.get("clip-path"),
         Some(&ComputedValue::Keyword(
-            "inset(18px 10% calc(-5px + 25%) 3px round 8px)".to_string()
+            "inset(18px 10% calc(25% - 5px) 3px round 8px)".to_string()
         ))
     );
 
@@ -7217,7 +7217,7 @@ fn font_size_larger_resolves_to_px() {
 }
 
 #[test]
-fn calc_mixed_percent_and_px_produces_calc_px_percent() {
+fn calc_mixed_percent_and_px_produces_typed_length_percentage() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
     let body = NodeHandle::element("body");
@@ -7233,12 +7233,107 @@ fn calc_mixed_percent_and_px_produces_calc_px_percent() {
     );
     let style = resolver.computed_style(&div);
     match style.get("width") {
-        Some(ComputedValue::CalcPxPercent(px, pct)) => {
-            assert!((*px - (-165.0)).abs() < 0.1, "px should be -165, got {px}");
-            assert!((*pct - 100.0).abs() < 0.1, "pct should be 100, got {pct}");
+        Some(ComputedValue::LengthPercentage(value)) => {
+            let (px, pct) = value.linear_components().expect("linear expression");
+            assert!((px - (-165.0)).abs() < 0.1, "px should be -165, got {px}");
+            assert!((pct - 100.0).abs() < 0.1, "pct should be 100, got {pct}");
         }
-        other => panic!("expected CalcPxPercent, got {other:?}"),
+        other => panic!("expected LengthPercentage, got {other:?}"),
     }
+}
+
+#[test]
+fn typed_length_percentage_math_preserves_functions_until_used_value_resolution() {
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    document.append_child(div.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { \
+                width: min(80px, 50%); \
+                min-width: max(calc(10% + 5px), 20px); \
+                max-width: clamp(10px, 25%, 80px); \
+                left: max(10px, min(20%, 100px)); \
+            }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+
+    for (property, serialized, used) in [
+        ("width", "min(80px, 50%)", 80.0),
+        ("min-width", "max(10% + 5px, 20px)", 25.0),
+        ("max-width", "clamp(10px, 25%, 80px)", 50.0),
+        ("left", "max(10px, min(20%, 100px))", 40.0),
+    ] {
+        let value = style
+            .get(property)
+            .unwrap_or_else(|| panic!("missing {property}"));
+        assert_eq!(value.css_text(), serialized, "{property}");
+        assert_eq!(
+            value.resolve_length_percentage(200.0),
+            Some(used),
+            "{property}"
+        );
+    }
+}
+
+#[test]
+fn length_percentage_math_uses_one_grammar_for_supports_shorthands_and_cascade() {
+    for (property, value) in [
+        ("width", "min(80px, 50%)"),
+        ("left", "max(calc(10% + 5px), 20px)"),
+        ("text-decoration-thickness", "clamp(1px, 25%, 10px)"),
+        ("text-decoration", "underline min(1px, 2px) red"),
+    ] {
+        assert!(supports_declaration(property, value), "{property}: {value}");
+    }
+    for (property, value) in [
+        ("width", "min(1, 2px)"),
+        ("left", "max(1, 2px)"),
+        ("text-decoration-thickness", "clamp(1px, 2, 3px)"),
+        ("width", "min(10px,)"),
+    ] {
+        assert!(
+            !supports_declaration(property, value),
+            "invalid {property}: {value}"
+        );
+    }
+
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    document.append_child(div.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { \
+                --basis: 10%; --bad: 1; \
+                width: 31px; width: min(var(--bad), 2px); \
+                height: max(calc(var(--basis) + 5px), 20px); \
+                left: 7px; left: max(1, 2px); \
+                text-decoration: underline min(1px, 2px) red; \
+            }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(31.0)));
+    assert_eq!(
+        style.get("height").map(ComputedValue::css_text),
+        Some("max(10% + 5px, 20px)".to_string())
+    );
+    assert_eq!(style.get("left"), Some(&ComputedValue::Px(7.0)));
+    assert_eq!(
+        style.get("text-decoration-line"),
+        Some(&ComputedValue::Keyword("underline".to_string()))
+    );
+    assert_eq!(
+        style.get("text-decoration-thickness"),
+        Some(&ComputedValue::Px(1.0))
+    );
 }
 
 #[test]
@@ -8145,7 +8240,7 @@ fn image_computed_style(declarations: &str) -> ComputedStyle {
 
 fn image_computed_keyword(declarations: &str, property: &str) -> String {
     match image_computed_style(declarations).get(property) {
-        Some(ComputedValue::Keyword(keyword)) => keyword.clone(),
+        Some(value) => value.css_text(),
         other => panic!("{property} computed to {other:?}"),
     }
 }
@@ -8637,6 +8732,7 @@ fn object_position_computes_to_normalized_x_y_components() {
         // Lengths resolve against the used font size (16px) and viewport.
         ("2em", "32px 50%"),
         ("calc(10px + 5px) 50%", "15px 50%"),
+        ("min(10%, 20%) 50%", "min(10%, 20%) 50%"),
     ] {
         assert_eq!(
             image_computed_keyword(&format!("object-position: {declared}"), "object-position"),
@@ -8644,6 +8740,12 @@ fn object_position_computes_to_normalized_x_y_components() {
             "object-position: {declared}"
         );
     }
+
+    let style = image_computed_style("object-position: min(10%, 20%) 50%");
+    let Some(ComputedValue::Position { x, .. }) = style.get("object-position") else {
+        panic!("percentage min() must remain typed until paint")
+    };
+    assert_eq!(x.resolve_length_percentage(-100.0), Some(-20.0));
 }
 
 #[test]
@@ -8701,7 +8803,7 @@ fn object_fit_and_position_resolve_css_wide_keywords() {
             .unwrap(),
         );
         match resolver.computed_style(&image).get(property) {
-            Some(ComputedValue::Keyword(keyword)) => keyword.clone(),
+            Some(value) => value.css_text(),
             other => panic!("{property} computed to {other:?}"),
         }
     };
@@ -8900,7 +9002,13 @@ fn underline_properties_preserve_relative_inheritance_and_decoration_origin() {
     for (value, expected) in [
         ("0", ComputedValue::Px(0.0)),
         ("20%", ComputedValue::Percentage(20.0)),
-        ("calc(2px + 10%)", ComputedValue::CalcPxPercent(2.0, 10.0)),
+        (
+            "calc(2px + 10%)",
+            ComputedValue::LengthPercentage(LengthPercentageMath::Linear {
+                px: 2.0,
+                percentage: 10.0,
+            }),
+        ),
     ] {
         let document = NodeHandle::document();
         let parent = NodeHandle::element("div");

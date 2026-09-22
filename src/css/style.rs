@@ -36,9 +36,241 @@ pub enum ComputedValue {
     Color(String),
     String(String),
     Number(f32),
-    /// `calc()` expression with mixed px and percentage: `px_value + percent_value% of basis`.
-    /// Resolved at layout time using `resolved_length(basis)`.
-    CalcPxPercent(f32, f32),
+    /// A typed `<length-percentage>` math expression whose percentage basis is
+    /// not available until used-value resolution.
+    LengthPercentage(LengthPercentageMath),
+    /// The two typed axes of a computed `<position>` value.
+    Position {
+        /// Horizontal component.
+        x: Box<Self>,
+        /// Vertical component.
+        y: Box<Self>,
+    },
+}
+
+impl ComputedValue {
+    pub(crate) fn resolve_length_percentage(&self, basis: f32) -> Option<f32> {
+        match self {
+            Self::Px(value) => Some(*value),
+            Self::Percentage(value) => Some(basis * value / 100.0),
+            Self::LengthPercentage(value) => Some(value.resolve(basis)),
+            Self::Number(value) if *value == 0.0 => Some(0.0),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn linear_length_percentage_components(&self) -> Option<(f32, f32)> {
+        match self {
+            Self::Px(value) => Some((*value, 0.0)),
+            Self::Percentage(value) => Some((0.0, *value)),
+            Self::LengthPercentage(value) => value.linear_components(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn css_text(&self) -> String {
+        match self {
+            Self::Keyword(value) | Self::String(value) | Self::Color(value) => value.clone(),
+            Self::Px(value) => format!("{value}px"),
+            Self::Percentage(value) => format!("{value}%"),
+            Self::Number(value) => value.to_string(),
+            Self::LengthPercentage(value) => value.css_text(),
+            Self::Position { x, y } => format!("{} {}", x.css_text(), y.css_text()),
+        }
+    }
+}
+
+/// A computed CSS `<length-percentage>` expression.
+///
+/// Relative and absolute lengths have already been converted to CSS pixels.
+/// Percentages remain symbolic until the property supplies its percentage
+/// basis during layout or paint.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LengthPercentageMath {
+    /// An affine `px + percentage` value.
+    Linear {
+        /// The absolute component in CSS pixels.
+        px: f32,
+        /// The percentage component, where `100.0` means the full basis.
+        percentage: f32,
+    },
+    /// A sum of compatible `<length-percentage>` expressions.
+    Sum(Vec<Self>),
+    /// An expression multiplied by a unitless number.
+    Scale {
+        /// The unitless multiplier.
+        factor: f32,
+        /// The typed expression being multiplied.
+        value: Box<Self>,
+    },
+    /// The smallest argument after resolving every argument against one basis.
+    Min(Vec<Self>),
+    /// The largest argument after resolving every argument against one basis.
+    Max(Vec<Self>),
+    /// `max(minimum, min(preferred, maximum))`.
+    Clamp {
+        /// The lower bound.
+        minimum: Box<Self>,
+        /// The preferred value.
+        preferred: Box<Self>,
+        /// The upper bound.
+        maximum: Box<Self>,
+    },
+}
+
+impl LengthPercentageMath {
+    /// Resolves this expression using `basis` as the value represented by
+    /// `100%`.
+    #[must_use]
+    pub fn resolve(&self, basis: f32) -> f32 {
+        match self {
+            Self::Linear { px, percentage } => px + basis * percentage / 100.0,
+            Self::Sum(values) => values.iter().map(|value| value.resolve(basis)).sum(),
+            Self::Scale { factor, value } => factor * value.resolve(basis),
+            Self::Min(values) => values
+                .iter()
+                .map(|value| value.resolve(basis))
+                .reduce(f32::min)
+                .unwrap_or(0.0),
+            Self::Max(values) => values
+                .iter()
+                .map(|value| value.resolve(basis))
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            Self::Clamp {
+                minimum,
+                preferred,
+                maximum,
+            } => preferred
+                .resolve(basis)
+                .min(maximum.resolve(basis))
+                .max(minimum.resolve(basis)),
+        }
+    }
+
+    pub(crate) fn linear_components(&self) -> Option<(f32, f32)> {
+        match self {
+            Self::Linear { px, percentage } => Some((*px, *percentage)),
+            Self::Sum(values) => values.iter().try_fold((0.0, 0.0), |total, value| {
+                let value = value.linear_components()?;
+                Some((total.0 + value.0, total.1 + value.1))
+            }),
+            Self::Scale { factor, value } => value
+                .linear_components()
+                .map(|(px, percentage)| (factor * px, factor * percentage)),
+            Self::Min(_) | Self::Max(_) | Self::Clamp { .. } => None,
+        }
+    }
+
+    fn scaled(self, factor: f32) -> Self {
+        if let Some((px, percentage)) = self.linear_components() {
+            return Self::Linear {
+                px: px * factor,
+                percentage: percentage * factor,
+            };
+        }
+        Self::Scale {
+            factor,
+            value: Box::new(self),
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        if let (Some(left), Some(right)) = (self.linear_components(), other.linear_components()) {
+            return Self::Linear {
+                px: left.0 + right.0,
+                percentage: left.1 + right.1,
+            };
+        }
+        let mut values = match self {
+            Self::Sum(values) => values,
+            value => vec![value],
+        };
+        match other {
+            Self::Sum(other) => values.extend(other),
+            value => values.push(value),
+        }
+        Self::Sum(values)
+    }
+
+    fn is_pure_px(&self) -> bool {
+        match self {
+            Self::Linear { percentage, .. } => *percentage == 0.0,
+            Self::Sum(values) | Self::Min(values) | Self::Max(values) => {
+                !values.is_empty() && values.iter().all(Self::is_pure_px)
+            }
+            Self::Scale { value, .. } => value.is_pure_px(),
+            Self::Clamp {
+                minimum,
+                preferred,
+                maximum,
+            } => minimum.is_pure_px() && preferred.is_pure_px() && maximum.is_pure_px(),
+        }
+    }
+
+    fn css_text(&self) -> String {
+        match self {
+            Self::Linear { px, percentage } if *px == 0.0 || *percentage == 0.0 => {
+                self.expression_text()
+            }
+            Self::Min(_) | Self::Max(_) | Self::Clamp { .. } => self.expression_text(),
+            Self::Linear { .. } | Self::Sum(_) | Self::Scale { .. } => {
+                format!("calc({})", self.expression_text())
+            }
+        }
+    }
+
+    /// Serializes this node as a calculation expression. Math-function
+    /// arguments already provide a calculation context, so mixed linear terms
+    /// must not gain a nested `calc()` wrapper there.
+    fn expression_text(&self) -> String {
+        match self {
+            Self::Linear { px, percentage } if *percentage == 0.0 => format!("{px}px"),
+            Self::Linear { px, percentage } if *px == 0.0 => format!("{percentage}%"),
+            Self::Linear { px, percentage } if *px < 0.0 => {
+                format!("{percentage}% - {}px", px.abs())
+            }
+            Self::Linear { px, percentage } => format!("{percentage}% + {px}px"),
+            Self::Sum(values) => values
+                .iter()
+                .map(Self::expression_text)
+                .collect::<Vec<_>>()
+                .join(" + "),
+            Self::Scale { factor, value } => {
+                let value = match value.as_ref() {
+                    Self::Sum(_) => format!("calc({})", value.expression_text()),
+                    _ => value.expression_text(),
+                };
+                format!("{value} * {factor}")
+            }
+            Self::Min(values) => format!(
+                "min({})",
+                values
+                    .iter()
+                    .map(Self::expression_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Max(values) => format!(
+                "max({})",
+                values
+                    .iter()
+                    .map(Self::expression_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Clamp {
+                minimum,
+                preferred,
+                maximum,
+            } => format!(
+                "clamp({}, {}, {})",
+                minimum.expression_text(),
+                preferred.expression_text(),
+                maximum.expression_text()
+            ),
+        }
+    }
 }
 
 /// Paint data captured from a box that originates a text decoration.
@@ -105,7 +337,7 @@ impl ComputedStyle {
                 .map(|declaration| {
                     compute_value(&declaration.value, name, ResolutionContext::default())
                 });
-            if let Some(computed @ ComputedValue::CalcPxPercent(_, _)) = computed {
+            if let Some(computed @ ComputedValue::LengthPercentage(_)) = computed {
                 self.properties.insert(name.to_string(), computed);
                 return;
             }
@@ -2027,9 +2259,7 @@ fn validate_multicol_declaration(name: &str, value: &Value) -> Option<Declaratio
         Value::Number(number) if *number == 0.0 => {
             DeclarationValidation::Valid(ComputedValue::Px(0.0))
         }
-        Value::Function { name: function, .. }
-            if function.eq_ignore_ascii_case("calc") || function.eq_ignore_ascii_case("clamp") =>
-        {
+        Value::Function { name: function, .. } if is_length_percentage_math_function(function) => {
             match compute_value(value, property_name, ResolutionContext::default()) {
                 ComputedValue::Px(number) if number >= 0.0 => DeclarationValidation::Unvalidated,
                 _ => DeclarationValidation::Invalid,
@@ -2559,18 +2789,16 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             Value::Number(number) if *number == 0.0 => {
                 DeclarationValidation::Valid(ComputedValue::Px(0.0))
             }
-            Value::Function { name: function, .. } if function.eq_ignore_ascii_case("calc") => {
+            Value::Function { name: function, .. }
+                if is_length_percentage_math_function(function) =>
+            {
                 match compute_value(value, name, ResolutionContext::default()) {
                     ComputedValue::Px(number) | ComputedValue::Percentage(number)
                         if number >= 0.0 =>
                     {
                         DeclarationValidation::Unvalidated
                     }
-                    ComputedValue::CalcPxPercent(px, percentage)
-                        if px >= 0.0 && percentage >= 0.0 =>
-                    {
-                        DeclarationValidation::Unvalidated
-                    }
+                    ComputedValue::LengthPercentage(_) => DeclarationValidation::Unvalidated,
                     _ => DeclarationValidation::Invalid,
                 }
             }
@@ -2896,6 +3124,16 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             None => DeclarationValidation::Invalid,
         };
     }
+    if is_position_offset_property(name)
+        && matches!(value, Value::Function { name: function, .. } if is_length_percentage_math_function(function))
+    {
+        return match compute_value(value, name, ResolutionContext::default()) {
+            ComputedValue::Px(_)
+            | ComputedValue::Percentage(_)
+            | ComputedValue::LengthPercentage(_) => DeclarationValidation::Unvalidated,
+            _ => DeclarationValidation::Invalid,
+        };
+    }
     DeclarationValidation::Unvalidated
 }
 
@@ -2918,7 +3156,7 @@ fn validate_contain_intrinsic_size(value: &Value) -> DeclarationValidation {
         }
         Value::Number(number) => *number == 0.0,
         Value::Function { name, .. } => {
-            (name.eq_ignore_ascii_case("calc") || name.eq_ignore_ascii_case("clamp"))
+            is_length_percentage_math_function(name)
                 && matches!(
                     compute_value(value, "width", ResolutionContext::default()),
                     ComputedValue::Px(number) if number.is_finite() && number >= 0.0
@@ -2993,7 +3231,7 @@ fn validate_text_decoration_thickness(value: &Value) -> DeclarationValidation {
         }
         Value::Percentage(number) if number.is_finite() => DeclarationValidation::Unvalidated,
         Value::Number(number) if *number == 0.0 => DeclarationValidation::Unvalidated,
-        Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => {
+        Value::Function { name, .. } if is_length_percentage_math_function(name) => {
             match compute_value(
                 value,
                 "text-decoration-thickness",
@@ -3001,7 +3239,7 @@ fn validate_text_decoration_thickness(value: &Value) -> DeclarationValidation {
             ) {
                 ComputedValue::Px(_)
                 | ComputedValue::Percentage(_)
-                | ComputedValue::CalcPxPercent(_, _) => DeclarationValidation::Unvalidated,
+                | ComputedValue::LengthPercentage(_) => DeclarationValidation::Unvalidated,
                 _ => DeclarationValidation::Invalid,
             }
         }
@@ -3036,14 +3274,12 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
         }
         Value::Percentage(number) if *number >= 0.0 => DeclarationValidation::Unvalidated,
         Value::Number(number) if *number == 0.0 => DeclarationValidation::Unvalidated,
-        Value::Function { name: function, .. }
-            if function.eq_ignore_ascii_case("calc") || function.eq_ignore_ascii_case("clamp") =>
-        {
+        Value::Function { name: function, .. } if is_length_percentage_math_function(function) => {
             let computed = compute_value(value, name, ResolutionContext::default());
             match computed {
                 ComputedValue::Px(_)
                 | ComputedValue::Percentage(_)
-                | ComputedValue::CalcPxPercent(_, _) => DeclarationValidation::Unvalidated,
+                | ComputedValue::LengthPercentage(_) => DeclarationValidation::Unvalidated,
                 ComputedValue::Number(number) if number == 0.0 => {
                     DeclarationValidation::Unvalidated
                 }
@@ -3052,6 +3288,13 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
         }
         _ => DeclarationValidation::Invalid,
     }
+}
+
+fn is_length_percentage_math_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "calc" | "min" | "max" | "clamp"
+    )
 }
 
 fn is_non_negative_sizing_property(name: &str) -> bool {
@@ -3067,6 +3310,20 @@ fn is_non_negative_sizing_property(name: &str) -> bool {
             | "column-gap"
             | "column-rule-width"
             | "shape-margin"
+    )
+}
+
+fn is_position_offset_property(name: &str) -> bool {
+    matches!(
+        name,
+        "top"
+            | "right"
+            | "bottom"
+            | "left"
+            | "inset-inline-start"
+            | "inset-inline-end"
+            | "inset-block-start"
+            | "inset-block-end"
     )
 }
 
@@ -5812,7 +6069,22 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         return ComputedValue::Keyword(render_clip_path_value(value, ctx));
     }
     if property_name.eq_ignore_ascii_case("object-position") {
-        return ComputedValue::Keyword(render_object_position_value(value, ctx));
+        if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return ComputedValue::Keyword(render_value(value));
+        }
+        if let Some((x, y)) = object_position_components(value)
+            && let (Some(x), Some(y)) = (
+                compute_object_position_component(&x, ctx),
+                compute_object_position_component(&y, ctx),
+            )
+        {
+            return ComputedValue::Position {
+                x: Box::new(x),
+                y: Box::new(y),
+            };
+        }
+        return ComputedValue::Keyword(render_value(value));
     }
     if property_name.eq_ignore_ascii_case("aspect-ratio") {
         return ComputedValue::Keyword(render_aspect_ratio_value(value, ctx));
@@ -5884,6 +6156,9 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             }
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            if let Some(value) = evaluate_length_percentage_math(value, ctx) {
+                return computed_length_percentage_math(value, property_name, ctx);
+            }
             if let Some(quantity) = evaluate_calc(arguments, ctx) {
                 let value = if is_non_negative_sizing_property(property_name)
                     && quantity.unit != CalcUnit::Unitless
@@ -5904,16 +6179,23 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                     CalcUnit::Unitless => ComputedValue::Number(value),
                 };
             }
-            // Try to extract mixed px + percentage from calc() arguments.
-            if let Some((px, pct)) = try_extract_calc_px_percent(arguments, ctx) {
-                return ComputedValue::CalcPxPercent(px, pct);
-            }
             ComputedValue::Keyword(render_value(value))
         }
-        Value::Function { name, arguments } if name.eq_ignore_ascii_case("clamp") => {
-            compute_clamp_function(arguments, property_name, ctx)
-                .map(|computed| clamp_sizing_computed_value(property_name, computed))
+        Value::Function { name, .. }
+            if name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max") =>
+        {
+            evaluate_length_percentage_math(value, ctx)
+                .map(|value| computed_length_percentage_math(value, property_name, ctx))
                 .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)))
+        }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("clamp") => {
+            if let Some(value) = evaluate_length_percentage_math(value, ctx) {
+                computed_length_percentage_math(value, property_name, ctx)
+            } else {
+                compute_clamp_function(arguments, property_name, ctx)
+                    .map(|computed| clamp_sizing_computed_value(property_name, computed))
+                    .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)))
+            }
         }
         Value::Function { .. } => ComputedValue::Keyword(render_value(value)),
         Value::List(values) => {
@@ -6250,24 +6532,14 @@ fn object_position_axis(value: &Value) -> Option<PositionAxis> {
         Value::Percentage(_) | Value::Length(..) => Some(PositionAxis::Either),
         // A bare `0` is a length; other bare numbers are not valid offsets.
         Value::Number(number) if *number == 0.0 => Some(PositionAxis::Either),
-        // Only a `calc()` that carries a length or percentage is a valid offset:
-        // `calc(1)` and `calc(0)` are bare numbers, which Firefox 152 drops too.
-        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
-            calc_yields_length_or_percentage(arguments).then_some(PositionAxis::Either)
+        // A math function must compute to a typed length-percentage; bare
+        // numeric `calc(1)` and `calc(0)` remain invalid offsets.
+        Value::Function { name, .. } if is_length_percentage_math_function(name) => {
+            evaluate_length_percentage_math(value, ResolutionContext::default())
+                .map(|_| PositionAxis::Either)
         }
         _ => None,
     }
-}
-
-/// Whether a `calc()` argument list mentions a length or percentage anywhere, so
-/// its result is a `<length-percentage>` rather than a bare number.
-fn calc_yields_length_or_percentage(arguments: &[Value]) -> bool {
-    arguments.iter().any(|argument| match argument {
-        Value::Length(..) | Value::Percentage(_) => true,
-        Value::Function { arguments, .. } => calc_yields_length_or_percentage(arguments),
-        Value::List(values) => calc_yields_length_or_percentage(values),
-        _ => false,
-    })
 }
 
 /// One component of an `aspect-ratio` value.
@@ -6435,53 +6707,36 @@ fn aspect_ratio_number(value: &Value, ctx: ResolutionContext) -> Option<f32> {
     }
 }
 
-/// Renders `object-position` as the two `<x> <y>` components getComputedStyle
-/// reports: edge keywords become percentages and lengths become pixels, matching
-/// Firefox 152 (`top center` → `50% 0%`, `2em` → `32px 50%`).
-fn render_object_position_value(value: &Value, ctx: ResolutionContext) -> String {
-    if let Value::Keyword(keyword) = value
-        && is_css_wide_keyword(&keyword.to_ascii_lowercase())
-    {
-        // Leave CSS-wide keywords for the cascade to resolve.
-        return keyword.clone();
-    }
-    let Some((x, y)) = object_position_components(value) else {
-        return render_value(value);
-    };
-    format!(
-        "{} {}",
-        render_object_position_component(&x, ctx),
-        render_object_position_component(&y, ctx),
-    )
-}
-
-/// Renders one already axis-assigned component, so an edge keyword maps to the
-/// start or end of its axis without needing to know which axis that is.
-fn render_object_position_component(value: &Value, ctx: ResolutionContext) -> String {
+/// Computes one already axis-assigned `object-position` component. Edge
+/// keywords become percentages; typed math stays symbolic until paint knows
+/// the free space on that axis.
+fn compute_object_position_component(
+    value: &Value,
+    ctx: ResolutionContext,
+) -> Option<ComputedValue> {
     match value {
         Value::Keyword(keyword) => match keyword.to_ascii_lowercase().as_str() {
-            "left" | "top" => "0%".to_string(),
-            "right" | "bottom" => "100%".to_string(),
-            "center" => "50%".to_string(),
-            other => other.to_string(),
+            "left" | "top" => Some(ComputedValue::Percentage(0.0)),
+            "right" | "bottom" => Some(ComputedValue::Percentage(100.0)),
+            "center" => Some(ComputedValue::Percentage(50.0)),
+            _ => None,
         },
-        Value::Percentage(percentage) => format!("{percentage}%"),
-        Value::Number(number) if *number == 0.0 => "0px".to_string(),
-        Value::Length(number, unit) => resolve_length_to_px(*number, unit, ctx)
-            .map(|px| format!("{px}px"))
-            .unwrap_or_else(|| format!("{number}{unit}")),
-        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
-            match evaluate_calc(arguments, ctx) {
-                Some(quantity) => match quantity.unit {
-                    CalcUnit::Px => format!("{}px", quantity.value),
-                    CalcUnit::Percentage => format!("{}%", quantity.value),
-                    CalcUnit::Unitless if quantity.value == 0.0 => "0px".to_string(),
-                    CalcUnit::Unitless => quantity.value.to_string(),
-                },
-                None => render_value(value),
-            }
+        Value::Percentage(percentage) => Some(ComputedValue::Percentage(*percentage)),
+        Value::Number(number) if *number == 0.0 => Some(ComputedValue::Px(0.0)),
+        Value::Length(number, unit) => {
+            resolve_length_to_px(*number, unit, ctx).map(ComputedValue::Px)
         }
-        other => render_value(other),
+        Value::Function { name, .. } if is_length_percentage_math_function(name) => {
+            let computed = compute_value(value, "object-position-component", ctx);
+            matches!(
+                computed,
+                ComputedValue::Px(_)
+                    | ComputedValue::Percentage(_)
+                    | ComputedValue::LengthPercentage(_)
+            )
+            .then_some(computed)
+        }
+        _ => None,
     }
 }
 
@@ -6490,17 +6745,18 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
         Value::Length(number, unit) => resolve_length_to_px(*number, unit, ctx)
             .map(|px| format!("{px}px"))
             .unwrap_or_else(|| format!("{number}{unit}")),
-        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
-            if let Some(quantity) = evaluate_calc(arguments, ctx) {
+        Value::Function { name, arguments } if is_length_percentage_math_function(name) => {
+            if let Some(value) = evaluate_length_percentage_math(value, ctx) {
+                return value.css_text();
+            }
+            if name.eq_ignore_ascii_case("calc")
+                && let Some(quantity) = evaluate_calc(arguments, ctx)
+            {
                 return match quantity.unit {
                     CalcUnit::Px => format!("{}px", quantity.value),
                     CalcUnit::Percentage => format!("{}%", quantity.value),
                     CalcUnit::Unitless => quantity.value.to_string(),
                 };
-            }
-            if let Some((px, percentage)) = try_extract_calc_px_percent(arguments, ctx) {
-                let operator = if percentage < 0.0 { '-' } else { '+' };
-                return format!("calc({px}px {operator} {}%)", percentage.abs());
             }
             render_value(value)
         }
@@ -6594,48 +6850,212 @@ enum CalcToken {
     Operator(char),
 }
 
-/// Tries to extract a simple `px + percent` or `percent - px` form from calc() arguments.
-/// Returns `(px_component, percent_component)` if successful.
-fn try_extract_calc_px_percent(arguments: &[Value], ctx: ResolutionContext) -> Option<(f32, f32)> {
-    let mut tokens = Vec::new();
-    collect_calc_tokens(arguments.first()?, ctx, &mut tokens)?;
+#[derive(Debug, Clone, PartialEq)]
+enum LengthMathValue {
+    Length(LengthPercentageMath),
+    Number(f32),
+}
 
-    let mut px_total = 0.0f32;
-    let mut pct_total = 0.0f32;
-    let mut sign = 1.0f32;
-    let mut saw_px = false;
-    let mut saw_pct = false;
+#[derive(Debug, Clone, PartialEq)]
+enum LengthMathToken {
+    Value(LengthMathValue),
+    Operator(char),
+}
 
-    for token in &tokens {
-        match token {
-            CalcToken::Value(q) => {
-                match q.unit {
-                    CalcUnit::Px => {
-                        px_total += sign * q.value;
-                        saw_px = true;
-                    }
-                    CalcUnit::Percentage => {
-                        pct_total += sign * q.value;
-                        saw_pct = true;
-                    }
-                    // Only accept unitless zero; reject other unitless values.
-                    CalcUnit::Unitless if q.value == 0.0 => {}
-                    CalcUnit::Unitless => return None,
-                }
-                sign = 1.0;
-            }
-            CalcToken::Operator('+') => sign = 1.0,
-            CalcToken::Operator('-') => sign = -1.0,
-            CalcToken::Operator(_) => return None,
+fn evaluate_length_percentage_math(
+    value: &Value,
+    ctx: ResolutionContext,
+) -> Option<LengthPercentageMath> {
+    let value = evaluate_length_math_value(value, ctx)?;
+    match value {
+        LengthMathValue::Length(value) => Some(value),
+        LengthMathValue::Number(_) => None,
+    }
+}
+
+fn evaluate_length_math_value(value: &Value, ctx: ResolutionContext) -> Option<LengthMathValue> {
+    match value {
+        Value::Length(number, unit) => {
+            Some(LengthMathValue::Length(LengthPercentageMath::Linear {
+                px: resolve_length_to_px(*number, unit, ctx)?,
+                percentage: 0.0,
+            }))
         }
+        Value::Percentage(percentage) => {
+            Some(LengthMathValue::Length(LengthPercentageMath::Linear {
+                px: 0.0,
+                percentage: *percentage,
+            }))
+        }
+        Value::Number(number) if number.is_finite() => Some(LengthMathValue::Number(*number)),
+        Value::List(_) => evaluate_length_math_expression(value, ctx),
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            let [expression] = arguments.as_slice() else {
+                return None;
+            };
+            evaluate_length_math_expression(expression, ctx)
+        }
+        Value::Function { name, arguments }
+            if name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max") =>
+        {
+            if arguments.is_empty() {
+                return None;
+            }
+            let values = arguments
+                .iter()
+                .map(|argument| evaluate_length_percentage_math(argument, ctx))
+                .collect::<Option<Vec<_>>>()?;
+            Some(LengthMathValue::Length(
+                if name.eq_ignore_ascii_case("min") {
+                    LengthPercentageMath::Min(values)
+                } else {
+                    LengthPercentageMath::Max(values)
+                },
+            ))
+        }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("clamp") => {
+            let [minimum, preferred, maximum] = arguments.as_slice() else {
+                return None;
+            };
+            Some(LengthMathValue::Length(LengthPercentageMath::Clamp {
+                minimum: Box::new(evaluate_length_percentage_math(minimum, ctx)?),
+                preferred: Box::new(evaluate_length_percentage_math(preferred, ctx)?),
+                maximum: Box::new(evaluate_length_percentage_math(maximum, ctx)?),
+            }))
+        }
+        _ => None,
     }
+}
 
-    // Only return if we actually saw both px and percentage tokens.
-    if saw_px && saw_pct {
-        Some((px_total, pct_total))
-    } else {
-        None
+fn evaluate_length_math_expression(
+    expression: &Value,
+    ctx: ResolutionContext,
+) -> Option<LengthMathValue> {
+    let mut tokens = Vec::new();
+    collect_length_math_tokens(expression, ctx, &mut tokens)?;
+    if tokens.is_empty() {
+        return None;
     }
+    let mut index = 0usize;
+    let value = parse_length_math_add_sub(&tokens, &mut index)?;
+    (index == tokens.len()).then_some(value)
+}
+
+fn collect_length_math_tokens(
+    value: &Value,
+    ctx: ResolutionContext,
+    out: &mut Vec<LengthMathToken>,
+) -> Option<()> {
+    if let Value::List(values) = value {
+        for item in values {
+            collect_length_math_tokens(item, ctx, out)?;
+        }
+        return Some(());
+    }
+    if let Value::Keyword(operator) = value
+        && matches!(operator.as_str(), "+" | "-" | "*" | "/")
+    {
+        out.push(LengthMathToken::Operator(operator.chars().next()?));
+        return Some(());
+    }
+    out.push(LengthMathToken::Value(evaluate_length_math_value(
+        value, ctx,
+    )?));
+    Some(())
+}
+
+fn parse_length_math_add_sub(
+    tokens: &[LengthMathToken],
+    index: &mut usize,
+) -> Option<LengthMathValue> {
+    let mut left = parse_length_math_mul_div(tokens, index)?;
+    while let Some(LengthMathToken::Operator(operator @ ('+' | '-'))) = tokens.get(*index) {
+        let subtract = *operator == '-';
+        *index += 1;
+        let right = parse_length_math_mul_div(tokens, index)?;
+        left = match (left, right) {
+            (LengthMathValue::Length(left), LengthMathValue::Length(right)) => {
+                LengthMathValue::Length(left.add(if subtract { right.scaled(-1.0) } else { right }))
+            }
+            (LengthMathValue::Number(left), LengthMathValue::Number(right)) => {
+                LengthMathValue::Number(left + if subtract { -right } else { right })
+            }
+            _ => return None,
+        };
+    }
+    Some(left)
+}
+
+fn parse_length_math_mul_div(
+    tokens: &[LengthMathToken],
+    index: &mut usize,
+) -> Option<LengthMathValue> {
+    let mut left = parse_length_math_factor(tokens, index)?;
+    while let Some(LengthMathToken::Operator(operator @ ('*' | '/'))) = tokens.get(*index) {
+        let operator = *operator;
+        *index += 1;
+        let right = parse_length_math_factor(tokens, index)?;
+        left = match (left, operator, right) {
+            (LengthMathValue::Length(value), '*', LengthMathValue::Number(factor))
+            | (LengthMathValue::Number(factor), '*', LengthMathValue::Length(value)) => {
+                LengthMathValue::Length(value.scaled(factor))
+            }
+            (LengthMathValue::Length(value), '/', LengthMathValue::Number(divisor))
+                if divisor != 0.0 =>
+            {
+                LengthMathValue::Length(value.scaled(1.0 / divisor))
+            }
+            (LengthMathValue::Number(left), '*', LengthMathValue::Number(right)) => {
+                LengthMathValue::Number(left * right)
+            }
+            (LengthMathValue::Number(left), '/', LengthMathValue::Number(right))
+                if right != 0.0 =>
+            {
+                LengthMathValue::Number(left / right)
+            }
+            _ => return None,
+        };
+    }
+    Some(left)
+}
+
+fn parse_length_math_factor(
+    tokens: &[LengthMathToken],
+    index: &mut usize,
+) -> Option<LengthMathValue> {
+    let LengthMathToken::Value(value) = tokens.get(*index)? else {
+        return None;
+    };
+    *index += 1;
+    Some(value.clone())
+}
+
+fn computed_length_percentage_math(
+    value: LengthPercentageMath,
+    property_name: &str,
+    ctx: ResolutionContext,
+) -> ComputedValue {
+    if property_name.eq_ignore_ascii_case("font-size") {
+        return ComputedValue::Px(value.resolve(ctx.parent_font_size));
+    }
+    if value.is_pure_px() {
+        let px = value.resolve(0.0);
+        return ComputedValue::Px(if is_non_negative_sizing_property(property_name) {
+            px.max(0.0)
+        } else {
+            px
+        });
+    }
+    if let Some((px, percentage)) = value.linear_components()
+        && px == 0.0
+    {
+        return ComputedValue::Percentage(if is_non_negative_sizing_property(property_name) {
+            percentage.max(0.0)
+        } else {
+            percentage
+        });
+    }
+    ComputedValue::LengthPercentage(value)
 }
 
 fn evaluate_calc(arguments: &[Value], ctx: ResolutionContext) -> Option<CalcQuantity> {
@@ -7827,7 +8247,10 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         .or_insert_with(|| ComputedValue::Keyword("fill".to_string()));
     properties
         .entry("object-position".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
+        .or_insert_with(|| ComputedValue::Position {
+            x: Box::new(ComputedValue::Percentage(50.0)),
+            y: Box::new(ComputedValue::Percentage(50.0)),
+        });
     // CSS Masking initial values.  `none` is an identity mask in the paint
     // implementation; match-source resolves gradients/images through their
     // alpha channel and keeps SVG/image defaults deterministic.
@@ -7910,17 +8333,7 @@ fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedVa
 }
 
 fn computed_value_css_text(value: &ComputedValue) -> String {
-    match value {
-        ComputedValue::Keyword(value)
-        | ComputedValue::String(value)
-        | ComputedValue::Color(value) => value.clone(),
-        ComputedValue::Px(value) => format!("{value}px"),
-        ComputedValue::Percentage(value) => format!("{value}%"),
-        ComputedValue::Number(value) => value.to_string(),
-        ComputedValue::CalcPxPercent(px, percentage) => {
-            format!("calc({px}px + {percentage}%)")
-        }
-    }
+    value.css_text()
 }
 
 fn resolve_initial_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
@@ -8495,17 +8908,18 @@ fn render_grid_track_value(value: &Value, ctx: ResolutionContext) -> String {
         Value::Length(number, unit) => resolve_length_to_px(*number, unit, ctx)
             .map(|px| format!("{px}px"))
             .unwrap_or_else(|| format!("{number}{unit}")),
-        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
-            if let Some(quantity) = evaluate_calc(arguments, ctx) {
+        Value::Function { name, arguments } if is_length_percentage_math_function(name) => {
+            if let Some(value) = evaluate_length_percentage_math(value, ctx) {
+                return value.css_text();
+            }
+            if name.eq_ignore_ascii_case("calc")
+                && let Some(quantity) = evaluate_calc(arguments, ctx)
+            {
                 return match quantity.unit {
                     CalcUnit::Px => format!("{}px", quantity.value),
                     CalcUnit::Percentage => format!("{}%", quantity.value),
                     CalcUnit::Unitless => quantity.value.to_string(),
                 };
-            }
-            if let Some((px, percentage)) = try_extract_calc_px_percent(arguments, ctx) {
-                let operator = if percentage < 0.0 { '-' } else { '+' };
-                return format!("calc({px}px {operator} {}%)", percentage.abs());
             }
             render_value(value)
         }
@@ -8570,9 +8984,8 @@ fn computed_value_to_value(cv: &ComputedValue) -> Value {
         ComputedValue::Color(c) => Value::Keyword(c.clone()),
         ComputedValue::Keyword(k) => Value::Keyword(k.clone()),
         ComputedValue::String(s) => Value::Keyword(s.clone()),
-        ComputedValue::CalcPxPercent(px, pct) => {
-            Value::Keyword(format!("calc({}px + {}%)", px, pct))
-        }
+        ComputedValue::LengthPercentage(value) => Value::Keyword(value.css_text()),
+        value @ ComputedValue::Position { .. } => Value::Keyword(value.css_text()),
     }
 }
 
