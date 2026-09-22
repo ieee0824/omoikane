@@ -889,7 +889,7 @@ fn multicol_auto_fill_uses_explicit_height_and_creates_overflow_columns() {
 }
 
 #[test]
-fn multicol_balance_grows_to_keep_indivisible_blocks_in_the_requested_columns() {
+fn multicol_balance_grows_to_keep_break_avoiding_blocks_in_the_requested_columns() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
     let container = NodeHandle::element("main");
@@ -898,7 +898,7 @@ fn multicol_balance_grows_to_keep_indivisible_blocks_in_the_requested_columns() 
     let children = (0..3)
         .map(|_| {
             let child = NodeHandle::element("section");
-            child.set_attribute("style", "height:30px");
+            child.set_attribute("style", "height:30px;break-inside:avoid-column");
             container.append_child(child.clone());
             child
         })
@@ -926,6 +926,264 @@ fn multicol_balance_grows_to_keep_indivisible_blocks_in_the_requested_columns() 
         .collect::<Vec<_>>();
     assert_eq!(positions, vec![(0.0, 0.0), (0.0, 30.0), (120.0, 0.0)]);
     assert_eq!(multicol.dimensions.content.height, 60.0);
+}
+
+#[test]
+fn multicol_balances_general_blocks_into_physical_fragments() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("main");
+    let first = NodeHandle::element("section");
+    let second = NodeHandle::element("section");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first.clone());
+    container.append_child(second.clone());
+    container.set_attribute(
+        "style",
+        "width:340px;column-count:3;column-gap:20px;column-fill:balance",
+    );
+    first.set_attribute("style", "height:24px;margin:0");
+    second.set_attribute("style", "height:24px;margin:0");
+
+    let mut resolver = resolver_without_body_ua_margin();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 300.0,
+        },
+    )
+    .unwrap();
+    let multicol = find_layout_box(&layout, &container).unwrap();
+    let first_box = find_layout_box(&layout, &first).unwrap();
+    let second_box = find_layout_box(&layout, &second).unwrap();
+
+    assert_eq!(multicol.dimensions.content.height, 16.0);
+    assert_eq!(
+        first_box
+            .block_fragments
+            .iter()
+            .map(|fragment| fragment.target)
+            .collect::<Vec<_>>(),
+        vec![
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 16.0,
+            },
+            Rect {
+                x: 120.0,
+                y: 0.0,
+                width: 100.0,
+                height: 8.0,
+            },
+        ]
+    );
+    assert_eq!(
+        second_box
+            .block_fragments
+            .iter()
+            .map(|fragment| fragment.target)
+            .collect::<Vec<_>>(),
+        vec![
+            Rect {
+                x: 120.0,
+                y: 8.0,
+                width: 100.0,
+                height: 8.0,
+            },
+            Rect {
+                x: 240.0,
+                y: 0.0,
+                width: 100.0,
+                height: 16.0,
+            },
+        ]
+    );
+    assert_eq!(multicol.scrollable_overflow(), (340.0, 16.0));
+}
+
+#[test]
+fn multicol_fragments_visible_descendant_overflow_without_advancing_following_flow() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("main");
+    let first = NodeHandle::element("section");
+    let inner = NodeHandle::element("div");
+    let second = NodeHandle::element("section");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first.clone());
+    first.append_child(inner.clone());
+    container.append_child(second.clone());
+    container.set_attribute(
+        "style",
+        "width:340px;column-count:3;column-gap:20px;column-fill:balance",
+    );
+    first.set_attribute("style", "height:24px;overflow:visible");
+    inner.set_attribute("style", "width:20px;height:40px");
+    second.set_attribute("style", "height:24px");
+
+    let mut resolver = resolver_without_body_ua_margin();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 80.0,
+        },
+    )
+    .unwrap();
+    let multicol = find_layout_box(&layout, &container).unwrap();
+    let first_box = find_layout_box(&layout, &first).unwrap();
+    let inner_box = find_layout_box(&layout, &inner).unwrap();
+    let second_box = find_layout_box(&layout, &second).unwrap();
+    let targets = |layout: &LayoutBox| {
+        layout
+            .block_fragments
+            .iter()
+            .map(|fragment| fragment.target)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        targets(first_box),
+        vec![
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 16.0,
+            },
+            Rect {
+                x: 120.0,
+                y: 0.0,
+                width: 100.0,
+                height: 8.0,
+            },
+            Rect {
+                x: 240.0,
+                y: 0.0,
+                width: 100.0,
+                height: 0.0,
+            },
+        ]
+    );
+    assert_eq!(
+        targets(inner_box),
+        vec![
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 16.0,
+            },
+            Rect {
+                x: 120.0,
+                y: 0.0,
+                width: 20.0,
+                height: 16.0,
+            },
+            Rect {
+                x: 240.0,
+                y: 0.0,
+                width: 20.0,
+                height: 8.0,
+            },
+        ]
+    );
+    assert!(
+        inner_box
+            .block_fragments
+            .iter()
+            .all(|fragment| !fragment.owns_paint)
+    );
+    assert_eq!(
+        targets(second_box),
+        vec![
+            Rect {
+                x: 120.0,
+                y: 8.0,
+                width: 100.0,
+                height: 8.0,
+            },
+            Rect {
+                x: 240.0,
+                y: 0.0,
+                width: 100.0,
+                height: 16.0,
+            },
+        ]
+    );
+    assert_eq!(multicol.scrollable_overflow(), (340.0, 16.0));
+}
+
+#[test]
+fn multicol_clones_block_decorations_at_each_fragment_boundary() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("main");
+    let child = NodeHandle::element("section");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(child.clone());
+    container.set_attribute(
+        "style",
+        "width:340px;height:16px;column-count:3;column-gap:20px;column-fill:auto",
+    );
+    child.set_attribute(
+        "style",
+        "box-sizing:border-box;height:24px;padding:2px;border:2px solid black;\
+         box-decoration-break:clone",
+    );
+
+    let mut resolver = resolver_without_body_ua_margin();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let child = find_layout_box(&layout, &child).unwrap();
+    assert_eq!(
+        child
+            .block_fragments
+            .iter()
+            .map(|fragment| fragment.target)
+            .collect::<Vec<_>>(),
+        vec![
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 16.0,
+            },
+            Rect {
+                x: 120.0,
+                y: 0.0,
+                width: 100.0,
+                height: 16.0,
+            },
+        ]
+    );
+    assert!(
+        child
+            .block_fragments
+            .iter()
+            .all(|fragment| fragment.clone_content_target.is_some())
+    );
 }
 
 #[test]
@@ -1033,8 +1291,8 @@ fn multicol_honors_forced_column_breaks_and_full_width_spanners() {
     let second_box = find_layout_box(&layout, &second).unwrap();
     let spanner_box = find_layout_box(&layout, &spanner).unwrap();
     let after_box = find_layout_box(&layout, &after).unwrap();
-    assert_eq!(first_box.dimensions.content.x, 0.0);
-    assert_eq!(second_box.dimensions.content.x, 120.0);
+    assert_eq!(first_box.block_fragments[0].target.x, 0.0);
+    assert_eq!(second_box.block_fragments[0].target.x, 120.0);
     assert_eq!(spanner_box.dimensions.content.x, 0.0);
     assert_eq!(spanner_box.dimensions.content.width, 220.0);
     assert!(spanner_box.dimensions.content.y >= 20.0);

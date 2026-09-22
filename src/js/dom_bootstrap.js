@@ -364,7 +364,7 @@
     "outline-color", "text-decoration", "text-decoration-color", "text-decoration-thickness",
     "columns", "column-count", "column-width", "column-fill", "column-span", "column-gap",
     "column-rule", "column-rule-color", "column-rule-style", "column-rule-width",
-    "break-before", "break-after", "break-inside", "orphans", "widows",
+    "break-before", "break-after", "break-inside", "box-decoration-break", "orphans", "widows",
     "text-underline-position", "text-underline-offset",
     "clip-path", "-webkit-clip-path", "shape-outside", "shape-margin",
     "mask", "-webkit-mask",

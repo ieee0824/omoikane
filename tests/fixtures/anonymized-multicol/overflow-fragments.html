@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Multicol visible descendant overflow fragments</title>
+<style>
+  html, body { margin: 0; background: white; }
+  .columns { width: 340px; column-count: 3; column-gap: 20px; column-fill: balance; }
+  .item { height: 24px; background: rgb(40, 120, 208); overflow: visible; }
+  .inner { width: 20px; height: 40px; background: rgb(220, 40, 40); }
+  .second { height: 24px; }
+</style>
+<section id="columns" class="columns" data-probe>
+  <div id="item" class="item" data-probe><div id="inner" class="inner" data-probe></div></div>
+  <div id="second" class="second" data-probe></div>
+</section>

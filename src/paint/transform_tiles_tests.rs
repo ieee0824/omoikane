@@ -168,6 +168,7 @@ pub(super) fn paint_reference(
     viewport: Rect,
     text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
+    paint_decorations: bool,
     offset: PaintOffset,
 ) {
     let mut shifted;
@@ -242,6 +243,7 @@ pub(super) fn paint_reference(
                 true,
                 text_fonts,
                 web_fonts,
+                paint_decorations,
                 PaintOffset::default(),
             );
             let tile_transform = layout

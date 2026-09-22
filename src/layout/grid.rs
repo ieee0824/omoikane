@@ -516,6 +516,7 @@ pub(super) fn layout_grid_container(
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol: None,
         lines: Vec::new(),
         children,

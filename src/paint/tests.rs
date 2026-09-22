@@ -113,6 +113,224 @@ fn multicol_column_rule_paints_between_columns() {
 }
 
 #[test]
+fn multicol_general_block_fragments_paint_in_each_column() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:white}.columns{width:340px;column-count:3;\
+         column-gap:20px;column-fill:balance}.item{height:24px;margin:0}\
+         #first{background:rgb(40,120,208)}#second{background:rgb(224,120,40)}</style>\
+         <section class=columns><div id=first class=item></div><div id=second class=item></div></section>",
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 80.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(50, 12), Some(Color::rgb(40, 120, 208)));
+    assert_eq!(canvas.pixel(170, 4), Some(Color::rgb(40, 120, 208)));
+    assert_eq!(canvas.pixel(170, 12), Some(Color::rgb(224, 120, 40)));
+    assert_eq!(canvas.pixel(290, 12), Some(Color::rgb(224, 120, 40)));
+    assert_eq!(canvas.pixel(110, 8), Some(Color::rgb(255, 255, 255)));
+    assert_eq!(canvas.pixel(50, 20), Some(Color::rgb(255, 255, 255)));
+
+    if let Some(directory) = std::env::var_os("OMOIKANE_BROWSER_REPORT_DIR") {
+        let directory = PathBuf::from(directory);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("multicol-general-block-fragments.actual.png"),
+            canvas.encode_png(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn multicol_fragment_replay_preserves_opacity_and_transforms() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:white}.columns{width:340px;column-count:3;\
+         column-gap:20px;column-fill:balance}.item{height:24px;margin:0}\
+         #first{background:rgb(40,120,208);opacity:.5}\
+         #second{background:rgb(224,120,40);transform:translateX(2px)}</style>\
+         <section class=columns><div id=first class=item></div><div id=second class=item></div></section>",
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 80.0,
+        },
+    )
+    .unwrap();
+
+    let first_fragment = canvas.pixel(50, 12);
+    assert_ne!(first_fragment, Some(Color::rgb(255, 255, 255)));
+    assert_eq!(canvas.pixel(170, 4), first_fragment);
+    assert_eq!(canvas.pixel(172, 12), Some(Color::rgb(224, 120, 40)));
+    assert_eq!(canvas.pixel(292, 12), Some(Color::rgb(224, 120, 40)));
+}
+
+#[test]
+fn multicol_general_block_fragments_are_hit_at_their_target_geometry() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let columns = NodeHandle::element("section");
+    let first = NodeHandle::element("div");
+    let second = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(columns.clone());
+    columns.append_child(first.clone());
+    columns.append_child(second.clone());
+    body.set_attribute("style", "margin:0");
+    columns.set_attribute(
+        "style",
+        "width:340px;column-count:3;column-gap:20px;column-fill:balance",
+    );
+    first.set_attribute("style", "height:24px");
+    second.set_attribute("style", "height:24px");
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 500.0,
+        height: 80.0,
+    };
+    let mut resolver = StyleResolver::new();
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+
+    assert_eq!(
+        hit_test_layout(&layout, &mut resolver, viewport, 170.0, 4.0),
+        Some(first)
+    );
+    assert_eq!(
+        hit_test_layout(&layout, &mut resolver, viewport, 170.0, 12.0),
+        Some(second.clone())
+    );
+    assert_eq!(
+        hit_test_layout(&layout, &mut resolver, viewport, 290.0, 12.0),
+        Some(second)
+    );
+}
+
+#[test]
+fn multicol_visible_descendant_overflow_paints_and_hits_in_later_columns() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:white}.columns{width:340px;column-count:3;\
+         column-gap:20px;column-fill:balance}.item{height:24px;background:rgb(40,120,208);\
+         overflow:visible}.inner{width:20px;height:40px;background:rgb(220,40,40)}\
+         .second{height:24px}</style><section class=columns><div id=item class=item>\
+         <div id=inner class=inner></div></div><div class=second></div></section>",
+    )
+    .document();
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 500.0,
+        height: 80.0,
+    };
+    let canvas = render_document(&document, viewport).unwrap();
+
+    assert_eq!(canvas.pixel(10, 12), Some(Color::rgb(220, 40, 40)));
+    assert_eq!(canvas.pixel(50, 12), Some(Color::rgb(40, 120, 208)));
+    assert_eq!(canvas.pixel(130, 12), Some(Color::rgb(220, 40, 40)));
+    assert_eq!(canvas.pixel(170, 4), Some(Color::rgb(40, 120, 208)));
+    assert_eq!(canvas.pixel(170, 12), Some(Color::rgb(255, 255, 255)));
+    assert_eq!(canvas.pixel(250, 4), Some(Color::rgb(220, 40, 40)));
+    assert_eq!(canvas.pixel(290, 4), Some(Color::rgb(255, 255, 255)));
+
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let columns = NodeHandle::element("section");
+    let item = NodeHandle::element("div");
+    let inner = NodeHandle::element("div");
+    let second = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(columns.clone());
+    columns.append_child(item.clone());
+    item.append_child(inner.clone());
+    columns.append_child(second.clone());
+    body.set_attribute("style", "margin:0");
+    columns.set_attribute(
+        "style",
+        "width:340px;column-count:3;column-gap:20px;column-fill:balance",
+    );
+    item.set_attribute("style", "height:24px;overflow:visible");
+    inner.set_attribute("style", "width:20px;height:40px");
+    second.set_attribute("style", "height:24px");
+    let mut resolver = StyleResolver::new();
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(
+        hit_test_layout(&layout, &mut resolver, viewport, 130.0, 4.0),
+        Some(inner)
+    );
+    assert_eq!(
+        hit_test_layout(&layout, &mut resolver, viewport, 250.0, 4.0),
+        Some(second)
+    );
+}
+
+#[test]
+fn multicol_clone_repeats_background_padding_and_borders() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:white}.columns{width:340px;height:16px;\
+         column-count:3;column-gap:20px;column-fill:auto}.item{box-sizing:border-box;\
+         height:24px;padding:2px;border:2px solid black;background:rgb(40,120,208);\
+         box-decoration-break:clone}</style><section class=columns><div class=item></div></section>",
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 40.0,
+        },
+    )
+    .unwrap();
+
+    for x in [50, 170] {
+        assert_eq!(canvas.pixel(x, 1), Some(Color::rgb(0, 0, 0)));
+        assert_eq!(canvas.pixel(x, 8), Some(Color::rgb(40, 120, 208)));
+        assert_eq!(canvas.pixel(x, 15), Some(Color::rgb(0, 0, 0)));
+    }
+    assert_eq!(canvas.pixel(290, 8), Some(Color::rgb(255, 255, 255)));
+}
+
+#[test]
+fn multicol_clone_paints_translucent_background_once_per_fragment() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:white}.columns{width:340px;height:16px;\
+         column-count:3;column-gap:20px;column-fill:auto}.item{box-sizing:border-box;\
+         height:24px;padding:2px;border:2px solid black;\
+         background:rgba(40,120,208,.5);box-decoration-break:clone}</style>\
+         <section class=columns><div class=item></div></section>",
+    )
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 40.0,
+        },
+    )
+    .unwrap();
+
+    let expected = Some(Color::rgb(147, 187, 231));
+    assert_eq!(canvas.pixel(50, 8), expected);
+    assert_eq!(canvas.pixel(170, 8), expected);
+}
+
+#[test]
 fn vertical_multicol_paints_a_horizontal_column_rule() {
     let document = TreeBuilder::parse(
         "<style>html,body{margin:0;background:white}div{writing-mode:vertical-rl;width:40px;\
@@ -1540,6 +1758,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol: None,
         lines: Vec::new(),
         children: vec![
@@ -1562,6 +1781,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 needs_scroll_translation: false,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
+                block_fragments: Vec::new(),
                 multicol: None,
                 lines: Vec::new(),
                 children: Vec::new(),
@@ -1586,6 +1806,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 needs_scroll_translation: false,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
+                block_fragments: Vec::new(),
                 multicol: None,
                 lines: vec![LineBox {
                     rect: Rect {
@@ -1716,6 +1937,7 @@ fn float_grandchild_paints_above_block_uncle() {
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol: None,
         lines: Vec::new(),
         children: vec![
@@ -1738,6 +1960,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 needs_scroll_translation: false,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
+                block_fragments: Vec::new(),
                 multicol: None,
                 lines: Vec::new(),
                 children: vec![LayoutBox {
@@ -1759,6 +1982,7 @@ fn float_grandchild_paints_above_block_uncle() {
                     needs_scroll_translation: false,
                     content_visibility_contents_skipped: false,
                     paint_scroll: None,
+                    block_fragments: Vec::new(),
                     multicol: None,
                     lines: Vec::new(),
                     children: Vec::new(),
@@ -1785,6 +2009,7 @@ fn float_grandchild_paints_above_block_uncle() {
                 needs_scroll_translation: false,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
+                block_fragments: Vec::new(),
                 multicol: None,
                 lines: Vec::new(),
                 children: Vec::new(),
@@ -10246,6 +10471,7 @@ fn form_control_label_uses_web_font_variant() {
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol: None,
         lines: vec![LineBox {
             rect: viewport,
@@ -10364,6 +10590,7 @@ fn focused_text_control_paints_selection_and_caret() {
         needs_scroll_translation: false,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
+        block_fragments: Vec::new(),
         multicol: None,
         lines: vec![LineBox {
             rect: viewport,

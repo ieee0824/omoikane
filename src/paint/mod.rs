@@ -1434,6 +1434,140 @@ fn paint_box_internal(
         return;
     }
 
+    if layout
+        .block_fragments
+        .iter()
+        .any(|fragment| fragment.owns_paint)
+    {
+        let base_clip = inherited_clip.unwrap_or(viewport);
+        for fragment in layout
+            .block_fragments
+            .iter()
+            .filter(|fragment| fragment.owns_paint)
+        {
+            let Some(fragment_clip) = intersect(base_clip, offset.rect(fragment.clip)) else {
+                continue;
+            };
+            if fragment.clone_content_target.is_some() {
+                paint_cloned_fragment_decorations(
+                    canvas,
+                    layout,
+                    resolver,
+                    Some(fragment_clip),
+                    viewport,
+                    text_fonts,
+                    web_fonts,
+                    offset,
+                    fragment.target,
+                );
+            }
+            let content_clip = if let Some(target) = fragment.clone_content_target {
+                let Some(content_clip) = intersect(fragment_clip, offset.rect(target)) else {
+                    continue;
+                };
+                content_clip
+            } else {
+                fragment_clip
+            };
+            let (dx, dy) = fragment.translation();
+            paint_box_internal_single(
+                canvas,
+                layout,
+                resolver,
+                Some(content_clip),
+                viewport,
+                include_phase_descendants,
+                text_fonts,
+                web_fonts,
+                fragment.clone_content_target.is_none(),
+                offset.shifted(dx, dy),
+            );
+        }
+        return;
+    }
+
+    paint_box_internal_single(
+        canvas,
+        layout,
+        resolver,
+        inherited_clip,
+        viewport,
+        include_phase_descendants,
+        text_fonts,
+        web_fonts,
+        true,
+        offset,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_cloned_fragment_decorations(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    text_fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    offset: PaintOffset,
+    target: Rect,
+) {
+    let padding = layout.dimensions.padding;
+    let border = layout.dimensions.border;
+    let mut dimensions = layout.dimensions;
+    dimensions.content = Rect {
+        x: target.x + border.left + padding.left,
+        y: target.y + border.top + padding.top,
+        width: (target.width - border.left - border.right - padding.left - padding.right).max(0.0),
+        height: (target.height - border.top - border.bottom - padding.top - padding.bottom)
+            .max(0.0),
+    };
+    // Build a decoration-only view without cloning the potentially large
+    // descendant tree for every fragment.
+    let decoration = LayoutBox {
+        node: layout.node.clone(),
+        pseudo: layout.pseudo,
+        dimensions,
+        visibility: layout.visibility,
+        overflow: layout.overflow,
+        z_index: layout.z_index,
+        transform: layout.transform,
+        needs_scroll_translation: false,
+        content_visibility_contents_skipped: true,
+        paint_scroll: layout.paint_scroll,
+        block_fragments: Vec::new(),
+        multicol: None,
+        lines: Vec::new(),
+        children: Vec::new(),
+        marker: None,
+    };
+    paint_box_internal_single(
+        canvas,
+        &decoration,
+        resolver,
+        inherited_clip,
+        viewport,
+        false,
+        text_fonts,
+        web_fonts,
+        true,
+        offset,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_box_internal_single(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    include_phase_descendants: bool,
+    text_fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    paint_decorations: bool,
+    offset: PaintOffset,
+) {
     if !layout.transform.is_identity() {
         paint_transformed_box(
             canvas,
@@ -1443,6 +1577,7 @@ fn paint_box_internal(
             viewport,
             text_fonts,
             web_fonts,
+            paint_decorations,
             offset,
         );
         return;
@@ -1457,6 +1592,7 @@ fn paint_box_internal(
         include_phase_descendants,
         text_fonts,
         web_fonts,
+        paint_decorations,
         offset,
     );
 }
@@ -1508,6 +1644,7 @@ fn paint_transformed_box(
     viewport: Rect,
     text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
+    paint_decorations: bool,
     offset: PaintOffset,
 ) {
     #[cfg(test)]
@@ -1520,6 +1657,7 @@ fn paint_transformed_box(
             viewport,
             text_fonts,
             web_fonts,
+            paint_decorations,
             offset,
         );
     }
@@ -1595,6 +1733,7 @@ fn paint_transformed_box(
                 true,
                 text_fonts,
                 web_fonts,
+                paint_decorations,
                 tile_offset,
             );
             let tile_transform =
@@ -1687,19 +1826,41 @@ fn hit_test_box(
     }
     let transform = ancestor_transform.multiply(layout.transform);
     let inverse = transform.inverse()?;
-    let local_point = inverse.transform_point(x, y);
+    let mut query_point = (x, y);
+    let mut local_point = inverse.transform_point(x, y);
     if !local_point.0.is_finite() || !local_point.1.is_finite() {
         return None;
     }
+    let fragment_source_clip = if !layout
+        .block_fragments
+        .iter()
+        .any(|fragment| fragment.owns_paint)
+    {
+        None
+    } else {
+        let fragment = layout
+            .block_fragments
+            .iter()
+            .rev()
+            .filter(|fragment| fragment.owns_paint)
+            .find(|fragment| rect_contains_point(fragment.clip, local_point.0, local_point.1))?;
+        let (dx, dy) = fragment.translation();
+        local_point.0 -= dx;
+        local_point.1 -= dy;
+        query_point = transform.transform_point(local_point.0, local_point.1);
+        Some(transformed_rect_bounds(fragment.source, transform))
+    };
     let style = layout_box_style(layout, resolver);
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
     let clip_shape = clip_path_shape(&style, border_box);
-    let mut clip = inherited_clip;
+    let mut clip = fragment_source_clip.or(inherited_clip);
     if let Some(inset) = clip_path_inset_rect(&style, border_box) {
         let inset = inset?;
         clip = intersect_optional_clip(clip, transformed_rect_bounds(inset, transform));
-        if clip.is_none() || clip.is_some_and(|area| !rect_contains_point(area, x, y)) {
+        if clip.is_none()
+            || clip.is_some_and(|area| !rect_contains_point(area, query_point.0, query_point.1))
+        {
             return None;
         }
     }
@@ -1708,7 +1869,9 @@ fn hit_test_box(
             return None;
         }
         clip = intersect_optional_clip(clip, transformed_rect_bounds(shape.bounds(), transform));
-        if clip.is_none() || clip.is_some_and(|area| !rect_contains_point(area, x, y)) {
+        if clip.is_none()
+            || clip.is_some_and(|area| !rect_contains_point(area, query_point.0, query_point.1))
+        {
             return None;
         }
     }
@@ -1771,7 +1934,15 @@ fn hit_test_box(
 
     for group in [&positive, &auto_positioned, &inline] {
         for child in group.iter().rev() {
-            if let Some(target) = hit_test_box(child, resolver, transform, clip, viewport, x, y) {
+            if let Some(target) = hit_test_box(
+                child,
+                resolver,
+                transform,
+                clip,
+                viewport,
+                query_point.0,
+                query_point.1,
+            ) {
                 return Some(target);
             }
         }
@@ -1878,7 +2049,15 @@ fn hit_test_box(
     }
     for group in [&floats, &normal, &negative] {
         for child in group.iter().rev() {
-            if let Some(target) = hit_test_box(child, resolver, transform, clip, viewport, x, y) {
+            if let Some(target) = hit_test_box(
+                child,
+                resolver,
+                transform,
+                clip,
+                viewport,
+                query_point.0,
+                query_point.1,
+            ) {
                 return Some(target);
             }
         }
@@ -1968,6 +2147,18 @@ fn translate_layout_for_scroll(
     if (dx, dy) != (0.0, 0.0) {
         layout.dimensions.content.x += dx;
         layout.dimensions.content.y += dy;
+        for fragment in &mut layout.block_fragments {
+            fragment.source.x += dx;
+            fragment.source.y += dy;
+            fragment.target.x += dx;
+            fragment.target.y += dy;
+            fragment.clip.x += dx;
+            fragment.clip.y += dy;
+            if let Some(target) = &mut fragment.clone_content_target {
+                target.x += dx;
+                target.y += dy;
+            }
+        }
         layout.transform = AffineTransform::translate(dx, dy)
             .multiply(layout.transform)
             .multiply(AffineTransform::translate(-dx, -dy));
@@ -2142,6 +2333,7 @@ fn paint_box_internal_untransformed(
     include_phase_descendants: bool,
     text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
+    paint_decorations: bool,
     offset: PaintOffset,
 ) {
     if layout.visibility == Visibility::Hidden {
@@ -2168,9 +2360,11 @@ fn paint_box_internal_untransformed(
         inherited_clip
     };
 
-    let backdrop_filters = style_filters(&style, "backdrop-filter");
-    if !backdrop_filters.is_empty() {
-        apply_backdrop_filters(canvas, &backdrop_filters, border_box, inherited_clip);
+    if paint_decorations {
+        let backdrop_filters = style_filters(&style, "backdrop-filter");
+        if !backdrop_filters.is_empty() {
+            apply_backdrop_filters(canvas, &backdrop_filters, border_box, inherited_clip);
+        }
     }
 
     // opacity、filter、mask、または非矩形 clip-path がある場合、要素サブツリーを
@@ -2257,6 +2451,7 @@ fn paint_box_internal_untransformed(
             &style,
             offset_border_box,
             offset_padding_box,
+            paint_decorations,
             surface_offset,
         );
         apply_filters(&mut offscreen, &filters);
@@ -2312,6 +2507,7 @@ fn paint_box_internal_untransformed(
         &style,
         border_box,
         padding_box,
+        paint_decorations,
         offset,
     );
 }
@@ -2438,7 +2634,31 @@ fn composite_affine(
 }
 
 fn subtree_paint_bounds(layout: &LayoutBox, resolver: &mut StyleResolver) -> Rect {
+    // `paint_box_internal` expands the current box's owning fragments before
+    // effects and transforms reach this walk. Keep that root in source space
+    // so its replay offset is applied once. Descendant fragments still need
+    // their final target bounds when an ancestor allocates an effect surface.
+    subtree_paint_bounds_internal(layout, resolver, false)
+}
+
+fn subtree_paint_bounds_internal(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    include_own_fragments: bool,
+) -> Rect {
     let mut bounds = border_box_rect(layout);
+    if include_own_fragments {
+        let mut owning_fragments = layout
+            .block_fragments
+            .iter()
+            .filter(|fragment| fragment.owns_paint);
+        if let Some(fragment) = owning_fragments.next() {
+            bounds = fragment.clip;
+            for fragment in owning_fragments {
+                bounds = union_rect(bounds, fragment.clip);
+            }
+        }
+    }
     for line in &layout.lines {
         bounds = union_rect(bounds, line.rect);
         for fragment in &line.fragments {
@@ -2484,7 +2704,7 @@ fn subtree_paint_bounds(layout: &LayoutBox, resolver: &mut StyleResolver) -> Rec
     }
 
     for child in &layout.children {
-        let child_bounds = subtree_paint_bounds(child, resolver);
+        let child_bounds = subtree_paint_bounds_internal(child, resolver, true);
         bounds = union_rect(
             bounds,
             transformed_rect_bounds(child_bounds, child.transform),
@@ -2906,6 +3126,7 @@ fn paint_box_internal_to(
     style: &ComputedStyle,
     border_box: Rect,
     padding_box: Rect,
+    paint_decorations: bool,
     offset: PaintOffset,
 ) {
     let has_paint_containment = crate::layout::has_containment(style, "paint");
@@ -2913,57 +3134,65 @@ fn paint_box_internal_to(
         .then(|| intersect_optional_clip(inherited_clip, padding_box))
         .flatten();
 
-    // box-shadow を背景より前（下）に描画する
-    border::paint_box_shadow(canvas, style, border_box, inherited_clip);
+    if paint_decorations {
+        // box-shadow を背景より前（下）に描画する
+        border::paint_box_shadow(canvas, style, border_box, inherited_clip);
 
-    // `background_list` always supplies at least its default, but keep the
-    // arithmetic robust if its parsing contract changes.
-    let image_count = background_list(style, "background-image", "none")
-        .len()
-        .max(1);
-    let clip_values = background_list(style, "background-clip", "border-box");
-    let color_clip = &clip_values[(image_count - 1) % clip_values.len()];
-    let (background_clip_rect, background_radii) =
-        background_clip_geometry(layout, style, color_clip, border_box, padding_box, offset);
-    let background_clip = match inherited_clip {
-        Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
-        None => Some(background_clip_rect),
-    };
-    if let Some(background_clip) = background_clip {
-        if let Some(background) = background_color(style) {
-            if background_radii != (0.0, 0.0, 0.0, 0.0) {
-                let (tl, tr, br, bl) = background_radii;
-                canvas.fill_rounded_rect(
-                    background_clip_rect,
-                    background,
-                    tl,
-                    tr,
-                    br,
-                    bl,
-                    Some(background_clip),
-                );
-            } else {
-                canvas.fill_rect_clipped(background_clip_rect, background, Some(background_clip));
+        // `background_list` always supplies at least its default, but keep the
+        // arithmetic robust if its parsing contract changes.
+        let image_count = background_list(style, "background-image", "none")
+            .len()
+            .max(1);
+        let clip_values = background_list(style, "background-clip", "border-box");
+        let color_clip = &clip_values[(image_count - 1) % clip_values.len()];
+        let (background_clip_rect, background_radii) =
+            background_clip_geometry(layout, style, color_clip, border_box, padding_box, offset);
+        let background_clip = match inherited_clip {
+            Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
+            None => Some(background_clip_rect),
+        };
+        if let Some(background_clip) = background_clip {
+            if let Some(background) = background_color(style) {
+                if background_radii != (0.0, 0.0, 0.0, 0.0) {
+                    let (tl, tr, br, bl) = background_radii;
+                    canvas.fill_rounded_rect(
+                        background_clip_rect,
+                        background,
+                        tl,
+                        tr,
+                        br,
+                        bl,
+                        Some(background_clip),
+                    );
+                } else {
+                    canvas.fill_rect_clipped(
+                        background_clip_rect,
+                        background,
+                        Some(background_clip),
+                    );
+                }
             }
         }
+        paint_background_images_for_box(
+            canvas,
+            style,
+            layout,
+            border_box,
+            padding_box,
+            inherited_clip,
+            viewport,
+            offset,
+        );
     }
-    paint_background_images_for_box(
-        canvas,
-        style,
-        layout,
-        border_box,
-        padding_box,
-        inherited_clip,
-        viewport,
-        offset,
-    );
     if layout.content_visibility_contents_skipped {
         // The principal box remains visible, but replaced content, generated
         // boxes, line fragments and descendants are all skipped. Geometry
         // queries may have forced those descendants into the layout tree, so
         // paint suppression must be explicit rather than inferred from an
         // empty child list.
-        border::paint_borders(canvas, layout, style, inherited_clip, offset);
+        if paint_decorations {
+            border::paint_borders(canvas, layout, style, inherited_clip, offset);
+        }
         return;
     }
     if has_paint_containment {
@@ -2979,7 +3208,9 @@ fn paint_box_internal_to(
     } else {
         paint_replaced_image_box(canvas, layout, style, inherited_clip, offset);
     }
-    border::paint_borders(canvas, layout, style, inherited_clip, offset);
+    if paint_decorations {
+        border::paint_borders(canvas, layout, style, inherited_clip, offset);
+    }
 
     let clip = if has_paint_containment {
         let Some(combined) = paint_containment_clip else {

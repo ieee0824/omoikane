@@ -135,6 +135,7 @@ git_wpt sparse-checkout add "/domxpath/"
 git_wpt sparse-checkout add "/visual-viewport/"
 git_wpt sparse-checkout add "/web-locks/"
 git_wpt sparse-checkout add "/css/css-multicol/parsing/" "/css/support/shorthand-testcommon.js"
+git_wpt sparse-checkout add "/css/css-break/parsing/"
 git_wpt sparse-checkout add \
   "/css/css-contain/content-visibility/parsing/" \
   "/css/css-contain/content-visibility/content-visibility-hidden-boundingbox-query.html" \

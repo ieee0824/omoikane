@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>General multicol block fragments</title>
+<style>
+  html, body { margin: 0; background: white; }
+  .columns { width: 340px; column-count: 3; column-gap: 20px; column-fill: balance; }
+  .item { height: 24px; margin: 0; }
+  #first { background: rgb(40, 120, 208); }
+  #second { background: rgb(224, 120, 40); }
+</style>
+<section id="columns" class="columns" data-probe>
+  <div id="first" class="item" data-probe></div>
+  <div id="second" class="item" data-probe></div>
+</section>
