@@ -854,6 +854,14 @@
     return attr;
   }
 
+  function refreshMaterializedAttribute(element, sourceRecord) {
+    const record = normalizedAttributeRecord(sourceRecord);
+    if (!record) return null;
+    const entries = attributeCacheFor(element, record[1], false);
+    if (!entries || !safeMapHas(entries, record[2])) return null;
+    return materializeAttribute(element, record);
+  }
+
   function detachMaterializedAttribute(element, record) {
     record = normalizedAttributeRecord(record);
     if (!record) return null;
@@ -2497,13 +2505,21 @@
           "InvalidCharacterError"
         );
       }
-      if (isHtmlElementInHtmlDocument(this)) attr = asciiLowercase(attr);
-      const previous = attributeRecordByName(this, attr);
-      const oldValue = previous ? previous[3] : null;
+      const htmlElement = isHtmlElementInHtmlDocument(this);
+      if (htmlElement) attr = asciiLowercase(attr);
       const newValue = String(value);
-      if (isHtmlElementInHtmlDocument(this)) {
+      let oldValue;
+      let callbackName;
+      let callbackNamespace;
+      if (htmlElement) {
+        oldValue = __omoikane_get_attribute(this.__id, attr);
         __omoikane_set_attribute(this.__id, attr, newValue);
+        refreshMaterializedAttribute(this, [attr, null, attr, newValue]);
+        callbackName = attr;
+        callbackNamespace = null;
       } else {
+        const previous = attributeRecordByName(this, attr);
+        oldValue = previous ? previous[3] : null;
         nativeSetAttributeNS(
           this.__id,
           previous ? previous[1] : null,
@@ -2512,13 +2528,13 @@
           newValue,
           false
         );
+        const current = previous
+          ? [previous[0], previous[1], previous[2], newValue]
+          : [attr, null, attr, newValue];
+        refreshMaterializedAttribute(this, current);
+        callbackName = current[2];
+        callbackNamespace = current[1];
       }
-      const current = previous
-        ? namespacedAttributeRecord(this.__id, previous[1], previous[2])
-        : namespacedAttributeRecord(this.__id, null, attr);
-      if (current) materializeAttribute(this, current);
-      const callbackName = current ? current[2] : attr;
-      const callbackNamespace = current ? current[1] : null;
       queueMutation(this, "attributes", {
         attributeName: callbackName,
         attributeNamespace: callbackNamespace,
@@ -4904,8 +4920,8 @@
     const previous = namespacedAttributeRecord(id, namespace, localName);
     const oldValue = previous ? previous[3] : null;
     nativeSetAttributeNS(id, namespace, name, localName, value, replaceName);
-    const current = namespacedAttributeRecord(id, namespace, localName);
-    if (current) materializeAttribute(element, current);
+    const currentName = previous && !replaceName ? previous[0] : name;
+    refreshMaterializedAttribute(element, [currentName, namespace, localName, value]);
     queueMutation(element, "attributes", {
       attributeName: localName,
       attributeNamespace: namespace,
