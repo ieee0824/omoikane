@@ -1228,10 +1228,15 @@ fn parse_value_sequence_with_mode(
                         render_tokens(&tokens[start..end]).trim()
                     )));
                 } else {
-                    if (name.eq_ignore_ascii_case("rgb")
+                    let is_math_function = matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "calc" | "min" | "max" | "clamp"
+                    );
+                    if ((name.eq_ignore_ascii_case("rgb")
                         || name.eq_ignore_ascii_case("rgba")
                         || name.eq_ignore_ascii_case("hsl")
                         || name.eq_ignore_ascii_case("hsla"))
+                        || is_math_function)
                         && has_empty_top_level_comma_segment(&tokens[start..end])
                     {
                         values.push(Value::Keyword(format!(
@@ -1241,7 +1246,7 @@ fn parse_value_sequence_with_mode(
                         index = end + 1;
                         continue;
                     }
-                    let arguments = if name.eq_ignore_ascii_case("calc") {
+                    let arguments = if is_math_function {
                         parse_function_arguments_with_mode(&tokens[start..end], true)?
                     } else {
                         parse_function_arguments_with_mode(

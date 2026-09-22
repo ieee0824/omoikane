@@ -11024,35 +11024,33 @@ fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> S
         ComputedValue::Px(px) => format!("{}px", format_css_number(*px)),
         ComputedValue::Percentage(pct) => format!("{}%", format_css_number(*pct)),
         ComputedValue::Number(number) => format_css_number(*number),
-        ComputedValue::CalcPxPercent(px, pct)
+        value @ ComputedValue::LengthPercentage(_)
             if property_name.eq_ignore_ascii_case("text-decoration-thickness")
                 || property_name.eq_ignore_ascii_case("text-underline-offset") =>
         {
-            if *px == 0.0 {
-                format!("{}%", format_css_number(*pct))
-            } else if *pct == 0.0 {
-                format!("{}px", format_css_number(*px))
-            } else if *px < 0.0 {
+            let Some((px, pct)) = value.linear_length_percentage_components() else {
+                return value.css_text();
+            };
+            if px == 0.0 {
+                format!("{}%", format_css_number(pct))
+            } else if pct == 0.0 {
+                format!("{}px", format_css_number(px))
+            } else if px < 0.0 {
                 format!(
                     "calc({}% - {}px)",
-                    format_css_number(*pct),
+                    format_css_number(pct),
                     format_css_number(px.abs())
                 )
             } else {
                 format!(
                     "calc({}% + {}px)",
-                    format_css_number(*pct),
-                    format_css_number(*px)
+                    format_css_number(pct),
+                    format_css_number(px)
                 )
             }
         }
-        ComputedValue::CalcPxPercent(px, pct) => {
-            format!(
-                "calc({}px + {}%)",
-                format_css_number(*px),
-                format_css_number(*pct)
-            )
-        }
+        value @ ComputedValue::LengthPercentage(_) => value.css_text(),
+        value @ ComputedValue::Position { .. } => value.css_text(),
     }
 }
 
@@ -13381,6 +13379,21 @@ fn normalize_style_value_native(
                 | "isolation"
                 | "text-overflow"
                 | "content-visibility"
+                | "width"
+                | "height"
+                | "min-width"
+                | "min-height"
+                | "max-width"
+                | "max-height"
+                | "top"
+                | "right"
+                | "bottom"
+                | "left"
+                | "inset-inline-start"
+                | "inset-inline-end"
+                | "inset-block-start"
+                | "inset-block-end"
+                | "object-position"
                 | "contain-intrinsic-size"
                 | "contain-intrinsic-width"
                 | "contain-intrinsic-height"
@@ -25374,6 +25387,89 @@ b</textarea></form>"#,
     }
 
     #[test]
+    fn cssom_preserves_typed_length_percentage_math_and_rejects_invalid_types() {
+        let doc =
+            crate::html::TreeBuilder::parse("<div id='target'></div><img id='image'>").document();
+        let mut runtime = JsRuntime::with_document(doc).unwrap();
+
+        runtime
+            .eval(
+                r#"
+                const target = document.getElementById('target');
+                const image = document.getElementById('image');
+                target.style.width = 'min(80px, 50%)';
+                target.style.left = 'max(calc(10% + 5px), 20px)';
+                target.style.textDecorationThickness = 'clamp(1px, 25%, 10px)';
+                image.style.objectPosition =
+                  'min(80px, 50%) max(calc(10% + 5px), 20px)';
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"JSON.stringify([
+                  target.style.width,
+                  target.style.left,
+                  target.style.textDecorationThickness,
+                  image.style.objectPosition,
+                  getComputedStyle(target).width,
+                  getComputedStyle(target).left,
+                  getComputedStyle(target).textDecorationThickness,
+                  getComputedStyle(image).objectPosition
+                ])"#,
+            ),
+            r#"["min(80px, 50%)","max(calc(10% + 5px), 20px)","clamp(1px, 25%, 10px)","min(80px, 50%) max(calc(10% + 5px), 20px)","80px","max(10% + 5px, 20px)","clamp(1px, 25%, 10px)","min(80px, 50%) max(10% + 5px, 20px)"]"#,
+        );
+        assert!(
+            runtime
+                .eval(
+                    "CSS.supports('width','min(80px,50%)') && \
+                     CSS.supports('left','max(10%,20px)') && \
+                     CSS.supports('text-decoration-thickness','clamp(1px,25%,10px)') && \
+                     !CSS.supports('width','min(1,2px)')",
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+
+        runtime
+            .eval("target.style.width='31px';target.style.width='min(1,2px)'")
+            .unwrap();
+        assert_eq!(eval_str(&mut runtime, "target.style.width"), "31px");
+
+        runtime
+            .eval(
+                "target.style.cssText = \
+                 'width:31px;width:min(1,2px);left:7px;left:max(1,2px)'",
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "JSON.stringify([target.style.cssText,target.style.width,target.style.left])",
+            ),
+            r#"["width: 31px; left: 7px;","31px","7px"]"#
+        );
+
+        runtime
+            .eval(
+                "target.setAttribute('style', \
+                 'width:42px;width:min(1,2px);left:9px;left:max(1,2px)')",
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "JSON.stringify([target.style.cssText,target.style.width,target.style.left])",
+            ),
+            r#"["width: 42px; left: 9px;","42px","9px"]"#
+        );
+    }
+
+    #[test]
     fn style_mutation_accepts_clip_shapes_and_mask_layers_but_rejects_invalid_values() {
         let doc = NodeHandle::document();
         let div = NodeHandle::element("div");
@@ -25682,7 +25778,7 @@ b</textarea></form>"#,
                 &mut runtime,
                 "document.querySelector('div').getAttribute('style')"
             ),
-            "color: green !important; width: 17px"
+            "color: green !important; width: 17px;"
         );
         assert_eq!(
             eval_str(
@@ -26052,7 +26148,7 @@ b</textarea></form>"#,
     }
 
     #[test]
-    fn style_normalization_host_call_is_limited_to_transition_properties() {
+    fn style_normalization_host_call_is_limited_to_grammar_sensitive_properties() {
         let mut runtime = JsRuntime::new().unwrap();
         assert_eq!(
             runtime
@@ -26073,7 +26169,7 @@ b</textarea></form>"#,
                 )
                 .unwrap()
                 .as_number(),
-            Some(1.0)
+            Some(2.0)
         );
     }
 

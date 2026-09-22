@@ -247,6 +247,10 @@
   const canonicalCharacterDataOverrides = new WeakMap();
   const wrapperLocalNames = new WeakMap();
   const ownerDocumentIds = new WeakMap();
+  // Parsed inline declarations are shared by the short-lived style proxies
+  // returned from repeated `element.style` reads. The source string is the
+  // invalidation key, so direct setAttribute() writes are still revalidated.
+  const elementStyleDeclarationCache = new WeakMap();
   // Keep the inert-document relationship in a private weak map so it follows
   // the creator document's lifetime. A template contents owner is shared by
   // every template from one document, and an inert document is its own
@@ -368,6 +372,10 @@
     "mask-composite", "-webkit-mask-composite",
     "transform-style", "backface-visibility", "mix-blend-mode", "isolation",
     "text-overflow",
+    "width", "height", "min-width", "min-height", "max-width", "max-height",
+    "top", "right", "bottom", "left",
+    "inset-inline-start", "inset-inline-end", "inset-block-start", "inset-block-end",
+    "object-position",
     "content-visibility", "contain-intrinsic-size", "contain-intrinsic-width",
     "contain-intrinsic-height", "contain-intrinsic-inline-size",
     "contain-intrinsic-block-size",
@@ -2645,8 +2653,7 @@
       // and the CSSStyleDeclaration methods below operate over this list so the
       // two views stay consistent and every mutation re-serializes through the
       // one `__omoikane_set_attribute` path (driving cascade/layout dirtying).
-      const parseDecls = () => {
-        const attr = __omoikane_get_attribute(node.__id, "style") || "";
+      const parseDeclText = (attr) => {
         const decls = [];
         for (const part of splitCssDeclarations(attr)) {
           const idx = part.indexOf(":");
@@ -2665,12 +2672,50 @@
         }
         return decls;
       };
+      const normalizeDecls = (declarations) => {
+        const normalized = [];
+        for (const declaration of declarations) {
+          if (declaration.name === "transition" ||
+              declaration.name.startsWith("transition-") ||
+              validatesSpecialStyleProperties.has(declaration.name)) {
+            const value = __omoikane_normalize_style_value(
+              declaration.name, declaration.value
+            );
+            if (value === null) continue;
+            declaration.value = value;
+          }
+          normalized.push(declaration);
+        }
+        return normalized;
+      };
+      const cloneDecls = declarations => declarations.map(declaration => ({
+        name: declaration.name,
+        value: declaration.value,
+        priority: declaration.priority,
+      }));
+      const parseDecls = () => {
+        const source = __omoikane_get_attribute(node.__id, "style") || "";
+        const cached = safeWeakMapGet(elementStyleDeclarationCache, node);
+        if (cached && cached.source === source) return cloneDecls(cached.declarations);
+        const declarations = normalizeDecls(parseDeclText(source));
+        safeWeakMapSet(elementStyleDeclarationCache, node, {
+          source,
+          declarations: cloneDecls(declarations),
+        });
+        return declarations;
+      };
       const serializeDecls = (decls) =>
         decls
           .map(d => d.name + ": " + d.value + (d.priority ? " !" + d.priority : "") + ";")
           .join(" ");
-      const writeDecls = (decls) =>
-        node.setAttribute("style", serializeDecls(decls));
+      const writeDecls = (decls) => {
+        const source = serializeDecls(decls);
+        node.setAttribute("style", source);
+        safeWeakMapSet(elementStyleDeclarationCache, node, {
+          source,
+          declarations: cloneDecls(decls),
+        });
+      };
 
       // Returns the declared value for a kebab-case property ("" if absent).
       // Later declarations win, matching the inline cascade.
@@ -2741,7 +2786,9 @@
       // reflect the live attribute; `cssText` writes go through the proxy `set`
       // trap below (which routes to `setCssText`).
       const setCssText = (value) => {
-        node.setAttribute("style", value == null ? "" : String(value));
+        writeDecls(normalizeDecls(parseDeclText(
+          value == null ? "" : String(value)
+        )));
       };
       const decl = {
         getPropertyValue(name) { return getValue(toCssName(name)); },

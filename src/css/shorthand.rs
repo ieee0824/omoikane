@@ -381,7 +381,7 @@ fn expand_contain_intrinsic_size(value: Value, important: bool) -> Vec<Declarati
         matches!(value, Value::Length(number, _) if number.is_finite() && *number >= 0.0)
             || matches!(value, Value::Number(number) if *number == 0.0)
             || matches!(value, Value::Function { name, .. }
-                if name.eq_ignore_ascii_case("calc") || name.eq_ignore_ascii_case("clamp"))
+                if matches!(name.to_ascii_lowercase().as_str(), "calc" | "min" | "max" | "clamp"))
             || matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none"))
     }
 
@@ -1389,7 +1389,10 @@ fn is_background_size_value(value: &Value) -> bool {
         Value::Length(_, _) | Value::Percentage(_) => true,
         Value::Number(number) => *number == 0.0,
         Value::Function { name, .. } => {
-            matches!(name.to_ascii_lowercase().as_str(), "calc" | "clamp")
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "calc" | "min" | "max" | "clamp"
+            )
         }
         Value::Keyword(keyword) => {
             matches!(
@@ -2026,7 +2029,12 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
             {
                 thickness = Some(item.clone())
             }
-            Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => {
+            Value::Function { name, .. }
+                if matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "calc" | "min" | "max" | "clamp"
+                ) =>
+            {
                 if thickness.is_some()
                     || !crate::css::style::is_valid_text_decoration_thickness(item)
                 {

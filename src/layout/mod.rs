@@ -2135,7 +2135,13 @@ fn contain_intrinsic_axis_size(
     let fallback = match style.get(property) {
         Some(ComputedValue::Px(value)) => Some(*value),
         Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
-        Some(ComputedValue::CalcPxPercent(px, percentage)) if *percentage == 0.0 => Some(*px),
+        Some(computed @ ComputedValue::LengthPercentage(_))
+            if computed
+                .linear_length_percentage_components()
+                .is_some_and(|(_, percentage)| percentage == 0.0) =>
+        {
+            computed.resolve_length_percentage(0.0)
+        }
         Some(ComputedValue::Keyword(value)) => {
             let value = value.trim().to_ascii_lowercase();
             if let Some(fallback) = value.strip_prefix("auto ") {
@@ -3880,14 +3886,11 @@ fn resolved_length(style: &ComputedStyle, property: &str, basis: f32) -> Option<
             })
         })
         .or_else(|| {
-            // Resolve calc(px + %) using the provided basis.
-            // Only resolve when basis is known (> 0); otherwise leave unresolved.
-            match style.get(property) {
-                Some(ComputedValue::CalcPxPercent(px, pct)) if basis > 0.0 => {
-                    Some(px + basis * (pct / 100.0))
-                }
-                _ => None,
-            }
+            // Resolve typed length-percentage math only when the caller has a
+            // concrete percentage basis.
+            (basis > 0.0)
+                .then(|| style.get(property)?.resolve_length_percentage(basis))
+                .flatten()
         });
     if matches!(
         property,

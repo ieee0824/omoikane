@@ -6295,7 +6295,16 @@ fn text_decoration_thickness_applies_to_every_line_position() {
 
 #[test]
 fn text_decoration_percentage_calc_and_from_font_resolve_used_thickness() {
-    use crate::css::ComputedValue;
+    use crate::css::{ComputedValue, LengthPercentageMath};
+
+    let px = |value| LengthPercentageMath::Linear {
+        px: value,
+        percentage: 0.0,
+    };
+    let percentage = |value| LengthPercentageMath::Linear {
+        px: 0.0,
+        percentage: value,
+    };
 
     let font = Font::load_from_bytes(
         std::fs::read("tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf")
@@ -6312,11 +6321,37 @@ fn text_decoration_percentage_calc_and_from_font_resolve_used_thickness() {
     );
     assert_eq!(
         super::text::used_text_decoration_thickness(
-            &ComputedValue::CalcPxPercent(2.0, 10.0),
+            &ComputedValue::LengthPercentage(LengthPercentageMath::Linear {
+                px: 2.0,
+                percentage: 10.0,
+            }),
             20.0,
             Some(&font),
         ),
         4.0
+    );
+    assert_eq!(
+        super::text::used_text_decoration_thickness(
+            &ComputedValue::LengthPercentage(LengthPercentageMath::Clamp {
+                minimum: Box::new(px(1.0)),
+                preferred: Box::new(percentage(25.0)),
+                maximum: Box::new(px(10.0)),
+            }),
+            20.0,
+            Some(&font),
+        ),
+        5.0
+    );
+    assert_eq!(
+        super::text::used_text_decoration_thickness(
+            &ComputedValue::LengthPercentage(LengthPercentageMath::Min(vec![
+                px(3.0),
+                percentage(10.0),
+            ])),
+            20.0,
+            Some(&font),
+        ),
+        2.0
     );
     assert_eq!(
         super::text::used_text_decoration_thickness(&ComputedValue::Px(2.7), 20.0, None),
@@ -11425,6 +11460,29 @@ fn object_position_places_an_intrinsic_object_by_percentage_and_length() {
     assert_eq!(
         painted_bounds_in_box(&single, single_box),
         Some((0, 49, 4, 2))
+    );
+}
+
+#[test]
+fn object_position_resolves_typed_math_against_free_space() {
+    // The intrinsic object is 4x2, leaving 96x98px of free space.
+    let (min_max, box_rect) = render_object_fit(
+        "object-fit: none; \
+         object-position: min(80px, 50%) max(calc(10% + 5px), 20px)",
+        (100.0, 100.0),
+    );
+    assert_eq!(
+        painted_bounds_in_box(&min_max, box_rect),
+        Some((48, 20, 4, 2))
+    );
+
+    let (clamped, box_rect) = render_object_fit(
+        "object-fit: none; object-position: clamp(10px, 25%, 80px) 50%",
+        (100.0, 100.0),
+    );
+    assert_eq!(
+        painted_bounds_in_box(&clamped, box_rect),
+        Some((24, 49, 4, 2))
     );
 }
 
