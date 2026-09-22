@@ -1,5 +1,9 @@
 //! CSS cascade and computed style resolution.
 
+mod page;
+
+pub use page::{PageBoxGeometry, PageSelectorContext, PageSide, ResolvedPageStyle};
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -14,9 +18,9 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use rusqlite::{Connection, params};
 
 use super::{
-    Combinator, CssToken, Declaration, MediaQuery, PseudoElement, Rule, Selector, SelectorPart,
-    SimpleSelector, Specificity, Stylesheet, Value, evaluate_media_query, parse_media_query_list,
-    specificity,
+    Combinator, CssToken, Declaration, MediaQuery, MediaType, PseudoElement, Rule, Selector,
+    SelectorPart, SimpleSelector, Specificity, Stylesheet, Value, evaluate_media_query_for_type,
+    parse_media_query_list, specificity,
 };
 
 /// CSS origin.
@@ -431,6 +435,8 @@ pub struct StyleResolver {
     viewport_height: f32,
     /// `true` when the system is in dark mode (affects `prefers-color-scheme` evaluation).
     color_scheme_dark: bool,
+    /// Output medium used for `@media` evaluation.
+    media_type: MediaType,
     /// Cache of parsed media query lists keyed by the normalized (trimmed) prelude string.
     ///
     /// Avoids re-parsing the same `@media` prelude string for every node that
@@ -972,6 +978,7 @@ impl CascadeLayerOrder {
         viewport_width: f32,
         viewport_height: f32,
         color_scheme_dark: bool,
+        media_type: MediaType,
     ) {
         self.register_rules(
             rules,
@@ -980,6 +987,7 @@ impl CascadeLayerOrder {
             viewport_width,
             viewport_height,
             color_scheme_dark,
+            media_type,
         );
     }
 
@@ -991,6 +999,7 @@ impl CascadeLayerOrder {
         viewport_width: f32,
         viewport_height: f32,
         color_scheme_dark: bool,
+        media_type: MediaType,
     ) {
         for rule in rules {
             let Rule::At(at_rule) = rule else {
@@ -1002,6 +1011,7 @@ impl CascadeLayerOrder {
                     viewport_width,
                     viewport_height,
                     color_scheme_dark,
+                    media_type,
                 )
             {
                 continue;
@@ -1019,6 +1029,7 @@ impl CascadeLayerOrder {
                         viewport_width,
                         viewport_height,
                         color_scheme_dark,
+                        media_type,
                     );
                 } else if let Some(names) = super::parse_layer_name_list(&at_rule.prelude) {
                     for name in names {
@@ -1035,6 +1046,7 @@ impl CascadeLayerOrder {
                     viewport_width,
                     viewport_height,
                     color_scheme_dark,
+                    media_type,
                 );
             }
         }
@@ -1078,13 +1090,20 @@ fn layer_group_rule_is_active(
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    media_type: MediaType,
 ) -> bool {
     if at_rule.name.eq_ignore_ascii_case("media") {
         return parse_media_query_list(&at_rule.prelude)
             .unwrap_or_default()
             .iter()
             .any(|query| {
-                evaluate_media_query(query, viewport_width, viewport_height, color_scheme_dark)
+                evaluate_media_query_for_type(
+                    query,
+                    viewport_width,
+                    viewport_height,
+                    color_scheme_dark,
+                    media_type,
+                )
             });
     }
     if at_rule.name.eq_ignore_ascii_case("supports") {
@@ -1340,6 +1359,28 @@ impl StyleResolver {
         self.selector_match_cache = SelectorMatchCache::default();
     }
 
+    /// Selects the output medium used by conditional rules.
+    ///
+    /// Screen rendering is the default. Paged layout switches this to
+    /// [`MediaType::Print`] before resolving document and page styles.
+    pub fn set_media_type(&mut self, media_type: MediaType) {
+        if self.media_type == media_type {
+            return;
+        }
+        self.media_type = media_type;
+        self.rebuild_layer_orders();
+        self.rebuild_keyframes();
+        self.rebuild_font_faces();
+        self.rebuild_counter_styles();
+        self.rebuild_registered_custom_properties();
+        self.invalidate_style_cache();
+    }
+
+    /// Returns the output medium currently used by the resolver.
+    pub fn media_type(&self) -> MediaType {
+        self.media_type
+    }
+
     /// Installs the query-container snapshot for the next style pass.
     pub(crate) fn set_container_contexts(
         &mut self,
@@ -1496,6 +1537,7 @@ impl StyleResolver {
                 self.viewport_width,
                 self.viewport_height,
                 self.color_scheme_dark,
+                self.media_type,
             );
         stylesheet_id
     }
@@ -1518,6 +1560,7 @@ impl StyleResolver {
                 self.viewport_width,
                 self.viewport_height,
                 self.color_scheme_dark,
+                self.media_type,
             );
         }
         self.layer_orders = orders;
@@ -1552,6 +1595,7 @@ impl StyleResolver {
                 self.viewport_width,
                 self.viewport_height,
                 self.color_scheme_dark,
+                self.media_type,
             );
         }
         self.keyframes = keyframes;
@@ -1582,6 +1626,7 @@ impl StyleResolver {
             self.viewport_width,
             self.viewport_height,
             self.color_scheme_dark,
+            self.media_type,
         );
     }
 
@@ -1616,6 +1661,7 @@ impl StyleResolver {
                 self.viewport_width,
                 self.viewport_height,
                 self.color_scheme_dark,
+                self.media_type,
             );
         }
         self.font_faces = font_faces;
@@ -1648,6 +1694,7 @@ impl StyleResolver {
             self.viewport_width,
             self.viewport_height,
             self.color_scheme_dark,
+            self.media_type,
         );
     }
 
@@ -1680,6 +1727,7 @@ impl StyleResolver {
                 self.viewport_width,
                 self.viewport_height,
                 self.color_scheme_dark,
+                self.media_type,
             );
         }
         self.counter_styles = counter_styles;
@@ -1717,6 +1765,7 @@ impl StyleResolver {
             self.viewport_width,
             self.viewport_height,
             self.color_scheme_dark,
+            self.media_type,
         );
     }
 
@@ -1769,6 +1818,7 @@ impl StyleResolver {
                 self.viewport_width,
                 self.viewport_height,
                 self.color_scheme_dark,
+                self.media_type,
             );
         }
         registrations.extend(self.script_registered_custom_properties.clone());
@@ -1931,6 +1981,7 @@ impl StyleResolver {
                 viewport_width,
                 viewport_height,
                 color_scheme_dark,
+                self.media_type,
                 &mut self.media_query_cache,
                 &mut self.scope_prelude_cache,
                 &mut self.container_query_cache,
@@ -3089,6 +3140,22 @@ fn validate_multicol_declaration(name: &str, value: &Value) -> Option<Declaratio
             "avoid-column",
             "avoid-region",
         ]),
+        "page" => match value {
+            Value::Keyword(name) if is_css_wide_keyword(&name.to_ascii_lowercase()) => {
+                DeclarationValidation::Unvalidated
+            }
+            Value::Keyword(name)
+                if name.eq_ignore_ascii_case("auto")
+                    || (!name.is_empty()
+                        && !name.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+                        && name
+                            .chars()
+                            .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_'))) =>
+            {
+                DeclarationValidation::Valid(ComputedValue::Keyword(name.clone()))
+            }
+            _ => DeclarationValidation::Invalid,
+        },
         "box-decoration-break" => keyword(&["slice", "clone"]),
         "orphans" | "widows" => match value {
             Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => {
@@ -4729,6 +4796,7 @@ fn collect_indexed_rule_candidates(
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    media_type: MediaType,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     scope_cache: &mut HashMap<String, Option<super::ScopePrelude>>,
     container_cache: &mut HashMap<String, Option<super::ContainerQuery>>,
@@ -4753,6 +4821,7 @@ fn collect_indexed_rule_candidates(
             viewport_width,
             viewport_height,
             color_scheme_dark,
+            media_type,
             media_cache,
             scope_cache,
             container_cache,
@@ -4784,6 +4853,7 @@ fn collect_indexed_rule_candidates(
             viewport_width,
             viewport_height,
             color_scheme_dark,
+            media_type,
             media_cache,
             scope_cache,
             container_cache,
@@ -4815,6 +4885,7 @@ fn collect_indexed_rule_candidates(
             viewport_width,
             viewport_height,
             color_scheme_dark,
+            media_type,
             media_cache,
             scope_cache,
             container_cache,
@@ -4844,6 +4915,7 @@ fn collect_rule_candidates(
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    media_type: MediaType,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     scope_cache: &mut HashMap<String, Option<super::ScopePrelude>>,
     container_cache: &mut HashMap<String, Option<super::ContainerQuery>>,
@@ -4971,6 +5043,7 @@ fn collect_rule_candidates(
                             viewport_width,
                             viewport_height,
                             color_scheme_dark,
+                            media_type,
                             media_cache,
                             scope_cache,
                             container_cache,
@@ -5016,6 +5089,7 @@ fn collect_rule_candidates(
                             viewport_width,
                             viewport_height,
                             color_scheme_dark,
+                            media_type,
                             media_cache,
                             scope_cache,
                             container_cache,
@@ -5037,6 +5111,7 @@ fn collect_rule_candidates(
                             viewport_width,
                             viewport_height,
                             color_scheme_dark,
+                            media_type,
                             media_cache,
                         )
                     } else if at_rule.name.eq_ignore_ascii_case("supports") {
@@ -5071,6 +5146,7 @@ fn collect_rule_candidates(
                             viewport_width,
                             viewport_height,
                             color_scheme_dark,
+                            media_type,
                             media_cache,
                             scope_cache,
                             container_cache,
@@ -5356,6 +5432,7 @@ fn media_query_matches(
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    media_type: MediaType,
     cache: &mut HashMap<String, Vec<MediaQuery>>,
 ) -> bool {
     let prelude = prelude.trim();
@@ -5365,9 +5442,15 @@ fn media_query_matches(
     let queries = cache
         .entry(prelude.to_owned())
         .or_insert_with(|| parse_media_query_list(prelude).unwrap_or_default());
-    queries
-        .iter()
-        .any(|q| evaluate_media_query(q, viewport_width, viewport_height, color_scheme_dark))
+    queries.iter().any(|query| {
+        evaluate_media_query_for_type(
+            query,
+            viewport_width,
+            viewport_height,
+            color_scheme_dark,
+            media_type,
+        )
+    })
 }
 
 fn container_query_matches(
@@ -5484,6 +5567,7 @@ fn collect_keyframes(
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    media_type: MediaType,
 ) {
     for rule in rules {
         match rule {
@@ -5531,6 +5615,7 @@ fn collect_keyframes(
                     viewport_width,
                     viewport_height,
                     color_scheme_dark,
+                    media_type,
                 ) {
                     continue;
                 }
@@ -5555,6 +5640,7 @@ fn collect_keyframes(
                         viewport_width,
                         viewport_height,
                         color_scheme_dark,
+                        media_type,
                     );
                 } else {
                     collect_keyframes(
@@ -5569,6 +5655,7 @@ fn collect_keyframes(
                         viewport_width,
                         viewport_height,
                         color_scheme_dark,
+                        media_type,
                     );
                 }
             }
@@ -5583,6 +5670,7 @@ fn collect_registered_custom_properties(
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    media_type: MediaType,
 ) {
     for rule in rules {
         match rule {
@@ -5597,6 +5685,7 @@ fn collect_registered_custom_properties(
                     viewport_width,
                     viewport_height,
                     color_scheme_dark,
+                    media_type,
                 ) {
                     continue;
                 }
@@ -5606,6 +5695,7 @@ fn collect_registered_custom_properties(
                     viewport_width,
                     viewport_height,
                     color_scheme_dark,
+                    media_type,
                 );
             }
             _ => {}
@@ -5639,6 +5729,7 @@ fn collect_font_faces(
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    media_type: MediaType,
 ) {
     for rule in rules {
         match rule {
@@ -5689,6 +5780,7 @@ fn collect_font_faces(
                     viewport_width,
                     viewport_height,
                     color_scheme_dark,
+                    media_type,
                 ) {
                     continue;
                 }
@@ -5714,6 +5806,7 @@ fn collect_font_faces(
                         viewport_width,
                         viewport_height,
                         color_scheme_dark,
+                        media_type,
                     );
                 } else {
                     collect_font_faces(
@@ -5729,6 +5822,7 @@ fn collect_font_faces(
                         viewport_width,
                         viewport_height,
                         color_scheme_dark,
+                        media_type,
                     );
                 }
             }
@@ -5750,6 +5844,7 @@ fn collect_counter_styles(
     viewport_width: f32,
     viewport_height: f32,
     color_scheme_dark: bool,
+    media_type: MediaType,
 ) {
     for rule in rules {
         match rule {
@@ -5781,6 +5876,7 @@ fn collect_counter_styles(
                     viewport_width,
                     viewport_height,
                     color_scheme_dark,
+                    media_type,
                 ) {
                     continue;
                 }
@@ -5806,6 +5902,7 @@ fn collect_counter_styles(
                     viewport_width,
                     viewport_height,
                     color_scheme_dark,
+                    media_type,
                 );
             }
             _ => {}
@@ -6613,6 +6710,7 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "break-after",
     "break-before",
     "break-inside",
+    "page",
     "inset-inline-start",
     "inset-inline-end",
     "inset-block-start",
@@ -9187,6 +9285,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
             .entry(property.to_string())
             .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
     }
+    properties
+        .entry("page".to_string())
+        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
     for property in ["orphans", "widows"] {
         properties
             .entry(property.to_string())

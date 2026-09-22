@@ -131,7 +131,7 @@ fn force_opacity_enabled() -> bool {
 use base64::Engine;
 
 use crate::css::{
-    AffineTransform, ComputedStyle, ComputedValue, Origin, PseudoElement, StyleResolver,
+    AffineTransform, ComputedStyle, ComputedValue, MediaType, Origin, PseudoElement, StyleResolver,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
@@ -165,10 +165,10 @@ pub(crate) use image::{
 };
 #[allow(unused_imports)]
 pub(crate) use stylesheet::{
-    WebFont, at_import_starts_at, collect_author_stylesheets, collect_stylesheet_with_imports,
-    collect_text_contents, extract_author_stylesheets, extract_document_base_url,
-    fetch_relative_stylesheet, fetch_stylesheet_by_url, find_base_elements, matches_screen_media,
-    materialize_local_assets, non_empty_token, normalize_unquoted_urls, parse_stylesheet_forgiving,
+    WebFont, at_import_starts_at, collect_stylesheet_with_imports, collect_text_contents,
+    extract_author_stylesheets, extract_document_base_url, fetch_relative_stylesheet,
+    fetch_stylesheet_by_url, find_base_elements, matches_screen_media, materialize_local_assets,
+    non_empty_token, normalize_unquoted_urls, parse_stylesheet_forgiving,
     resolve_relative_stylesheet_url, rewrite_local_asset_attribute, salvage_style_rule,
     same_origin, split_declarations_forgiving, unquote_css_token,
 };
@@ -1114,6 +1114,100 @@ pub fn paint_layout_with_web_fonts(
 /// Renders a DOM document into a canvas using inline and linked author stylesheets.
 pub fn render_document(document: &NodeHandle, viewport: Rect) -> Result<Canvas, PaintError> {
     render_document_with_url(document, viewport, None)
+}
+
+/// Renders a static document as a sequence of printed page canvases.
+pub fn render_document_pages(
+    document: &NodeHandle,
+    default_sheet: Rect,
+) -> Result<Vec<Canvas>, PaintError> {
+    render_document_pages_with_url(document, default_sheet, None)
+}
+
+/// Renders printed pages with linked CSS and assets resolved against `base_url`.
+pub fn render_document_pages_with_url(
+    document: &NodeHandle,
+    default_sheet: Rect,
+    base_url: Option<&crate::http::Url>,
+) -> Result<Vec<Canvas>, PaintError> {
+    let effective_base = stylesheet::extract_document_base_url(document, base_url);
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(default_sheet.width, default_sheet.height);
+    resolver.set_media_type(MediaType::Print);
+    for css in
+        stylesheet::extract_author_stylesheets_for_media(document, base_url, MediaType::Print)?
+    {
+        resolver.add_stylesheet(Origin::Author, stylesheet::parse_stylesheet_forgiving(&css));
+    }
+    let font_rules = resolver.resolved_font_face_rules();
+    let mut web_font_registry = WebFontRegistry::new();
+    for font in stylesheet::fetch_resolved_font_face_fonts(&font_rules, effective_base.as_ref()) {
+        web_font_registry.push_shared_scoped(
+            font.scope_root,
+            &font.family,
+            font.weight,
+            font.style,
+            font.font,
+        );
+    }
+    let web_font_registry = Arc::new(web_font_registry);
+    let web_fonts = if web_font_registry.is_empty() {
+        None
+    } else {
+        Some(web_font_registry.as_ref())
+    };
+    let fonts = text::load_text_fonts();
+    let paged = crate::layout::with_layout_fonts(
+        fonts.clone(),
+        web_fonts.map(|_| Arc::clone(&web_font_registry)),
+        || {
+            crate::layout::with_image_base_url(effective_base, || {
+                crate::layout::layout_paged_tree(document, &mut resolver, default_sheet)
+            })
+        },
+    )
+    .ok_or(PaintError::InvalidImageBuffer)?;
+
+    let mut canvases = Vec::with_capacity(paged.pages.len());
+    for page in &paged.pages {
+        let mut layout = paged.layout.clone();
+        crate::layout::translate_layout_box(
+            &mut layout,
+            page.content.x - page.source.x,
+            page.content.y - page.source.y,
+            &mut resolver,
+        );
+        let mut canvas = Canvas::new(
+            page.sheet.width.ceil().max(1.0) as u32,
+            page.sheet.height.ceil().max(1.0) as u32,
+        );
+        let page_background = page
+            .style
+            .get("background-color")
+            .and_then(|value| color::parse_color(&crate::css::serialize_specified_value(value)))
+            .unwrap_or(Color::rgb(255, 255, 255));
+        canvas.fill_rect(page.sheet, page_background);
+        if let Some(background) = viewport_background_color(&layout, &mut resolver) {
+            canvas.fill_rect(page.content, background);
+        }
+        let source_clip = Rect {
+            height: page.source.height.min(page.content.height),
+            ..page.content
+        };
+        text::with_render_glyph_cache(|| {
+            paint_box(
+                &mut canvas,
+                &layout,
+                &mut resolver,
+                Some(source_clip),
+                page.sheet,
+                &fonts,
+                web_fonts,
+            );
+        });
+        canvases.push(canvas);
+    }
+    Ok(canvases)
 }
 
 /// Renders a DOM document into a canvas, fetching external stylesheets relative to `base_url`.

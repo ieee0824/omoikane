@@ -171,6 +171,15 @@ git_wpt sparse-checkout add \
   "/storage/storagemanager-persist.https.window.js" \
   "/storage/storagemanager-persist-persisted-match.https.window.js" \
   "/storage/resources/helpers.js"
+git_wpt sparse-checkout add \
+  "/css/css-page/layers-001-print.html" \
+  "/css/css-page/layers-001-print-ref.html" \
+  "/css/css-page/layers-002-print.html" \
+  "/css/css-page/layers-002-print-ref.html" \
+  "/css/css-page/layers-003-print.html" \
+  "/css/css-page/layers-003-print-ref.html" \
+  "/css/css-page/layers-004-print.html" \
+  "/css/css-page/layers-004-print-ref.html"
 if [[ "$(git_wpt rev-parse HEAD 2>/dev/null || true)" == "$revision" ]]; then exit 0; fi
 git_wpt fetch --depth 1 origin "$revision"
 git_wpt checkout --detach "$revision"

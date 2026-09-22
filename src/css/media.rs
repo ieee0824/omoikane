@@ -2,6 +2,16 @@
 
 use super::{MediaCondition, MediaQuery};
 
+/// Media type used while evaluating conditional CSS rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MediaType {
+    /// Interactive screen rendering.
+    #[default]
+    Screen,
+    /// Printed or paged-media rendering.
+    Print,
+}
+
 /// Evaluates a `@media` query against the given viewport dimensions.
 ///
 /// Returns `true` when the query matches (i.e. its rules should apply).
@@ -13,10 +23,27 @@ pub fn evaluate_media_query(
     viewport_height: f32,
     color_scheme_dark: bool,
 ) -> bool {
+    evaluate_media_query_for_type(
+        query,
+        viewport_width,
+        viewport_height,
+        color_scheme_dark,
+        MediaType::Screen,
+    )
+}
+
+/// Evaluates a media query for an explicit output media type.
+pub fn evaluate_media_query_for_type(
+    query: &MediaQuery,
+    viewport_width: f32,
+    viewport_height: f32,
+    color_scheme_dark: bool,
+    media_type: MediaType,
+) -> bool {
     let type_matches = match query.media_type.as_deref() {
         None | Some("all") => true,
-        Some("screen") => true,
-        Some("print") => false,
+        Some("screen") => media_type == MediaType::Screen,
+        Some("print") => media_type == MediaType::Print,
         Some(_) => false,
     };
 

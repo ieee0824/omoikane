@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use crate::css::extract_font_face_rules;
-use crate::css::{FontFaceRule, Stylesheet, parse_stylesheet};
+use crate::css::{FontFaceRule, MediaType, Stylesheet, parse_stylesheet};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::Font;
 use crate::http::url::resolve_url;
@@ -17,16 +17,25 @@ pub(crate) fn extract_author_stylesheets(
     document: &NodeHandle,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Vec<String>, PaintError> {
+    extract_author_stylesheets_for_media(document, base_url, MediaType::Screen)
+}
+
+pub(crate) fn extract_author_stylesheets_for_media(
+    document: &NodeHandle,
+    base_url: Option<&crate::http::Url>,
+    media_type: MediaType,
+) -> Result<Vec<String>, PaintError> {
     // Compute effective base URL considering <base> element
     let effective_base = extract_document_base_url(document, base_url);
 
     let mut stylesheets = Vec::new();
     let mut client = effective_base.as_ref().map(|_| crate::http::Client::new());
-    collect_author_stylesheets(
+    collect_author_stylesheets_for_media(
         document,
         &mut stylesheets,
         effective_base.as_ref(),
         &mut client,
+        media_type,
     )?;
     Ok(stylesheets)
 }
@@ -34,11 +43,12 @@ pub(crate) fn extract_author_stylesheets(
 const MAX_EXTERNAL_STYLESHEET_BYTES: usize = 4 * 1024 * 1024; // 4 MiB limit
 const MAX_IMPORT_DEPTH: usize = 5;
 
-pub(crate) fn collect_author_stylesheets(
+fn collect_author_stylesheets_for_media(
     node: &NodeHandle,
     out: &mut Vec<String>,
     base_url: Option<&crate::http::Url>,
     client: &mut Option<crate::http::Client>,
+    media_type: MediaType,
 ) -> Result<(), PaintError> {
     if node.node_type() == NodeType::Element {
         // Rendering runs with scripting enabled, so fallback content inside
@@ -88,7 +98,7 @@ pub(crate) fn collect_author_stylesheets(
                     .split_whitespace()
                     .any(|token| token.eq_ignore_ascii_case("stylesheet"))
                     && !href.is_empty()
-                    && matches_screen_media(media)
+                    && (media_type == MediaType::Print || matches_screen_media(media))
                 {
                     let start = out.len();
                     if href.starts_with("data:text/css") {
@@ -136,7 +146,7 @@ pub(crate) fn collect_author_stylesheets(
     }
 
     for child in node.child_nodes() {
-        collect_author_stylesheets(&child, out, base_url, client)?;
+        collect_author_stylesheets_for_media(&child, out, base_url, client, media_type)?;
     }
 
     Ok(())

@@ -61,6 +61,27 @@ CI automatically writes to `.artifacts/wpt/results` and uploads both these
 revision-scoped files and the flat `WPT_REPORT`, matching the
 `report.json` convention used by the Web API surface probe.
 
+The print path has a separate reftest for the four pinned
+`css/css-page/layers-00*-print.html` cases. It renders both upstream HTML and
+the matching reference as pages, then compares every page pixel:
+
+```bash
+WPT_ROOT=target/wpt scripts/fetch-wpt.sh
+WPT_ROOT=target/wpt WPT_REQUIRED=1 cargo test --locked --test print_page_wpt
+```
+
+`tests/fixtures/print/page-layers.html` also has a two-page Firefox comparison.
+With Firefox, geckodriver, Selenium, Pillow, and poppler-utils installed:
+
+```bash
+OMOIKANE_PRINT_ARTIFACTS=<output-dir> cargo test --locked --test print_page_layers
+python3 scripts/compare-print-page-firefox.py \
+  --geckodriver <path> --actual-dir <output-dir> --output-dir <reference-dir>
+```
+
+The script saves the Firefox PDF/PNGs and reports page dimensions and changed
+pixels.
+
 For a known `FAIL` that affects only specific subtests, set
 `known_failure.failed_subtests` to their exact names. The runner then rejects any
 additional failure, missing expected failure, or timeout instead of accepting all
