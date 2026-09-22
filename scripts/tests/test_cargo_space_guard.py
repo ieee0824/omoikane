@@ -2,6 +2,7 @@
 
 import importlib.util
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -129,6 +130,126 @@ class CargoSpaceGuardTests(unittest.TestCase):
             usage=lambda _: usage,
         )
         self.assertEqual(result, guard.CAPACITY_EXIT)
+
+    def test_target_binding_rejects_another_worktree(self):
+        target = self.root / "cache" / "bound"
+        guard.prepare_target(target, self.workspace)
+
+        binding = json.loads((target / guard.BINDING_NAME).read_text())
+        self.assertEqual(binding["workspace"], str(self.workspace.resolve()))
+        self.assertEqual(binding["uid"], os.geteuid())
+
+        other_workspace = self.root / "other-source"
+        other_workspace.mkdir()
+        with self.assertRaisesRegex(ValueError, "another worktree"):
+            guard.prepare_target(target, other_workspace)
+
+    def test_binding_uses_the_worktree_root_from_a_subdirectory(self):
+        (self.workspace / ".git").write_text("gitdir: elsewhere\n")
+        child = self.workspace / "nested" / "directory"
+        child.mkdir(parents=True)
+        target = self.root / "cache" / "from-subdirectory"
+
+        guard.prepare_target(target, child)
+
+        binding = guard.read_binding(target)
+        self.assertEqual(binding.workspace, str(self.workspace.resolve()))
+
+    def test_target_binding_rejects_another_user(self):
+        target = self.root / "cache" / "foreign-user"
+        guard.prepare_target(target, self.workspace)
+        marker = target / guard.BINDING_NAME
+        binding = json.loads(marker.read_text())
+        binding["uid"] = os.geteuid() + 1
+        marker.write_text(json.dumps(binding))
+
+        with self.assertRaisesRegex(ValueError, "another uid"):
+            guard.prepare_target(target, self.workspace)
+
+    def test_unbound_target_with_build_artifacts_requires_reset(self):
+        target = self.root / "cache" / "legacy"
+        target.mkdir(parents=True)
+        (target / "CACHEDIR.TAG").write_text(guard.CACHE_TAG)
+        (target / "debug").mkdir()
+
+        with self.assertRaisesRegex(ValueError, "not bound to a worktree"):
+            guard.prepare_target(target, self.workspace)
+
+        quarantine = guard.reset_target(target, self.workspace, execute=True)
+        self.assertTrue((quarantine / "debug").is_dir())
+        self.assertIsNotNone(guard.read_binding(target))
+
+    def test_target_with_unwritable_artifact_is_rejected_before_command(self):
+        target = self.root / "cache" / "unwritable"
+        guard.prepare_target(target, self.workspace)
+        artifact = target / "debug" / "deps" / "crate.rcgu.o"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(b"object")
+        artifact.chmod(0o400)
+        self.addCleanup(artifact.chmod, 0o600)
+
+        with self.assertRaisesRegex(ValueError, "not writable"):
+            guard.run_guarded(
+                [sys.executable, "-c", "raise SystemExit('must not run')"],
+                target,
+                self.workspace,
+                required_free=1,
+                minimum_free=0,
+                maximum_target=guard.GIB,
+                poll_seconds=0.01,
+            )
+
+    def test_reset_quarantines_whole_target_and_reinitializes_binding(self):
+        target = self.root / "cache" / "corrupt"
+        guard.prepare_target(target, self.workspace)
+        artifact = target / "debug" / "incremental" / "partial.o"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(b"partial")
+
+        planned = guard.reset_target(
+            target, self.workspace, execute=False, now=1_790_000_000
+        )
+        self.assertTrue(target.exists())
+        self.assertFalse(planned.exists())
+
+        quarantine = guard.reset_target(
+            target, self.workspace, execute=True, now=1_790_000_000
+        )
+        self.assertEqual(quarantine, planned)
+        self.assertEqual(
+            (quarantine / artifact.relative_to(target)).read_bytes(), b"partial"
+        )
+        self.assertFalse((target / artifact.relative_to(target)).exists())
+        binding = json.loads((target / guard.BINDING_NAME).read_text())
+        self.assertEqual(binding["workspace"], str(self.workspace.resolve()))
+        self.assertEqual(binding["uid"], os.geteuid())
+
+    def test_reset_refuses_an_active_or_foreign_target(self):
+        target = self.root / "cache" / "active"
+        guard.prepare_target(target, self.workspace)
+        target_lock = guard.lock_target(target, blocking=False)
+        try:
+            with self.assertRaisesRegex(ValueError, "already in use"):
+                guard.reset_target(target, self.workspace, execute=True)
+        finally:
+            target_lock.close()
+        other_workspace = self.root / "other-source"
+        other_workspace.mkdir()
+        with self.assertRaisesRegex(ValueError, "another worktree"):
+            guard.reset_target(target, other_workspace, execute=True)
+
+    def test_reset_refuses_preserved_source_or_evidence_targets(self):
+        target = self.root / "cache" / "protected"
+        guard.prepare_target(target, self.workspace)
+        preserve = target / guard.PRESERVE_NAME
+        preserve.touch()
+        with self.assertRaisesRegex(ValueError, "marked for preservation"):
+            guard.reset_target(target, self.workspace, execute=True)
+
+        preserve.unlink()
+        (target / "Cargo.toml").write_text("[package]\n")
+        with self.assertRaisesRegex(ValueError, "source or evidence"):
+            guard.reset_target(target, self.workspace, execute=True)
 
 
 if __name__ == "__main__":
