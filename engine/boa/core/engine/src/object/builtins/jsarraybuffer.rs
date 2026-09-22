@@ -139,6 +139,16 @@ impl JsArrayBuffer {
         self.inner.borrow().data().is_fixed_len()
     }
 
+    /// Returns the maximum byte length from the buffer's internal slots.
+    #[inline]
+    pub fn max_byte_length(&self, context: &mut Context) -> JsResult<usize> {
+        Ok(
+            ArrayBuffer::get_max_byte_length(&self.inner.clone().upcast().into(), &[], context)?
+                .as_number()
+                .expect("maxByteLength should return a number") as usize,
+        )
+    }
+
     /// Set a maximum length for the underlying array buffer.
     #[inline]
     #[must_use]

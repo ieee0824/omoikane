@@ -16,13 +16,16 @@ use base64::Engine as _;
 use boa_engine::JsString;
 use boa_engine::Module;
 use boa_engine::builtins::promise::{OperationType, PromiseState};
+use boa_engine::builtins::typed_array::TypedArrayKind;
 use boa_engine::context::HostHooks;
 use boa_engine::job::AsyncContext;
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::native_function::{NativeCallContinuation, NativeCallSuspension, NativeFunction};
 use boa_engine::object::{
     JsObject,
-    builtins::{JsArrayBuffer, JsPromise, JsUint8Array},
+    builtins::{
+        AlignedVec, JsArray, JsArrayBuffer, JsDataView, JsPromise, JsTypedArray, JsUint8Array,
+    },
 };
 use boa_engine::realm::Realm;
 use boa_engine::value::TryIntoJs;
@@ -9111,6 +9114,26 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(attribute_records_native),
         ),
         (
+            js_string!("__omoikane_array_buffer_info"),
+            1,
+            NativeFunction::from_copy_closure(array_buffer_info_native),
+        ),
+        (
+            js_string!("__omoikane_clone_array_buffer"),
+            1,
+            NativeFunction::from_copy_closure(clone_array_buffer_native),
+        ),
+        (
+            js_string!("__omoikane_transfer_array_buffer"),
+            1,
+            NativeFunction::from_copy_closure(transfer_array_buffer_native),
+        ),
+        (
+            js_string!("__omoikane_array_buffer_view_info"),
+            1,
+            NativeFunction::from_copy_closure(array_buffer_view_info_native),
+        ),
+        (
             js_string!("__omoikane_set_attribute"),
             3,
             NativeFunction::from_copy_closure(set_attribute_native),
@@ -12923,6 +12946,158 @@ fn attribute_records_native(
     // `TryIntoJs` roots each row array and the outer array while it appends
     // values. A plain Rust `Vec<JsValue>` is invisible to Boa's collector.
     rows.try_into_js(context)
+}
+
+fn array_buffer_argument(args: &[JsValue]) -> JsResult<JsArrayBuffer> {
+    let object = args
+        .first()
+        .and_then(JsValue::as_object)
+        .ok_or_else(|| JsNativeError::typ().with_message("value is not an ArrayBuffer"))?;
+    JsArrayBuffer::from_object(object)
+}
+
+fn array_buffer_info_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = args.first().and_then(JsValue::as_object) else {
+        return Ok(JsValue::null());
+    };
+    let Ok(buffer) = JsArrayBuffer::from_object(object) else {
+        return Ok(JsValue::null());
+    };
+    let detached = buffer.data().is_none();
+    let fixed = buffer.is_fixed_length();
+    let max_byte_length = buffer.max_byte_length(context)?;
+    Ok(JsArray::from_iter(
+        [
+            JsValue::from(detached),
+            JsValue::from(fixed),
+            JsValue::from(max_byte_length as f64),
+        ],
+        context,
+    )
+    .into())
+}
+
+fn clone_array_buffer_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let buffer = array_buffer_argument(args)?;
+    let max_byte_length = (!buffer.is_fixed_length()).then(|| buffer.max_byte_length(context));
+    let max_byte_length = max_byte_length.transpose()?;
+    let data = buffer
+        .data()
+        .ok_or_else(|| JsNativeError::typ().with_message("ArrayBuffer is detached"))?;
+    let data = AlignedVec::from_iter(0, data.iter().copied());
+    let cloned = JsArrayBuffer::from_byte_block(data, context)?;
+    Ok(match max_byte_length {
+        Some(max) => cloned.with_max_byte_length(max as u64).into(),
+        None => cloned.into(),
+    })
+}
+
+fn transfer_array_buffer_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let buffer = array_buffer_argument(args)?;
+    let max_byte_length = (!buffer.is_fixed_length()).then(|| buffer.max_byte_length(context));
+    let max_byte_length = max_byte_length.transpose()?;
+    let data = buffer.detach(&JsValue::undefined())?;
+    let transferred = JsArrayBuffer::from_byte_block(data, context)?;
+    Ok(match max_byte_length {
+        Some(max) => transferred.with_max_byte_length(max as u64).into(),
+        None => transferred.into(),
+    })
+}
+
+fn typed_array_kind_name(kind: TypedArrayKind) -> &'static str {
+    match kind {
+        TypedArrayKind::Int8 => "Int8Array",
+        TypedArrayKind::Uint8 => "Uint8Array",
+        TypedArrayKind::Uint8Clamped => "Uint8ClampedArray",
+        TypedArrayKind::Int16 => "Int16Array",
+        TypedArrayKind::Uint16 => "Uint16Array",
+        TypedArrayKind::Int32 => "Int32Array",
+        TypedArrayKind::Uint32 => "Uint32Array",
+        TypedArrayKind::BigInt64 => "BigInt64Array",
+        TypedArrayKind::BigUint64 => "BigUint64Array",
+        TypedArrayKind::Float16 => "Float16Array",
+        TypedArrayKind::Float32 => "Float32Array",
+        TypedArrayKind::Float64 => "Float64Array",
+    }
+}
+
+fn array_buffer_view_info_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = args.first().and_then(JsValue::as_object) else {
+        return Ok(JsValue::null());
+    };
+    if let Ok(view) = JsTypedArray::from_object(object.clone()) {
+        let out_of_bounds = view.is_out_of_bounds();
+        let buffer = view.buffer(context)?;
+        let (offset, length) = if out_of_bounds {
+            (JsValue::from(0), JsValue::null())
+        } else {
+            let length = if view.is_length_tracking() {
+                JsValue::null()
+            } else {
+                JsValue::from(view.length(context)? as f64)
+            };
+            (JsValue::from(view.byte_offset(context)? as f64), length)
+        };
+        let kind = view
+            .kind()
+            .map(typed_array_kind_name)
+            .ok_or_else(|| JsNativeError::typ().with_message("unknown TypedArray kind"))?;
+        return Ok(JsArray::from_iter(
+            [
+                js_string!("typed").into(),
+                JsString::from(kind).into(),
+                buffer,
+                offset,
+                length,
+                JsValue::from(out_of_bounds),
+            ],
+            context,
+        )
+        .into());
+    }
+    if let Ok(view) = JsDataView::from_object(object) {
+        let out_of_bounds = view.is_out_of_bounds();
+        let buffer = view.buffer(context)?;
+        let (offset, length) = if out_of_bounds {
+            (JsValue::from(0), JsValue::null())
+        } else {
+            let length = if view.is_length_tracking() {
+                JsValue::null()
+            } else {
+                JsValue::from(view.byte_length(context)? as f64)
+            };
+            (JsValue::from(view.byte_offset(context)? as f64), length)
+        };
+        return Ok(JsArray::from_iter(
+            [
+                js_string!("data").into(),
+                JsValue::null(),
+                buffer,
+                offset,
+                length,
+                JsValue::from(out_of_bounds),
+            ],
+            context,
+        )
+        .into());
+    }
+    Ok(JsValue::null())
 }
 
 fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -18807,37 +18982,194 @@ mod tests {
     }
 
     #[test]
-    fn dedicated_worker_post_message_rejects_array_transfer_lists() {
+    fn structured_clone_transfers_array_buffers_after_successful_serialization() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"(() => {
+                  const source = new ArrayBuffer(6);
+                  new Uint8Array(source).set([10, 20, 30, 40, 50, 60]);
+                  const sourceView = new Uint8Array(source, 1, 3);
+                  const graph = { buffer: source, alias: source, view: sourceView, list: [sourceView] };
+                  const copy = structuredClone(graph, { transfer: [source] });
+
+                  const unused = new ArrayBuffer(2);
+                  const unusedCopy = structuredClone({ ok: true }, { transfer: [unused] });
+
+                  let invalidGetterCalls = 0;
+                  let invalidName = "";
+                  try {
+                    structuredClone({ get value() { invalidGetterCalls++; return 1; } }, { transfer: [{}] });
+                  } catch (error) { invalidName = error.name; }
+
+                  let duplicateGetterCalls = 0;
+                  const duplicate = new ArrayBuffer(1);
+                  let duplicateName = "";
+                  try {
+                    structuredClone({ get value() { duplicateGetterCalls++; return 1; } },
+                      { transfer: [duplicate, duplicate] });
+                  } catch (error) { duplicateName = error.name; }
+
+                  let unsupportedPortName = "";
+                  try {
+                    structuredClone(null, { transfer: [new MessageChannel().port1] });
+                  } catch (error) { unsupportedPortName = error.name; }
+
+                  const throwing = new ArrayBuffer(3);
+                  let throwingName = "";
+                  try {
+                    structuredClone({ get value() { throw new Error("stop"); } }, { transfer: [throwing] });
+                  } catch (error) { throwingName = error.name; }
+
+                  const mutable = new ArrayBuffer(2);
+                  new Uint8Array(mutable).set([1, 2]);
+                  const mutated = structuredClone({
+                    buffer: mutable,
+                    get later() { new Uint8Array(mutable)[0] = 99; return true; },
+                  }, { transfer: [mutable] });
+
+                  const detached = new ArrayBuffer(1);
+                  structuredClone(null, { transfer: [detached] });
+                  const stillAttached = new ArrayBuffer(4);
+                  let detachedName = "";
+                  try { structuredClone(null, { transfer: [stillAttached, detached] }); }
+                  catch (error) { detachedName = error.name; }
+
+                  const outerFirst = new ArrayBuffer(2);
+                  const outerSecond = new ArrayBuffer(2);
+                  let nestedName = "";
+                  try {
+                    structuredClone({
+                      get detachSecond() {
+                        structuredClone(null, { transfer: [outerSecond] });
+                        return true;
+                      },
+                    }, { transfer: [outerFirst, outerSecond] });
+                  } catch (error) { nestedName = error.name; }
+
+                  return source.byteLength === 0 && sourceView.byteLength === 0 &&
+                    copy.buffer === copy.alias && copy.view === copy.list[0] &&
+                    copy.view.buffer === copy.buffer && copy.view.byteOffset === 1 &&
+                    copy.view.length === 3 && Array.from(new Uint8Array(copy.buffer)).join(",") === "10,20,30,40,50,60" &&
+                    unused.byteLength === 0 && unusedCopy.ok === true &&
+                    invalidName === "DataCloneError" && invalidGetterCalls === 0 &&
+                    duplicateName === "DataCloneError" && duplicateGetterCalls === 0 && duplicate.byteLength === 1 &&
+                    unsupportedPortName === "DataCloneError" &&
+                    throwingName === "Error" && throwing.byteLength === 3 &&
+                    mutable.byteLength === 0 && new Uint8Array(mutated.buffer)[0] === 99 &&
+                    detachedName === "DataCloneError" && stillAttached.byteLength === 4 &&
+                    nestedName === "DataCloneError" && outerFirst.byteLength === 2 && outerSecond.byteLength === 0 &&
+                    typeof globalThis.__omoikane_array_buffer_info === "undefined" &&
+                    typeof globalThis.__omoikane_transfer_array_buffer === "undefined";
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(result.as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn structured_clone_preserves_resizable_array_buffer_views() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let result = runtime
+            .eval(
+                r#"(() => {
+                  const source = new ArrayBuffer(8, { maxByteLength: 16 });
+                  new Uint8Array(source).set([1, 2, 3, 4, 5, 6, 7, 8]);
+                  const tracking = new Uint8Array(source, 2);
+                  const fixed = new Uint16Array(source, 2, 2);
+                  const trackingData = new DataView(source, 4);
+                  const fixedData = new DataView(source, 1, 3);
+                  const copy = structuredClone({ source, tracking, fixed, trackingData, fixedData },
+                    { transfer: [source] });
+                  const initial = copy.source.resizable === true && copy.source.maxByteLength === 16 &&
+                    copy.tracking.buffer === copy.source && copy.fixed.buffer === copy.source &&
+                    copy.trackingData.buffer === copy.source && copy.fixedData.buffer === copy.source &&
+                    copy.tracking.byteOffset === 2 && copy.tracking.length === 6 &&
+                    copy.fixed.byteOffset === 2 && copy.fixed.length === 2 &&
+                    copy.trackingData.byteOffset === 4 && copy.trackingData.byteLength === 4 &&
+                    copy.fixedData.byteOffset === 1 && copy.fixedData.byteLength === 3;
+                  copy.source.resize(12);
+                  const resized = copy.tracking.length === 10 && copy.fixed.length === 2 &&
+                    copy.trackingData.byteLength === 8 && copy.fixedData.byteLength === 3;
+
+                  const shrinking = new ArrayBuffer(8, { maxByteLength: 16 });
+                  const outOfBounds = new Uint8Array(shrinking, 6, 2);
+                  shrinking.resize(4);
+                  let outOfBoundsName = "";
+                  try { structuredClone(outOfBounds); }
+                  catch (error) { outOfBoundsName = error.name; }
+
+                  return source.byteLength === 0 && tracking.byteLength === 0 &&
+                    initial && resized && outOfBoundsName === "DataCloneError";
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(result.as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn message_port_supports_legacy_and_dictionary_array_buffer_transfers() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime
             .eval(
-                r#"globalThis.workerValues = []; globalThis.ownerTransferError = "";
-                   const source = encodeURIComponent('onmessage = event => { let name = ""; try { postMessage("worker", [new ArrayBuffer(1)]); } catch (error) { name = error.name; } postMessage(name); };');
-                   const worker = new Worker('data:text/javascript,' + source);
-                   worker.onmessage = event => workerValues.push(event.data);
-                   try { worker.postMessage("owner", [new ArrayBuffer(1)]); } catch (error) { ownerTransferError = error.name; }
-                   worker.postMessage("go");"#,
+                r#"globalThis.portTransferValues = [];
+                   const channel = new MessageChannel();
+                   channel.port2.onmessage = event => portTransferValues.push(event.data);
+                   const legacy = new ArrayBuffer(3);
+                   new Uint8Array(legacy).set([1, 2, 3]);
+                   const dictionary = new ArrayBuffer(2);
+                   new Uint8Array(dictionary).set([4, 5]);
+                   channel.port1.postMessage({ buffer: legacy, alias: legacy }, [legacy]);
+                   channel.port1.postMessage({ buffer: dictionary }, { transfer: [dictionary] });
+                   globalThis.portSourcesDetached = legacy.byteLength === 0 && dictionary.byteLength === 0;"#,
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
-        assert_eq!(
+        assert!(
             runtime
-                .eval("ownerTransferError")
+                .eval(
+                    r#"portSourcesDetached && portTransferValues.length === 2 &&
+                   portTransferValues[0].buffer === portTransferValues[0].alias &&
+                   Array.from(new Uint8Array(portTransferValues[0].buffer)).join(",") === "1,2,3" &&
+                   Array.from(new Uint8Array(portTransferValues[1].buffer)).join(",") === "4,5""#,
+                )
                 .unwrap()
-                .as_string()
-                .unwrap()
-                .to_std_string_escaped(),
-            "DataCloneError"
+                .as_boolean()
+                .unwrap_or(false)
         );
-        assert_eq!(
-            runtime
-                .eval("JSON.stringify(workerValues)")
-                .unwrap()
-                .as_string()
-                .unwrap()
-                .to_std_string_escaped(),
-            "[\"DataCloneError\"]"
-        );
+    }
+
+    #[test]
+    fn dedicated_worker_post_message_transfers_array_buffers_in_both_directions() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"globalThis.workerValues = [];
+                   const source = encodeURIComponent('onmessage = event => { const input = event.data.buffer; const output = new ArrayBuffer(4, { maxByteLength: 8 }); new Uint8Array(output).set([9, 8, 7, 6]); const tracking = new Uint8Array(output, 1); postMessage({ inputBytes: Array.from(new Uint8Array(input)), inputAlias: input === event.data.alias, inputResizable: input.resizable && input.maxByteLength === 6, inputTracking: event.data.tracking.buffer === input && event.data.tracking.length === 2, output, alias: output, tracking }, [output]); postMessage({ outputDetached: output.byteLength === 0 && tracking.byteLength === 0 }); };');
+                   const worker = new Worker('data:text/javascript,' + source);
+                   worker.onmessage = event => workerValues.push(event.data);
+                   const input = new ArrayBuffer(3, { maxByteLength: 6 });
+                   new Uint8Array(input).set([1, 2, 3]);
+                   const tracking = new Uint8Array(input, 1);
+                   worker.postMessage({ buffer: input, alias: input, tracking }, [input]);
+                   globalThis.ownerInputDetached = input.byteLength === 0;"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval(
+                r#"ownerInputDetached && workerValues.length === 2 &&
+                   workerValues[0].inputBytes.join(",") === "1,2,3" && workerValues[0].inputAlias === true &&
+                   workerValues[0].inputResizable === true && workerValues[0].inputTracking === true &&
+                   workerValues[0].output === workerValues[0].alias &&
+                   workerValues[0].output.resizable === true && workerValues[0].output.maxByteLength === 8 &&
+                   workerValues[0].tracking.buffer === workerValues[0].output && workerValues[0].tracking.length === 3 &&
+                   Array.from(new Uint8Array(workerValues[0].output)).join(",") === "9,8,7,6" &&
+                   workerValues[1].outputDetached === true"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap_or(false));
     }
 
     #[test]

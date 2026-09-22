@@ -11,7 +11,7 @@ use crate::{
     value::{IntoOrUndefined, TryFromJs},
 };
 use boa_gc::{Finalize, Trace};
-use std::ops::Deref;
+use std::{ops::Deref, sync::atomic::Ordering};
 
 /// `JsTypedArray` provides a wrapper for Boa's implementation of the ECMAScript `TypedArray`
 /// builtin object.
@@ -53,6 +53,29 @@ impl JsTypedArray {
         self.inner
             .downcast_ref::<TypedArray>()
             .map(|arr| arr.kind())
+    }
+
+    /// Returns whether this view tracks the length of a resizable buffer.
+    #[inline]
+    #[must_use]
+    pub fn is_length_tracking(&self) -> bool {
+        self.inner
+            .downcast_ref::<TypedArray>()
+            .is_some_and(|array| array.is_auto_length())
+    }
+
+    /// Returns whether this view is detached or outside its buffer bounds.
+    #[inline]
+    #[must_use]
+    pub fn is_out_of_bounds(&self) -> bool {
+        let Some(array) = self.inner.downcast_ref::<TypedArray>() else {
+            return true;
+        };
+        let buffer = array.viewed_array_buffer().as_buffer();
+        let Some(bytes) = buffer.bytes(Ordering::SeqCst) else {
+            return true;
+        };
+        array.is_out_of_bounds(bytes.len())
     }
 
     /// Get the length of the array.

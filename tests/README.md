@@ -145,8 +145,9 @@ For `/common/sab.js`, this smoke runner uses the exposed native
 `SharedArrayBuffer` constructor directly: upstream discovers it through
 `WebAssembly.Memory`, which Omoikane does not implement. The test inputs remain
 real shared buffers and all assertions are retained. This adapter does not test
-WebAssembly compatibility. ArrayBuffer transfer via MessagePort is tracked in
-#763; decoder regressions use the engine's detach API independently of it.
+WebAssembly compatibility. The transferred-input subtests exercise actual
+ArrayBuffer detachment through MessagePort; focused engine tests also cover
+structuredClone and Worker transfer ordering, aliases and resizable views.
 
 The form-associated custom-element subset submits GET and multipart POST
 requests into named iframes. The runner gives each document its actual local

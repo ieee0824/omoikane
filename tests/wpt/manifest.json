@@ -156,15 +156,7 @@
     { "path": "encoding/streams/decode-incomplete-input.any.js" },
     { "path": "encoding/streams/decode-non-utf8.any.js" },
     { "path": "encoding/streams/decode-split-character.any.js" },
-    { "path": "encoding/streams/decode-utf8.any.js", "known_failure": {
-      "status": "FAIL",
-      "reason": "MessagePort ignores ArrayBuffer transfer lists; the remaining UTF-8/shared-buffer subtests must pass",
-      "issue": "#763",
-      "failed_subtests": [
-        "decoding a transferred Uint8Array chunk should give no output",
-        "decoding a transferred ArrayBuffer chunk should give no output"
-      ]
-    } },
+    { "path": "encoding/streams/decode-utf8.any.js" },
     { "path": "encoding/streams/encode-bad-chunks.any.js" },
     { "path": "encoding/streams/encode-utf8.any.js" },
     { "path": "encoding/streams/readable-writable-properties.any.js" },
