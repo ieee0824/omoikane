@@ -456,6 +456,11 @@ pub struct StyleResolver {
     active_font_faces: Vec<(Option<usize>, super::FontFaceRule)>,
     /// Winning document-scoped `@counter-style` definitions.
     counter_styles: HashMap<Option<usize>, HashMap<String, CounterStyleDefinition>>,
+    /// Effective document-scoped custom-property registrations. Stylesheet
+    /// registrations are collected in document order and script registrations
+    /// installed through `CSS.registerProperty()` take precedence.
+    registered_custom_properties: BTreeMap<String, RegisteredCustomProperty>,
+    script_registered_custom_properties: BTreeMap<String, RegisteredCustomProperty>,
     /// Monotonic order assigned to parsed `@font-face` definitions.
     next_font_face_source_order: usize,
     /// Before/after style snapshots and running CSS transitions.
@@ -463,6 +468,426 @@ pub struct StyleResolver {
     /// Node identities whose inline `style` attribute is blocked by the
     /// owning Document's CSP `style-src` policy.
     blocked_inline_style_nodes: HashSet<usize>,
+}
+
+/// A validated custom-property registration shared by stylesheet and script
+/// registration paths.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RegisteredCustomProperty {
+    pub(crate) name: String,
+    pub(crate) syntax_text: String,
+    syntax: RegisteredPropertySyntax,
+    pub(crate) inherits: bool,
+    pub(crate) initial_value: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RegisteredPropertySyntax {
+    Universal,
+    Alternatives(Vec<RegisteredSyntaxComponent>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RegisteredSyntaxComponent {
+    kind: RegisteredSyntaxKind,
+    multiplier: RegisteredSyntaxMultiplier,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RegisteredSyntaxKind {
+    Length,
+    LengthPercentage,
+    Number,
+    Integer,
+    Percentage,
+    Color,
+    Angle,
+    Time,
+    Resolution,
+    TransformFunction,
+    TransformList,
+    String,
+    Image,
+    Url,
+    CustomIdent,
+    Literal(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegisteredSyntaxMultiplier {
+    Single,
+    SpaceList,
+    CommaList,
+}
+
+/// Validates a registration supplied by `CSS.registerProperty()`.
+pub(crate) fn parse_registered_custom_property(
+    name: &str,
+    syntax: &str,
+    inherits: bool,
+    initial_value: Option<&str>,
+) -> Option<RegisteredCustomProperty> {
+    if !is_custom_property_registration_name(name) {
+        return None;
+    }
+    let syntax = parse_registered_property_syntax(syntax)?;
+    let initial_value = match initial_value {
+        Some(value) => Some(parse_registered_initial_value(value)?),
+        None => None,
+    };
+    if !matches!(syntax, RegisteredPropertySyntax::Universal) && initial_value.is_none() {
+        return None;
+    }
+    if let Some(value) = initial_value.as_ref()
+        && (!registered_value_matches_syntax(value, &syntax)
+            || !registered_initial_value_is_independent(value))
+    {
+        return None;
+    }
+    Some(RegisteredCustomProperty {
+        name: name.to_string(),
+        syntax_text: syntax_text(syntax.clone()),
+        syntax,
+        inherits,
+        initial_value,
+    })
+}
+
+/// Parses a stylesheet `@property` rule. Invalid rules have no registration
+/// effect and are omitted from CSSOM by the native rule-source filter.
+pub(crate) fn registered_custom_property_from_rule(
+    rule: &super::AtRule,
+) -> Option<RegisteredCustomProperty> {
+    if !rule.name.eq_ignore_ascii_case("property") {
+        return None;
+    }
+    let name = rule.prelude.trim();
+    if !is_custom_property_registration_name(name) {
+        return None;
+    }
+    let descriptor = |expected: &str| {
+        rule.declarations
+            .iter()
+            .rev()
+            .find(|declaration| declaration.name.eq_ignore_ascii_case(expected))
+            .map(|declaration| &declaration.value)
+    };
+    let syntax_value = descriptor("syntax")?;
+    let syntax_text = match syntax_value {
+        Value::String(value) | Value::Keyword(value) => value.trim(),
+        _ => return None,
+    };
+    let inherits = match descriptor("inherits")? {
+        Value::Keyword(value) if value.eq_ignore_ascii_case("true") => true,
+        Value::Keyword(value) if value.eq_ignore_ascii_case("false") => false,
+        _ => return None,
+    };
+    let parsed_syntax = parse_registered_property_syntax(syntax_text)?;
+    let initial_value = descriptor("initial-value").cloned();
+    if !matches!(parsed_syntax, RegisteredPropertySyntax::Universal) && initial_value.is_none() {
+        return None;
+    }
+    if let Some(value) = initial_value.as_ref()
+        && (!registered_value_matches_syntax(value, &parsed_syntax)
+            || !registered_initial_value_is_independent(value))
+    {
+        return None;
+    }
+    Some(RegisteredCustomProperty {
+        name: name.to_string(),
+        syntax_text: match syntax_value {
+            Value::String(value) | Value::Keyword(value) => value.clone(),
+            _ => unreachable!("syntax descriptor was matched above"),
+        },
+        syntax: parsed_syntax,
+        inherits,
+        initial_value,
+    })
+}
+
+fn is_custom_property_registration_name(name: &str) -> bool {
+    name.starts_with("--") && name.len() > 2 && !name.contains('\0')
+}
+
+fn parse_registered_initial_value(input: &str) -> Option<Value> {
+    if input.trim().is_empty() || contains_top_level_semicolon(input) {
+        return None;
+    }
+    super::parse_style_attribute(&format!("--omoikane-registration-value: {input}"))
+        .into_iter()
+        .find(|declaration| declaration.name == "--omoikane-registration-value")
+        .map(|declaration| declaration.value)
+}
+
+fn parse_registered_property_syntax(input: &str) -> Option<RegisteredPropertySyntax> {
+    let input = input.trim();
+    if input == "*" {
+        return Some(RegisteredPropertySyntax::Universal);
+    }
+    if input.is_empty() || input.contains('*') {
+        return None;
+    }
+    let mut alternatives = Vec::new();
+    for raw in input.split('|') {
+        let raw = raw.trim();
+        if raw.is_empty() || raw.split_whitespace().count() != 1 {
+            return None;
+        }
+        let (core, multiplier) = match raw.as_bytes().last() {
+            Some(b'+') => (&raw[..raw.len() - 1], RegisteredSyntaxMultiplier::SpaceList),
+            Some(b'#') => (&raw[..raw.len() - 1], RegisteredSyntaxMultiplier::CommaList),
+            _ => (raw, RegisteredSyntaxMultiplier::Single),
+        };
+        if core.is_empty() || core.ends_with(['+', '#']) {
+            return None;
+        }
+        let kind = if core.starts_with('<') && core.ends_with('>') {
+            match &core[1..core.len() - 1] {
+                "length" => RegisteredSyntaxKind::Length,
+                "length-percentage" => RegisteredSyntaxKind::LengthPercentage,
+                "number" => RegisteredSyntaxKind::Number,
+                "integer" => RegisteredSyntaxKind::Integer,
+                "percentage" => RegisteredSyntaxKind::Percentage,
+                "color" => RegisteredSyntaxKind::Color,
+                "angle" => RegisteredSyntaxKind::Angle,
+                "time" => RegisteredSyntaxKind::Time,
+                "resolution" => RegisteredSyntaxKind::Resolution,
+                "transform-function" => RegisteredSyntaxKind::TransformFunction,
+                "transform-list" if multiplier == RegisteredSyntaxMultiplier::Single => {
+                    RegisteredSyntaxKind::TransformList
+                }
+                "string" => RegisteredSyntaxKind::String,
+                "image" => RegisteredSyntaxKind::Image,
+                "url" => RegisteredSyntaxKind::Url,
+                "custom-ident" => RegisteredSyntaxKind::CustomIdent,
+                _ => return None,
+            }
+        } else {
+            if !valid_registered_literal(core) {
+                return None;
+            }
+            RegisteredSyntaxKind::Literal(core.to_string())
+        };
+        alternatives.push(RegisteredSyntaxComponent { kind, multiplier });
+    }
+    (!alternatives.is_empty()).then_some(RegisteredPropertySyntax::Alternatives(alternatives))
+}
+
+fn valid_registered_literal(value: &str) -> bool {
+    !value.is_empty()
+        && !value.chars().any(char::is_whitespace)
+        && !value.contains([',', '<', '>', '+', '#'])
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default"
+        )
+}
+
+fn syntax_text(syntax: RegisteredPropertySyntax) -> String {
+    match syntax {
+        RegisteredPropertySyntax::Universal => "*".to_string(),
+        RegisteredPropertySyntax::Alternatives(parts) => parts
+            .into_iter()
+            .map(|part| {
+                let core = match part.kind {
+                    RegisteredSyntaxKind::Length => "<length>".to_string(),
+                    RegisteredSyntaxKind::LengthPercentage => "<length-percentage>".to_string(),
+                    RegisteredSyntaxKind::Number => "<number>".to_string(),
+                    RegisteredSyntaxKind::Integer => "<integer>".to_string(),
+                    RegisteredSyntaxKind::Percentage => "<percentage>".to_string(),
+                    RegisteredSyntaxKind::Color => "<color>".to_string(),
+                    RegisteredSyntaxKind::Angle => "<angle>".to_string(),
+                    RegisteredSyntaxKind::Time => "<time>".to_string(),
+                    RegisteredSyntaxKind::Resolution => "<resolution>".to_string(),
+                    RegisteredSyntaxKind::TransformFunction => "<transform-function>".to_string(),
+                    RegisteredSyntaxKind::TransformList => "<transform-list>".to_string(),
+                    RegisteredSyntaxKind::String => "<string>".to_string(),
+                    RegisteredSyntaxKind::Image => "<image>".to_string(),
+                    RegisteredSyntaxKind::Url => "<url>".to_string(),
+                    RegisteredSyntaxKind::CustomIdent => "<custom-ident>".to_string(),
+                    RegisteredSyntaxKind::Literal(value) => value,
+                };
+                match part.multiplier {
+                    RegisteredSyntaxMultiplier::Single => core,
+                    RegisteredSyntaxMultiplier::SpaceList => format!("{core}+"),
+                    RegisteredSyntaxMultiplier::CommaList => format!("{core}#"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" | "),
+    }
+}
+
+fn registered_value_matches_syntax(value: &Value, syntax: &RegisteredPropertySyntax) -> bool {
+    if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    {
+        return false;
+    }
+    match syntax {
+        RegisteredPropertySyntax::Universal => true,
+        RegisteredPropertySyntax::Alternatives(alternatives) => alternatives
+            .iter()
+            .any(|component| registered_value_matches_component(value, component)),
+    }
+}
+
+fn registered_value_matches_component(
+    value: &Value,
+    component: &RegisteredSyntaxComponent,
+) -> bool {
+    match component.multiplier {
+        RegisteredSyntaxMultiplier::Single => registered_value_matches_kind(value, &component.kind),
+        RegisteredSyntaxMultiplier::SpaceList => match value {
+            Value::List(values) => {
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|value| registered_value_matches_kind(value, &component.kind))
+            }
+            value => registered_value_matches_kind(value, &component.kind),
+        },
+        RegisteredSyntaxMultiplier::CommaList => match value {
+            Value::CommaList(values) => {
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|value| registered_value_matches_kind(value, &component.kind))
+            }
+            value => registered_value_matches_kind(value, &component.kind),
+        },
+    }
+}
+
+fn registered_value_matches_kind(value: &Value, kind: &RegisteredSyntaxKind) -> bool {
+    match kind {
+        RegisteredSyntaxKind::Length => match value {
+            Value::Length(_, unit) => is_css_length_unit(unit),
+            Value::Number(value) => *value == 0.0,
+            Value::Function { name, .. } if is_length_percentage_math_function(name) => {
+                matches!(
+                    compute_value(value, "--registered", ResolutionContext::default()),
+                    ComputedValue::Px(_)
+                )
+            }
+            _ => false,
+        },
+        RegisteredSyntaxKind::LengthPercentage => match value {
+            Value::Length(_, unit) => is_css_length_unit(unit),
+            Value::Number(value) => *value == 0.0,
+            Value::Percentage(_) => true,
+            Value::Function { name, .. } if is_length_percentage_math_function(name) => matches!(
+                compute_value(value, "--registered", ResolutionContext::default()),
+                ComputedValue::Px(_)
+                    | ComputedValue::Percentage(_)
+                    | ComputedValue::LengthPercentage(_)
+            ),
+            _ => false,
+        },
+        RegisteredSyntaxKind::Number => match value {
+            Value::Number(_) => true,
+            Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => matches!(
+                compute_value(value, "--registered", ResolutionContext::default()),
+                ComputedValue::Number(_)
+            ),
+            _ => false,
+        },
+        RegisteredSyntaxKind::Integer => match value {
+            Value::Number(value) => value.fract() == 0.0,
+            Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => matches!(
+                compute_value(value, "--registered", ResolutionContext::default()),
+                ComputedValue::Number(value) if value.fract() == 0.0
+            ),
+            _ => false,
+        },
+        RegisteredSyntaxKind::Percentage => match value {
+            Value::Percentage(_) => true,
+            Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => matches!(
+                compute_value(value, "--registered", ResolutionContext::default()),
+                ComputedValue::Percentage(_)
+            ),
+            _ => false,
+        },
+        RegisteredSyntaxKind::Color => {
+            crate::paint::color::parse_color(&render_value(value)).is_some()
+        }
+        RegisteredSyntaxKind::Angle => {
+            matches!(value, Value::Length(_, unit) if matches!(unit.to_ascii_lowercase().as_str(), "deg" | "grad" | "rad" | "turn"))
+        }
+        RegisteredSyntaxKind::Time => resolve_time_seconds(value).is_some(),
+        RegisteredSyntaxKind::Resolution => {
+            matches!(value, Value::Length(number, unit) if *number >= 0.0 && matches!(unit.to_ascii_lowercase().as_str(), "dpi" | "dpcm" | "dppx" | "x"))
+        }
+        RegisteredSyntaxKind::TransformFunction => matches!(value, Value::Function { .. }),
+        RegisteredSyntaxKind::TransformList => match value {
+            Value::Function { .. } => true,
+            Value::List(values) => {
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|value| matches!(value, Value::Function { .. }))
+            }
+            _ => false,
+        },
+        RegisteredSyntaxKind::String => matches!(value, Value::String(_)),
+        RegisteredSyntaxKind::Image => {
+            matches!(value, Value::Function { name, .. } if name.eq_ignore_ascii_case("url") || name.to_ascii_lowercase().ends_with("gradient"))
+                || matches!(value, Value::Keyword(keyword) if keyword.to_ascii_lowercase().starts_with("url("))
+        }
+        RegisteredSyntaxKind::Url => {
+            matches!(value, Value::Function { name, .. } if name.eq_ignore_ascii_case("url"))
+                || matches!(value, Value::Keyword(keyword) if keyword.to_ascii_lowercase().starts_with("url("))
+        }
+        RegisteredSyntaxKind::CustomIdent => {
+            matches!(value, Value::Keyword(keyword) if valid_registered_literal(keyword))
+        }
+        RegisteredSyntaxKind::Literal(expected) => {
+            matches!(value, Value::Keyword(keyword) if keyword == expected)
+        }
+    }
+}
+
+fn is_css_length_unit(unit: &str) -> bool {
+    matches!(
+        unit.to_ascii_lowercase().as_str(),
+        "px" | "cm"
+            | "mm"
+            | "q"
+            | "in"
+            | "pt"
+            | "pc"
+            | "em"
+            | "rem"
+            | "ex"
+            | "ch"
+            | "vw"
+            | "vh"
+            | "vmin"
+            | "vmax"
+            | "svw"
+            | "svh"
+            | "lvw"
+            | "lvh"
+            | "dvw"
+            | "dvh"
+    )
+}
+
+fn registered_initial_value_is_independent(value: &Value) -> bool {
+    if value_contains_var_function(value) {
+        return false;
+    }
+    match value {
+        Value::Length(_, unit) => !matches!(
+            unit.to_ascii_lowercase().as_str(),
+            "em" | "rem" | "ex" | "ch"
+        ),
+        Value::Function { arguments, .. }
+        | Value::List(arguments)
+        | Value::CommaList(arguments) => arguments
+            .iter()
+            .all(registered_initial_value_is_independent),
+        _ => true,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -887,6 +1312,7 @@ impl StyleResolver {
             self.rebuild_keyframes();
             self.rebuild_font_faces();
             self.rebuild_counter_styles();
+            self.rebuild_registered_custom_properties();
         }
         self.cache.clear();
         self.pseudo_cache.clear();
@@ -907,6 +1333,7 @@ impl StyleResolver {
             self.rebuild_keyframes();
             self.rebuild_font_faces();
             self.rebuild_counter_styles();
+            self.rebuild_registered_custom_properties();
         }
         self.cache.clear();
         self.pseudo_cache.clear();
@@ -944,6 +1371,7 @@ impl StyleResolver {
         self.register_latest_stylesheet_keyframes();
         self.register_latest_stylesheet_font_faces();
         self.register_latest_stylesheet_counter_styles();
+        self.rebuild_registered_custom_properties();
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -971,6 +1399,7 @@ impl StyleResolver {
         self.register_latest_stylesheet_keyframes();
         self.register_latest_stylesheet_font_faces();
         self.register_latest_stylesheet_counter_styles();
+        self.rebuild_registered_custom_properties();
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -1044,6 +1473,7 @@ impl StyleResolver {
         self.register_latest_stylesheet_keyframes();
         self.register_latest_stylesheet_font_faces();
         self.register_latest_stylesheet_counter_styles();
+        self.rebuild_registered_custom_properties();
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
@@ -1311,6 +1741,40 @@ impl StyleResolver {
         Some(result)
     }
 
+    /// Installs the script registrations for this document. Script
+    /// registrations override stylesheet registrations with the same name.
+    pub(crate) fn set_script_registered_custom_properties(
+        &mut self,
+        registrations: BTreeMap<String, RegisteredCustomProperty>,
+    ) {
+        if self.script_registered_custom_properties == registrations {
+            return;
+        }
+        self.script_registered_custom_properties = registrations;
+        self.rebuild_registered_custom_properties();
+        self.invalidate_style_cache();
+    }
+
+    fn rebuild_registered_custom_properties(&mut self) {
+        let mut registrations = BTreeMap::new();
+        for (input, scope) in self.stylesheets.iter().zip(&self.stylesheet_scopes) {
+            // `@property` is document-scoped and rules in shadow trees do not
+            // register names in the outer document.
+            if scope.root.is_some() {
+                continue;
+            }
+            collect_registered_custom_properties(
+                &input.stylesheet.rules,
+                &mut registrations,
+                self.viewport_width,
+                self.viewport_height,
+                self.color_scheme_dark,
+            );
+        }
+        registrations.extend(self.script_registered_custom_properties.clone());
+        self.registered_custom_properties = registrations;
+    }
+
     /// Returns the active `@font-face` winner for each supported variant and
     /// tree scope in stable source order.
     pub(crate) fn resolved_font_face_rules(&self) -> Vec<(Option<usize>, super::FontFaceRule)> {
@@ -1516,6 +1980,7 @@ impl StyleResolver {
         }
 
         candidates.sort_by(compare_candidate_priority);
+        let unexpanded_candidates = candidates.clone();
 
         let mut custom_candidates = candidates
             .iter()
@@ -1525,7 +1990,9 @@ impl StyleResolver {
         remove_reverted_candidates(&mut custom_candidates, None);
         let inherited_custom_properties = inherited_custom_properties(parent_style);
         let mut custom_properties = inherited_custom_properties.clone();
+        let mut specified_custom_properties = BTreeMap::new();
         for candidate in custom_candidates {
+            specified_custom_properties.insert(candidate.name.clone(), candidate.value.clone());
             match &candidate.value {
                 Value::Keyword(keyword)
                     if keyword.eq_ignore_ascii_case("inherit")
@@ -1545,7 +2012,7 @@ impl StyleResolver {
                 }
             }
         }
-        let custom_properties = resolve_custom_property_values(&custom_properties);
+        let mut custom_properties = resolve_custom_property_values(&custom_properties);
         candidates = expand_pending_shorthand_candidates(candidates, &custom_properties);
         candidates.sort_by(compare_candidate_priority);
         remove_reverted_candidates(&mut candidates, Some(&custom_properties));
@@ -1615,8 +2082,32 @@ impl StyleResolver {
             }
         }
 
+        let element_font_size = inherited_font_size(parent_style, &properties);
+        let custom_ctx = ResolutionContext {
+            parent_font_size: element_font_size,
+            root_font_size,
+            viewport_width: self.viewport_width,
+            viewport_height: self.viewport_height,
+        };
+        let (computed_custom_properties, typed_custom_properties) =
+            compute_registered_custom_properties(
+                &specified_custom_properties,
+                &inherited_custom_properties,
+                &self.registered_custom_properties,
+                custom_ctx,
+            );
+        custom_properties = computed_custom_properties;
+        for (name, value) in typed_custom_properties {
+            properties.insert(name, value);
+        }
+        // Pending shorthands may contain var() references whose registered
+        // value changed after syntax validation or inheritance fallback.
+        candidates = expand_pending_shorthand_candidates(unexpanded_candidates, &custom_properties);
+        candidates.sort_by(compare_candidate_priority);
+        remove_reverted_candidates(&mut candidates, Some(&custom_properties));
+
         for candidate in candidates {
-            if candidate.name == "font-size" {
+            if candidate.name == "font-size" || candidate.name.starts_with("--") {
                 continue; // already processed above
             }
             log_unsupported_css_if_enabled(&candidate.name, &candidate.value);
@@ -1848,6 +2339,8 @@ impl StyleResolver {
         let Some(declarations) = declarations else {
             return;
         };
+        let animation_progress =
+            animation_snapshot_progress(properties, fill_mode.as_str(), infinite, paused);
 
         let element_font_size = properties
             .get("font-size")
@@ -1888,6 +2381,92 @@ impl StyleResolver {
                     .unwrap_or_else(|| declaration.value.clone());
             let computed = compute_value(&resolved, property_name, ctx);
             insert_computed_property(properties, property_name, computed);
+        }
+        if let Some(progress) = animation_progress {
+            self.apply_registered_animation_interpolation(
+                steps,
+                progress,
+                properties,
+                ctx,
+                &custom_properties,
+                important_properties,
+            );
+        }
+    }
+
+    fn apply_registered_animation_interpolation(
+        &self,
+        steps: &[KeyframeStep],
+        progress: f32,
+        properties: &mut BTreeMap<String, ComputedValue>,
+        ctx: ResolutionContext,
+        custom_properties: &BTreeMap<String, Value>,
+        important_properties: &HashSet<String>,
+    ) {
+        for (name, registration) in &self.registered_custom_properties {
+            if important_properties.contains(name) {
+                continue;
+            }
+            let mut lower = None;
+            let mut upper = None;
+            for step in steps {
+                if step.offset <= progress {
+                    lower = Some(step);
+                }
+                if step.offset >= progress {
+                    upper = Some(step);
+                    break;
+                }
+            }
+            let lower = lower.or_else(|| steps.first());
+            let upper = upper.or_else(|| steps.last());
+            let lower_value = lower.and_then(|step| {
+                step.declarations
+                    .iter()
+                    .rev()
+                    .find(|declaration| declaration.name == *name)
+                    .map(|declaration| declaration.value.clone())
+            });
+            let upper_value = upper.and_then(|step| {
+                step.declarations
+                    .iter()
+                    .rev()
+                    .find(|declaration| declaration.name == *name)
+                    .map(|declaration| declaration.value.clone())
+            });
+            let current = properties.get(name).cloned();
+            let lower = lower_value
+                .or_else(|| current.as_ref().map(computed_value_to_value))
+                .and_then(|value| resolve_value_with_custom_properties(&value, custom_properties))
+                .map(|value| compute_registered_value(&value, &registration.syntax, ctx));
+            let upper = upper_value
+                .or_else(|| current.as_ref().map(computed_value_to_value))
+                .and_then(|value| resolve_value_with_custom_properties(&value, custom_properties))
+                .map(|value| compute_registered_value(&value, &registration.syntax, ctx));
+            let (Some(lower), Some(upper)) = (lower, upper) else {
+                continue;
+            };
+            let lower_offset = steps
+                .iter()
+                .filter(|step| step.offset <= progress)
+                .map(|step| step.offset)
+                .next_back()
+                .unwrap_or(0.0);
+            let upper_offset = steps
+                .iter()
+                .find(|step| step.offset >= progress)
+                .map(|step| step.offset)
+                .unwrap_or(1.0);
+            let span = if upper_offset > lower_offset {
+                (progress - lower_offset) / (upper_offset - lower_offset)
+            } else {
+                0.0
+            };
+            if let Some(value) =
+                super::transition::interpolate_custom_property(name, &lower, &upper, span)
+            {
+                properties.insert(name.clone(), value);
+            }
         }
     }
 
@@ -1993,6 +2572,41 @@ fn animation_seconds(value: Option<&ComputedValue>) -> Option<f32> {
         Some(ComputedValue::Number(value)) => Some(*value),
         _ => None,
     }
+}
+
+fn animation_snapshot_progress(
+    properties: &BTreeMap<String, ComputedValue>,
+    fill_mode: &str,
+    infinite: bool,
+    paused: bool,
+) -> Option<f32> {
+    let duration = animation_seconds(properties.get("animation-duration")).unwrap_or(0.0);
+    let delay = animation_seconds(properties.get("animation-delay")).unwrap_or(0.0);
+    let backwards = fill_mode == "backwards" || fill_mode == "both";
+    let forwards = fill_mode == "forwards" || fill_mode == "both";
+    if paused {
+        if delay > 0.0 {
+            return backwards.then_some(0.0);
+        }
+        if duration <= 0.0 {
+            return forwards.then_some(1.0);
+        }
+        let elapsed = -delay;
+        if infinite {
+            return Some((elapsed / duration).rem_euclid(1.0));
+        }
+        if elapsed <= duration {
+            return Some((elapsed / duration).clamp(0.0, 1.0));
+        }
+        return forwards.then_some(1.0);
+    }
+    if forwards {
+        return Some(1.0);
+    }
+    if infinite && duration > 0.0 && STATIC_ANIMATION_TIME_SECONDS >= delay {
+        return Some(((STATIC_ANIMATION_TIME_SECONDS - delay) / duration).rem_euclid(1.0));
+    }
+    None
 }
 
 fn animation_reference_scope_root(
@@ -4931,6 +5545,42 @@ fn collect_keyframes(
                         color_scheme_dark,
                     );
                 }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_registered_custom_properties(
+    rules: &[Rule],
+    registrations: &mut BTreeMap<String, RegisteredCustomProperty>,
+    viewport_width: f32,
+    viewport_height: f32,
+    color_scheme_dark: bool,
+) {
+    for rule in rules {
+        match rule {
+            Rule::At(at_rule) if at_rule.name.eq_ignore_ascii_case("property") => {
+                if let Some(registration) = registered_custom_property_from_rule(at_rule) {
+                    registrations.insert(registration.name.clone(), registration);
+                }
+            }
+            Rule::At(at_rule) if at_rule.block.is_some() => {
+                if !layer_group_rule_is_active(
+                    at_rule,
+                    viewport_width,
+                    viewport_height,
+                    color_scheme_dark,
+                ) {
+                    continue;
+                }
+                collect_registered_custom_properties(
+                    at_rule.block.as_deref().unwrap_or_default(),
+                    registrations,
+                    viewport_width,
+                    viewport_height,
+                    color_scheme_dark,
+                );
             }
             _ => {}
         }
@@ -9226,6 +9876,158 @@ fn inherited_custom_properties(parent_style: Option<&ComputedStyle>) -> BTreeMap
     parent_style
         .map(|style| style.custom_properties.clone())
         .unwrap_or_default()
+}
+
+fn compute_registered_custom_properties(
+    specified_on_element: &BTreeMap<String, Value>,
+    inherited: &BTreeMap<String, Value>,
+    registrations: &BTreeMap<String, RegisteredCustomProperty>,
+    ctx: ResolutionContext,
+) -> (BTreeMap<String, Value>, BTreeMap<String, ComputedValue>) {
+    let mut values = inherited.clone();
+
+    for registration in registrations.values() {
+        let fallback = if registration.inherits {
+            inherited
+                .get(&registration.name)
+                .cloned()
+                .or_else(|| registration.initial_value.clone())
+        } else {
+            registration.initial_value.clone()
+        };
+        if let Some(value) = fallback {
+            values.insert(registration.name.clone(), value);
+        } else {
+            values.remove(&registration.name);
+        }
+    }
+
+    for (name, specified) in specified_on_element {
+        let registration = registrations.get(name);
+        let keyword = match specified {
+            Value::Keyword(keyword) => Some(keyword.to_ascii_lowercase()),
+            _ => None,
+        };
+        let fallback = || {
+            registration.and_then(|registration| {
+                if registration.inherits {
+                    inherited
+                        .get(name)
+                        .cloned()
+                        .or_else(|| registration.initial_value.clone())
+                } else {
+                    registration.initial_value.clone()
+                }
+            })
+        };
+        match keyword.as_deref() {
+            Some("inherit") => {
+                if let Some(value) = inherited.get(name).cloned() {
+                    values.insert(name.clone(), value);
+                } else if let Some(value) =
+                    registration.and_then(|value| value.initial_value.clone())
+                {
+                    values.insert(name.clone(), value);
+                } else {
+                    values.remove(name);
+                }
+            }
+            Some("initial") => {
+                if let Some(value) = registration.and_then(|value| value.initial_value.clone()) {
+                    values.insert(name.clone(), value);
+                } else {
+                    values.remove(name);
+                }
+            }
+            Some("unset") if registration.is_some() => {
+                if let Some(value) = fallback() {
+                    values.insert(name.clone(), value);
+                } else {
+                    values.remove(name);
+                }
+            }
+            Some("unset") => {
+                if let Some(value) = inherited.get(name).cloned() {
+                    values.insert(name.clone(), value);
+                } else {
+                    values.remove(name);
+                }
+            }
+            _ => {
+                values.insert(name.clone(), specified.clone());
+            }
+        }
+    }
+
+    let mut resolved = resolve_custom_property_values(&values);
+    // A registered value that does not match its syntax computes as `unset`.
+    // Apply those fallbacks before resolving dependent var() references again.
+    for registration in registrations.values() {
+        let valid = resolved
+            .get(&registration.name)
+            .is_some_and(|value| registered_value_matches_syntax(value, &registration.syntax));
+        if valid {
+            continue;
+        }
+        let fallback = if registration.inherits {
+            inherited
+                .get(&registration.name)
+                .cloned()
+                .or_else(|| registration.initial_value.clone())
+        } else {
+            registration.initial_value.clone()
+        };
+        if let Some(value) = fallback {
+            resolved.insert(registration.name.clone(), value);
+        } else {
+            resolved.remove(&registration.name);
+        }
+    }
+    resolved = resolve_custom_property_values(&resolved);
+
+    let mut computed = BTreeMap::new();
+    for (name, value) in &resolved {
+        let value = if let Some(registration) = registrations.get(name) {
+            compute_registered_value(value, &registration.syntax, ctx)
+        } else {
+            // Unregistered custom properties retain their token sequence. In
+            // particular, color-looking keywords such as `green` must not be
+            // normalized until a typed registration is active.
+            ComputedValue::Keyword(render_value(value))
+        };
+        computed.insert(name.clone(), value);
+    }
+    for (name, value) in &computed {
+        if registrations.contains_key(name) {
+            resolved.insert(name.clone(), computed_value_to_value(value));
+        }
+    }
+    (resolved, computed)
+}
+
+fn compute_registered_value(
+    value: &Value,
+    syntax: &RegisteredPropertySyntax,
+    ctx: ResolutionContext,
+) -> ComputedValue {
+    let scalar = match syntax {
+        RegisteredPropertySyntax::Alternatives(parts) => parts.iter().find(|part| {
+            part.multiplier == RegisteredSyntaxMultiplier::Single
+                && registered_value_matches_kind(value, &part.kind)
+        }),
+        RegisteredPropertySyntax::Universal => None,
+    };
+    match scalar.map(|part| &part.kind) {
+        Some(
+            RegisteredSyntaxKind::Length
+            | RegisteredSyntaxKind::LengthPercentage
+            | RegisteredSyntaxKind::Number
+            | RegisteredSyntaxKind::Integer
+            | RegisteredSyntaxKind::Percentage
+            | RegisteredSyntaxKind::Color,
+        ) => compute_value(value, "--registered", ctx),
+        _ => ComputedValue::Keyword(render_value(value)),
+    }
 }
 
 fn resolve_custom_property_values(specified: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {

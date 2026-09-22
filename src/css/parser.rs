@@ -856,6 +856,7 @@ impl Parser {
         // per-layer values for compositing, positioning, sizing, and repeat
         // behavior instead of silently dropping every layer after the first.
         let value = if (name.starts_with("--")
+            || name == "initial-value"
             || is_layered_background_property(&name)
             || matches!(
                 name.as_str(),
