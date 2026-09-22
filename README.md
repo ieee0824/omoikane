@@ -241,18 +241,29 @@ docker compose build
 docker compose up -d
 docker compose exec dev bash
 
-# コンテナ内でビルド・テスト
-cargo build
-CI=1 cargo test -- --include-ignored
+# コンテナ内でworktree専用targetを選び、guard経由でビルド
+export CARGO_TARGET_DIR="/target/$(basename "$PWD")"
+python3 scripts/cargo-space-guard.py run -- cargo build --locked
 ```
 
-- ビルド成果物はホストの `target/` と分け、worktreeごとの専用ディレクトリへ出力します。全体テストなど容量が大きい処理には、開始時22 GiB・実行中2 GiBの空きと、target 20 GiBの上限を確認するguardを使います。
+- ビルド成果物はホストの `target/` と分け、worktreeごとの専用ディレクトリへ出力します。同じtargetを別worktreeで再利用せず、Cargoを `sudo` で実行しないでください。guardは初回実行時にtargetをworktreeの絶対パスと実行UIDへ紐付け、別worktree・別UIDによる再利用と、所有者または書込み権限が不整合な成果物をCargo起動前に拒否します。
+- 全体テストなど容量が大きい処理では、開始時22 GiB・実行中2 GiBの空きと、target 20 GiBの上限もguardが確認します。
 
 ```bash
 export CARGO_TARGET_DIR="/target/$(basename "$PWD")"
 python3 scripts/cargo-space-guard.py run -- \
   cargo test --locked -- --include-ignored --test-threads=1
 ```
+
+Cargoがobjectへの `Permission denied` を報告した場合や、その直後にLLVM内部symbolなどの大量の未定義参照が出た場合は、同じtargetで再試行したり、個別のobject・incrementalディレクトリだけを削除したりしません。guard管理下のtarget全体を隔離し、同じパスへclean targetを再作成してから再実行します。`reset`はdry-runが既定で、実行中のtarget、別worktreeに紐付いたtarget、source・証跡・保持印を含むディレクトリを拒否します。
+
+```bash
+python3 scripts/cargo-space-guard.py reset --target-dir "$CARGO_TARGET_DIR"
+python3 scripts/cargo-space-guard.py reset --target-dir "$CARGO_TARGET_DIR" --execute
+python3 scripts/cargo-space-guard.py run -- cargo build --locked
+```
+
+隔離したディレクトリは、再構築と検証が成功するまで原因調査用に保持します。従来の共有 `/target` に異常がある場合はそれをresetせず、新しいworktree専用targetを選びます。
 
 完了済みworktreeのCargo cacheは、7日保持・合計60 GiBを既定として確認できます。最初のコマンドはdry-runで、`--execute`を付けた場合もcache root直下でguardが作成したCargo印・lock付きディレクトリだけを削除します。Git worktree、`Cargo.toml`を含むsource、`.artifacts`などの証跡、保持印 `.cargo-space-guard-preserve`、実行中のtarget、guard導入前のcacheは対象外です。
 

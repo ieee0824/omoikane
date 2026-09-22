@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Run Cargo with disk limits and clean only validated Cargo target caches."""
+"""Run Cargo with isolated disk limits and recover validated target caches."""
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
 import fcntl
+import json
 import math
 import os
 from pathlib import Path
@@ -21,6 +22,8 @@ GIB = 1024 ** 3
 CAPACITY_EXIT = 75
 LOCK_NAME = ".cargo-space-guard.lock"
 PRESERVE_NAME = ".cargo-space-guard-preserve"
+BINDING_NAME = ".cargo-space-guard-worktree.json"
+BINDING_VERSION = 1
 TARGET_MARKERS = ("CACHEDIR.TAG", ".rustc_info.json")
 SOURCE_MARKERS = (".git", "Cargo.toml", ".artifacts", "images", "evidence")
 CACHE_TAG = """Signature: 8a477f597d28d172789f06886806bc55
@@ -33,6 +36,13 @@ class TargetCache:
     path: Path
     last_used: float
     size: int
+
+
+@dataclass(frozen=True)
+class TargetBinding:
+    workspace: str
+    uid: int
+    gid: int
 
 
 class DiskUsage(Protocol):
@@ -51,6 +61,14 @@ def gib(value: str | float) -> int:
 
 def display_size(value: int) -> str:
     return f"{value / GIB:.1f} GiB"
+
+
+def worktree_root(path: Path) -> Path:
+    source = path.resolve()
+    for candidate in (source, *source.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return source
 
 
 def directory_size(root: Path) -> int:
@@ -77,12 +95,120 @@ def validate_run_target(path: Path, workspace: Path) -> Path:
     if path.expanduser().is_symlink():
         raise ValueError("target must not be a symbolic link")
     target = path.expanduser().resolve()
-    source = workspace.resolve()
+    source = worktree_root(workspace)
     if target == Path(target.anchor) or target.parent == Path(target.anchor):
         raise ValueError("target must be a dedicated directory below a cache root")
     if target == source or source in target.parents or target in source.parents:
         raise ValueError("target must be separate from the source worktree")
     return target
+
+
+def current_binding(workspace: Path) -> TargetBinding:
+    return TargetBinding(str(worktree_root(workspace)), os.geteuid(), os.getegid())
+
+
+def read_binding(target: Path) -> TargetBinding | None:
+    marker = target / BINDING_NAME
+    if not marker.exists():
+        return None
+    try:
+        value = json.loads(marker.read_text())
+        if (
+            not isinstance(value, dict)
+            or value.get("version") != BINDING_VERSION
+            or not isinstance(value.get("workspace"), str)
+            or not isinstance(value.get("uid"), int)
+            or not isinstance(value.get("gid"), int)
+        ):
+            raise ValueError
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"invalid target binding: {marker}") from error
+    return TargetBinding(value["workspace"], value["uid"], value["gid"])
+
+
+def write_binding(target: Path, binding: TargetBinding) -> None:
+    marker = target / BINDING_NAME
+    temporary = target / f".{BINDING_NAME}.{os.getpid()}.tmp"
+    value = {
+        "version": BINDING_VERSION,
+        "workspace": binding.workspace,
+        "uid": binding.uid,
+        "gid": binding.gid,
+    }
+    try:
+        temporary.write_text(json.dumps(value, sort_keys=True) + "\n")
+        os.replace(temporary, marker)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def has_build_artifacts(target: Path) -> bool:
+    metadata = {"CACHEDIR.TAG", LOCK_NAME, PRESERVE_NAME, BINDING_NAME}
+    return any(path.name not in metadata for path in target.iterdir())
+
+
+def target_access_problem(target: Path, expected_uid: int) -> str | None:
+    def check(path: Path, directory: bool) -> str | None:
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            return None
+        if path.is_symlink():
+            return None
+        if details.st_uid != expected_uid:
+            return f"owner uid {details.st_uid} differs from expected uid {expected_uid}: {path}"
+        access = os.W_OK | (os.X_OK if directory else 0)
+        if not os.access(path, access, effective_ids=True):
+            return f"not writable by uid {expected_uid}: {path}"
+        return None
+
+    problem = check(target, True)
+    if problem is not None:
+        return problem
+
+    def fail(error: OSError) -> None:
+        raise error
+
+    for directory, directories, files in os.walk(target, onerror=fail):
+        root = Path(directory)
+        for name in directories:
+            problem = check(root / name, True)
+            if problem is not None:
+                return problem
+        for name in files:
+            problem = check(root / name, False)
+            if problem is not None:
+                return problem
+    return None
+
+
+def prepare_target(target: Path, workspace: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    expected = current_binding(workspace)
+    binding = read_binding(target)
+    if binding is None:
+        if has_build_artifacts(target):
+            raise ValueError(
+                "target contains build artifacts but is not bound to a worktree; "
+                f"reset it before reuse: {target}"
+            )
+        write_binding(target, expected)
+    else:
+        if binding.workspace != expected.workspace:
+            raise ValueError(
+                "target belongs to another worktree: "
+                f"recorded={binding.workspace}, current={expected.workspace}, target={target}"
+            )
+        if binding.uid != expected.uid:
+            raise ValueError(
+                "target belongs to another uid: "
+                f"recorded={binding.uid}, current={expected.uid}, target={target}"
+            )
+
+    problem = target_access_problem(target, expected.uid)
+    if problem is not None:
+        raise ValueError(f"target ownership or permissions are inconsistent: {problem}")
+    mark_target(target)
 
 
 def mark_target(target: Path) -> None:
@@ -95,7 +221,11 @@ def mark_target(target: Path) -> None:
 
 
 def lock_target(target: Path, blocking: bool):
-    lock = (target / LOCK_NAME).open("a+")
+    path = target / LOCK_NAME
+    try:
+        lock = path.open("a+")
+    except PermissionError:
+        lock = path.open("r")
     operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
     try:
         fcntl.flock(lock.fileno(), operation)
@@ -103,6 +233,67 @@ def lock_target(target: Path, blocking: bool):
         lock.close()
         return None
     return lock
+
+
+def reset_target(
+    target: Path,
+    workspace: Path,
+    execute: bool,
+    now: float | None = None,
+) -> Path:
+    target = validate_run_target(target, workspace)
+    if not target.is_dir():
+        raise ValueError(f"target does not exist: {target}")
+    if (target / PRESERVE_NAME).exists():
+        raise ValueError(f"target is marked for preservation: {target}")
+    if any((target / name).exists() for name in SOURCE_MARKERS):
+        raise ValueError(f"target contains source or evidence markers: {target}")
+
+    binding = read_binding(target)
+    expected = current_binding(workspace)
+    if binding is not None and binding.workspace != expected.workspace:
+        raise ValueError(
+            "target belongs to another worktree: "
+            f"recorded={binding.workspace}, current={expected.workspace}, target={target}"
+        )
+    tag = target / "CACHEDIR.TAG"
+    if binding is None and (not tag.is_file() or tag.read_text() != CACHE_TAG):
+        raise ValueError(f"target was not created by cargo-space-guard: {target}")
+
+    target_lock = lock_target(target, blocking=False)
+    if target_lock is None:
+        raise ValueError(f"target is already in use: {target}")
+    try:
+        instant = time.time() if now is None else now
+        timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(instant))
+        quarantine = target.with_name(f"{target.name}.quarantine-{timestamp}-{os.getpid()}")
+        if quarantine.exists():
+            raise ValueError(f"quarantine path already exists: {quarantine}")
+        if not execute:
+            return quarantine
+
+        staging = target.with_name(f".{target.name}.reset-{os.getpid()}")
+        if staging.exists():
+            raise ValueError(f"reset staging path already exists: {staging}")
+        staging.mkdir()
+        staging_lock = lock_target(staging, blocking=False)
+        if staging_lock is None:
+            raise ValueError(f"reset staging target is already in use: {staging}")
+        try:
+            prepare_target(staging, workspace)
+            os.replace(target, quarantine)
+            try:
+                os.replace(staging, target)
+            except BaseException:
+                os.replace(quarantine, target)
+                raise
+        finally:
+            staging_lock.close()
+            if staging.exists():
+                shutil.rmtree(staging)
+        return quarantine
+    finally:
+        target_lock.close()
 
 
 def stop_process_group(process: subprocess.Popen) -> None:
@@ -132,7 +323,7 @@ def run_guarded(
     size: Callable[[Path], int] = directory_size,
 ) -> int:
     target = validate_run_target(target, workspace)
-    mark_target(target)
+    target.mkdir(parents=True, exist_ok=True)
     target_lock = lock_target(target, blocking=False)
     if target_lock is None:
         print(f"cargo-space-guard: target is already in use: {target}", file=sys.stderr)
@@ -140,6 +331,7 @@ def run_guarded(
 
     process = None
     try:
+        prepare_target(target, workspace)
         initial = usage(target)
         initial_target_size = size(target)
         effective_required = max(
@@ -276,6 +468,12 @@ def parser() -> argparse.ArgumentParser:
     clean.add_argument("--retention-hours", type=float, default=24 * 7)
     clean.add_argument("--maximum-total-gib", type=gib, default=gib(60))
     clean.add_argument("--execute", action="store_true")
+
+    reset = commands.add_parser(
+        "reset", help="quarantine a corrupted target and initialize a clean replacement"
+    )
+    reset.add_argument("--target-dir", type=Path, default=os.environ.get("CARGO_TARGET_DIR"))
+    reset.add_argument("--execute", action="store_true")
     return result
 
 
@@ -303,6 +501,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 options.maximum_target_gib,
                 options.poll_seconds,
             )
+
+        if options.operation == "reset":
+            if options.target_dir is None:
+                parser().error("reset requires --target-dir (or CARGO_TARGET_DIR)")
+            target = validate_run_target(options.target_dir, Path.cwd())
+            quarantine = reset_target(target, Path.cwd(), options.execute)
+            action = "quarantined" if options.execute else "would quarantine"
+            suffix = " and initialized a clean target" if options.execute else ""
+            print(f"cargo-space-guard: {action} {target} as {quarantine}{suffix}")
+            return 0
 
         if not math.isfinite(options.retention_hours) or options.retention_hours < 0:
             parser().error("--retention-hours must be a finite non-negative number")

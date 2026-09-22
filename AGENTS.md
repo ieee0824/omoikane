@@ -43,6 +43,7 @@ OmoikaneはRustで開発するブラウザエンジンです。HTTP、HTML/CSS�
 ## 作業環境・証跡の管理
 
 - 大容量のビルド・全体テストにはworktreeごとの `CARGO_TARGET_DIR` と [容量guard](scripts/cargo-space-guard.py) を使う。設定・実行例は [README.md](README.md) のDockerサンドボックス節を参照する。
+- Cargo成果物の権限エラーや、その直後の未定義symbolを検出したら同じtargetを再利用しない。guardの `reset`をdry-run後に実行してtarget全体を隔離し、clean targetで再検証する。Cargoを`sudo`で実行しない。
 - cache整理はguardの `clean` でdry-runを確認してから実行する。実行中のtarget、未コミット変更、原画像、ログなどの証跡を削除しない。
 - 長時間作業は工程・結果・失敗箇所を短く報告し、詳細ログを保存する。区切りごとに目的、完了事項、未解決事項、検証結果、次の手順、worktree・証跡のパスを既存の備忘録へ記録する。
 - 画像比較は寸法・容量・数値差分・差分領域を先に確認し、目視が必要な画像を選ぶ。原画像を保持し、無圧縮PNGは別ファイルへ可逆圧縮してから表示する。画素・解像度を維持し、不要な再表示を避ける。
