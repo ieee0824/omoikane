@@ -25,6 +25,7 @@ use boa_engine::object::{
     builtins::{JsArrayBuffer, JsPromise, JsUint8Array},
 };
 use boa_engine::realm::Realm;
+use boa_engine::value::TryIntoJs;
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
 use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
@@ -12906,26 +12907,22 @@ fn attribute_records_native(
             .and_then(|node| node.attribute_records())
             .unwrap_or_default())
     })?;
-    let mut rows = Vec::with_capacity(records.len());
-    for (qualified_name, namespace_uri, local_name, value) in records {
-        let namespace = namespace_uri
-            .map(|namespace| js_string!(namespace.as_str()).into())
-            .unwrap_or_else(JsValue::null);
-        rows.push(JsValue::from(
-            boa_engine::object::builtins::JsArray::from_iter(
-                [
-                    js_string!(qualified_name.as_str()).into(),
-                    namespace,
-                    js_string!(local_name.as_str()).into(),
-                    js_string!(value.as_str()).into(),
-                ],
-                context,
-            ),
-        ));
-    }
-    Ok(JsValue::from(
-        boa_engine::object::builtins::JsArray::from_iter(rows, context),
-    ))
+    let rows: Vec<(JsValue, JsValue, JsValue, JsValue)> = records
+        .into_iter()
+        .map(|(qualified_name, namespace_uri, local_name, value)| {
+            (
+                js_string!(qualified_name.as_str()).into(),
+                namespace_uri
+                    .map(|namespace| js_string!(namespace.as_str()).into())
+                    .unwrap_or_else(JsValue::null),
+                js_string!(local_name.as_str()).into(),
+                js_string!(value.as_str()).into(),
+            )
+        })
+        .collect();
+    // `TryIntoJs` roots each row array and the outer array while it appends
+    // values. A plain Rust `Vec<JsValue>` is invisible to Boa's collector.
+    rows.try_into_js(context)
 }
 
 fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
