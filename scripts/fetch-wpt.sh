@@ -64,6 +64,7 @@ git_wpt sparse-checkout add \
   "/css/css-cascade/parsing/supports-import-parsing.html"
 git_wpt sparse-checkout add "/fonts/Ahem.ttf" "/fonts/noto/noto-sans-v8-latin-regular.woff"
 git_wpt sparse-checkout add "/css/css-variables/variable-substitution-shorthands.html"
+git_wpt sparse-checkout add "/css/css-cascade/layer-counter-style-override.html"
 git_wpt sparse-checkout add "/css/cssom/CSSContainerRule.tentative.html"
 git_wpt sparse-checkout add \
   "/css/css-font-loading/fontfaceset-has.html" \
