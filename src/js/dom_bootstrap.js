@@ -380,11 +380,14 @@
     "contain-intrinsic-height", "contain-intrinsic-inline-size",
     "contain-intrinsic-block-size",
     "counter-reset", "counter-increment",
+    "scroll-behavior", "overscroll-behavior", "overscroll-behavior-x",
+    "overscroll-behavior-y", "overscroll-behavior-inline", "overscroll-behavior-block",
   ]);
   const styleShorthandLonghands = Object.freeze({
     "columns": ["column-width", "column-count"],
     "column-rule": ["column-rule-width", "column-rule-style", "column-rule-color"],
     "contain-intrinsic-size": ["contain-intrinsic-width", "contain-intrinsic-height"],
+    "overscroll-behavior": ["overscroll-behavior-x", "overscroll-behavior-y"],
   });
 
   // CSSOM serializes the two physical contain-intrinsic-size axes back through
@@ -2724,6 +2727,19 @@
         if (kebab === "contain-intrinsic-size") {
           return containIntrinsicSizeShorthand(decls);
         }
+        if (kebab === "overscroll-behavior") {
+          let x = "", y = "";
+          for (const declaration of decls) {
+            if (declaration.name === kebab) {
+              const values = declaration.value.trim().split(/\s+/);
+              x = values[0] || "";
+              y = values[1] || x;
+            }
+            if (declaration.name === "overscroll-behavior-x") x = declaration.value;
+            if (declaration.name === "overscroll-behavior-y") y = declaration.value;
+          }
+          if (x && y) return x === y ? x : x + " " + y;
+        }
         for (let i = decls.length - 1; i >= 0; i--) {
           if (decls[i].name === kebab) return decls[i].value;
         }
@@ -3465,13 +3481,14 @@
     // Scrolls to (x, y), clamped natively. A changed target is queued there for
     // the next rendering opportunity. An element with no scrolling box is left
     // alone, so nothing is remembered that could not be applied.
-    __applyScroll(x, y) {
+    __applyScroll(x, y, behavior = "auto") {
+      const smooth = scrollBehaviorIsSmooth(behavior, this);
       if (this.__isViewportScrollingElement()) {
-        applyWindowScroll(x, y);
+        applyWindowScroll(x, y, smooth);
         return;
       }
       try {
-        __omoikane_set_element_scroll(this.__id, Number(x), Number(y));
+        __omoikane_set_element_scroll(this.__id, Number(x), Number(y), smooth);
       } catch (error) {
         // An unresolvable node has no scrolling box; nothing to scroll.
       }
@@ -3484,14 +3501,15 @@
 
     // `scroll()` and `scrollTo()` are the same operation. Both accept
     // `(x, y)` or a ScrollToOptions dictionary whose absent members keep the
-    // current offset; `behavior` is accepted and ignored because only instant
-    // scrolling is implemented.
+    // current offset. `behavior: auto` follows the element's computed
+    // scroll-behavior; explicit `instant` and `smooth` override it.
     scrollTo(xOrOptions, y) {
       const current = this.__scrollOffset();
       if (isScrollOptions(xOrOptions)) {
         this.__applyScroll(
           xOrOptions.left === undefined ? current.x : Number(xOrOptions.left),
-          xOrOptions.top === undefined ? current.y : Number(xOrOptions.top)
+          xOrOptions.top === undefined ? current.y : Number(xOrOptions.top),
+          xOrOptions.behavior
         );
       } else {
         this.__applyScroll(Number(xOrOptions), Number(y));
@@ -3505,7 +3523,8 @@
       if (isScrollOptions(xOrOptions)) {
         this.__applyScroll(
           current.x + (xOrOptions.left === undefined ? 0 : Number(xOrOptions.left)),
-          current.y + (xOrOptions.top === undefined ? 0 : Number(xOrOptions.top))
+          current.y + (xOrOptions.top === undefined ? 0 : Number(xOrOptions.top)),
+          xOrOptions.behavior
         );
       } else {
         this.__applyScroll(current.x + Number(xOrOptions), current.y + Number(y));
@@ -14706,37 +14725,103 @@
     }
     return notCanceled;
   };
+  function performScrollBoundaryDefault(target, deltaX, deltaY) {
+    let remainingX = Number(deltaX) || 0;
+    let remainingY = Number(deltaY) || 0;
+    let hostOverscrollX = false;
+    let hostOverscrollY = false;
+    let element = target && target.nodeType === 1 ? target : target.parentNode;
+    while (element && element.nodeType === 1) {
+      const style = getComputedStyle(element);
+      const viewport = typeof element.__isViewportScrollingElement === "function" &&
+        element.__isViewportScrollingElement();
+      const acceptsX = viewport || style.overflowX === "auto" || style.overflowX === "scroll";
+      const acceptsY = viewport || style.overflowY === "auto" || style.overflowY === "scroll";
+      const canScrollX = remainingX !== 0 && acceptsX && element.scrollWidth > element.clientWidth;
+      const canScrollY = remainingY !== 0 && acceptsY && element.scrollHeight > element.clientHeight;
+      if (canScrollX || canScrollY) {
+        const beforeX = element.scrollLeft;
+        const beforeY = element.scrollTop;
+        element.scrollBy({
+          left: canScrollX ? remainingX : 0,
+          top: canScrollY ? remainingY : 0,
+          behavior: "instant",
+        });
+        remainingX -= element.scrollLeft - beforeX;
+        remainingY -= element.scrollTop - beforeY;
+      }
+      if (remainingX !== 0 && acceptsX &&
+          style.overscrollBehaviorX !== "auto" && style.overscrollBehaviorX !== "chain") {
+        hostOverscrollX = style.overscrollBehaviorX === "contain";
+        remainingX = 0;
+      }
+      if (remainingY !== 0 && acceptsY &&
+          style.overscrollBehaviorY !== "auto" && style.overscrollBehaviorY !== "chain") {
+        hostOverscrollY = style.overscrollBehaviorY === "contain";
+        remainingY = 0;
+      }
+      element = element.parentNode;
+    }
+    if (remainingX !== 0 || remainingY !== 0) {
+      const beforeX = globalThis.scrollX;
+      const beforeY = globalThis.scrollY;
+      globalThis.scrollBy({ left: remainingX, top: remainingY, behavior: "instant" });
+      remainingX -= globalThis.scrollX - beforeX;
+      remainingY -= globalThis.scrollY - beforeY;
+      const rootStyle = getComputedStyle(document.documentElement);
+      if (remainingX !== 0) {
+        hostOverscrollX = rootStyle.overscrollBehaviorX !== "none";
+      }
+      if (remainingY !== 0) {
+        hostOverscrollY = rootStyle.overscrollBehaviorY !== "none";
+      }
+    }
+    return (hostOverscrollX ? 2 : 0) | (hostOverscrollY ? 4 : 0);
+  }
   globalThis.__omoikane_dispatch_wheel_input = function(id, init) {
     const locked = wrapNode(nativePointerLockTarget());
     const target = locked || wrapNode(id) || document;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
     const forwarded = nativeForwardInput(internalNodeId(inputDocument), "wheel", [internalNodeId(target), init]);
-    if (forwarded !== undefined) return forwarded;
+    if (forwarded !== undefined) {
+      return typeof forwarded === "number" ? forwarded : (forwarded ? 1 : 0);
+    }
     const notCanceled = target.dispatchEvent(new WheelEvent("wheel", {
       ...init, bubbles: true, cancelable: true, composed: true, deltaMode: 0,
     }));
-    if (!notCanceled) return false;
-    if (locked) return true;
-
-    let element = target && target.nodeType === 1 ? target : target.parentNode;
-    while (element && element.nodeType === 1) {
-      const style = getComputedStyle(element);
-      const canScrollX = init.deltaX !== 0 &&
-        (style.overflowX === "auto" || style.overflowX === "scroll") &&
-        element.scrollWidth > element.clientWidth;
-      const canScrollY = init.deltaY !== 0 &&
-        (style.overflowY === "auto" || style.overflowY === "scroll") &&
-        element.scrollHeight > element.clientHeight;
-      if (canScrollX || canScrollY) {
-        const beforeX = element.scrollLeft;
-        const beforeY = element.scrollTop;
-        element.scrollBy(init.deltaX, init.deltaY);
-        if (element.scrollLeft !== beforeX || element.scrollTop !== beforeY) return true;
-      }
-      element = element.parentNode;
+    if (!notCanceled) return 0;
+    if (locked) return 1;
+    return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
+  };
+  globalThis.__omoikane_dispatch_touch_input = function(id, type, init) {
+    const target = wrapNode(id) || document;
+    const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
+    const forwarded = nativeForwardInput(internalNodeId(inputDocument), "touch", [
+      internalNodeId(target), type, init,
+    ]);
+    if (forwarded !== undefined) {
+      return typeof forwarded === "number" ? forwarded : (forwarded ? 1 : 0);
     }
-    globalThis.scrollBy(init.deltaX, init.deltaY);
-    return true;
+    const event = new Event(type, {
+      bubbles: true,
+      cancelable: type === "touchstart" || type === "touchmove",
+      composed: true,
+    });
+    for (const [name, value] of Object.entries({
+      touches: init.touches || [],
+      targetTouches: init.touches || [],
+      changedTouches: init.changedTouches || [],
+      altKey: !!init.altKey,
+      ctrlKey: !!init.ctrlKey,
+      metaKey: !!init.metaKey,
+      shiftKey: !!init.shiftKey,
+    })) {
+      Object.defineProperty(event, name, { configurable: true, enumerable: true, value });
+    }
+    const notCanceled = target.dispatchEvent(event);
+    if (!notCanceled) return 0;
+    if (type !== "touchmove" || init.defaultAllowed === false) return 1;
+    return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
     const focusedDocument = focusChainDocuments()[0] || document;
@@ -16604,8 +16689,8 @@
       return { x: 0, y: 0 };
     }
   }
-  function applyWindowScroll(x, y) {
-    __omoikane_set_window_scroll(Number(x), Number(y));
+  function applyWindowScroll(x, y, smooth = false) {
+    __omoikane_set_window_scroll(Number(x), Number(y), Boolean(smooth));
   }
   globalThis.__omoikane_dispatch_scroll_event = function(nodeId, viewport) {
     const target = viewport ? document : wrapNode(nodeId);
@@ -16619,14 +16704,23 @@
   function isScrollOptions(value) {
     return value !== null && (typeof value === "object" || typeof value === "function");
   }
+  function scrollBehaviorIsSmooth(value, element = document.documentElement) {
+    const behavior = value === undefined ? "auto" : String(value);
+    if (behavior !== "auto" && behavior !== "instant" && behavior !== "smooth") {
+      throw new TypeError(`Invalid scroll behavior: ${behavior}`);
+    }
+    if (behavior === "smooth") return true;
+    if (behavior === "instant") return false;
+    return !!element && getComputedStyle(element).scrollBehavior === "smooth";
+  }
   globalThis.scrollTo = function scrollTo(xOrOptions, y) {
     const current = windowScrollOffset();
     if (isScrollOptions(xOrOptions)) {
       const left = xOrOptions.left === undefined ? current.x : Number(xOrOptions.left);
       const top = xOrOptions.top === undefined ? current.y : Number(xOrOptions.top);
-      applyWindowScroll(left, top);
+      applyWindowScroll(left, top, scrollBehaviorIsSmooth(xOrOptions.behavior));
     } else {
-      applyWindowScroll(Number(xOrOptions), Number(y));
+      applyWindowScroll(Number(xOrOptions), Number(y), scrollBehaviorIsSmooth(undefined));
     }
   };
   globalThis.scroll = globalThis.scrollTo;
@@ -16635,9 +16729,17 @@
     if (isScrollOptions(xOrOptions)) {
       const left = xOrOptions.left === undefined ? 0 : Number(xOrOptions.left);
       const top = xOrOptions.top === undefined ? 0 : Number(xOrOptions.top);
-      applyWindowScroll(current.x + left, current.y + top);
+      applyWindowScroll(
+        current.x + left,
+        current.y + top,
+        scrollBehaviorIsSmooth(xOrOptions.behavior),
+      );
     } else {
-      applyWindowScroll(current.x + Number(xOrOptions), current.y + Number(y));
+      applyWindowScroll(
+        current.x + Number(xOrOptions),
+        current.y + Number(y),
+        scrollBehaviorIsSmooth(undefined),
+      );
     }
   };
   Object.defineProperties(globalThis, {
@@ -24568,6 +24670,7 @@
   const inputDispatchers = {
     mouse: globalThis.__omoikane_dispatch_mouse_input,
     wheel: globalThis.__omoikane_dispatch_wheel_input,
+    touch: globalThis.__omoikane_dispatch_touch_input,
     keyboard: globalThis.__omoikane_dispatch_keyboard_input,
     composition: globalThis.__omoikane_dispatch_composition_input,
     capture: dispatchLostPointerCapture,

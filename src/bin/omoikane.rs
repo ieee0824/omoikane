@@ -8,13 +8,15 @@ use omoikane::frame::{PlatformFrameScheduler, render_browser_frame};
 use omoikane::js::{FullscreenTransition, PointerLockTransition};
 use omoikane::platform_input::{
     InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
+    PlatformTouchPhase,
 };
 use serde_json::json;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{
-    DeviceEvent, DeviceId, ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent,
+    DeviceEvent, DeviceId, ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase,
+    WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
@@ -245,6 +247,16 @@ impl BrowserApp {
                 }
                 let (delta_x, delta_y) = wheel_delta_css_pixels(delta, scale_factor);
                 self.input.wheel(&mut self.session, delta_x, delta_y)
+            }
+            WindowEvent::Touch(touch) => {
+                let (x, y) = physical_position_css_pixels(touch.location, scale_factor);
+                let phase = match touch.phase {
+                    TouchPhase::Started => PlatformTouchPhase::Started,
+                    TouchPhase::Moved => PlatformTouchPhase::Moved,
+                    TouchPhase::Ended => PlatformTouchPhase::Ended,
+                    TouchPhase::Cancelled => PlatformTouchPhase::Cancelled,
+                };
+                self.input.touch(&mut self.session, touch.id, phase, x, y)
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();

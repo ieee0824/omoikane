@@ -76,6 +76,19 @@ pub enum PlatformImeEvent {
     Disabled,
 }
 
+/// Phase of a single-finger touch scroll gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformTouchPhase {
+    /// A new touch point became active.
+    Started,
+    /// The active touch point moved.
+    Moved,
+    /// The active touch point ended normally.
+    Ended,
+    /// The platform canceled the active touch point.
+    Cancelled,
+}
+
 /// Stateful input bridge for a single native browser surface.
 #[derive(Debug, Default)]
 pub struct PlatformInput {
@@ -83,6 +96,7 @@ pub struct PlatformInput {
     modifiers: InputModifiers,
     buttons: u8,
     composition_text: Option<String>,
+    host_overscroll: (bool, bool),
 }
 
 impl PlatformInput {
@@ -119,6 +133,12 @@ impl PlatformInput {
             }),
         )?;
         Ok(())
+    }
+
+    /// Returns whether the latest scroll input permits a host overscroll
+    /// affordance on each axis.
+    pub fn host_overscroll(&self) -> (bool, bool) {
+        self.host_overscroll
     }
 
     /// Last unlocked cursor position, in CSS pixels, for native restoration.
@@ -200,7 +220,7 @@ impl PlatformInput {
         delta_x: f64,
         delta_y: f64,
     ) -> Result<(), JsonRpcError> {
-        session.dispatch(
+        let result = session.dispatch(
             "Input.dispatchMouseEvent",
             json!({
                 "type": "mouseWheel",
@@ -213,6 +233,41 @@ impl PlatformInput {
                 "modifiers": self.modifiers.cdp_bits(),
             }),
         )?;
+        self.host_overscroll = (
+            result["hostOverscrollX"].as_bool().unwrap_or(false),
+            result["hostOverscrollY"].as_bool().unwrap_or(false),
+        );
+        Ok(())
+    }
+
+    /// Dispatches a touch gesture point and applies the browser scrolling
+    /// default action for uncancelled movement.
+    pub fn touch(
+        &mut self,
+        session: &mut CdpSession,
+        id: u64,
+        phase: PlatformTouchPhase,
+        x: f64,
+        y: f64,
+    ) -> Result<(), JsonRpcError> {
+        let (event_type, touch_points) = match phase {
+            PlatformTouchPhase::Started => ("touchStart", json!([{ "id": id, "x": x, "y": y }])),
+            PlatformTouchPhase::Moved => ("touchMove", json!([{ "id": id, "x": x, "y": y }])),
+            PlatformTouchPhase::Ended => ("touchEnd", json!([])),
+            PlatformTouchPhase::Cancelled => ("touchCancel", json!([])),
+        };
+        let result = session.dispatch(
+            "Input.dispatchTouchEvent",
+            json!({
+                "type": event_type,
+                "touchPoints": touch_points,
+                "modifiers": self.modifiers.cdp_bits(),
+            }),
+        )?;
+        self.host_overscroll = (
+            result["hostOverscrollX"].as_bool().unwrap_or(false),
+            result["hostOverscrollY"].as_bool().unwrap_or(false),
+        );
         Ok(())
     }
 
@@ -667,6 +722,136 @@ mod tests {
         input.wheel(&mut session, 0.0, 80.0).unwrap();
 
         assert_eq!(evaluate(&mut session, "scrollY"), json!(80));
+    }
+
+    #[test]
+    fn wheel_chains_only_the_unconsumed_delta_to_ancestor_scrollers() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>body{margin:0}#outer{width:100px;height:80px;overflow:auto}\
+             #outerContent{height:260px}#inner{width:80px;height:50px;overflow:auto}\
+             #innerContent{height:200px}</style><div id='outer'><div id='outerContent'>\
+             <div id='inner'><div id='innerContent'></div></div></div></div>",
+        );
+        let mut input = PlatformInput::new();
+        input.cursor_moved(&mut session, 10.0, 10.0).unwrap();
+        evaluate(&mut session, "inner.scrollTop=140");
+
+        input.wheel(&mut session, 0.0, 50.0).unwrap();
+
+        assert_eq!(evaluate(&mut session, "inner.scrollTop"), json!(150));
+        assert_eq!(evaluate(&mut session, "outer.scrollTop"), json!(40));
+    }
+
+    #[test]
+    fn overscroll_behavior_stops_chaining_per_axis_without_scrollable_extent() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>body{margin:0}#outer{width:80px;height:80px;overflow:auto}\
+             #outerContent{width:240px;height:240px}#barrier{width:60px;height:60px;\
+             overflow:auto;overscroll-behavior-x:contain;overscroll-behavior-y:auto}\
+             #target{width:60px;height:60px}</style><div id='outer'><div id='outerContent'>\
+             <div id='barrier'><div id='target'></div></div></div></div>",
+        );
+        let mut input = PlatformInput::new();
+        input.cursor_moved(&mut session, 10.0, 10.0).unwrap();
+
+        input.wheel(&mut session, 25.0, 30.0).unwrap();
+
+        assert_eq!(evaluate(&mut session, "outer.scrollLeft"), json!(0));
+        assert_eq!(evaluate(&mut session, "outer.scrollTop"), json!(30));
+    }
+
+    #[test]
+    fn root_overscroll_distinguishes_contain_from_none_for_the_host() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>html{overscroll-behavior-y:contain}body{margin:0;height:1000px}</style>",
+        );
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "scrollTo(0, 10000)" }),
+            )
+            .unwrap();
+
+        let contain = session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({ "type":"mouseWheel", "x":10, "y":10, "deltaY":40 }),
+            )
+            .unwrap();
+        assert_eq!(contain["hostOverscrollY"], json!(true));
+
+        evaluate(
+            &mut session,
+            "document.documentElement.style.overscrollBehaviorY='none'",
+        );
+        let none = session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({ "type":"mouseWheel", "x":10, "y":10, "deltaY":40 }),
+            )
+            .unwrap();
+        assert_eq!(none["hostOverscrollY"], json!(false));
+    }
+
+    #[test]
+    fn touch_scroll_honors_overscroll_boundary_and_dispatches_touch_events() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>body{margin:0}#outer{width:100px;height:80px;overflow:auto}\
+             #outerContent{height:240px}#inner{width:80px;height:50px;overflow:auto;\
+             overscroll-behavior-y:none}#innerContent{height:160px}</style>\
+             <div id='outer'><div id='outerContent'><div id='inner'><div id='innerContent'>\
+             </div></div></div></div><script>globalThis.touchLog=[];\
+             for(const type of ['touchstart','touchmove','touchend'])\
+             innerContent.addEventListener(type,e=>touchLog.push(type+':'+e.changedTouches.length))</script>",
+        );
+        evaluate(&mut session, "inner.scrollTop=10000");
+        let mut input = PlatformInput::new();
+
+        input
+            .touch(&mut session, 7, PlatformTouchPhase::Started, 10.0, 40.0)
+            .unwrap();
+        input
+            .touch(&mut session, 7, PlatformTouchPhase::Moved, 10.0, 10.0)
+            .unwrap();
+        input
+            .touch(&mut session, 7, PlatformTouchPhase::Ended, 10.0, 10.0)
+            .unwrap();
+
+        assert_eq!(evaluate(&mut session, "outer.scrollTop"), json!(0));
+        assert_eq!(
+            evaluate(&mut session, "touchLog.join(',')"),
+            json!("touchstart:1,touchmove:1,touchend:1")
+        );
+    }
+
+    #[test]
+    fn wheel_input_interrupts_an_active_smooth_scroll() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>body{margin:0}#scroller{width:100px;height:50px;overflow:auto}\
+             #content{height:200px}</style><div id='scroller'><div id='content'></div></div>",
+        );
+        evaluate(
+            &mut session,
+            "scroller.scrollTo({top:100,behavior:'smooth'})",
+        );
+        let mut input = PlatformInput::new();
+        input.cursor_moved(&mut session, 10.0, 10.0).unwrap();
+
+        input.wheel(&mut session, 0.0, 20.0).unwrap();
+        assert_eq!(evaluate(&mut session, "scroller.scrollTop"), json!(20));
+
+        render_browser_frame(&mut session, 320, 200, 400).unwrap();
+        assert_eq!(evaluate(&mut session, "scroller.scrollTop"), json!(20));
     }
 
     #[test]

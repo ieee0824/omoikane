@@ -38,6 +38,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
             expand_mask_position_shorthand(value, important)
         }
         "overflow" => expand_overflow_shorthand(value, important),
+        "overscroll-behavior" => expand_overscroll_behavior_shorthand(value, important),
         "flex" => expand_flex_shorthand(value, important),
         "text-decoration" => expand_text_decoration_shorthand(value, important),
         "border-radius" => expand_border_radius_shorthand(value, important),
@@ -98,6 +99,7 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "mask-position"
             | "-webkit-mask-position"
             | "overflow"
+            | "overscroll-behavior"
             | "flex"
             | "text-decoration"
             | "border-radius"
@@ -232,6 +234,10 @@ fn expand_css_wide_shorthand(
             .map(str::to_string)
             .collect(),
         "overflow" => ["overflow-x", "overflow-y"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "overscroll-behavior" => ["overscroll-behavior-x", "overscroll-behavior-y"]
             .into_iter()
             .map(str::to_string)
             .collect(),
@@ -1746,6 +1752,30 @@ fn expand_overflow_shorthand(value: Value, important: bool) -> Vec<Declaration> 
             important,
         }],
     }
+}
+
+fn expand_overscroll_behavior_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+    if values.is_empty() || values.len() > 2 {
+        return Vec::new();
+    }
+    let x = values[0].clone();
+    let y = values.get(1).cloned().unwrap_or_else(|| x.clone());
+    vec![
+        Declaration {
+            name: "overscroll-behavior-x".to_string(),
+            value: x,
+            important,
+        },
+        Declaration {
+            name: "overscroll-behavior-y".to_string(),
+            value: y,
+            important,
+        },
+    ]
 }
 
 fn expand_flex_shorthand(value: Value, important: bool) -> Vec<Declaration> {

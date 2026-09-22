@@ -1395,6 +1395,86 @@ fn css_supports_uses_parser_and_supported_property_table() {
 }
 
 #[test]
+fn scroll_boundary_properties_validate_and_compute() {
+    for (property, value) in [
+        ("scroll-behavior", "smooth"),
+        ("overscroll-behavior", "contain none"),
+        ("overscroll-behavior-x", "none"),
+        ("overscroll-behavior-y", "contain"),
+        ("overscroll-behavior-inline", "chain"),
+        ("overscroll-behavior-block", "none"),
+    ] {
+        assert!(supports_declaration(property, value), "{property}: {value}");
+    }
+    for (property, value) in [
+        ("scroll-behavior", "slow"),
+        ("overscroll-behavior", "auto contain none"),
+        ("overscroll-behavior-x", "smooth"),
+        ("overscroll-behavior-y", "auto contain"),
+    ] {
+        assert!(
+            !supports_declaration(property, value),
+            "{property}: {value}"
+        );
+    }
+
+    let parent = NodeHandle::element("div");
+    parent.set_attribute(
+        "style",
+        "scroll-behavior: smooth; overscroll-behavior: contain none",
+    );
+    let child = NodeHandle::element("div");
+    parent.append_child(child.clone());
+
+    let parent_style = StyleResolver::new().computed_style(&parent);
+    assert_eq!(
+        parent_style.get("scroll-behavior"),
+        Some(&ComputedValue::Keyword("smooth".to_string()))
+    );
+    assert_eq!(
+        parent_style.get("overscroll-behavior-x"),
+        Some(&ComputedValue::Keyword("contain".to_string()))
+    );
+    assert_eq!(
+        parent_style.get("overscroll-behavior-y"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+
+    let logical = NodeHandle::element("div");
+    logical.set_attribute(
+        "style",
+        "overscroll-behavior-inline: chain; overscroll-behavior-block: contain",
+    );
+    let logical_style = StyleResolver::new().computed_style(&logical);
+    for (property, expected) in [
+        ("overscroll-behavior-inline", "chain"),
+        ("overscroll-behavior-block", "contain"),
+        ("overscroll-behavior-x", "chain"),
+        ("overscroll-behavior-y", "contain"),
+    ] {
+        assert_eq!(
+            logical_style.get(property),
+            Some(&ComputedValue::Keyword(expected.to_string()))
+        );
+    }
+
+    let child_style = StyleResolver::new().computed_style(&child);
+    for property in [
+        "scroll-behavior",
+        "overscroll-behavior-block",
+        "overscroll-behavior-inline",
+        "overscroll-behavior-x",
+        "overscroll-behavior-y",
+    ] {
+        assert_eq!(
+            child_style.get(property),
+            Some(&ComputedValue::Keyword("auto".to_string())),
+            "{property} is non-inherited and initially auto"
+        );
+    }
+}
+
+#[test]
 fn contain_computes_core_keywords_and_defaults_to_none() {
     let (_document, body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
