@@ -27,7 +27,9 @@ pub use matcher::{
     selector_pseudo_element, specificity,
 };
 pub(crate) use matcher::{SelectorMatchCache, matches_selector_cached};
-pub use media::{evaluate_media_query, parse_media_query_list};
+pub use media::{
+    MediaType, evaluate_media_query, evaluate_media_query_for_type, parse_media_query_list,
+};
 pub use parser::{
     extract_font_face_rules, parse_selector_list, parse_style_attribute, parse_stylesheet,
 };
@@ -35,7 +37,8 @@ pub(crate) use scope::{ScopePrelude, parse_scope_prelude};
 pub(crate) use style::ContainerContext;
 pub(crate) use style::supports_declaration;
 pub use style::{
-    ComputedStyle, ComputedValue, LengthPercentageMath, Origin, StyleResolver, StylesheetInput,
+    ComputedStyle, ComputedValue, LengthPercentageMath, Origin, PageBoxGeometry,
+    PageSelectorContext, PageSide, ResolvedPageStyle, StyleResolver, StylesheetInput,
 };
 pub(crate) use supports::{supports_condition_matches, supports_condition_result};
 pub(crate) use transition::{

@@ -26,8 +26,11 @@ mod grid;
 mod inline;
 mod margins;
 mod multicol;
+mod paged;
 mod shapes;
 mod table;
+
+pub use paged::{PagedLayout, PagedPage, layout_paged_tree};
 
 use flex::{is_flex_container, layout_flex_container};
 use grid::{is_grid_container, layout_grid_container};
@@ -4743,7 +4746,12 @@ fn translate_layout_box_to_outer(
     );
 }
 
-fn translate_layout_box(layout: &mut LayoutBox, dx: f32, dy: f32, resolver: &mut StyleResolver) {
+pub(crate) fn translate_layout_box(
+    layout: &mut LayoutBox,
+    dx: f32,
+    dy: f32,
+    resolver: &mut StyleResolver,
+) {
     if (dx, dy) == (0.0, 0.0) {
         return;
     }

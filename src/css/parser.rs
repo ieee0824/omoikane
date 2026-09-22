@@ -316,6 +316,17 @@ impl Parser {
                         }));
                     }
 
+                    if name.eq_ignore_ascii_case("page") {
+                        let (declarations, margin_rules) = self.parse_page_block()?;
+                        return Ok(Rule::At(AtRule {
+                            name,
+                            prelude: render_tokens(&prelude_tokens).trim().to_string(),
+                            block: Some(margin_rules),
+                            declarations,
+                            anonymous_layer_id: None,
+                        }));
+                    }
+
                     let declarations = self.parse_declaration_list()?;
 
                     // Produce a structured FontFace rule when possible.
@@ -398,6 +409,33 @@ impl Parser {
             }
         }
         Ok(rules)
+    }
+
+    fn parse_page_block(&mut self) -> Result<(Vec<Declaration>, Vec<Rule>), CssParseError> {
+        let mut declarations = Vec::new();
+        let mut margin_rules = Vec::new();
+        loop {
+            self.skip_whitespace();
+            match self.peek() {
+                Some(CssToken::CurlyClose) => {
+                    self.next();
+                    break;
+                }
+                Some(CssToken::AtKeyword(_)) => margin_rules.push(self.parse_at_rule()?),
+                Some(CssToken::Semicolon) => {
+                    self.next();
+                }
+                None => return Err(CssParseError::UnexpectedEndOfInput),
+                _ => {
+                    declarations.append(&mut self.parse_declaration()?);
+                    self.skip_whitespace();
+                    if matches!(self.peek(), Some(CssToken::Semicolon)) {
+                        self.next();
+                    }
+                }
+            }
+        }
+        Ok((declarations, margin_rules))
     }
 
     fn parse_style_rule(&mut self) -> Result<Rule, CssParseError> {
