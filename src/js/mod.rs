@@ -1053,6 +1053,22 @@ struct AdjustedLayoutCache {
     root: LayoutBox,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmoothScrollTarget {
+    Document(usize),
+    Element(usize),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SmoothScrollAnimation {
+    target: SmoothScrollTarget,
+    start: (f32, f32),
+    end: (f32, f32),
+    started_ms: f64,
+}
+
+const SMOOTH_SCROLL_DURATION_MS: f64 = 300.0;
+
 /// Monotonic generations shared by the top-level document's style, layout, and
 /// paint cache layers.
 ///
@@ -1188,6 +1204,7 @@ struct HostState {
     /// Scroll targets waiting for the next rendering opportunity. This is an
     /// ordered set: first-queue order is retained and duplicate ids are skipped.
     pending_scroll_targets: Vec<usize>,
+    smooth_scrolls: Vec<SmoothScrollAnimation>,
     /// Effective element offsets captured before invalidating layout. Reflow
     /// compares these with the rebuilt scrolling extents to detect clamps.
     scroll_offsets_before_layout: HashMap<usize, (f32, f32)>,
@@ -1872,6 +1889,7 @@ impl HostState {
             pending_visual_viewport_resize_documents: Vec::new(),
             pending_visual_viewport_scroll_documents: Vec::new(),
             pending_scroll_targets: Vec::new(),
+            smooth_scrolls: Vec::new(),
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
             font_loading: Default::default(),
@@ -2446,6 +2464,17 @@ impl HostState {
         }
     }
 
+    fn cancel_smooth_scrolls_in_subtree(&mut self, root: &NodeHandle) {
+        let mut subtree_ids = HashSet::new();
+        Self::collect_tree_ids(root, &mut subtree_ids);
+        self.smooth_scrolls
+            .retain(|animation| match animation.target {
+                SmoothScrollTarget::Document(id) | SmoothScrollTarget::Element(id) => {
+                    !subtree_ids.contains(&id)
+                }
+            });
+    }
+
     /// Destroys one iframe's active document and every descendant browsing
     /// context. All document-scoped policy/cache state and queued resource
     /// tasks are removed in the same transition. DOM wrappers keep their old
@@ -2475,6 +2504,12 @@ impl HostState {
 
         let mut tree_ids = HashSet::new();
         Self::collect_tree_ids(&previous.document, &mut tree_ids);
+        self.smooth_scrolls
+            .retain(|animation| match animation.target {
+                SmoothScrollTarget::Document(id) | SmoothScrollTarget::Element(id) => {
+                    !tree_ids.contains(&id)
+                }
+            });
         let nested_iframe_ids: Vec<_> = self
             .iframe_documents
             .keys()
@@ -3670,6 +3705,104 @@ impl HostState {
             self.queue_scroll_target(node.identity());
         }
         changed
+    }
+
+    fn cancel_smooth_scroll(&mut self, target: SmoothScrollTarget) {
+        self.smooth_scrolls
+            .retain(|animation| animation.target != target);
+    }
+
+    fn scroll_document_to(&mut self, document_id: usize, x: f32, y: f32, smooth: bool) {
+        let target = SmoothScrollTarget::Document(document_id);
+        self.cancel_smooth_scroll(target);
+        if !smooth {
+            self.set_window_scroll_for_document(document_id, x, y);
+            return;
+        }
+        let current = self.window_scroll_for_document(document_id);
+        let end = if document_id == self.document.identity() {
+            let (max_x, max_y) = self.window_scroll_extent();
+            (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
+        } else {
+            (x.max(0.0), y.max(0.0))
+        };
+        if current == end {
+            return;
+        }
+        self.smooth_scrolls.push(SmoothScrollAnimation {
+            target,
+            start: current,
+            end,
+            started_ms: self.event_loop.rendering_time_ms(),
+        });
+    }
+
+    fn scroll_element_to(&mut self, node: &NodeHandle, x: f32, y: f32, smooth: bool) {
+        let target = SmoothScrollTarget::Element(node.identity());
+        self.cancel_smooth_scroll(target);
+        if !smooth {
+            self.set_element_scroll(node, x, y);
+            return;
+        }
+        self.ensure_content_visibility_geometry(node);
+        let Some(layout) = self
+            .layout_root
+            .as_ref()
+            .and_then(|root| find_layout_box(root, node))
+        else {
+            return;
+        };
+        if !layout.is_scroll_container() {
+            return;
+        }
+        let start = layout.scroll_offset();
+        let (max_x, max_y) = layout.max_scroll_offset();
+        let end = (x.clamp(0.0, max_x), y.clamp(0.0, max_y));
+        if start == end {
+            return;
+        }
+        self.smooth_scrolls.push(SmoothScrollAnimation {
+            target,
+            start,
+            end,
+            started_ms: self.event_loop.rendering_time_ms(),
+        });
+    }
+
+    fn sample_smooth_scrolls(&mut self) {
+        let now = self.event_loop.rendering_time_ms();
+        let animations = std::mem::take(&mut self.smooth_scrolls);
+        for animation in animations {
+            let progress =
+                ((now - animation.started_ms) / SMOOTH_SCROLL_DURATION_MS).clamp(0.0, 1.0);
+            // A fixed smoothstep curve keeps controlled-clock tests exact while
+            // avoiding a visible velocity jump at either endpoint.
+            let eased = progress * progress * (3.0 - 2.0 * progress);
+            let position = (
+                animation.start.0 + (animation.end.0 - animation.start.0) * eased as f32,
+                animation.start.1 + (animation.end.1 - animation.start.1) * eased as f32,
+            );
+            let live = match animation.target {
+                SmoothScrollTarget::Document(document_id) => {
+                    if self.document_is_active(document_id) {
+                        self.set_window_scroll_for_document(document_id, position.0, position.1);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                SmoothScrollTarget::Element(node_id) => self
+                    .get_node(node_id)
+                    .filter(|node| document_root_for_node(node).is_some())
+                    .is_some_and(|node| {
+                        self.set_element_scroll(&node, position.0, position.1);
+                        true
+                    }),
+            };
+            if live && progress < 1.0 {
+                self.smooth_scrolls.push(animation);
+            }
+        }
     }
 }
 
@@ -6310,6 +6443,7 @@ impl JsRuntime {
         self.run_worker_background_tasks();
         self.run_worklet_background_tasks();
         self.run_until_idle()?;
+        self.host_state.borrow_mut().sample_smooth_scrolls();
         self.host_state
             .borrow_mut()
             .collect_iframe_viewport_resizes();
@@ -6416,6 +6550,7 @@ impl JsRuntime {
         self.run_worker_background_tasks();
         self.run_worklet_background_tasks();
         self.run_until_idle_async().await?;
+        self.host_state.borrow_mut().sample_smooth_scrolls();
         self.host_state
             .borrow_mut()
             .collect_iframe_viewport_resizes();
@@ -6611,7 +6746,9 @@ impl JsRuntime {
 
     fn has_pending_scroll_steps(&self) -> bool {
         let state = self.host_state.borrow();
-        !state.pending_scroll_targets.is_empty() || !state.scroll_offsets_before_layout.is_empty()
+        !state.pending_scroll_targets.is_empty()
+            || !state.scroll_offsets_before_layout.is_empty()
+            || !state.smooth_scrolls.is_empty()
     }
 
     fn has_pending_viewport_steps(&self) -> bool {
@@ -9670,7 +9807,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_set_element_scroll"),
-            3,
+            4,
             NativeFunction::from_copy_closure(set_element_scroll_native),
         ),
         (
@@ -9685,7 +9822,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_set_window_scroll"),
-            2,
+            3,
             NativeFunction::from_copy_closure(set_window_scroll_native),
         ),
         (
@@ -12004,8 +12141,8 @@ fn element_scroll_offset_native(
     })
 }
 
-/// Sets and clamps an element's scroll offset. Non-finite coordinates scroll to
-/// zero, matching how browsers normalize them.
+/// Sets or animates an element's scroll offset. Non-finite coordinates scroll
+/// to zero, matching how browsers normalize them.
 fn set_element_scroll_native(
     _: &JsValue,
     args: &[JsValue],
@@ -12018,12 +12155,13 @@ fn set_element_scroll_native(
     };
     let x = coordinate(args.get(1), context)?;
     let y = coordinate(args.get(2), context)?;
+    let smooth = args.get(3).and_then(JsValue::as_boolean).unwrap_or(false);
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let Some(node) = node else {
             return Ok(JsValue::undefined());
         };
-        state.borrow_mut().set_element_scroll(&node, x, y);
+        state.borrow_mut().scroll_element_to(&node, x, y, smooth);
         Ok(JsValue::undefined())
     })
 }
@@ -12082,7 +12220,7 @@ fn window_scroll_offset_native(
     })
 }
 
-/// Sets and clamps the top-level Window scroll offset.
+/// Sets or animates the calling Window's scroll offset.
 fn set_window_scroll_native(
     _: &JsValue,
     args: &[JsValue],
@@ -12094,10 +12232,11 @@ fn set_window_scroll_native(
     };
     let x = coordinate(args.first(), context)?;
     let y = coordinate(args.get(1), context)?;
+    let smooth = args.get(2).and_then(JsValue::as_boolean).unwrap_or(false);
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         let document_id = context_document_id(context, &state);
-        state.set_window_scroll_for_document(document_id, x, y);
+        state.scroll_document_to(document_id, x, y, smooth);
         Ok(JsValue::undefined())
     })
 }
@@ -13430,10 +13569,23 @@ fn normalize_style_value_native(
                 | "widows"
                 | "counter-reset"
                 | "counter-increment"
+                | "scroll-behavior"
+                | "overscroll-behavior"
+                | "overscroll-behavior-x"
+                | "overscroll-behavior-y"
+                | "overscroll-behavior-inline"
+                | "overscroll-behavior-block"
         )
     {
         crate::css::supports_declaration(&property, &value).then(|| {
-            if matches!(
+            if property == "overscroll-behavior" {
+                let values = value.split_whitespace().collect::<Vec<_>>();
+                if values.len() == 2 && values[0].eq_ignore_ascii_case(values[1]) {
+                    values[0].to_ascii_lowercase()
+                } else {
+                    value.to_ascii_lowercase()
+                }
+            } else if matches!(
                 property.as_str(),
                 "column-width" | "column-gap" | "column-rule-width" | "shape-margin"
             ) && value.trim() == "0"
@@ -15926,6 +16078,7 @@ fn set_text_content_native(
             {
                 let mut state = state.borrow_mut();
                 for child in &removed_children {
+                    state.cancel_smooth_scrolls_in_subtree(child);
                     state.destroy_iframe_contexts_in_subtree(child);
                 }
             }
@@ -16407,6 +16560,7 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             .map_err(|e| JsError::from(JsNativeError::error().with_message(e.to_string())))?;
         {
             let mut state = state.borrow_mut();
+            state.cancel_smooth_scrolls_in_subtree(&child);
             state.destroy_iframe_contexts_in_subtree(&child);
             if let Some(document) = &parent_document {
                 state.mark_document_style_dirty(document);
@@ -38142,6 +38296,28 @@ b</textarea></form>"#,
     }
 
     #[test]
+    fn window_smooth_scroll_uses_root_scroll_behavior_and_can_be_interrupted() {
+        let html = r#"<html style="scroll-behavior:smooth"><head><style>
+            * { margin: 0; padding: 0; }
+            body { height: 1000px; }
+        </style></head><body></body></html>"#;
+        let mut runtime = runtime_from_html(html);
+        runtime.set_viewport(200.0, 100.0);
+
+        runtime.eval("scrollTo(0, 300)").unwrap();
+        assert_eq!(eval_num(&mut runtime, "scrollY"), 0.0);
+        runtime.run_animation_frame(150).unwrap();
+        assert_eq!(eval_num(&mut runtime, "scrollY"), 150.0);
+
+        runtime
+            .eval("scrollBy({ top: 25, behavior: 'instant' })")
+            .unwrap();
+        assert_eq!(eval_num(&mut runtime, "scrollY"), 175.0);
+        runtime.run_animation_frame(300).unwrap();
+        assert_eq!(eval_num(&mut runtime, "scrollY"), 175.0);
+    }
+
+    #[test]
     fn viewport_resize_reclamps_window_scroll() {
         let html = r#"<html><head><style>* { margin: 0; padding: 0; } body { height: 500px; }</style></head><body></body></html>"#;
         let mut runtime = runtime_from_html(html);
@@ -45520,7 +45696,96 @@ b</textarea></form>"#,
                 return out.join("|");
             })()"#,
         );
-        assert_eq!(result, "5,6|7,9|11,12|11,13|0,0|1,30|1,2");
+        assert_eq!(result, "5,6|7,9|11,12|11,13|0,0|1,30|1,30");
+    }
+
+    #[test]
+    fn smooth_element_scroll_uses_controlled_frames_and_orders_events_before_raf() {
+        let mut runtime = scroll_runtime();
+        runtime
+            .eval(
+                r#"const box = document.getElementById("hidden");
+                   globalThis.smoothLog = [];
+                   box.addEventListener("scroll", () => smoothLog.push("scroll:" + box.scrollTop));
+                   box.scrollTo({ top: 150, behavior: "smooth" });
+                   requestAnimationFrame(() => smoothLog.push("raf:" + box.scrollTop));"#,
+            )
+            .unwrap();
+        assert_eq!(eval_num(&mut runtime, "box.scrollTop"), 0.0);
+
+        runtime.run_animation_frame(150).unwrap();
+        assert_eq!(eval_num(&mut runtime, "box.scrollTop"), 75.0);
+        assert_eq!(
+            eval_str(&mut runtime, "smoothLog.join('|')"),
+            "scroll:75|raf:75"
+        );
+
+        runtime.run_animation_frame(150).unwrap();
+        assert_eq!(eval_num(&mut runtime, "box.scrollTop"), 150.0);
+        assert_eq!(
+            eval_str(&mut runtime, "smoothLog.join('|')"),
+            "scroll:75|raf:75|scroll:150"
+        );
+    }
+
+    #[test]
+    fn scroll_behavior_auto_and_new_requests_control_smooth_scrolling() {
+        let mut runtime = scroll_runtime();
+        runtime
+            .eval(
+                r#"const box = document.getElementById("hidden");
+                   box.style.scrollBehavior = "smooth";
+                   box.scrollTo(0, 150);"#,
+            )
+            .unwrap();
+        assert_eq!(eval_num(&mut runtime, "box.scrollTop"), 0.0);
+        runtime.run_animation_frame(100).unwrap();
+        let intermediate = eval_num(&mut runtime, "box.scrollTop");
+        assert!(intermediate > 0.0 && intermediate < 150.0);
+
+        runtime
+            .eval("box.scrollTo({ top: 20, behavior: 'instant' })")
+            .unwrap();
+        assert_eq!(eval_num(&mut runtime, "box.scrollTop"), 20.0);
+        runtime.run_animation_frame(300).unwrap();
+        assert_eq!(eval_num(&mut runtime, "box.scrollTop"), 20.0);
+
+        assert!(runtime
+            .eval("(() => { try { box.scrollTo({top:40,behavior:'slow'}); return false; } catch (error) { return error instanceof TypeError; } })()")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert_eq!(eval_num(&mut runtime, "box.scrollTop"), 20.0);
+    }
+
+    #[test]
+    fn removing_an_element_cancels_its_smooth_scroll() {
+        let mut runtime = scroll_runtime();
+        runtime
+            .eval(
+                r#"const box = document.getElementById("hidden");
+                   box.scrollTo({ top: 150, behavior: "smooth" });
+                   box.remove();
+                   document.body.appendChild(box);"#,
+            )
+            .unwrap();
+        runtime.run_animation_frame(300).unwrap();
+        assert_eq!(eval_num(&mut runtime, "box.scrollTop"), 0.0);
+    }
+
+    #[test]
+    fn replacing_a_subtree_cancels_descendant_smooth_scrolls() {
+        let mut runtime = scroll_runtime();
+        runtime
+            .eval(
+                r#"const box = document.getElementById("hidden");
+                   box.scrollTo({ top: 150, behavior: "smooth" });
+                   document.body.textContent = "";
+                   document.body.appendChild(box);"#,
+            )
+            .unwrap();
+        runtime.run_animation_frame(300).unwrap();
+        assert_eq!(eval_num(&mut runtime, "box.scrollTop"), 0.0);
     }
 
     #[test]

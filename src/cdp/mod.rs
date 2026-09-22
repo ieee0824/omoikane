@@ -687,6 +687,9 @@ pub struct CdpSession {
     pending_events: Vec<CdpEvent>,
     last_key_event: Option<Value>,
     last_mouse_event: Option<Value>,
+    touch_target: Option<NodeHandle>,
+    last_touch_position: Option<(f64, f64)>,
+    touch_scroll_allowed: bool,
     mouse_pressed_target: Option<usize>,
     drag_candidate: bool,
     drag_active: bool,
@@ -793,6 +796,9 @@ impl CdpSession {
             pending_events: Vec::new(),
             last_key_event: None,
             last_mouse_event: None,
+            touch_target: None,
+            last_touch_position: None,
+            touch_scroll_allowed: true,
             mouse_pressed_target: None,
             drag_candidate: false,
             drag_active: false,
@@ -858,6 +864,7 @@ impl CdpSession {
             "Target.disposeBrowserContext" => self.target_dispose_browser_context(&params),
             "Input.dispatchKeyEvent" => self.input_dispatch_key_event(&params),
             "Input.dispatchMouseEvent" => self.input_dispatch_mouse_event(&params),
+            "Input.dispatchTouchEvent" => self.input_dispatch_touch_event(&params),
             "Input.imeSetComposition" => self.input_ime_set_composition(&params),
             "Input.insertText" => self.input_insert_text(&params),
             _ => Err(JsonRpcError {
@@ -2236,12 +2243,15 @@ impl CdpSession {
             init["deltaY"] = json!(optional_f64(params, "deltaY", 0.0)?);
             init["deltaZ"] = json!(0);
             init["deltaMode"] = json!(0);
-            let not_canceled = self.eval_input_bool(&format!(
+            let outcome = self.eval_input_number(&format!(
                 "__omoikane_dispatch_wheel_input({target_id}, {init})"
             ))?;
+            let not_canceled = outcome & 1 != 0;
             return Ok(json!({
                 "defaultPrevented": !not_canceled,
                 "targetNodeId": target_node_id,
+                "hostOverscrollX": outcome & 2 != 0,
+                "hostOverscrollY": outcome & 4 != 0,
             }));
         }
         let not_canceled = self.eval_input_bool(&format!(
@@ -2318,6 +2328,107 @@ impl CdpSession {
         }))
     }
 
+    fn input_dispatch_touch_event(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let event_type = require_string(params, "type")?;
+        let dom_type = match event_type.as_str() {
+            "touchStart" | "touchstart" => "touchstart",
+            "touchMove" | "touchmove" => "touchmove",
+            "touchEnd" | "touchend" => "touchend",
+            "touchCancel" | "touchcancel" => "touchcancel",
+            _ => {
+                return Err(invalid_params(format!(
+                    "Unsupported Input.dispatchTouchEvent type: {event_type}"
+                )));
+            }
+        };
+        let points = params
+            .get("touchPoints")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_params("touchPoints must be an array".to_string()))?;
+        let point = points.first();
+        let position = point
+            .map(|point| {
+                Ok((
+                    optional_f64(point, "x", 0.0)?,
+                    optional_f64(point, "y", 0.0)?,
+                ))
+            })
+            .transpose()?;
+        if dom_type == "touchstart" {
+            let (x, y) = position
+                .ok_or_else(|| invalid_params("touchStart requires a touch point".to_string()))?;
+            self.runtime.update_pointer_position(x, y);
+            self.touch_target = self
+                .runtime
+                .hit_test(x as f32, y as f32)
+                .or_else(|| Some(self.runtime.document()));
+            self.last_touch_position = Some((x, y));
+            self.touch_scroll_allowed = true;
+        } else if self.touch_target.is_none() {
+            return Err(invalid_params("touch sequence is not active".to_string()));
+        }
+
+        let target = self
+            .touch_target
+            .clone()
+            .unwrap_or_else(|| self.runtime.document());
+        let target_id = target.identity();
+        let target_node_id = self.ensure_node_id(&target);
+        let (delta_x, delta_y) = match (dom_type, position, self.last_touch_position) {
+            ("touchmove", Some((x, y)), Some((previous_x, previous_y))) => {
+                self.last_touch_position = Some((x, y));
+                (previous_x - x, previous_y - y)
+            }
+            _ => (0.0, 0.0),
+        };
+        let (fallback_x, fallback_y) = self.last_touch_position.unwrap_or((0.0, 0.0));
+        let touch_values = points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                json!({
+                    "identifier": point.get("id").and_then(Value::as_i64).unwrap_or(index as i64),
+                    "clientX": point.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+                    "clientY": point.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+                })
+            })
+            .collect::<Vec<_>>();
+        let changed_touches = if touch_values.is_empty() {
+            vec![json!({ "identifier": 0, "clientX": fallback_x, "clientY": fallback_y })]
+        } else {
+            touch_values.clone()
+        };
+        let modifiers = params.get("modifiers").and_then(Value::as_u64).unwrap_or(0);
+        let init = json!({
+            "touches": if matches!(dom_type, "touchend" | "touchcancel") { Vec::<Value>::new() } else { touch_values },
+            "changedTouches": changed_touches,
+            "deltaX": delta_x,
+            "deltaY": delta_y,
+            "defaultAllowed": self.touch_scroll_allowed,
+            "altKey": modifiers & 1 != 0,
+            "ctrlKey": modifiers & 2 != 0,
+            "metaKey": modifiers & 4 != 0,
+            "shiftKey": modifiers & 8 != 0,
+        });
+        let outcome = self.eval_input_number(&format!(
+            "__omoikane_dispatch_touch_input({target_id}, {dom_type:?}, {init})"
+        ))?;
+        if dom_type == "touchstart" && outcome & 1 == 0 {
+            self.touch_scroll_allowed = false;
+        }
+        if matches!(dom_type, "touchend" | "touchcancel") {
+            self.touch_target = None;
+            self.last_touch_position = None;
+            self.touch_scroll_allowed = true;
+        }
+        Ok(json!({
+            "defaultPrevented": outcome & 1 == 0,
+            "targetNodeId": target_node_id,
+            "hostOverscrollX": outcome & 2 != 0,
+            "hostOverscrollY": outcome & 4 != 0,
+        }))
+    }
+
     fn input_ime_set_composition(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let text = require_string(params, "text")?;
         let length = text.encode_utf16().count() as u64;
@@ -2355,6 +2466,19 @@ impl CdpSession {
             .map_err(js_error)?;
         self.drive_navigation_requests()?;
         Ok(not_canceled)
+    }
+
+    fn eval_input_number(&mut self, script: &str) -> Result<u8, JsonRpcError> {
+        let outcome = self
+            .runtime
+            .eval(script)
+            .and_then(|value| {
+                self.runtime.run_jobs()?;
+                Ok(value.as_number().unwrap_or(1.0) as u8)
+            })
+            .map_err(js_error)?;
+        self.drive_navigation_requests()?;
+        Ok(outcome)
     }
 
     fn evaluate_expression(
@@ -2580,6 +2704,9 @@ impl CdpSession {
 
         self.runtime = runtime;
         self.mouse_pressed_target = None;
+        self.touch_target = None;
+        self.last_touch_position = None;
+        self.touch_scroll_allowed = true;
         self.drag_candidate = false;
         self.drag_active = false;
         self.document_generation = self.document_generation.saturating_add(1);
@@ -2693,6 +2820,9 @@ impl CdpSession {
 
         self.runtime = runtime;
         self.mouse_pressed_target = None;
+        self.touch_target = None;
+        self.last_touch_position = None;
+        self.touch_scroll_allowed = true;
         self.drag_candidate = false;
         self.drag_active = false;
         self.document_generation = pending.generation;
@@ -3377,6 +3507,7 @@ impl BrowserSession {
             "Target.disposeBrowserContext",
             "Input.dispatchKeyEvent",
             "Input.dispatchMouseEvent",
+            "Input.dispatchTouchEvent",
             "Input.imeSetComposition",
             "Input.insertText",
         ] {

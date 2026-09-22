@@ -830,6 +830,14 @@
       "baseline_supported": true
     },
     {
+      "id": "css.scroll-boundary-properties",
+      "area": "cssom",
+      "description": "scroll-behavior and overscroll-behavior parse, expand, and expose their computed values",
+      "setup": "globalThis.__scrollBoundaryStyle = document.createElement('div'); __scrollBoundaryStyle.style.cssText = 'scroll-behavior:smooth;overscroll-behavior:contain none'; document.body.appendChild(__scrollBoundaryStyle)",
+      "probe": "(() => { const style = getComputedStyle(__scrollBoundaryStyle); const computed = style.scrollBehavior === 'smooth' && style.overscrollBehaviorX === 'contain' && style.overscrollBehaviorY === 'none'; const original = __scrollBoundaryStyle.style.scrollBehavior; __scrollBoundaryStyle.style.scrollBehavior = 'slow'; const invalidIgnored = __scrollBoundaryStyle.style.scrollBehavior === original; __scrollBoundaryStyle.style.overscrollBehavior = 'contain contain'; const canonical = __scrollBoundaryStyle.style.overscrollBehavior === 'contain'; return CSS.supports('scroll-behavior', 'smooth') && CSS.supports('overscroll-behavior', 'contain none') && !CSS.supports('overscroll-behavior', 'contain none auto') && invalidIgnored && canonical && computed; })()",
+      "baseline_supported": true
+    },
+    {
       "id": "css.element-scroll-geometry-and-event",
       "area": "cssom",
       "description": "Element scroll events are deferred, coalesced per frame, and do not bubble",

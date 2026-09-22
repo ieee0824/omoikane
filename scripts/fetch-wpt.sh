@@ -135,6 +135,13 @@ git_wpt sparse-checkout add "/domxpath/"
 git_wpt sparse-checkout add "/visual-viewport/"
 git_wpt sparse-checkout add "/web-locks/"
 git_wpt sparse-checkout add "/css/css-multicol/parsing/" "/css/support/shorthand-testcommon.js"
+git_wpt sparse-checkout add \
+  "/css/css-overscroll-behavior/parsing/overscroll-behavior-valid.html" \
+  "/css/css-overscroll-behavior/parsing/overscroll-behavior-invalid.html" \
+  "/css/css-overscroll-behavior/parsing/overscroll-behavior-computed.html" \
+  "/css/cssom-view/parsing/scroll-behavior-valid.html" \
+  "/css/cssom-view/parsing/scroll-behavior-invalid.html" \
+  "/css/cssom-view/parsing/scroll-behavior-computed.html"
 git_wpt sparse-checkout add "/css/css-break/parsing/"
 git_wpt sparse-checkout add \
   "/css/css-contain/content-visibility/parsing/" \

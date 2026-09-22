@@ -2108,6 +2108,8 @@ fn logical_box_property_physical_name(name: &str) -> Option<&'static str> {
         "margin-block-end" => Some("margin-bottom"),
         "contain-intrinsic-inline-size" => Some("contain-intrinsic-width"),
         "contain-intrinsic-block-size" => Some("contain-intrinsic-height"),
+        "overscroll-behavior-inline" => Some("overscroll-behavior-x"),
+        "overscroll-behavior-block" => Some("overscroll-behavior-y"),
         _ => None,
     }
 }
@@ -2177,6 +2179,18 @@ enum DeclarationValidation {
     Invalid,
     /// The property has no dedicated grammar validation here.
     Unvalidated,
+}
+
+fn validate_keyword_value(value: &Value, keywords: &[&str]) -> DeclarationValidation {
+    let Value::Keyword(keyword) = value else {
+        return DeclarationValidation::Invalid;
+    };
+    let keyword = keyword.to_ascii_lowercase();
+    if is_css_wide_keyword(&keyword) || keywords.contains(&keyword.as_str()) {
+        DeclarationValidation::Valid(ComputedValue::Keyword(keyword))
+    } else {
+        DeclarationValidation::Invalid
+    }
 }
 
 fn is_supported_pointer_events_keyword(value: &str) -> bool {
@@ -2421,6 +2435,18 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             }
             _ => DeclarationValidation::Invalid,
         };
+    }
+    if name.eq_ignore_ascii_case("scroll-behavior") {
+        return validate_keyword_value(value, &["auto", "smooth"]);
+    }
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "overscroll-behavior-x"
+            | "overscroll-behavior-y"
+            | "overscroll-behavior-inline"
+            | "overscroll-behavior-block"
+    ) {
+        return validate_keyword_value(value, &["auto", "contain", "none", "chain"]);
     }
     if matches!(
         name.to_ascii_lowercase().as_str(),
@@ -5772,6 +5798,11 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "overflow",
     "overflow-x",
     "overflow-y",
+    "overscroll-behavior",
+    "overscroll-behavior-block",
+    "overscroll-behavior-inline",
+    "overscroll-behavior-x",
+    "overscroll-behavior-y",
     "padding-bottom",
     "padding-left",
     "padding-right",
@@ -5786,6 +5817,7 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "pointer-events",
     "right",
     "row-gap",
+    "scroll-behavior",
     "mix-blend-mode",
     "transform",
     "transform-origin",
@@ -5887,6 +5919,7 @@ fn is_shorthand_or_legacy_alias(name: &str) -> bool {
             | "mask"
             | "mask-position"
             | "overflow"
+            | "overscroll-behavior"
             | "place-content"
             | "place-items"
             | "place-self"
@@ -8162,6 +8195,17 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     properties
         .entry("pointer-events".to_string())
         .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    for property in [
+        "scroll-behavior",
+        "overscroll-behavior-block",
+        "overscroll-behavior-inline",
+        "overscroll-behavior-x",
+        "overscroll-behavior-y",
+    ] {
+        properties
+            .entry(property.to_string())
+            .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    }
     properties
         .entry("position".to_string())
         .or_insert_with(|| ComputedValue::Keyword("static".to_string()));
