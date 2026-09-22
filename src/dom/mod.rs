@@ -226,8 +226,7 @@ pub struct Element {
     local_name: String,
     html: bool,
     attributes: BTreeMap<String, String>,
-    attribute_names: BTreeMap<String, AttributeName>,
-    attribute_order: Vec<String>,
+    attribute_records: Vec<AttributeRecord>,
     checked: bool,
     dirty_checkedness: bool,
     selected: bool,
@@ -283,9 +282,21 @@ impl PartialEq for ParserFormOwner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AttributeName {
+struct AttributeRecord {
+    qualified_name: String,
     namespace_uri: Option<String>,
     local_name: String,
+    value: String,
+}
+
+fn rebuild_attribute_projection(element: &mut Element) {
+    element.attributes.clear();
+    for attribute in &element.attribute_records {
+        element
+            .attributes
+            .entry(attribute.qualified_name.clone())
+            .or_insert_with(|| attribute.value.clone());
+    }
 }
 
 impl Element {
@@ -300,8 +311,7 @@ impl Element {
             local_name: String::new(),
             html: true,
             attributes: BTreeMap::new(),
-            attribute_names: BTreeMap::new(),
-            attribute_order: Vec::new(),
+            attribute_records: Vec::new(),
             checked: false,
             dirty_checkedness: false,
             selected: false,
@@ -333,8 +343,7 @@ impl Element {
             local_name,
             html: false,
             attributes: BTreeMap::new(),
-            attribute_names: BTreeMap::new(),
-            attribute_order: Vec::new(),
+            attribute_records: Vec::new(),
             checked: false,
             dirty_checkedness: false,
             selected: false,
@@ -912,19 +921,15 @@ impl NodeHandle {
         match &self.0.borrow().data {
             NodeData::Element(element) => Some(
                 element
-                    .attribute_order
+                    .attribute_records
                     .iter()
-                    .filter_map(|name| {
-                        let value = element.attributes.get(name)?;
-                        let metadata = element.attribute_names.get(name);
-                        Some((
-                            name.clone(),
-                            metadata.and_then(|entry| entry.namespace_uri.clone()),
-                            metadata
-                                .map(|entry| entry.local_name.clone())
-                                .unwrap_or_else(|| name.clone()),
-                            value.clone(),
-                        ))
+                    .map(|attribute| {
+                        (
+                            attribute.qualified_name.clone(),
+                            attribute.namespace_uri.clone(),
+                            attribute.local_name.clone(),
+                            attribute.value.clone(),
+                        )
                     })
                     .collect(),
             ),
@@ -939,15 +944,19 @@ impl NodeHandle {
     pub fn get_attribute(&self, name: &str) -> Option<String> {
         match &self.0.borrow().data {
             NodeData::Element(element) => element
-                .attributes
-                .get(name)
+                .attribute_records
+                .iter()
+                .find(|attribute| attribute.qualified_name == name)
                 .or_else(|| {
-                    element
-                        .html
-                        .then(|| element.attributes.get(&name.to_ascii_lowercase()))
-                        .flatten()
+                    element.html.then(|| {
+                        let lowercase = name.to_ascii_lowercase();
+                        element
+                            .attribute_records
+                            .iter()
+                            .find(|attribute| attribute.qualified_name == lowercase)
+                    })?
                 })
-                .cloned(),
+                .map(|attribute| attribute.value.clone()),
             _ => None,
         }
     }
@@ -973,17 +982,22 @@ impl NodeHandle {
             if name == "selected" && !element.dirty_selectedness {
                 element.selected = true;
             }
-            if !element.attributes.contains_key(&name) {
-                element.attribute_order.push(name.clone());
-            }
-            element.attributes.insert(name.clone(), value.into());
-            element
-                .attribute_names
-                .entry(name.clone())
-                .or_insert_with(|| AttributeName {
+            let value = value.into();
+            if let Some(attribute) = element
+                .attribute_records
+                .iter_mut()
+                .find(|attribute| attribute.qualified_name == name)
+            {
+                attribute.value = value;
+            } else {
+                element.attribute_records.push(AttributeRecord {
+                    qualified_name: name.clone(),
                     namespace_uri: None,
                     local_name: name,
+                    value,
                 });
+            }
+            rebuild_attribute_projection(element);
         }
     }
 
@@ -1001,27 +1015,73 @@ impl NodeHandle {
         local_name: impl Into<String>,
         value: impl Into<String>,
     ) {
+        self.set_xml_attribute_ns_internal(
+            qualified_name.into(),
+            namespace_uri,
+            local_name.into(),
+            value.into(),
+            false,
+        );
+    }
+
+    /// Replaces a namespaced attribute, including its qualified name, in place.
+    pub(crate) fn replace_xml_attribute_ns(
+        &self,
+        qualified_name: impl Into<String>,
+        namespace_uri: Option<String>,
+        local_name: impl Into<String>,
+        value: impl Into<String>,
+    ) {
+        self.set_xml_attribute_ns_internal(
+            qualified_name.into(),
+            namespace_uri,
+            local_name.into(),
+            value.into(),
+            true,
+        );
+    }
+
+    fn set_xml_attribute_ns_internal(
+        &self,
+        qualified_name: String,
+        namespace_uri: Option<String>,
+        local_name: String,
+        value: String,
+        replace_qualified_name: bool,
+    ) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            let qualified_name = qualified_name.into();
             if namespace_uri.is_none() && qualified_name == "form" {
                 element.parser_form_owner = None;
+            }
+            if namespace_uri.is_none() && qualified_name == "checked" && !element.dirty_checkedness
+            {
+                element.checked = true;
+            }
+            if namespace_uri.is_none()
+                && qualified_name == "selected"
+                && !element.dirty_selectedness
+            {
+                element.selected = true;
             }
             if matches!(qualified_name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             }
-            if !element.attributes.contains_key(&qualified_name) {
-                element.attribute_order.push(qualified_name.clone());
-            }
-            element
-                .attributes
-                .insert(qualified_name.clone(), value.into());
-            element.attribute_names.insert(
-                qualified_name,
-                AttributeName {
+            if let Some(attribute) = element.attribute_records.iter_mut().find(|attribute| {
+                attribute.namespace_uri == namespace_uri && attribute.local_name == local_name
+            }) {
+                if replace_qualified_name {
+                    attribute.qualified_name = qualified_name;
+                }
+                attribute.value = value;
+            } else {
+                element.attribute_records.push(AttributeRecord {
+                    qualified_name,
                     namespace_uri,
-                    local_name: local_name.into(),
-                },
-            );
+                    local_name,
+                    value,
+                });
+            }
+            rebuild_attribute_projection(element);
         }
     }
 
@@ -1062,9 +1122,14 @@ impl NodeHandle {
             if matches!(name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             }
-            element.attributes.remove(&name);
-            element.attribute_names.remove(&name);
-            element.attribute_order.retain(|entry| entry != &name);
+            if let Some(index) = element
+                .attribute_records
+                .iter()
+                .position(|attribute| attribute.qualified_name == name)
+            {
+                element.attribute_records.remove(index);
+                rebuild_attribute_projection(element);
+            }
             if name == "form" {
                 element.parser_form_owner = None;
             }
@@ -1084,18 +1149,51 @@ impl NodeHandle {
                 invalidate_slot_assignments();
             }
             if qualified_name == "form"
-                && element
-                    .attribute_names
-                    .get(qualified_name)
-                    .is_some_and(|name| name.namespace_uri.is_none())
+                && element.attribute_records.iter().any(|attribute| {
+                    attribute.qualified_name == qualified_name && attribute.namespace_uri.is_none()
+                })
             {
                 element.parser_form_owner = None;
             }
-            element.attributes.remove(qualified_name);
-            element.attribute_names.remove(qualified_name);
-            element
-                .attribute_order
-                .retain(|entry| entry != qualified_name);
+            if let Some(index) = element
+                .attribute_records
+                .iter()
+                .position(|attribute| attribute.qualified_name == qualified_name)
+            {
+                element.attribute_records.remove(index);
+                rebuild_attribute_projection(element);
+            }
+        }
+    }
+
+    /// Removes an XML/namespaced attribute by namespace and local name.
+    pub fn remove_xml_attribute_ns(&self, namespace_uri: Option<&str>, local_name: &str) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            let Some(index) = element.attribute_records.iter().position(|attribute| {
+                attribute.namespace_uri.as_deref() == namespace_uri
+                    && attribute.local_name == local_name
+            }) else {
+                return;
+            };
+            let qualified_name = element.attribute_records[index].qualified_name.clone();
+            if matches!(qualified_name.as_str(), "slot" | "name") {
+                invalidate_slot_assignments();
+            }
+            if qualified_name == "form" && namespace_uri.is_none() {
+                element.parser_form_owner = None;
+            }
+            element.attribute_records.remove(index);
+            rebuild_attribute_projection(element);
+            if namespace_uri.is_none() && qualified_name == "checked" && !element.dirty_checkedness
+            {
+                element.checked = false;
+            }
+            if namespace_uri.is_none()
+                && qualified_name == "selected"
+                && !element.dirty_selectedness
+            {
+                element.selected = false;
+            }
         }
     }
 
@@ -2112,6 +2210,42 @@ mod tests {
         xml.remove_attribute("MixedCase");
         xml.remove_xml_attribute("a:item");
         assert!(xml.attribute_records().unwrap().is_empty());
+    }
+
+    #[test]
+    fn namespaced_attributes_keep_duplicate_qualified_names_and_replacement_order() {
+        let element = NodeHandle::xml_element("root", None);
+        element.set_xml_attribute_ns("item", Some("urn:first".into()), "item", "first");
+        element.set_xml_attribute_ns("item", Some("urn:second".into()), "item", "second");
+        element.set_xml_attribute_ns("p:tail", Some("urn:tail".into()), "tail", "tail");
+        element.replace_xml_attribute_ns("q:item", Some("urn:first".into()), "item", "updated");
+
+        assert_eq!(
+            element.attribute_records().unwrap(),
+            vec![
+                (
+                    "q:item".into(),
+                    Some("urn:first".into()),
+                    "item".into(),
+                    "updated".into(),
+                ),
+                (
+                    "item".into(),
+                    Some("urn:second".into()),
+                    "item".into(),
+                    "second".into(),
+                ),
+                (
+                    "p:tail".into(),
+                    Some("urn:tail".into()),
+                    "tail".into(),
+                    "tail".into(),
+                ),
+            ]
+        );
+        assert_eq!(element.get_attribute("item").as_deref(), Some("second"));
+        element.remove_xml_attribute_ns(Some("urn:second"), "item");
+        assert_eq!(element.get_attribute("item"), None);
     }
 
     #[test]
