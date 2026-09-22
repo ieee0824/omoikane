@@ -18,7 +18,10 @@ SHARDS = [f"unit-{i}" for i in range(UNIT_SHARDS)] + [
     "integration", "acid3", "compatibility", "stress",
 ]
 FEATURES = "jit-stress,jit-differential"
-DEDICATED_TARGETS = {"acid3_harness", "jit_deopt", "web_api_surface", "wpt_smoke"}
+# print_page_wpt needs the pinned checkout supplied by the separate WPT CI job.
+DEDICATED_TARGETS = {
+    "acid3_harness", "jit_deopt", "web_api_surface", "wpt_smoke", "print_page_wpt",
+}
 TEST_ARGS = ["--include-ignored", "--nocapture", "--test-threads=1"]
 STEPS = {**{f"unit-{i}": ["list", "unit"] for i in range(UNIT_SHARDS)},
          "integration": ["integration", "examples-and-bins", "doc", "build"],

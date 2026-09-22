@@ -138,6 +138,7 @@ class GateTests(unittest.TestCase):
             {"name": "native", "kind": ["test"], "required-features": ["baseline-jit"]},
             {"name": "gui_only", "kind": ["test"], "required-features": ["gui"]},
             {"name": "acid3_harness", "kind": ["test"]},
+            {"name": "print_page_wpt", "kind": ["test"]},
         ]}
         self.assertEqual(gate.integration_targets(package), ["native", "new_test"])
 
