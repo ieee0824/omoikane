@@ -454,6 +454,8 @@ pub struct StyleResolver {
     font_faces: HashMap<Option<usize>, HashMap<FontFaceKey, FontFaceDefinition>>,
     /// Every active `@font-face` rule in stable source order for CSS FontFaceSet.
     active_font_faces: Vec<(Option<usize>, super::FontFaceRule)>,
+    /// Winning document-scoped `@counter-style` definitions.
+    counter_styles: HashMap<Option<usize>, HashMap<String, CounterStyleDefinition>>,
     /// Effective document-scoped custom-property registrations. Stylesheet
     /// registrations are collected in document order and script registrations
     /// installed through `CSS.registerProperty()` take precedence.
@@ -917,6 +919,23 @@ struct FontFaceDefinition {
 }
 
 #[derive(Debug, Clone)]
+struct CounterStyleDefinition {
+    origin: Origin,
+    layer_order: Vec<usize>,
+    source_order: usize,
+    system: CounterStyleSystem,
+    symbols: Vec<String>,
+    prefix: String,
+    suffix: String,
+}
+
+#[derive(Debug, Clone)]
+enum CounterStyleSystem {
+    Cyclic,
+    Extends(String),
+}
+
+#[derive(Debug, Clone)]
 struct StylesheetScope {
     root: Option<NodeHandle>,
     implicit_scope_root: Option<NodeHandle>,
@@ -1292,6 +1311,7 @@ impl StyleResolver {
             self.rebuild_layer_orders();
             self.rebuild_keyframes();
             self.rebuild_font_faces();
+            self.rebuild_counter_styles();
             self.rebuild_registered_custom_properties();
         }
         self.cache.clear();
@@ -1312,6 +1332,7 @@ impl StyleResolver {
             self.rebuild_layer_orders();
             self.rebuild_keyframes();
             self.rebuild_font_faces();
+            self.rebuild_counter_styles();
             self.rebuild_registered_custom_properties();
         }
         self.cache.clear();
@@ -1349,6 +1370,7 @@ impl StyleResolver {
         });
         self.register_latest_stylesheet_keyframes();
         self.register_latest_stylesheet_font_faces();
+        self.register_latest_stylesheet_counter_styles();
         self.rebuild_registered_custom_properties();
         self.cache.clear();
         self.pseudo_cache.clear();
@@ -1376,6 +1398,7 @@ impl StyleResolver {
         });
         self.register_latest_stylesheet_keyframes();
         self.register_latest_stylesheet_font_faces();
+        self.register_latest_stylesheet_counter_styles();
         self.rebuild_registered_custom_properties();
         self.cache.clear();
         self.pseudo_cache.clear();
@@ -1449,6 +1472,7 @@ impl StyleResolver {
         });
         self.register_latest_stylesheet_keyframes();
         self.register_latest_stylesheet_font_faces();
+        self.register_latest_stylesheet_counter_styles();
         self.rebuild_registered_custom_properties();
         self.cache.clear();
         self.pseudo_cache.clear();
@@ -1625,6 +1649,96 @@ impl StyleResolver {
             self.viewport_height,
             self.color_scheme_dark,
         );
+    }
+
+    fn rebuild_counter_styles(&mut self) {
+        let mut counter_styles = HashMap::new();
+        let mut source_order = 0;
+        for (position, (input, scope)) in self
+            .stylesheets
+            .iter()
+            .zip(&self.stylesheet_scopes)
+            .enumerate()
+        {
+            let layer_context = LayerContextKey {
+                origin: input.origin,
+                scope_root: scope.root.as_ref().map(NodeHandle::identity),
+            };
+            let layer_order = self
+                .layer_orders
+                .get(&layer_context)
+                .expect("stylesheet layer order should be registered");
+            collect_counter_styles(
+                &input.stylesheet.rules,
+                input.origin,
+                self.stylesheet_ids[position],
+                layer_context.scope_root,
+                layer_order,
+                None,
+                &mut source_order,
+                &mut counter_styles,
+                self.viewport_width,
+                self.viewport_height,
+                self.color_scheme_dark,
+            );
+        }
+        self.counter_styles = counter_styles;
+    }
+
+    fn register_latest_stylesheet_counter_styles(&mut self) {
+        let position = self.stylesheets.len() - 1;
+        let input = &self.stylesheets[position];
+        let scope = &self.stylesheet_scopes[position];
+        let layer_context = LayerContextKey {
+            origin: input.origin,
+            scope_root: scope.root.as_ref().map(NodeHandle::identity),
+        };
+        let layer_order = self
+            .layer_orders
+            .get(&layer_context)
+            .expect("stylesheet layer order should be registered");
+        let source_order = self
+            .counter_styles
+            .values()
+            .flat_map(|styles| styles.values())
+            .map(|style| style.source_order)
+            .max()
+            .map_or(0, |order| order + 1);
+        let mut source_order = source_order;
+        collect_counter_styles(
+            &input.stylesheet.rules,
+            input.origin,
+            self.stylesheet_ids[position],
+            layer_context.scope_root,
+            layer_order,
+            None,
+            &mut source_order,
+            &mut self.counter_styles,
+            self.viewport_width,
+            self.viewport_height,
+            self.color_scheme_dark,
+        );
+    }
+
+    pub(crate) fn format_counter_value(&self, value: i32, style: &str) -> Option<String> {
+        let style = style.to_ascii_lowercase();
+        let definitions = self
+            .counter_styles
+            .values()
+            .find_map(|styles| styles.get(&style));
+        let definition = definitions?;
+        let mut result = match &definition.system {
+            CounterStyleSystem::Cyclic => {
+                let index = value
+                    .saturating_sub(1)
+                    .rem_euclid(definition.symbols.len() as i32)
+                    as usize;
+                definition.symbols.get(index)?.clone()
+            }
+            CounterStyleSystem::Extends(base) => self.format_counter_value(value, base)?,
+        };
+        result = format!("{}{}{}", definition.prefix, result, definition.suffix);
+        Some(result)
     }
 
     /// Installs the script registrations for this document. Script
@@ -5595,6 +5709,150 @@ fn collect_font_faces(
             _ => {}
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_counter_styles(
+    rules: &[Rule],
+    origin: Origin,
+    stylesheet_id: usize,
+    scope_root: Option<usize>,
+    layer_order: &CascadeLayerOrder,
+    active_layer: Option<&LayerPath>,
+    source_order: &mut usize,
+    counter_styles: &mut HashMap<Option<usize>, HashMap<String, CounterStyleDefinition>>,
+    viewport_width: f32,
+    viewport_height: f32,
+    color_scheme_dark: bool,
+) {
+    for rule in rules {
+        match rule {
+            Rule::At(at_rule) if at_rule.name.eq_ignore_ascii_case("counter-style") => {
+                if let Some(definition) = parse_counter_style_definition(
+                    at_rule,
+                    origin,
+                    layer_order.rank(active_layer),
+                    *source_order,
+                ) {
+                    let styles = counter_styles.entry(scope_root).or_default();
+                    match styles.entry(at_rule.prelude.trim().to_ascii_lowercase()) {
+                        std::collections::hash_map::Entry::Occupied(mut entry)
+                            if compare_counter_style_priority(&definition, entry.get()).is_gt() =>
+                        {
+                            entry.insert(definition);
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(definition);
+                        }
+                        _ => {}
+                    }
+                }
+                *source_order += 1;
+            }
+            Rule::At(at_rule) if at_rule.block.is_some() => {
+                if !layer_group_rule_is_active(
+                    at_rule,
+                    viewport_width,
+                    viewport_height,
+                    color_scheme_dark,
+                ) {
+                    continue;
+                }
+                let block = at_rule.block.as_deref().unwrap_or_default();
+                let next_layer = if at_rule.name.eq_ignore_ascii_case("layer") {
+                    layer_block_path(
+                        at_rule,
+                        stylesheet_id,
+                        active_layer.map(Vec::as_slice).unwrap_or(&[]),
+                    )
+                } else {
+                    None
+                };
+                collect_counter_styles(
+                    block,
+                    origin,
+                    stylesheet_id,
+                    scope_root,
+                    layer_order,
+                    next_layer.as_ref().or(active_layer),
+                    source_order,
+                    counter_styles,
+                    viewport_width,
+                    viewport_height,
+                    color_scheme_dark,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parse_counter_style_definition(
+    rule: &super::AtRule,
+    origin: Origin,
+    layer_order: Vec<usize>,
+    source_order: usize,
+) -> Option<CounterStyleDefinition> {
+    let name = rule.prelude.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("default") || name.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    let descriptor = |name: &str| {
+        rule.declarations
+            .iter()
+            .rev()
+            .find(|declaration| declaration.name.eq_ignore_ascii_case(name))
+            .map(|declaration| &declaration.value)
+    };
+    let system = match descriptor("system")? {
+        Value::Keyword(system) if system.eq_ignore_ascii_case("cyclic") => {
+            CounterStyleSystem::Cyclic
+        }
+        Value::List(values) if values.len() == 2 => match (&values[0], &values[1]) {
+            (Value::Keyword(system), Value::Keyword(base))
+                if system.eq_ignore_ascii_case("extends") =>
+            {
+                CounterStyleSystem::Extends(base.to_ascii_lowercase())
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let symbols = descriptor("symbols")
+        .map(counter_style_symbols)
+        .unwrap_or_default();
+    if symbols.is_empty() && matches!(system, CounterStyleSystem::Cyclic) {
+        return None;
+    }
+    let prefix = descriptor("prefix").map(render_value).unwrap_or_default();
+    let suffix = descriptor("suffix").map(render_value).unwrap_or_default();
+    Some(CounterStyleDefinition {
+        origin,
+        layer_order,
+        source_order,
+        system,
+        symbols,
+        prefix,
+        suffix,
+    })
+}
+
+fn counter_style_symbols(value: &Value) -> Vec<String> {
+    match value {
+        Value::CommaList(values) | Value::List(values) => values.iter().map(render_value).collect(),
+        value => vec![render_value(value)],
+    }
+}
+
+fn compare_counter_style_priority(
+    left: &CounterStyleDefinition,
+    right: &CounterStyleDefinition,
+) -> std::cmp::Ordering {
+    left.origin
+        .cmp(&right.origin)
+        .then(left.layer_order.cmp(&right.layer_order))
+        .then(left.source_order.cmp(&right.source_order))
 }
 
 fn compare_font_face_priority(

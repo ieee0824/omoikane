@@ -1579,7 +1579,11 @@ fn generated_counter_text(
                     .counter_values(node, pseudo, counter_name)
                     .and_then(|values| values.last().copied())
                     .unwrap_or(0);
-                output.push_str(&format_counter(value, style));
+                output.push_str(
+                    &resolver
+                        .format_counter_value(value, style)
+                        .unwrap_or_else(|| format_counter(value, style)),
+                );
             }
             Value::Function { name, arguments } if name.eq_ignore_ascii_case("counters") => {
                 let counter_name = match arguments.first() {
@@ -1599,7 +1603,11 @@ fn generated_counter_text(
                     .counter_values(node, pseudo, counter_name)
                     .unwrap_or(&[0])
                     .iter()
-                    .map(|value| format_counter(*value, style))
+                    .map(|value| {
+                        resolver
+                            .format_counter_value(*value, style)
+                            .unwrap_or_else(|| format_counter(*value, style))
+                    })
                     .collect::<Vec<_>>()
                     .join(separator);
                 output.push_str(&formatted);
