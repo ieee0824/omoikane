@@ -7,7 +7,7 @@ use crate::{
 };
 
 use boa_gc::{Finalize, Trace};
-use std::ops::Deref;
+use std::{ops::Deref, sync::atomic::Ordering};
 
 /// `JsDataView` provides a wrapper for Boa's implementation of the ECMAScript `DataView` object
 ///
@@ -162,6 +162,25 @@ impl JsDataView {
                     .with_message("object is not a DataView")
                     .into()
             })
+    }
+
+    /// Returns whether this view tracks the length of a resizable buffer.
+    #[inline]
+    #[must_use]
+    pub fn is_length_tracking(&self) -> bool {
+        self.inner.borrow().data().byte_length.is_none()
+    }
+
+    /// Returns whether this view is detached or outside its buffer bounds.
+    #[inline]
+    #[must_use]
+    pub fn is_out_of_bounds(&self) -> bool {
+        let view = self.inner.borrow();
+        let buffer = view.data().viewed_array_buffer.as_buffer();
+        let Some(bytes) = buffer.bytes(Ordering::SeqCst) else {
+            return true;
+        };
+        view.data().is_out_of_bounds(bytes.len())
     }
 
     /// Returns the `viewed_array_buffer` field for [`JsDataView`]

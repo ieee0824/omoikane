@@ -38,6 +38,10 @@
   const nativeCompressionWrite = globalThis.__omoikane_compression_write;
   const nativeCompressionFinish = globalThis.__omoikane_compression_finish;
   const nativeCompressionAbort = globalThis.__omoikane_compression_abort;
+  const nativeArrayBufferInfo = globalThis.__omoikane_array_buffer_info;
+  const nativeCloneArrayBuffer = globalThis.__omoikane_clone_array_buffer;
+  const nativeTransferArrayBuffer = globalThis.__omoikane_transfer_array_buffer;
+  const nativeArrayBufferViewInfo = globalThis.__omoikane_array_buffer_view_info;
   const nativeNodeIsHtmlElement = globalThis.__omoikane_node_is_html_element;
   // Node equality is a platform operation. Capture every host hook it needs
   // before page code can replace the public bootstrap globals.
@@ -151,6 +155,10 @@
   delete globalThis.__omoikane_compression_write;
   delete globalThis.__omoikane_compression_finish;
   delete globalThis.__omoikane_compression_abort;
+  delete globalThis.__omoikane_array_buffer_info;
+  delete globalThis.__omoikane_clone_array_buffer;
+  delete globalThis.__omoikane_transfer_array_buffer;
+  delete globalThis.__omoikane_array_buffer_view_info;
   delete globalThis.__omoikane_node_is_html_element;
   delete globalThis.__omoikane_attribute_records;
   delete globalThis.__omoikane_create_element_ns;
@@ -19725,66 +19733,267 @@
     (browsingInput.structuredCloneObjectPrototypes = new WeakSet());
   safeWeakSetAdd(structuredCloneObjectPrototypes, Object.prototype);
 
-  function cloneStructuredValue(value, memory) {
+  // Structured cloning must keep working after page code replaces public
+  // constructors or collection methods. ArrayBuffer internals are inspected
+  // by the native hooks above so proxies and lookalike objects cannot enter a
+  // transfer list.
+  const IntrinsicArray = Array;
+  const intrinsicArrayFrom = Array.from;
+  const intrinsicArrayIsArray = Array.isArray;
+  const IntrinsicDate = Date;
+  const intrinsicDateGetTime = Function.prototype.call.bind(Date.prototype.getTime);
+  const IntrinsicRegExp = RegExp;
+  const regexpSourceGetter = Object.getOwnPropertyDescriptor(RegExp.prototype, "source").get;
+  const regexpFlagsGetter = Object.getOwnPropertyDescriptor(RegExp.prototype, "flags").get;
+  const IntrinsicMap = Map;
+  const IntrinsicSet = Set;
+  const setForEachIntrinsic = Set.prototype.forEach;
+  const IntrinsicArrayBuffer = ArrayBuffer;
+  const IntrinsicDataView = DataView;
+  const IntrinsicInt8Array = Int8Array;
+  const IntrinsicUint8Array = Uint8Array;
+  const IntrinsicUint8ClampedArray = Uint8ClampedArray;
+  const IntrinsicInt16Array = Int16Array;
+  const IntrinsicUint16Array = Uint16Array;
+  const IntrinsicInt32Array = Int32Array;
+  const IntrinsicUint32Array = Uint32Array;
+  const IntrinsicBigInt64Array = BigInt64Array;
+  const IntrinsicBigUint64Array = BigUint64Array;
+  const IntrinsicFloat16Array = globalThis.Float16Array;
+  const IntrinsicFloat32Array = Float32Array;
+  const IntrinsicFloat64Array = Float64Array;
+  const intrinsicObjectCreate = Object.create;
+  const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
+  const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
+  const intrinsicObjectKeys = Object.keys;
+  const IntrinsicObjectPrototype = Object.prototype;
+
+  function typedArrayConstructor(name) {
+    switch (name) {
+      case "Int8Array": return IntrinsicInt8Array;
+      case "Uint8Array": return IntrinsicUint8Array;
+      case "Uint8ClampedArray": return IntrinsicUint8ClampedArray;
+      case "Int16Array": return IntrinsicInt16Array;
+      case "Uint16Array": return IntrinsicUint16Array;
+      case "Int32Array": return IntrinsicInt32Array;
+      case "Uint32Array": return IntrinsicUint32Array;
+      case "BigInt64Array": return IntrinsicBigInt64Array;
+      case "BigUint64Array": return IntrinsicBigUint64Array;
+      case "Float16Array": return IntrinsicFloat16Array;
+      case "Float32Array": return IntrinsicFloat32Array;
+      case "Float64Array": return IntrinsicFloat64Array;
+      default: return undefined;
+    }
+  }
+
+  function validateTransferList(source) {
+    if (source === undefined) return [];
+    const list = intrinsicArrayFrom(source);
+    const seen = new IntrinsicSet();
+    for (let index = 0; index < list.length; index++) {
+      const transferable = list[index];
+      if (nativeArrayBufferInfo(transferable) === null || hasSetValue(seen, transferable)) {
+        throw dataCloneError("The transfer list contains an invalid or duplicate object.");
+      }
+      addSetValue(seen, transferable);
+    }
+    return list;
+  }
+
+  function transferListFromOptions(options, allowLegacySequence) {
+    if (allowLegacySequence && intrinsicArrayIsArray(options)) {
+      return validateTransferList(options);
+    }
+    if (options === undefined || options === null) return [];
+    return validateTransferList(options.transfer);
+  }
+
+  function serializeStructuredValue(value, state) {
     if (value === null || typeof value === "undefined" ||
         typeof value === "boolean" || typeof value === "number" ||
-        typeof value === "string" || typeof value === "bigint") return value;
+        typeof value === "string" || typeof value === "bigint") return ["p", value];
     if (typeof value === "symbol" || typeof value === "function") throw dataCloneError();
     if (value instanceof Node || value instanceof EventTarget) throw dataCloneError();
-    if (memory.has(value)) return memory.get(value);
+    if (safeMapHas(state.memory, value)) return ["r", safeMapGet(state.memory, value)];
 
-    if (value instanceof Date) {
-      const result = new Date(value.getTime()); memory.set(value, result); return result;
-    }
-    if (value instanceof RegExp) {
-      const result = new RegExp(value.source, value.flags); memory.set(value, result); return result;
-    }
-    if (value instanceof ArrayBuffer) {
-      const result = value.slice(0); memory.set(value, result); return result;
-    }
-    if (ArrayBuffer.isView(value)) {
-      const buffer = cloneStructuredValue(value.buffer, memory);
-      const result = value instanceof DataView
-        ? new DataView(buffer, value.byteOffset, value.byteLength)
-        : new value.constructor(buffer, value.byteOffset, value.length);
-      memory.set(value, result); return result;
-    }
-    if (value instanceof Map) {
-      const result = new Map(); memory.set(value, result);
-      for (const [key, item] of value) {
-        result.set(cloneStructuredValue(key, memory), cloneStructuredValue(item, memory));
-      }
-      return result;
-    }
-    if (value instanceof Set) {
-      const result = new Set(); memory.set(value, result);
-      for (const item of value) result.add(cloneStructuredValue(item, memory));
-      return result;
-    }
-    if (Array.isArray(value)) {
-      const result = new Array(value.length); memory.set(value, result);
-      for (let index = 0; index < value.length; index++) {
-        if (Object.prototype.hasOwnProperty.call(value, index)) {
-          result[index] = cloneStructuredValue(value[index], memory);
+    const id = state.nodes.length;
+    safeMapSet(state.memory, value, id);
+    state.nodes.push(null);
+
+    if (value instanceof IntrinsicDate) {
+      state.nodes[id] = ["d", intrinsicDateGetTime(value)];
+    } else if (value instanceof IntrinsicRegExp) {
+      state.nodes[id] = ["x", safeApply(regexpSourceGetter, value, []),
+        safeApply(regexpFlagsGetter, value, [])];
+    } else {
+      const bufferInfo = nativeArrayBufferInfo(value);
+      if (bufferInfo !== null) {
+        if (bufferInfo[0]) throw dataCloneError("A detached ArrayBuffer cannot be cloned.");
+        if (safeMapHas(state.transferSet, value)) {
+          state.nodes[id] = ["b", value, true];
+        } else {
+          let clone;
+          try { clone = nativeCloneArrayBuffer(value); }
+          catch (_) { throw dataCloneError("The ArrayBuffer could not be cloned."); }
+          state.nodes[id] = ["b", clone, false];
         }
+        return ["r", id];
       }
-      return result;
+      const viewInfo = nativeArrayBufferViewInfo(value);
+      if (viewInfo !== null) {
+        if (viewInfo[5]) throw dataCloneError("An out-of-bounds ArrayBuffer view cannot be cloned.");
+        state.nodes[id] = ["v", viewInfo[0], viewInfo[1],
+          serializeStructuredValue(viewInfo[2], state), viewInfo[3], viewInfo[4], value];
+        return ["r", id];
+      }
+      if (value instanceof IntrinsicMap) {
+        const entries = [];
+        safeApply(mapForEachIntrinsic, value, [(item, key) => {
+          entries.push([serializeStructuredValue(key, state), serializeStructuredValue(item, state)]);
+        }]);
+        state.nodes[id] = ["m", entries];
+      } else if (value instanceof IntrinsicSet) {
+        const entries = [];
+        safeApply(setForEachIntrinsic, value, [item => {
+          entries.push(serializeStructuredValue(item, state));
+        }]);
+        state.nodes[id] = ["t", entries];
+      } else if (intrinsicArrayIsArray(value)) {
+        const entries = [];
+        const length = value.length;
+        for (let index = 0; index < length; index++) {
+          if (hasOwnProperty(value, index)) {
+            entries.push([index, serializeStructuredValue(value[index], state)]);
+          }
+        }
+        state.nodes[id] = ["a", length, entries];
+      } else {
+        const prototype = intrinsicObjectGetPrototypeOf(value);
+        if (prototype !== null && !safeWeakSetHas(structuredCloneObjectPrototypes, prototype)) {
+          throw dataCloneError();
+        }
+        if (intrinsicObjectGetOwnPropertySymbols(value).length) throw dataCloneError();
+        const entries = [];
+        for (const key of intrinsicObjectKeys(value)) {
+          entries.push([key, serializeStructuredValue(value[key], state)]);
+        }
+        state.nodes[id] = ["o", prototype === null ? 0 : 1, entries];
+      }
     }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== null && !safeWeakSetHas(structuredCloneObjectPrototypes, prototype)) throw dataCloneError();
-    if (Object.getOwnPropertySymbols(value).length) throw dataCloneError();
-    const result = Object.create(prototype === null ? null : Object.prototype); memory.set(value, result);
-    for (const key of Object.keys(value)) {
-      result[key] = cloneStructuredValue(value[key], memory);
+    return ["r", id];
+  }
+
+  function resolveStructuredCloneToken(token, objects) {
+    if (token[0] === "p") return token[1];
+    if (token[0] !== "r" || objects[token[1]] === undefined) throw dataCloneError();
+    return objects[token[1]];
+  }
+
+  function deserializeStructuredValue(root, state, transferred) {
+    const objects = new IntrinsicArray(state.nodes.length);
+    for (let index = 0; index < state.nodes.length; index++) {
+      const node = state.nodes[index];
+      switch (node[0]) {
+        case "d": objects[index] = new IntrinsicDate(node[1]); break;
+        case "x": objects[index] = new IntrinsicRegExp(node[1], node[2]); break;
+        case "b": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1]; break;
+        case "m": objects[index] = new IntrinsicMap(); break;
+        case "t": objects[index] = new IntrinsicSet(); break;
+        case "a": objects[index] = new IntrinsicArray(node[1]); break;
+        case "o": objects[index] = intrinsicObjectCreate(node[1] === 0 ? null : IntrinsicObjectPrototype); break;
+        case "v": break;
+        default: throw dataCloneError();
+      }
     }
-    return result;
+    for (let index = 0; index < state.nodes.length; index++) {
+      const node = state.nodes[index];
+      if (node[0] !== "v") continue;
+      const buffer = resolveStructuredCloneToken(node[3], objects);
+      if (nativeArrayBufferInfo(buffer) === null) throw dataCloneError();
+      if (node[1] === "data") {
+        objects[index] = node[5] === null
+          ? new IntrinsicDataView(buffer, node[4])
+          : new IntrinsicDataView(buffer, node[4], node[5]);
+      } else {
+        const Constructor = typedArrayConstructor(node[2]);
+        if (typeof Constructor !== "function") throw dataCloneError();
+        objects[index] = node[5] === null
+          ? new Constructor(buffer, node[4])
+          : new Constructor(buffer, node[4], node[5]);
+      }
+    }
+    for (let index = 0; index < state.nodes.length; index++) {
+      const node = state.nodes[index];
+      const target = objects[index];
+      switch (node[0]) {
+        case "m":
+          for (const pair of node[1]) {
+            safeMapSet(target, resolveStructuredCloneToken(pair[0], objects),
+              resolveStructuredCloneToken(pair[1], objects));
+          }
+          break;
+        case "t":
+          for (const entry of node[1]) addSetValue(target, resolveStructuredCloneToken(entry, objects));
+          break;
+        case "a":
+          for (const pair of node[2]) target[pair[0]] = resolveStructuredCloneToken(pair[1], objects);
+          break;
+        case "o":
+          for (const pair of node[2]) safeDefineProperty(target, pair[0], {
+            value: resolveStructuredCloneToken(pair[1], objects),
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
+          break;
+        default: break;
+      }
+    }
+    return resolveStructuredCloneToken(root, objects);
+  }
+
+  function cloneStructuredValue(value, transferList) {
+    const transferSet = new IntrinsicMap();
+    for (let index = 0; index < transferList.length; index++) {
+      safeMapSet(transferSet, transferList[index], index);
+    }
+    const state = { memory: new IntrinsicMap(), nodes: [], transferSet };
+    const root = serializeStructuredValue(value, state);
+
+    // Serialization can invoke getters. Recheck every buffer and view before
+    // detaching anything so one bad entry cannot partially consume the list.
+    for (let index = 0; index < transferList.length; index++) {
+      const info = nativeArrayBufferInfo(transferList[index]);
+      if (info === null || info[0]) throw dataCloneError("A detached ArrayBuffer cannot be transferred.");
+    }
+    for (let index = 0; index < state.nodes.length; index++) {
+      const node = state.nodes[index];
+      const bufferNode = node[0] === "v" && node[3][0] === "r"
+        ? state.nodes[node[3][1]]
+        : null;
+      if (bufferNode !== null && bufferNode[0] === "b" && bufferNode[2]) {
+        const info = nativeArrayBufferViewInfo(node[6]);
+        if (info === null || info[5]) throw dataCloneError("An out-of-bounds ArrayBuffer view cannot be cloned.");
+      }
+    }
+
+    const transferred = new IntrinsicMap();
+    for (let index = 0; index < transferList.length; index++) {
+      const source = transferList[index];
+      let target;
+      try { target = nativeTransferArrayBuffer(source); }
+      catch (_) { throw dataCloneError("The ArrayBuffer could not be transferred."); }
+      safeMapSet(transferred, source, target);
+    }
+    return deserializeStructuredValue(root, state, transferred);
+  }
+
+  function clonePostMessageValue(value, options) {
+    return cloneStructuredValue(value, transferListFromOptions(options, true));
   }
 
   globalThis.structuredClone = function(value, options = undefined) {
-    if (options != null && options.transfer != null && Array.from(options.transfer).length) {
-      throw dataCloneError("Transfer lists are not supported yet.");
-    }
-    return cloneStructuredValue(value, new Map());
+    return cloneStructuredValue(value, transferListFromOptions(options, false));
   };
 
   // -------------------------------------------------------------------------
@@ -21108,10 +21317,9 @@
   }
 
   function encodeWorkerMessage(value, options = undefined) {
-    if (Array.isArray(options)) throw dataCloneError("Transfer lists are not supported yet.");
-    const cloned = globalThis.structuredClone(value, options);
+    const cloned = clonePostMessageValue(value, options);
     const nodes = [];
-    const memory = new Map();
+    const memory = new IntrinsicMap();
     const visit = item => {
       if (item === undefined) return ["u"];
       if (item === null) return ["z"];
@@ -21122,37 +21330,49 @@
         case "bigint": return ["i", String(item)];
         default: break;
       }
-      const known = memory.get(item);
-      if (known !== undefined) return ["r", known];
+      if (safeMapHas(memory, item)) return ["r", safeMapGet(memory, item)];
       const id = nodes.length;
-      memory.set(item, id);
+      safeMapSet(memory, item, id);
       nodes.push(null);
-      if (item instanceof Date) {
-        nodes[id] = ["d", encodeWorkerNumber(item.getTime())];
-      } else if (item instanceof RegExp) {
-        nodes[id] = ["x", item.source, item.flags];
-      } else if (item instanceof ArrayBuffer) {
-        nodes[id] = ["q", Array.from(new Uint8Array(item))];
-      } else if (ArrayBuffer.isView(item)) {
-        const name = item instanceof DataView ? "DataView" : item.constructor.name;
-        nodes[id] = ["v", name, visit(item.buffer), item.byteOffset,
-          item instanceof DataView ? item.byteLength : item.length];
-      } else if (item instanceof Map) {
-        nodes[id] = ["m", Array.from(item, pair => [visit(pair[0]), visit(pair[1])])];
-      } else if (item instanceof Set) {
-        nodes[id] = ["t", Array.from(item, entry => visit(entry))];
-      } else if (Array.isArray(item)) {
+      if (item instanceof IntrinsicDate) {
+        nodes[id] = ["d", encodeWorkerNumber(intrinsicDateGetTime(item))];
+      } else if (item instanceof IntrinsicRegExp) {
+        nodes[id] = ["x", safeApply(regexpSourceGetter, item, []),
+          safeApply(regexpFlagsGetter, item, [])];
+      } else if (nativeArrayBufferInfo(item) !== null) {
+        const info = nativeArrayBufferInfo(item);
+        if (info[0]) throw dataCloneError();
+        const view = new IntrinsicUint8Array(item);
+        const bytes = new IntrinsicArray(view.length);
+        for (let index = 0; index < view.length; index++) bytes[index] = view[index];
+        nodes[id] = ["q", bytes, info[1] ? null : info[2]];
+      } else if (nativeArrayBufferViewInfo(item) !== null) {
+        const info = nativeArrayBufferViewInfo(item);
+        if (info[5]) throw dataCloneError();
+        const name = info[0] === "data" ? "DataView" : info[1];
+        nodes[id] = ["v", name, visit(info[2]), info[3], info[4]];
+      } else if (item instanceof IntrinsicMap) {
+        const entries = [];
+        safeApply(mapForEachIntrinsic, item, [(entry, key) => {
+          entries.push([visit(key), visit(entry)]);
+        }]);
+        nodes[id] = ["m", entries];
+      } else if (item instanceof IntrinsicSet) {
+        const entries = [];
+        safeApply(setForEachIntrinsic, item, [entry => entries.push(visit(entry))]);
+        nodes[id] = ["t", entries];
+      } else if (intrinsicArrayIsArray(item)) {
         const entries = [];
         for (let index = 0; index < item.length; index++) {
-          if (Object.prototype.hasOwnProperty.call(item, index)) entries.push([index, visit(item[index])]);
+          if (hasOwnProperty(item, index)) entries.push([index, visit(item[index])]);
         }
         nodes[id] = ["a", item.length, entries];
       } else {
-        const prototype = Object.getPrototypeOf(item);
-        if (prototype !== Object.prototype && prototype !== null) throw dataCloneError();
-        if (Object.getOwnPropertySymbols(item).length) throw dataCloneError();
+        const prototype = intrinsicObjectGetPrototypeOf(item);
+        if (prototype !== IntrinsicObjectPrototype && prototype !== null) throw dataCloneError();
+        if (intrinsicObjectGetOwnPropertySymbols(item).length) throw dataCloneError();
         nodes[id] = ["o", prototype === null ? 0 : 1,
-          Object.keys(item).map(key => [key, visit(item[key])])];
+          intrinsicObjectKeys(item).map(key => [key, visit(item[key])])];
       }
       return ["r", id];
     };
@@ -21161,11 +21381,13 @@
 
   function decodeWorkerMessage(wire) {
     const encoded = JSON.parse(String(wire));
-    if (!encoded || encoded.version !== 1 || !Array.isArray(encoded.nodes)) throw dataCloneError();
+    if (!encoded || encoded.version !== 1 || !intrinsicArrayIsArray(encoded.nodes)) {
+      throw dataCloneError();
+    }
     const nodes = encoded.nodes;
-    const objects = new Array(nodes.length);
+    const objects = new IntrinsicArray(nodes.length);
     const resolvePrimitive = token => {
-      if (!Array.isArray(token)) throw dataCloneError();
+      if (!intrinsicArrayIsArray(token)) throw dataCloneError();
       switch (token[0]) {
         case "u": return undefined;
         case "z": return null;
@@ -21183,35 +21405,43 @@
     };
     for (let index = 0; index < nodes.length; index++) {
       const node = nodes[index];
-      if (!Array.isArray(node)) throw dataCloneError();
+      if (!intrinsicArrayIsArray(node)) throw dataCloneError();
       switch (node[0]) {
-        case "d": objects[index] = new Date(decodeWorkerNumber(node[1])); break;
-        case "x": objects[index] = new RegExp(String(node[1]), String(node[2])); break;
-        case "q": objects[index] = new Uint8Array(node[1]).buffer; break;
-        case "m": objects[index] = new Map(); break;
-        case "t": objects[index] = new Set(); break;
-        case "a": objects[index] = new Array(node[1]); break;
-        case "o": objects[index] = Object.create(node[1] === 0 ? null : Object.prototype); break;
+        case "d": objects[index] = new IntrinsicDate(decodeWorkerNumber(node[1])); break;
+        case "x": objects[index] = new IntrinsicRegExp(String(node[1]), String(node[2])); break;
+        case "q": {
+          const maxByteLength = node[2];
+          const buffer = maxByteLength === null || maxByteLength === undefined
+            ? new IntrinsicArrayBuffer(node[1].length)
+            : new IntrinsicArrayBuffer(node[1].length, { maxByteLength });
+          const bytes = new IntrinsicUint8Array(buffer);
+          for (let offset = 0; offset < node[1].length; offset++) bytes[offset] = node[1][offset];
+          objects[index] = buffer;
+          break;
+        }
+        case "m": objects[index] = new IntrinsicMap(); break;
+        case "t": objects[index] = new IntrinsicSet(); break;
+        case "a": objects[index] = new IntrinsicArray(node[1]); break;
+        case "o": objects[index] = intrinsicObjectCreate(node[1] === 0 ? null : IntrinsicObjectPrototype); break;
         case "v": break;
         default: throw dataCloneError();
       }
     }
-    const typedArrayConstructors = {
-      Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
-      Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array,
-      BigUint64Array,
-    };
     for (let index = 0; index < nodes.length; index++) {
       const node = nodes[index];
       if (node[0] !== "v") continue;
       const buffer = resolvePrimitive(node[2]);
-      if (!(buffer instanceof ArrayBuffer)) throw dataCloneError();
+      if (nativeArrayBufferInfo(buffer) === null) throw dataCloneError();
       if (node[1] === "DataView") {
-        objects[index] = new DataView(buffer, node[3], node[4]);
+        objects[index] = node[4] === null
+          ? new IntrinsicDataView(buffer, node[3])
+          : new IntrinsicDataView(buffer, node[3], node[4]);
       } else {
-        const Constructor = typedArrayConstructors[node[1]];
+        const Constructor = typedArrayConstructor(node[1]);
         if (!Constructor) throw dataCloneError();
-        objects[index] = new Constructor(buffer, node[3], node[4]);
+        objects[index] = node[4] === null
+          ? new Constructor(buffer, node[3])
+          : new Constructor(buffer, node[3], node[4]);
       }
     }
     for (let index = 0; index < nodes.length; index++) {
@@ -21219,16 +21449,18 @@
       const target = objects[index];
       switch (node[0]) {
         case "m":
-          for (const pair of node[1]) target.set(resolvePrimitive(pair[0]), resolvePrimitive(pair[1]));
+          for (const pair of node[1]) {
+            safeMapSet(target, resolvePrimitive(pair[0]), resolvePrimitive(pair[1]));
+          }
           break;
         case "t":
-          for (const entry of node[1]) target.add(resolvePrimitive(entry));
+          for (const entry of node[1]) addSetValue(target, resolvePrimitive(entry));
           break;
         case "a":
           for (const pair of node[2]) target[pair[0]] = resolvePrimitive(pair[1]);
           break;
         case "o":
-          for (const pair of node[2]) Object.defineProperty(target, pair[0], {
+          for (const pair of node[2]) safeDefineProperty(target, pair[0], {
             value: resolvePrimitive(pair[1]), enumerable: true, writable: true, configurable: true,
           });
           break;
@@ -21254,7 +21486,7 @@
       this._onmessageerror = null;
     }
     postMessage(message, options = undefined) {
-      const data = globalThis.structuredClone(message, options);
+      const data = clonePostMessageValue(message, options);
       const destination = this._entangled;
       if (this._closed || !destination || destination._closed) return;
       destination._queueMessage(data);
@@ -21439,12 +21671,12 @@
       this._id = __omoikane_broadcast_channel_register(this._name, endpoint);
     }
     get name() { return this._name; }
-    postMessage(message, options = undefined) {
+    postMessage(message) {
       if (this._closed) throw new DOMException("The BroadcastChannel is closed.", "InvalidStateError");
       // Encoding performs the structured-clone operation synchronously, so
-      // functions, symbols, DOM objects, and unsupported transfer lists throw
-      // DataCloneError before any recipient is queued.
-      const wire = __omoikane_encode_worker_message(message, options);
+      // functions, symbols, and DOM objects throw DataCloneError before any
+      // recipient is queued. BroadcastChannel has no transfer-list overload.
+      const wire = __omoikane_encode_worker_message(message);
       __omoikane_broadcast_channel_post(this._id, wire);
     }
     close() {

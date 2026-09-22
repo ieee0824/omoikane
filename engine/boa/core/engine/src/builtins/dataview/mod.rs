@@ -68,7 +68,7 @@ impl DataView {
     /// Abstract operation [`IsViewOutOfBounds ( viewRecord )`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-isviewoutofbounds
-    fn is_out_of_bounds(&self, buf_byte_len: usize) -> bool {
+    pub(crate) fn is_out_of_bounds(&self, buf_byte_len: usize) -> bool {
         let buf_byte_len = buf_byte_len as u64;
         // 1. Let view be viewRecord.[[Object]].
         // 2. Let bufferByteLength be viewRecord.[[CachedBufferByteLength]].
