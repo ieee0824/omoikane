@@ -16,7 +16,7 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
     Font, FontFamilyKey, FontStyle, FontVariantKey, FontWeight, LayoutFontMetrics, WebFontRegistry,
 };
-use crate::http::{Client, Url};
+use crate::http::{Client, CookieJar, Url};
 use crate::paint::Image;
 use rusqlite::{Connection, params};
 
@@ -65,6 +65,8 @@ thread_local! {
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
     static LAYOUT_FONTS: RefCell<Option<LayoutFontContext>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
+    static IMAGE_COOKIE_CONTEXT: RefCell<Option<(Arc<Mutex<CookieJar>>, Option<Url>, usize)>> = const { RefCell::new(None) };
+    static IMAGE_CACHE_OWNER: RefCell<Option<(Arc<Mutex<CookieJar>>, usize)>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
     static CONTENT_VISIBILITY_LAYOUT: RefCell<Option<ContentVisibilityLayoutSession>> = const { RefCell::new(None) };
 }
@@ -407,6 +409,54 @@ pub fn with_image_base_url<T>(base_url: Option<Url>, f: impl FnOnce() -> T) -> T
         let _guard = ImageBaseUrlGuard(previous);
         f()
     })
+}
+
+/// Runs image resolution with the browsing session's Cookie store and site.
+/// Cached responses are scoped to the Document that selected those cookies.
+pub(crate) fn with_image_cookie_store<T>(
+    store: Arc<Mutex<CookieJar>>,
+    site: Option<Url>,
+    document_id: usize,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct ImageCookieContextGuard(Option<(Arc<Mutex<CookieJar>>, Option<Url>, usize)>);
+
+    impl Drop for ImageCookieContextGuard {
+        fn drop(&mut self) {
+            IMAGE_COOKIE_CONTEXT.with(|cell| {
+                cell.replace(self.0.take());
+            });
+        }
+    }
+
+    IMAGE_COOKIE_CONTEXT.with(|cell| {
+        let previous = cell.replace(Some((store, site, document_id)));
+        let _guard = ImageCookieContextGuard(previous);
+        f()
+    })
+}
+
+fn ensure_image_cache_context() {
+    let current = IMAGE_COOKIE_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|(store, _, document_id)| (Arc::clone(store), *document_id))
+    });
+    IMAGE_CACHE_OWNER.with(|owner| {
+        let mut owner = owner.borrow_mut();
+        let same = match (owner.as_ref(), current.as_ref()) {
+            (Some((left_store, left_document)), Some((right_store, right_document))) => {
+                Arc::ptr_eq(left_store, right_store) && left_document == right_document
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
+            IMAGE_ANIMATION_CACHE.with(|cache| cache.borrow_mut().clear());
+            *owner = current;
+        }
+    });
 }
 
 /// A rectangle in layout space.

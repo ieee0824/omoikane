@@ -2,9 +2,10 @@
 
 use super::csp::{CspPolicy, ResourceType};
 use crate::dom::NodeHandle;
-use crate::http::{Client, HttpRequest, Url};
+use crate::http::{Client, CookieJar, HttpRequest, Url};
 use crate::paint::{DataUri, image::parse_data_uri, stylesheet as css};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_IMPORT_DEPTH: usize = 5;
@@ -21,6 +22,7 @@ struct Resource {
 pub(super) struct StylesheetLoader {
     resources: HashMap<String, Option<Resource>>,
     client: Client,
+    site_for_cookies: Option<Url>,
 }
 
 impl std::fmt::Debug for StylesheetLoader {
@@ -56,7 +58,11 @@ impl StylesheetLoader {
         node: &NodeHandle,
         base: Option<&Url>,
         policy: &CspPolicy,
+        site_for_cookies: Option<&Url>,
+        cookies: Arc<Mutex<CookieJar>>,
     ) -> (String, Vec<String>) {
+        self.client.set_shared_cookie_store(cookies);
+        self.site_for_cookies = site_for_cookies.cloned();
         let mut blocked = Vec::new();
         if node.get_attribute("disabled").is_some() {
             return (String::new(), blocked);
@@ -162,7 +168,7 @@ impl StylesheetLoader {
                 if !same_origin {
                     request.require_public_ip();
                 }
-                if let Some(site) = document_base {
+                if let Some(site) = self.site_for_cookies.as_ref().or(document_base) {
                     request.set_cookie_context(site.clone(), false);
                 }
                 self.client.send(request).ok()
@@ -294,5 +300,77 @@ impl StylesheetLoader {
             resource.text,
             resource.url.as_ref(),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::html::TreeBuilder;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn stylesheet_uses_top_level_site_for_samesite_cookies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target: Url = format!("http://{}/style.css", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = std::thread::spawn(move || {
+            let mut cookies = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut cookie = None;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.strip_prefix("Cookie: ") {
+                        cookie = Some(value.trim().to_string());
+                    }
+                }
+                cookies.push(cookie);
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: 19\r\nConnection: close\r\n\r\nbody { color: red }").unwrap();
+            }
+            cookies
+        });
+        let store = Arc::new(Mutex::new(CookieJar::new()));
+        for header in [
+            "strict=1; SameSite=Strict; Path=/",
+            "lax=2; SameSite=Lax; Path=/",
+        ] {
+            store
+                .lock()
+                .unwrap()
+                .add_from_header_for_url(header, &target);
+        }
+        let document = TreeBuilder::parse(&format!(
+            "<html><head><link rel='stylesheet' href='{}'></head></html>",
+            target
+        ))
+        .document();
+        let link = document.query_selector("link").unwrap();
+        let other: Url = "http://localhost/".parse().unwrap();
+        for site in [&other, &target] {
+            let mut loader = StylesheetLoader::default();
+            let (css, blocked) = loader.load_node(
+                &link,
+                Some(&target),
+                &CspPolicy::default(),
+                Some(site),
+                Arc::clone(&store),
+            );
+            assert!(blocked.is_empty());
+            assert_eq!(css, "body { color: red }");
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            [None, Some("strict=1; lax=2".to_string())]
+        );
     }
 }

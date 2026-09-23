@@ -91,10 +91,9 @@ pub(super) struct ModuleFetchPool {
 }
 
 impl ModuleFetchPool {
-    pub fn new() -> std::io::Result<Self> {
+    pub fn new(cookies: Arc<Mutex<CookieJar>>) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::channel::<Request>();
         let receiver = Arc::new(Mutex::new(receiver));
-        let cookies = Arc::new(Mutex::new(CookieJar::new()));
         let live = Arc::new(AtomicBool::new(true));
         for index in 0..WORKERS {
             let receiver = receiver.clone();
@@ -178,6 +177,8 @@ impl Drop for ModuleFetchPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
     use std::sync::atomic::AtomicUsize;
     use std::task::Wake;
 
@@ -186,6 +187,65 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn module_workers_use_top_level_site_for_samesite_cookies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/module.js", listener.local_addr().unwrap());
+        let target: Url = url.parse().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut cookies = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut cookie = None;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.strip_prefix("Cookie: ") {
+                        cookie = Some(value.trim().to_string());
+                    }
+                }
+                cookies.push(cookie);
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+            cookies
+        });
+        let store = Arc::new(Mutex::new(CookieJar::new()));
+        for header in [
+            "strict=1; SameSite=Strict; Path=/",
+            "lax=2; SameSite=Lax; Path=/",
+        ] {
+            store
+                .lock()
+                .unwrap()
+                .add_from_header_for_url(header, &target);
+        }
+        let pool = ModuleFetchPool::new(store).unwrap();
+        let other: Url = "http://localhost/".parse().unwrap();
+        for site in [other, target] {
+            let mut fetch = pool.fetch(url.clone(), false, Some(site));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let mut context = Context::from_waker(Waker::noop());
+                if let Poll::Ready(result) = Pin::new(&mut fetch).poll(&mut context) {
+                    assert!(result.is_ok(), "{result:?}");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "module fetch timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            [None, Some("strict=1; lax=2".to_string())]
+        );
     }
 
     #[test]
@@ -223,7 +283,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/module.js", listener.local_addr().unwrap());
-        let pool = ModuleFetchPool::new().unwrap();
+        let pool = ModuleFetchPool::new(Arc::new(Mutex::new(CookieJar::new()))).unwrap();
         let active: Vec<_> = (0..WORKERS)
             .map(|_| pool.fetch(url.clone(), false, None))
             .collect();

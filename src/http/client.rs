@@ -5,7 +5,7 @@ use super::cookie::CookieJar;
 use super::request::{HttpRequest, Method, copy_header_on_redirect, default_user_agent};
 use super::response::{HttpParseError, HttpResponse};
 use super::url::{Url, resolve_url};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Maximum number of redirects to follow before aborting.
@@ -26,6 +26,7 @@ const DEFAULT_MAX_REDIRECTS: u32 = 10;
 #[derive(Debug)]
 pub struct Client {
     cookie_jar: CookieJar,
+    shared_cookie_store: Option<Arc<Mutex<CookieJar>>>,
     max_redirects: u32,
     user_agent: String,
     insecure: bool,
@@ -37,6 +38,7 @@ impl Client {
     pub fn new() -> Self {
         Self {
             cookie_jar: CookieJar::new(),
+            shared_cookie_store: None,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             user_agent: default_user_agent(),
             insecure: false,
@@ -83,6 +85,12 @@ impl Client {
         &mut self.cookie_jar
     }
 
+    /// Uses one browsing session's Cookie store while retaining this client's
+    /// independent connection pool. The public local jar API remains unchanged.
+    pub(crate) fn set_shared_cookie_store(&mut self, store: Arc<Mutex<CookieJar>>) {
+        self.shared_cookie_store = Some(store);
+    }
+
     /// Sends a GET request to `url`, following redirects and managing cookies.
     pub fn get(&mut self, url: &str) -> Result<HttpResponse, HttpParseError> {
         let request = HttpRequest::get(url).map_err(|e| {
@@ -107,7 +115,8 @@ impl Client {
     /// 303, 307, 308) are followed automatically up to
     /// [`Client::set_max_redirects`].
     pub fn send(&mut self, request: HttpRequest) -> Result<HttpResponse, HttpParseError> {
-        self.send_with_cookie_store(request, None)
+        let shared = self.shared_cookie_store.clone();
+        self.send_with_cookie_store(request, shared.as_deref())
     }
 
     /// Shares cookies between parallel clients while each client retains its
@@ -251,14 +260,26 @@ impl Client {
             request.set_header("User-Agent", self.user_agent.clone());
         }
         request.remove_header("cookie");
-        if credentials
-            && let Some(cookie_header) = self.cookie_jar.cookie_header_for_request(
-                request.url(),
-                request.site_for_cookies().unwrap_or(request.url()),
-                request.is_top_level_navigation(),
-                request.method(),
-            )
-        {
+        let shared = self.shared_cookie_store.clone();
+        let cookie_header = if credentials {
+            match shared.as_ref() {
+                Some(store) => store.lock().unwrap().cookie_header_for_request(
+                    request.url(),
+                    request.site_for_cookies().unwrap_or(request.url()),
+                    request.is_top_level_navigation(),
+                    request.method(),
+                ),
+                None => self.cookie_jar.cookie_header_for_request(
+                    request.url(),
+                    request.site_for_cookies().unwrap_or(request.url()),
+                    request.is_top_level_navigation(),
+                    request.method(),
+                ),
+            }
+        } else {
+            None
+        };
+        if let Some(cookie_header) = cookie_header {
             request.add_header("Cookie", cookie_header);
         }
 
@@ -267,9 +288,11 @@ impl Client {
             .send_with_timeout(&request, self.insecure, timeout)?;
         if credentials {
             let origin = request.url().clone();
+            let mut shared_jar = shared.as_ref().map(|store| store.lock().unwrap());
+            let cookies = shared_jar.as_deref_mut().unwrap_or(&mut self.cookie_jar);
             for (name, value) in response.headers() {
                 if name.eq_ignore_ascii_case("set-cookie") {
-                    self.cookie_jar.add_from_header_for_request(
+                    cookies.add_from_header_for_request(
                         value,
                         &origin,
                         request.site_for_cookies().unwrap_or(&origin),

@@ -563,7 +563,16 @@ impl ModuleLoader for HttpModuleLoader {
                 } else {
                     let mut pool = self.fetch_pool.borrow_mut();
                     if pool.is_none() {
-                        *pool = Some(ModuleFetchPool::new().map_err(|error| {
+                        let cookies = self
+                            .owner
+                            .upgrade()
+                            .ok_or_else(|| {
+                                JsNativeError::error().with_message("module owner was discarded")
+                            })?
+                            .borrow()
+                            .cookie_store
+                            .clone();
+                        *pool = Some(ModuleFetchPool::new(cookies).map_err(|error| {
                             JsNativeError::typ().with_message(error.to_string())
                         })?);
                     }
@@ -1191,6 +1200,7 @@ struct HostState {
     geolocation_requests: HashMap<u64, GeolocationRequest>,
     compression_streams: compression_stream::Store,
     http_client: Client,
+    cookie_store: Arc<Mutex<crate::http::CookieJar>>,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
     /// Successful CORS preflight results for this environment settings object.
@@ -1859,6 +1869,9 @@ impl HostState {
             .unwrap_or(DocumentSecurityOrigin::Opaque(1));
         let mut document_security_origins = HashMap::new();
         document_security_origins.insert(document.identity(), main_security_origin);
+        let cookie_store = Arc::new(Mutex::new(crate::http::CookieJar::new()));
+        let mut http_client = Client::new();
+        http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
         let mut state = Self {
             runtime_identity: Rc::new(()),
             performance_start,
@@ -1894,7 +1907,8 @@ impl HostState {
             next_geolocation_request_id: 1,
             geolocation_requests: HashMap::new(),
             compression_streams: compression_stream::Store::new(),
-            http_client: Client::new(),
+            http_client,
+            cookie_store,
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
             cors_preflight_cache: PreflightCache::default(),
@@ -2418,8 +2432,8 @@ impl HostState {
                         crate::http::HttpRequest::get(&url)
                             .ok()
                             .and_then(|mut request| {
-                                if let Some(site) = base_url {
-                                    request.set_cookie_context(site.clone(), false);
+                                if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
+                                    request.set_cookie_context(site, false);
                                 }
                                 self.http_client.send(request).ok()
                             });
@@ -3306,9 +3320,16 @@ impl HostState {
             .map(|entry| std::mem::take(&mut entry.resources))
             .unwrap_or_default();
         let mut web_fonts = crate::font::WebFontRegistry::new();
+        let site_for_cookies = self.location_href.parse::<crate::http::Url>().ok();
         let (stylesheet_nodes, font_scope_parents) = collect_stylesheet_nodes(document);
         for (style_node, scope, implicit_scope_root) in stylesheet_nodes {
-            let (css, blocked) = resources.load_node(&style_node, base.as_ref(), &policy);
+            let (css, blocked) = resources.load_node(
+                &style_node,
+                base.as_ref(),
+                &policy,
+                site_for_cookies.as_ref(),
+                Arc::clone(&self.cookie_store),
+            );
             for blocked_uri in blocked {
                 self.record_csp_violation(document, ResourceType::Style, blocked_uri);
             }
@@ -3564,6 +3585,8 @@ impl HostState {
             &document,
             self.base_url_for_document(document_id).as_ref(),
         );
+        let image_site = self.location_href.parse::<crate::http::Url>().ok();
+        let image_cookies = Arc::clone(&self.cookie_store);
         let animation_time = self.event_loop.rendering_time_ms() as u64;
         let relevant_nodes = self
             .content_visibility_focus_nodes
@@ -3593,16 +3616,23 @@ impl HostState {
                     crate::paint::text::load_text_fonts(),
                     Some(entry.web_fonts.clone()),
                     || {
-                        crate::layout::with_image_base_url(base, || {
-                            crate::layout::with_image_animation_time(animation_time, || {
-                                crate::layout::layout_tree_with_content_visibility(
-                                    &document,
-                                    resolver,
-                                    viewport,
-                                    content_visibility_input,
-                                )
-                            })
-                        })
+                        crate::layout::with_image_cookie_store(
+                            image_cookies,
+                            image_site,
+                            document_id,
+                            || {
+                                crate::layout::with_image_base_url(base, || {
+                                    crate::layout::with_image_animation_time(animation_time, || {
+                                        crate::layout::layout_tree_with_content_visibility(
+                                            &document,
+                                            resolver,
+                                            viewport,
+                                            content_visibility_input,
+                                        )
+                                    })
+                                })
+                            },
+                        )
                     },
                 ))
             })
@@ -5051,6 +5081,8 @@ impl JsRuntime {
             &state.document,
             state.base_url_for_document(document_id).as_ref(),
         );
+        let image_site = state.location_href.parse::<crate::http::Url>().ok();
+        let image_cookies = Arc::clone(&state.cookie_store);
         let animation_time = state.event_loop.rendering_time_ms() as u64;
         let state = &mut *state;
         let layout = &state
@@ -5067,17 +5099,20 @@ impl JsRuntime {
             .as_mut()
             .ok_or(crate::paint::PaintError::InvalidImageBuffer)?;
         let start = Instant::now();
-        let canvas = crate::layout::with_image_base_url(base, || {
-            crate::layout::with_image_animation_time(animation_time, || {
-                crate::paint::paint_layout_with_web_fonts(
-                    layout,
-                    resolver,
-                    viewport,
-                    crate::paint::text::load_text_fonts(),
-                    Some(&entry.web_fonts),
-                )
-            })
-        });
+        let canvas =
+            crate::layout::with_image_cookie_store(image_cookies, image_site, document_id, || {
+                crate::layout::with_image_base_url(base, || {
+                    crate::layout::with_image_animation_time(animation_time, || {
+                        crate::paint::paint_layout_with_web_fonts(
+                            layout,
+                            resolver,
+                            viewport,
+                            crate::paint::text::load_text_fonts(),
+                            Some(&entry.web_fonts),
+                        )
+                    })
+                })
+            });
         crate::paint::record_render_timings(&crate::paint::RenderTimings {
             layout: layout_time,
             paint: start.elapsed(),
@@ -5277,14 +5312,13 @@ impl JsRuntime {
         self.host_state.borrow_mut().set_main_base_url(url);
     }
 
-    /// Shares navigation cookies with the document's HTTP client.
-    pub(crate) fn set_cookie_jar(&mut self, cookies: crate::http::CookieJar) {
-        *self.host_state.borrow_mut().http_client.cookie_jar_mut() = cookies;
-    }
-
-    /// Returns the cookies accumulated by document APIs and resource requests.
-    pub(crate) fn cookie_jar_snapshot(&self) -> crate::http::CookieJar {
-        self.host_state.borrow().http_client.cookie_jar().clone()
+    /// Uses the browsing session's Cookie store across this Document and its resources.
+    pub(crate) fn set_shared_cookie_store(&mut self, store: Arc<Mutex<crate::http::CookieJar>>) {
+        let mut state = self.host_state.borrow_mut();
+        state
+            .http_client
+            .set_shared_cookie_store(Arc::clone(&store));
+        state.cookie_store = store;
     }
 
     /// Sets the initial visibility before a new Document runs any page script.
@@ -11072,7 +11106,11 @@ fn document_cookie_get_native(
                         .location_href
                         .parse::<crate::http::Url>()
                         .unwrap_or_else(|_| url.clone());
-                    state.http_client.cookie_jar().document_cookie(&url, &site)
+                    state
+                        .cookie_store
+                        .lock()
+                        .unwrap()
+                        .document_cookie(&url, &site)
                 })
                 .unwrap_or_default()
         } else {
@@ -11095,7 +11133,7 @@ fn document_cookie_set_native(
         .to_string(context)?
         .to_std_string_escaped();
     with_host_state(|state| {
-        let mut state = state.borrow_mut();
+        let state = state.borrow();
         if !state
             .document_origins
             .get(&document_id)
@@ -11113,8 +11151,9 @@ fn document_cookie_set_native(
                 .parse::<crate::http::Url>()
                 .unwrap_or_else(|_| url.clone());
             state
-                .http_client
-                .cookie_jar_mut()
+                .cookie_store
+                .lock()
+                .unwrap()
                 .add_from_document(&value, &url, &site);
         }
         Ok(JsValue::undefined())
@@ -12243,6 +12282,8 @@ fn resolved_layout_size(
         document,
         state.base_url_for_document(document_id).as_ref(),
     );
+    let image_site = state.location_href.parse::<crate::http::Url>().ok();
+    let image_cookies = Arc::clone(&state.cookie_store);
     let animation_time = state.event_loop.rendering_time_ms() as u64;
     let layout = state
         .document_styles
@@ -12253,11 +12294,18 @@ fn resolved_layout_size(
                 crate::paint::text::load_text_fonts(),
                 Some(entry.web_fonts.clone()),
                 || {
-                    crate::layout::with_image_base_url(base, || {
-                        crate::layout::with_image_animation_time(animation_time, || {
-                            crate::layout::layout_tree(document, resolver, viewport)
-                        })
-                    })
+                    crate::layout::with_image_cookie_store(
+                        image_cookies,
+                        image_site,
+                        document_id,
+                        || {
+                            crate::layout::with_image_base_url(base, || {
+                                crate::layout::with_image_animation_time(animation_time, || {
+                                    crate::layout::layout_tree(document, resolver, viewport)
+                                })
+                            })
+                        },
+                    )
                 },
             )
         });
@@ -25210,9 +25258,10 @@ b</textarea></form>"#,
         let target: crate::http::Url = format!("http://{address}/data").parse().unwrap();
         runtime
             .host_state
-            .borrow_mut()
-            .http_client
-            .cookie_jar_mut()
+            .borrow()
+            .cookie_store
+            .lock()
+            .unwrap()
             .add_from_header_for_url("session=miku; Path=/", &target);
         runtime
             .eval(&format!(
