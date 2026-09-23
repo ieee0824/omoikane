@@ -2,7 +2,7 @@ name: Issue 785 x86 profile (temporary)
 
 on:
   push:
-    branches: [perf/issues785-825]
+    branches: [perf/issues785-825, ci/issue785-comparison]
 
 jobs:
   acid3-profile:
@@ -35,20 +35,29 @@ jobs:
           printf 'acid3=%s\nattribute_records_gc=%s\n' "$baseline_acid3_status" "$baseline_attribute_status" \
             > .artifacts/issue785-profile/baseline/status.txt
           git checkout --detach "$GITHUB_SHA"
+      - name: Measure optimized behavior without profiling on the same x86_64 runner
+        env:
+          OMOIKANE_JIT_GATE_REPORT_DIR: .artifacts/issue785-profile/optimized-normal
+        run: |
+          mkdir -p .artifacts/issue785-profile/optimized-normal
+          cargo test --locked --features jit-stress,jit-differential \
+            --test acid3_harness runner_scores_100_in_both_drive_modes \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee .artifacts/issue785-profile/optimized-normal/acid3.log
       - name: Profile test26 on x86_64
         env:
           OMOIKANE_ACID3_PROFILE_26: '1'
-          OMOIKANE_JIT_GATE_REPORT_DIR: .artifacts/issue785-profile/optimized
+          OMOIKANE_JIT_GATE_REPORT_DIR: .artifacts/issue785-profile/optimized-profile
         run: |
-          mkdir -p .artifacts/issue785-profile/optimized
+          mkdir -p .artifacts/issue785-profile/optimized-profile
           cargo test --locked --features jit-stress,jit-differential \
             --test acid3_harness runner_scores_100_in_both_drive_modes \
-            -- --nocapture --test-threads=1 2>&1 | tee .artifacts/issue785-profile/optimized/acid3.log
+            -- --nocapture --test-threads=1 2>&1 | tee .artifacts/issue785-profile/optimized-profile/acid3.log
       - name: Measure attribute record regression on x86_64
         run: |
           cargo test --locked --features jit-stress,jit-differential \
             --test attribute_records_gc -- --nocapture --test-threads=1 \
-            2>&1 | tee .artifacts/issue785-profile/optimized/attribute_records_gc.log
+            2>&1 | tee .artifacts/issue785-profile/optimized-normal/attribute_records_gc.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
