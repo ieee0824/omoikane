@@ -170,7 +170,7 @@ impl PlatformInput {
 
     /// Starts a new movement sequence when the pointer re-enters the surface.
     pub fn cursor_left(&mut self, session: &mut CdpSession) {
-        session.reset_pointer_movement();
+        session.pointer_left_surface();
     }
 
     /// Releases cursor lock and stale button/modifier state when focus is lost.

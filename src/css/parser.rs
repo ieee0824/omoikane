@@ -138,13 +138,23 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                         | "valid"
                         | "invalid"
                         | "checked"
+                        | "hover"
+                        | "active"
+                        | "focus"
+                        | "focus-visible"
+                        | "focus-within"
                         | "fullscreen"
                         | "popover-open"
                         | "modal"
                         | "before"
                         | "after"
                 );
+                let user_action = matches!(
+                    base.as_str(),
+                    "hover" | "active" | "focus" | "focus-visible" | "focus-within"
+                );
                 known
+                    && (!user_action || !name.contains('('))
                     && (!base.starts_with("nth-")
                         || name
                             .split_once('(')

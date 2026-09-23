@@ -233,6 +233,8 @@ pub struct Element {
     dirty_selectedness: bool,
     form_associated_custom: bool,
     css_validity: Option<bool>,
+    /// Dynamic selector state shared by style resolution and DOM queries.
+    user_action_state: u8,
     parser_form_owner: Option<ParserFormOwner>,
     text_control_state: Option<TextControlState>,
     /// Scroll offset of this element's scrolling box in CSS pixels, as set
@@ -329,6 +331,7 @@ impl Element {
             dirty_selectedness: false,
             form_associated_custom: false,
             css_validity: None,
+            user_action_state: 0,
             parser_form_owner: None,
             text_control_state: None,
             scroll_offset: (0.0, 0.0),
@@ -361,6 +364,7 @@ impl Element {
             dirty_selectedness: false,
             form_associated_custom: false,
             css_validity: None,
+            user_action_state: 0,
             parser_form_owner: None,
             text_control_state: None,
             scroll_offset: (0.0, 0.0),
@@ -1448,6 +1452,42 @@ impl NodeHandle {
             NodeData::Element(element) => element.css_validity,
             _ => None,
         }
+    }
+
+    /// Returns whether an element currently matches a user-action pseudo-class.
+    pub(crate) fn has_user_action_state(&self, name: &str) -> bool {
+        let bit = match name {
+            "hover" => 1,
+            "active" => 2,
+            "focus" => 4,
+            "focus-visible" => 8,
+            "focus-within" => 16,
+            _ => return false,
+        };
+        matches!(&self.0.borrow().data, NodeData::Element(element) if element.user_action_state & bit != 0)
+    }
+
+    /// Updates the dynamic selector state. The caller invalidates cached styles.
+    pub(crate) fn set_user_action_state(&self, name: &str, enabled: bool) -> bool {
+        let bit = match name {
+            "hover" => 1,
+            "active" => 2,
+            "focus" => 4,
+            "focus-visible" => 8,
+            "focus-within" => 16,
+            _ => return false,
+        };
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return false;
+        };
+        let previous = element.user_action_state;
+        if enabled {
+            element.user_action_state |= bit;
+        } else {
+            element.user_action_state &= !bit;
+        }
+        previous != element.user_action_state
     }
 
     pub(crate) fn set_css_validity(&self, validity: Option<bool>) -> bool {

@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: white; }
+  #group { width: 200px; height: 120px; padding: 20px; background: #b8b8b8; }
+  #group:focus-within { background: #205060; }
+  #target { display: block; width: 80px; height: 40px; padding: 0; border: 0; outline: 0;
+            background: #b8b8b8; appearance: none; }
+  #target:focus-visible { background: #f05888; }
+</style>
+</head>
+<body>
+<div id="group"><button id="target" aria-label="Focus target"></button></div>
+<script>document.getElementById('target').focus();</script>
+</body>
+</html>

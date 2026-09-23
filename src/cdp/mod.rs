@@ -1084,6 +1084,12 @@ impl CdpSession {
         self.last_pointer_position = None;
     }
 
+    /// Clears pointer movement and hover state when the pointer leaves the view.
+    pub fn pointer_left_surface(&mut self) {
+        self.reset_pointer_movement();
+        self.runtime.clear_pointer_hover();
+    }
+
     pub(crate) fn http_client_mut(&mut self) -> &mut Client {
         &mut self.http_client
     }
@@ -6963,6 +6969,42 @@ mod tests {
         assert_eq!(
             remaining["browserContextIds"][0],
             second["browserContextId"].clone()
+        );
+    }
+
+    #[test]
+    fn pointer_leaving_surface_clears_hover_selector() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .install_document(
+                "https://example.test/",
+                "<html><body><button id='target' style='width:100px;height:50px'>Go</button></body></html>",
+                1,
+                "null",
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":20,"y":20}),
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .runtime
+                .eval("document.getElementById('target').matches(':hover')")
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+        );
+        session.pointer_left_surface();
+        assert_eq!(
+            session
+                .runtime
+                .eval("document.getElementById('target').matches(':hover')")
+                .unwrap()
+                .as_boolean(),
+            Some(false),
         );
     }
 

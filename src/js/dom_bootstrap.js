@@ -74,12 +74,16 @@
   const nativeExitPointerLock = globalThis.__omoikane_exit_pointer_lock;
   const nativePointerLockRemoving = globalThis.__omoikane_pointer_lock_removing;
   const nativeForwardInput = globalThis.__omoikane_forward_input;
+  const nativeSetUserActionTarget = globalThis.__omoikane_set_user_action_target;
   const nativeRegisterInputDispatcher = globalThis.__omoikane_register_input_dispatcher;
   const browsingInput = globalThis.__omoikane_input_state();
   if (browsingInput.topDocumentId === undefined) {
     browsingInput.topDocumentId = __omoikane_document_id;
     browsingInput.focusedDocumentId = null;
     browsingInput.captures = new Map();
+    browsingInput.focusVisibleKeyboard = true;
+    browsingInput.focusVisibleCurrent = false;
+    browsingInput.pointerFocusInProgress = false;
   }
   browsingInput.visibilityHiddenDocumentIds ||= new Set();
   if (__omoikane_document_id !== browsingInput.topDocumentId) {
@@ -187,6 +191,7 @@
   delete globalThis.__omoikane_take_discarded_node_ids;
   delete globalThis.__omoikane_document_url;
   delete globalThis.__omoikane_document_base_url;
+  delete globalThis.__omoikane_set_user_action_target;
 
   // The top-level browsing context is its own parent and top-level context.
   globalThis.parent = globalThis;
@@ -1968,6 +1973,8 @@
     }
     doc.__focusedElementId = null;
     __omoikane_set_content_visibility_focus(null);
+    nativeSetUserActionTarget("focus", null, false);
+    browsingInput.focusVisibleCurrent = false;
     return null;
   }
 
@@ -3805,6 +3812,7 @@
       const previousDocument = previousChain[0];
       const previous = focusedElementOf(previousDocument);
       if (previousDocument === doc && previous === this) return;
+      const previousVisible = previous !== null && browsingInput.focusVisibleCurrent;
       // A move across documents hides relatedTarget, because the element on the
       // other side belongs to a different tree.
       const crossesDocuments = previousDocument !== doc;
@@ -3813,11 +3821,17 @@
       // The spec takes focus away from the old element *before* dispatching
       // blur, so the active element is the viewport fallback for that pair.
       previousDocument.__focusedElementId = null;
+      nativeSetUserActionTarget("focus", null, false);
       if (previous) {
         fireFocusEvent(previous, "blur", related, false);
         fireFocusEvent(previous, "focusout", related, true);
         commitTextControlChange(previous);
       }
+      // A blur/focusout handler may have focused another element. That nested
+      // focus transition wins; resuming this one would leave :focus-within and
+      // activeElement pointing at different targets.
+      const redirectedDocument = focusChainDocuments()[0];
+      if (redirectedDocument && focusedElementOf(redirectedDocument)) return;
 
       if (crossesDocuments) {
         // Documents dropping out of the chain lose their focused element; the
@@ -3850,6 +3864,13 @@
 
       doc.__focusedElementId = this.__id;
       browsingInput.focusedDocumentId = doc.__id;
+      const focusVisible = browsingInput.focusVisibleKeyboard || isTextControl(this) ||
+        isEditingHost(this) ||
+        (!browsingInput.pointerFocusInProgress && previousVisible);
+      nativeSetUserActionTarget(
+        "focus", this.__id, focusVisible,
+      );
+      browsingInput.focusVisibleCurrent = focusVisible;
       __omoikane_set_content_visibility_focus(this.__id);
       if (!options?.preventScroll) {
         const view = doc.defaultView;
@@ -3872,6 +3893,8 @@
       if (focusedElementOf(doc) !== this) return;
       doc.__focusedElementId = null;
       __omoikane_set_content_visibility_focus(null);
+      nativeSetUserActionTarget("focus", null, false);
+      browsingInput.focusVisibleCurrent = false;
       fireFocusEvent(this, "blur", null, false);
       fireFocusEvent(this, "focusout", null, true);
       commitTextControlChange(this);
@@ -14946,10 +14969,27 @@
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
     const locked = nativePointerLockTarget() !== null;
     if (locked && ["mouseover", "mouseout", "mouseenter", "mouseleave"].includes(type)) return true;
-    const target = capturedInputTarget(wrapNode(id) || document, init && init.pointerId || 1) || document;
+    const hitTarget = wrapNode(id) || document;
+    const target = capturedInputTarget(hitTarget, init && init.pointerId || 1) || document;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
     const forwarded = nativeForwardInput(internalNodeId(inputDocument), "mouse", [internalNodeId(target), type, init, focusTarget]);
     if (forwarded !== undefined) return forwarded;
+    if (["mousemove", "mouseover", "mousedown", "mouseup"].includes(type)) {
+      nativeSetUserActionTarget("hover", hitTarget instanceof Element ? hitTarget.__id : null, false);
+    } else if (type === "mouseout") {
+      nativeSetUserActionTarget("hover", null, false);
+    }
+    if (type === "mousedown") {
+      browsingInput.focusVisibleKeyboard = false;
+      nativeSetUserActionTarget("active", target instanceof Element ? target.__id : null, false);
+      const focused = focusedElementOf(focusChainDocuments()[0] || document);
+      if (focused && !isTextControl(focused) && !isEditingHost(focused)) {
+        nativeSetUserActionTarget("focus", focused.__id, false);
+        browsingInput.focusVisibleCurrent = false;
+      }
+    } else if (type === "mouseup") {
+      nativeSetUserActionTarget("active", null, false);
+    }
     const activationEvent = type === "mousedown" || type === "pointerdown" || type === "click";
     if (activationEvent) grantFullscreenTransientActivation();
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {
@@ -14972,7 +15012,9 @@
       lightDismissPointerDown = null;
     }
     if (!locked && notCanceled && focusTarget && target && typeof target.focus === "function") {
-      target.focus();
+      browsingInput.pointerFocusInProgress = true;
+      try { target.focus(); }
+      finally { browsingInput.pointerFocusInProgress = false; }
     }
     return notCanceled;
   };
@@ -15053,6 +15095,13 @@
     if (forwarded !== undefined) {
       return typeof forwarded === "number" ? forwarded : (forwarded ? 1 : 0);
     }
+    if (type === "touchstart") {
+      browsingInput.focusVisibleKeyboard = false;
+      nativeSetUserActionTarget("active", target instanceof Element ? target.__id : null, false);
+    } else if (type === "touchcancel" ||
+               (type === "touchend" && !(init.touches || []).length)) {
+      nativeSetUserActionTarget("active", null, false);
+    }
     const event = new Event(type, {
       bubbles: true,
       cancelable: type === "touchstart" || type === "touchmove",
@@ -15078,6 +15127,14 @@
     const focusedDocument = focusChainDocuments()[0] || document;
     const forwarded = nativeForwardInput(internalNodeId(focusedDocument), "keyboard", [type, init]);
     if (forwarded !== undefined) return forwarded;
+    if (type === "keydown" && !["Shift", "Control", "Alt", "Meta"].includes(String(init && init.key || ""))) {
+      browsingInput.focusVisibleKeyboard = true;
+      const focused = focusedElementOf(focusedDocument);
+      if (focused) {
+        nativeSetUserActionTarget("focus", focused.__id, true);
+        browsingInput.focusVisibleCurrent = true;
+      }
+    }
     const target = focusedElementOf(focusedDocument) || focusedDocument.body ||
       focusedDocument.documentElement || focusedDocument;
     const activationEvent = type === "keydown" && String(init && init.key || "") !== "Escape";
