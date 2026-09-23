@@ -1068,6 +1068,126 @@
     return owner;
   }
 
+  function eventListenerOptions(options, target, type) {
+    const dictionary = options != null && typeof options !== "boolean" ? Object(options) : null;
+    const capture = typeof options === "boolean" ? options : !!dictionary?.capture;
+    const once = !!dictionary?.once;
+    const defaultPassive = (type === "touchstart" || type === "touchmove" ||
+      type === "wheel" || type === "mousewheel") &&
+      (target === globalThis || target === globalThis.document ||
+       target === globalThis.document?.documentElement ||
+       target === globalThis.document?.body);
+    const passive = dictionary && "passive" in dictionary ? !!dictionary.passive : defaultPassive;
+    const signalOption = dictionary?.signal;
+    if (signalOption !== undefined && !(signalOption instanceof AbortSignal)) {
+      throw new TypeError("signal must be an AbortSignal");
+    }
+    const signal = signalOption ?? null;
+    return { capture, once, passive, signal };
+  }
+
+  function isListenerMap(store) {
+    return typeof store.get === "function" && typeof store.set === "function";
+  }
+
+  function listenerList(store, key) {
+    return isListenerMap(store) ? store.get(key) || [] : store[key] || [];
+  }
+
+  function setListenerList(store, key, list) {
+    if (isListenerMap(store)) store.set(key, list);
+    else store[key] = list;
+  }
+
+  function detachAbortListener(entry) {
+    if (entry.signal && entry.abortHandler) {
+      entry.signal.removeEventListener("abort", entry.abortHandler);
+      entry.abortHandler = null;
+    }
+  }
+
+  function addListener(target, store, type, listener, options) {
+    const key = String(type);
+    const { capture, once, passive, signal } = eventListenerOptions(options, target, key);
+    if (listener == null) return;
+    if (typeof listener !== "function" && typeof listener !== "object") {
+      throw new TypeError("event listener must be a callback object");
+    }
+    if (signal?.aborted) return;
+    const list = listenerList(store, key);
+    if (list.some(entry => entry.listener === listener && entry.capture === capture)) return;
+    const entry = { listener, capture, once, passive, signal, abortHandler: null, removed: false };
+    list.push(entry);
+    setListenerList(store, key, list);
+    if (signal) {
+      entry.abortHandler = () => removeListener(store, key, listener, capture);
+      signal.addEventListener("abort", entry.abortHandler, { once: true });
+    }
+  }
+
+  function removeListener(store, type, listener, options) {
+    const key = String(type);
+    const capture = typeof options === "boolean" ? options : !!(options && options.capture);
+    const list = listenerList(store, key);
+    const index = list.findIndex(entry => entry.listener === listener && entry.capture === capture);
+    if (index < 0) return;
+    const [entry] = list.splice(index, 1);
+    entry.removed = true;
+    detachAbortListener(entry);
+    setListenerList(store, key, list);
+  }
+
+  function clearListeners(store) {
+    const lists = isListenerMap(store) ? store.values() : Object.values(store);
+    for (const list of lists) {
+      for (const entry of list) {
+        entry.removed = true;
+        detachAbortListener(entry);
+      }
+    }
+    if (isListenerMap(store)) store.clear();
+    else for (const key of Object.keys(store)) delete store[key];
+  }
+
+  let reportingEventListenerError = false;
+  function reportEventListenerError(error) {
+    if (reportingEventListenerError) {
+      try { console.error(error); } catch (_) {}
+      return;
+    }
+    reportingEventListenerError = true;
+    try {
+      const report = new Event("error", { cancelable: true });
+      report.error = error;
+      report.message = String(error?.message ?? error);
+      if (typeof globalThis.dispatchEvent === "function") {
+        globalThis.dispatchEvent(report);
+      } else {
+        console.error(error);
+      }
+    } catch (reportError) {
+      try { console.error(reportError); } catch (_) {}
+    } finally {
+      reportingEventListenerError = false;
+    }
+  }
+
+  function callListener(entry, target, event) {
+    const previousPassive = passiveListenerState.get(event);
+    passiveListenerState.set(event, entry.passive);
+    try {
+      __omoikane_call_event_listener(
+        entry.listener,
+        typeof entry.listener === "function" ? target : entry.listener,
+        event
+      );
+    } catch (error) {
+      reportEventListenerError(error);
+    } finally {
+      passiveListenerState.set(event, previousPassive);
+    }
+  }
+
   function invokeListeners(node, event, capture, phase) {
     const listeners = (node.__listeners.get(event.type) || []).slice();
     for (const entry of listeners) {
@@ -1077,11 +1197,7 @@
         }
         event.currentTarget = node;
         event.eventPhase = phase;
-        __omoikane_call_event_listener(
-          entry.listener,
-          typeof entry.listener === "function" ? node : entry.listener,
-          event
-        );
+        callListener(entry, node, event);
         if (event.__stoppedImmediate) {
           return true;
         }
@@ -1292,6 +1408,8 @@
   const DOCUMENT_FRAGMENT_CONSTRUCTION = {};
   const ATTR_CONSTRUCTION = {};
 
+  const passiveListenerState = new WeakMap();
+
   class Event {
     constructor(type, init = {}) {
       init = init ?? {};
@@ -1321,9 +1439,14 @@
     }
 
     preventDefault() {
-      if (this.cancelable) {
+      if (this.cancelable && !passiveListenerState.get(this)) {
         this.defaultPrevented = true;
       }
+    }
+
+    get returnValue() { return !this.defaultPrevented; }
+    set returnValue(value) {
+      if (!value) this.preventDefault();
     }
 
     // Legacy initialiser used by events created via `document.createEvent()`.
@@ -2377,31 +2500,11 @@
     }
 
     addEventListener(type, listener, options = false) {
-      if (listener == null ||
-          (typeof listener !== "function" && typeof listener.handleEvent !== "function")) {
-        return;
-      }
-      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
-      const once = typeof options === "object" && options !== null && !!options.once;
-      const key = String(type);
-      const list = this.__listeners.get(key) ?? [];
-      // Deduplicate: same listener+capture is only registered once (DOM spec).
-      if (!list.some(entry => entry.listener === listener && !!entry.capture === capture)) {
-        list.push({ listener, capture, once, removed: false });
-      }
-      this.__listeners.set(key, list);
+      addListener(this, this.__listeners, type, listener, options);
     }
 
     removeEventListener(type, listener, options = false) {
-      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
-      const key = String(type);
-      const list = this.__listeners.get(key);
-      if (!list) return;
-      const index = list.findIndex(entry => entry.listener === listener && !!entry.capture === capture);
-      if (index !== -1) {
-        list[index].removed = true;
-        list.splice(index, 1);
-      }
+      removeListener(this.__listeners, type, listener, options);
     }
 
     dispatchEvent(event) {
@@ -17762,16 +17865,9 @@
       ? new EventConstructor(type, init)
       : { type: String(type) };
   }
-  function invokeXhrListener(listener, target, event) {
-    if (typeof listener === "function") listener.call(target, event);
-    else if (listener && typeof listener.handleEvent === "function") {
-      listener.handleEvent.call(listener, event);
-    }
-  }
-
   class XMLHttpRequestUpload {
     constructor() {
-      this._listeners = {};
+      this._listeners = Object.create(null);
       this.onloadstart = null;
       this.onprogress = null;
       this.onload = null;
@@ -17780,21 +17876,10 @@
       this.onloadend = null;
     }
     addEventListener(type, callback, options = false) {
-      if (callback == null ||
-          (typeof callback !== "function" && typeof callback.handleEvent !== "function")) return;
-      const key = String(type);
-      const listeners = this._listeners[key] || [];
-      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
-      if (!listeners.some(entry => entry.listener === callback && entry.capture === capture)) {
-        listeners.push({ listener: callback, capture });
-      }
-      this._listeners[key] = listeners;
+      addListener(this, this._listeners, type, callback, options);
     }
     removeEventListener(type, callback, options = false) {
-      const key = String(type);
-      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
-      this._listeners[key] = (this._listeners[key] || [])
-        .filter(entry => !(entry.listener === callback && entry.capture === capture));
+      removeListener(this._listeners, type, callback, options);
     }
     dispatchEvent(event) {
       const dispatched = event instanceof Event ? event : createXhrEvent(event);
@@ -17803,7 +17888,10 @@
       const handler = this["on" + dispatched.type];
       if (typeof handler === "function") handler.call(this, dispatched);
       for (const entry of (this._listeners[dispatched.type] || []).slice()) {
-        invokeXhrListener(entry.listener, this, dispatched);
+        if (entry.removed) continue;
+        if (entry.once) this.removeEventListener(dispatched.type, entry.listener, entry.capture);
+        callListener(entry, this, dispatched);
+        if (dispatched.__stoppedImmediate) break;
       }
       dispatched.currentTarget = null;
       return !dispatched.defaultPrevented;
@@ -17817,7 +17905,7 @@
 
   globalThis.XMLHttpRequest = class XMLHttpRequest {
     constructor() {
-      this._listeners = {};
+      this._listeners = Object.create(null);
       this.readyState = 0;
       this.status = 0;
       this.statusText = "";
@@ -17947,21 +18035,10 @@
       return values.length ? values.join(", ") : null;
     }
     addEventListener(type, callback, options = false) {
-      if (callback == null ||
-          (typeof callback !== "function" && typeof callback.handleEvent !== "function")) return;
-      const key = String(type);
-      const listeners = this._listeners[key] || [];
-      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
-      if (!listeners.some(entry => entry.listener === callback && entry.capture === capture)) {
-        listeners.push({ listener: callback, capture });
-      }
-      this._listeners[key] = listeners;
+      addListener(this, this._listeners, type, callback, options);
     }
     removeEventListener(type, callback, options = false) {
-      const key = String(type);
-      const capture = typeof options === "boolean" ? options : !!(options && options.capture);
-      this._listeners[key] = (this._listeners[key] || [])
-        .filter(entry => !(entry.listener === callback && entry.capture === capture));
+      removeListener(this._listeners, type, callback, options);
     }
     abort() {
       const active = this._sendFlag && !this._terminal;
@@ -18210,7 +18287,10 @@
       const handler = this["on" + dispatched.type];
       if (typeof handler === "function") handler.call(this, dispatched);
       for (const entry of (this._listeners[dispatched.type] || []).slice()) {
-        invokeXhrListener(entry.listener, this, dispatched);
+        if (entry.removed) continue;
+        if (entry.once) this.removeEventListener(dispatched.type, entry.listener, entry.capture);
+        callListener(entry, this, dispatched);
+        if (dispatched.__stoppedImmediate) break;
       }
       dispatched.currentTarget = null;
       return !dispatched.defaultPrevented;
@@ -18796,34 +18876,19 @@
   class EventTarget {
     constructor() { this._listeners = new Map(); }
     addEventListener(type, callback, options = {}) {
-      if (callback == null) return;
-      const key = String(type);
-      const capture = typeof options === "boolean" ? options : !!options.capture;
-      const once = typeof options === "object" && !!options.once;
-      const listeners = this._listeners.get(key) || [];
-      if (!listeners.some(entry => entry.callback === callback && entry.capture === capture)) {
-        listeners.push({ callback, capture, once });
-      }
-      this._listeners.set(key, listeners);
+      addListener(this, this._listeners, type, callback, options);
     }
     removeEventListener(type, callback, options = {}) {
-      const listeners = this._listeners.get(String(type));
-      if (!listeners) return;
-      const capture = typeof options === "boolean" ? options : !!options.capture;
-      const index = listeners.findIndex(entry => entry.callback === callback && entry.capture === capture);
-      if (index >= 0) listeners.splice(index, 1);
+      removeListener(this._listeners, type, callback, options);
     }
     dispatchEvent(event) {
       if (!(event instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
       event.target = this;
       event.currentTarget = this;
       for (const entry of (this._listeners.get(event.type) || []).slice()) {
-        if (entry.once) this.removeEventListener(event.type, entry.callback, entry.capture);
-        __omoikane_call_event_listener(
-          entry.callback,
-          typeof entry.callback === "function" ? this : entry.callback,
-          event
-        );
+        if (entry.removed) continue;
+        if (entry.once) this.removeEventListener(event.type, entry.listener, entry.capture);
+        callListener(entry, this, event);
         if (event.__stoppedImmediate) break;
       }
       event.currentTarget = null;
@@ -19509,7 +19574,7 @@
     __teardown() {
       this.__active = false;
       this.__onchange = null;
-      this._listeners.clear();
+      clearListeners(this._listeners);
     }
     get [Symbol.toStringTag]() { return "PermissionStatus"; }
   }

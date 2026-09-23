@@ -1,5 +1,8 @@
 {
   "tests": [
+    { "path": "dom/events/AddEventListenerOptions-once.any.js" },
+    { "path": "dom/events/AddEventListenerOptions-passive.any.js" },
+    { "path": "dom/events/AddEventListenerOptions-signal.any.js" },
     { "path": "dom/nodes/Element-childElement-null.html" },
     { "path": "dom/nodes/Element-childElementCount-nochild.html" },
     { "path": "dom/nodes/Node-isConnected.html" },

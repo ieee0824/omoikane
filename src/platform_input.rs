@@ -699,7 +699,7 @@ mod tests {
         let mut session = CdpSession::new().unwrap();
         navigate(
             &mut session,
-            "<style>body{margin:0;height:1000px}</style><script>document.addEventListener('wheel',e=>e.preventDefault())</script>",
+            "<style>body{margin:0;height:1000px}</style><script>document.addEventListener('wheel',e=>e.preventDefault(),{passive:false})</script>",
         );
         let mut input = PlatformInput::new();
         input.cursor_moved(&mut session, 10.0, 10.0).unwrap();
@@ -707,6 +707,21 @@ mod tests {
         input.wheel(&mut session, 0.0, 80.0).unwrap();
 
         assert_eq!(evaluate(&mut session, "scrollY"), json!(0));
+    }
+
+    #[test]
+    fn default_passive_wheel_listener_allows_window_scroll() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<style>body{margin:0;height:1000px}</style><script>document.addEventListener('wheel',e=>e.preventDefault())</script>",
+        );
+        let mut input = PlatformInput::new();
+        input.cursor_moved(&mut session, 10.0, 10.0).unwrap();
+
+        input.wheel(&mut session, 0.0, 80.0).unwrap();
+
+        assert_eq!(evaluate(&mut session, "scrollY"), json!(80));
     }
 
     #[test]
