@@ -203,6 +203,7 @@ impl PlatformBrowser {
         if let Some(previous) = self.active_tab
             && let Some(tab) = self.tabs.get_mut(&previous)
         {
+            tab.session.set_host_visibility(true);
             tab.info.active = false;
         }
         self.active_tab = Some(id);
@@ -240,13 +241,12 @@ impl PlatformBrowser {
         if let Some(previous) = self.active_tab
             && let Some(tab) = self.tabs.get_mut(&previous)
         {
+            tab.session.set_host_visibility(true);
             tab.info.active = false;
         }
-        self.tabs
-            .get_mut(&id)
-            .expect("tab was checked above")
-            .info
-            .active = true;
+        let tab = self.tabs.get_mut(&id).expect("tab was checked above");
+        tab.session.set_host_visibility(false);
+        tab.info.active = true;
         self.active_tab = Some(id);
         self.events.push_back(BrowserEvent::TabActivated(id));
         Ok(())
@@ -259,6 +259,9 @@ impl PlatformBrowser {
             return Err(BrowserError::InvalidTab(id));
         }
         let was_active = self.active_tab == Some(id);
+        if let Some(tab) = self.tabs.get_mut(&id) {
+            tab.session.set_host_visibility(true);
+        }
         self.tabs.remove(&id);
         self.events.push_back(BrowserEvent::TabClosed(id));
         if was_active {

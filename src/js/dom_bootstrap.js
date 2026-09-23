@@ -81,6 +81,10 @@
     browsingInput.focusedDocumentId = null;
     browsingInput.captures = new Map();
   }
+  browsingInput.visibilityHiddenDocumentIds ||= new Set();
+  if (__omoikane_document_id !== browsingInput.topDocumentId) {
+    browsingInput.removalMayAffectIframeVisibility = true;
+  }
   delete globalThis.__omoikane_input_state;
   delete globalThis.__omoikane_forward_input;
   delete globalThis.__omoikane_register_input_dispatcher;
@@ -114,6 +118,8 @@
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
   const nativeIframeGlobal = globalThis.__omoikane_iframe_global;
+  const nativeExistingIframeDocument = globalThis.__omoikane_existing_iframe_document;
+  delete globalThis.__omoikane_existing_iframe_document;
   const nativeIframeContextState = globalThis.__omoikane_iframe_context_state;
   const nativeCaptureIframeFormState = globalThis.__omoikane_capture_iframe_form_state;
   const nativeRestoreIframeFormState = globalThis.__omoikane_restore_iframe_form_state;
@@ -334,6 +340,7 @@
     sweepNodeCache(ids.length > 0);
     for (let index = 0; index < ids.length; index += 1) {
       const id = ids[index];
+      browsingInput.visibilityHiddenDocumentIds.delete(id);
       // If teardown retired the browsing context which currently owns focus,
       // hand focus back to the top Document before any later hasFocus() walk
       // attempts to wrap the now-unregistered Document identity.
@@ -3105,6 +3112,11 @@
       }
       preRemove(this, child);
       const wasConnected = child.isConnected;
+      let visibilityDocuments = null;
+      if (wasConnected && browsingInput.removalMayAffectIframeVisibility) {
+        visibilityDocuments = [];
+        markIframeDocumentsHidden(child, visibilityDocuments);
+      }
       __omoikane_remove_child(this.__id, child.__id);
       if (wasConnected) retireIframeWindowProxies(child);
       forgetDiscardedNodeWrappers();
@@ -3112,6 +3124,11 @@
       queueMutation(this, "childList", { removedNodes: [child], previousSibling, nextSibling });
       refreshSlotAssignments();
       signalFallbackSlotChanges(this);
+      if (visibilityDocuments) {
+        for (const document of visibilityDocuments) {
+          document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+        }
+      }
       return child;
     }
 
@@ -6157,6 +6174,15 @@
       return created;
     }
 
+    get visibilityState() {
+      if (browsingInput.visibilityHiddenDocumentIds.has(this.__id)) return "hidden";
+      return __omoikane_document_visibility_state(this.__id);
+    }
+
+    get hidden() {
+      return this.visibilityState === "hidden";
+    }
+
     // Stamps a freshly created node with this document as its owner so
     // `node.ownerDocument` resolves to this document even while the node is
     // detached (before it is inserted into any tree). Once the node is inserted,
@@ -7900,6 +7926,30 @@
     }
   }
 
+  // A departing child Document becomes hidden before its browsing context is
+  // destroyed. Dispatch after removal and wrapper cleanup so native teardown
+  // does not run under event dispatch.
+  function markIframeDocumentsHidden(root, affectedDocuments) {
+    if (!root) return;
+    if (root.nodeType === 1 &&
+        asciiLowercase(internalNodeLocalName(root) || "") === "iframe") {
+      const documentId = nativeExistingIframeDocument(root.__id);
+      if (documentId !== null && documentId !== undefined &&
+          !browsingInput.visibilityHiddenDocumentIds.has(documentId)) {
+        const childDocument = wrapNode(documentId);
+        browsingInput.visibilityHiddenDocumentIds.add(documentId);
+        if (childDocument) {
+          affectedDocuments.push(childDocument);
+          markIframeDocumentsHidden(childDocument, affectedDocuments);
+        }
+      }
+    }
+    const children = root.childNodes || [];
+    for (let index = 0; index < children.length; index += 1) {
+      markIframeDocumentsHidden(children[index], affectedDocuments);
+    }
+  }
+
   // An <iframe> owns a nested browsing context whose document is reachable via
   // contentDocument (and, as a facade, contentWindow.document). The document is
   // created lazily by the host on first access: an empty/absent src yields an
@@ -7960,6 +8010,9 @@
       // from its parent browsing context.
       if (this.__id === null || !this.isConnected) return null;
       const id = nativeIframeContentDocument(this.__id);
+      if (id !== null && id !== undefined) {
+        browsingInput.removalMayAffectIframeVisibility = true;
+      }
       forgetDiscardedNodeWrappers();
       return wrapNode(id);
     }
@@ -13898,7 +13951,7 @@
     });
   }
 
-  for (const type of ["pointerlockchange", "pointerlockerror"]) {
+  for (const type of ["pointerlockchange", "pointerlockerror", "visibilitychange"]) {
     Object.defineProperty(Document.prototype, "on" + type, {
       configurable: true, enumerable: true,
       get() { return safeWeakMapGet(nodeEventStates, this).handlers.get(type) || null; },
@@ -13912,6 +13965,13 @@
       },
     });
   }
+
+  globalThis.__omoikane_dispatch_visibilitychange = function(documentId) {
+    const changedDocument = wrapNode(documentId);
+    if (changedDocument) {
+      changedDocument.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+    }
+  };
 
   const pointerLockDispatchEvent = Node.prototype.dispatchEvent;
   globalThis.Node = Node;

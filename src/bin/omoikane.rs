@@ -40,6 +40,8 @@ struct BrowserApp {
     frame_scheduler: PlatformFrameScheduler,
     input: PlatformInput,
     window_title: String,
+    window_occluded: bool,
+    window_minimized: bool,
     native_fullscreen: bool,
     native_pointer_lock: bool,
     native_pointer_lock_raw_buttons: bool,
@@ -62,6 +64,8 @@ impl BrowserApp {
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
             input: PlatformInput::new(),
             window_title: DEFAULT_WINDOW_TITLE.to_string(),
+            window_occluded: false,
+            window_minimized: false,
             native_fullscreen: false,
             native_pointer_lock: false,
             native_pointer_lock_raw_buttons: false,
@@ -448,11 +452,20 @@ impl ApplicationHandler for BrowserApp {
         }
         match event {
             WindowEvent::CloseRequested => {
+                self.session.set_host_visibility(true);
                 let _ = self.session.release_pointer_lock_from_host();
                 self.unlock_native_pointer();
                 event_loop.exit();
             }
-            WindowEvent::Resized(_) => {
+            WindowEvent::Occluded(occluded) => {
+                self.window_occluded = occluded;
+                self.session
+                    .set_host_visibility(self.window_occluded || self.window_minimized);
+            }
+            WindowEvent::Resized(size) => {
+                self.window_minimized = size.width == 0 || size.height == 0;
+                self.session
+                    .set_host_visibility(self.window_occluded || self.window_minimized);
                 if self.native_fullscreen
                     && self
                         .window
