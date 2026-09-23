@@ -25,24 +25,6 @@ use omoikane::js::JsRuntime;
 
 const EVALS_PER_GC: usize = 512;
 
-fn profile_test26_iteration(runtime: &mut JsRuntime, mode: DriveMode) {
-    let result = match runtime.eval_safe(include_str!("test26_profile.js")) {
-        Ok(value) => value
-            .as_string()
-            .map(|value| value.to_std_string_escaped())
-            .unwrap_or_else(|| "non-string diagnostic result".to_owned()),
-        Err(error) => format!("diagnostic error: {error}"),
-    };
-    let directory = std::env::var_os("OMOIKANE_JIT_GATE_REPORT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| ".artifacts/js-benchmark/jit-gate4".into());
-    let _ = std::fs::create_dir_all(&directory);
-    let _ = std::fs::write(
-        directory.join(format!("acid3-test26-profile-{mode:?}.json")),
-        result,
-    );
-}
-
 fn acid3_debug_log(message: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(".artifacts")
@@ -388,7 +370,6 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
     let mut iterations = 0usize;
     let mut termination_reason = TerminationReason::IterationLimit;
     let mut test26_step_wall_ms = None;
-    let profile_test26 = std::env::var_os("OMOIKANE_ACID3_PROFILE_26").is_some();
 
     match mode {
         DriveMode::Faithful => {
@@ -413,9 +394,6 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             let mut stalled = 0usize;
             for _ in 0..max_ticks {
                 iterations += 1;
-                if profile_test26 && last_index == 26 {
-                    profile_test26_iteration(&mut runtime, mode);
-                }
                 acid3_debug_log(&format!(
                     "mode={mode:?} tick start iteration={iterations} index={last_index}"
                 ));
@@ -487,9 +465,6 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
             let mut stall = 0usize;
             for _ in 0..max_calls {
                 iterations += 1;
-                if profile_test26 && last_index == 26 {
-                    profile_test26_iteration(&mut runtime, mode);
-                }
                 let test26_start = (last_index == 26).then(Instant::now);
                 let update_result =
                     runtime.eval_safe("if (typeof update === 'function') update();");
