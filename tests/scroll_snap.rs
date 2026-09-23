@@ -19,6 +19,96 @@ fn check(runtime: &mut JsRuntime, source: &str) {
 }
 
 #[test]
+fn viewport_overflow_includes_absolute_child_past_scrolling_body() {
+    let mut runtime = runtime(
+        r#"<style>
+          html, body { margin: 0; overflow: scroll; }
+          .space { position: absolute; left: 0; top: 0;
+                   width: 4000px; height: 4000px; }
+        </style>
+        <body><div class="space"></div></body>"#,
+    );
+    check(
+        &mut runtime,
+        r#"(() => {
+          if (document.documentElement.scrollWidth < 3900 ||
+              document.documentElement.scrollHeight < 3900) return false;
+          window.scrollTo(800, 900);
+          return window.scrollX === 800 && window.scrollY === 900;
+        })()"#,
+    );
+}
+
+#[test]
+fn viewport_snap_uses_absolute_areas_outside_body_scroll_container() {
+    let mut runtime = runtime(
+        r#"<style>
+          html, body { margin: 0; overflow: scroll; }
+          html { scroll-snap-type: both mandatory; }
+          .space { position: absolute; left: 0; top: 0;
+                   width: 4000px; height: 4000px; }
+          .target { position: absolute; left: 1000px; top: 1000px;
+                    width: 600px; height: 600px; scroll-snap-align: start; }
+        </style>
+        <body><div class="space"></div><div class="target"></div></body>"#,
+    );
+    check(
+        &mut runtime,
+        r#"(() => {
+          window.scrollTo(800, 900);
+          return window.scrollX === 1000 && window.scrollY === 1000;
+        })()"#,
+    );
+}
+
+#[test]
+fn positioned_inner_scroller_keeps_absolute_child_out_of_viewport_overflow() {
+    let mut runtime = runtime(
+        r#"<style>
+          html, body { margin: 0; }
+          .scroller { position: relative; width: 100px; height: 100px;
+                      overflow: auto; }
+          .space { position: absolute; left: 0; top: 0;
+                   width: 4000px; height: 4000px; }
+        </style>
+        <body><div class="scroller"><div class="space"></div></div></body>"#,
+    );
+    check(
+        &mut runtime,
+        r#"(() => {
+          const scroller = document.querySelector('.scroller');
+          window.scrollTo(800, 900);
+          scroller.scrollTo(800, 900);
+          return window.scrollX === 0 && window.scrollY === 0 &&
+                 document.documentElement.scrollWidth <= 1280 &&
+                 document.documentElement.scrollHeight <= 720 &&
+                 scroller.scrollLeft === 800 && scroller.scrollTop === 900;
+        })()"#,
+    );
+}
+
+#[test]
+fn viewport_fixed_child_does_not_enlarge_document_scroll_area() {
+    let mut runtime = runtime(
+        r#"<style>
+          html, body { margin: 0; overflow: scroll; }
+          .fixed { position: fixed; left: 0; top: 0;
+                   width: 4000px; height: 4000px; }
+        </style>
+        <body><div class="fixed"></div></body>"#,
+    );
+    check(
+        &mut runtime,
+        r#"(() => {
+          window.scrollTo(800, 900);
+          return window.scrollX === 0 && window.scrollY === 0 &&
+                 document.documentElement.scrollWidth <= 1280 &&
+                 document.documentElement.scrollHeight <= 720;
+        })()"#,
+    );
+}
+
+#[test]
 fn mandatory_element_scroll_snaps_to_nearest_item_and_queues_one_event() {
     let mut runtime = runtime(
         r#"<style>
