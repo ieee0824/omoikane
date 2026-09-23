@@ -114,6 +114,10 @@ impl HostState {
                 .iframe_documents
                 .values()
                 .any(|entry| entry.document.identity() == id)
+            || self
+                .auxiliary_contexts
+                .values()
+                .any(|entry| entry.document.identity() == id)
     }
 
     pub(super) fn node_is_in_active_document(&self, node: &NodeHandle) -> bool {

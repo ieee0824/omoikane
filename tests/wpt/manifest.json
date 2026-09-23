@@ -282,6 +282,8 @@
     { "path": "page-visibility/test_read_only.html" },
     { "path": "page-visibility/test_child_document.html" },
     { "path": "page-visibility/test_default_view.html" },
-    { "path": "page-visibility/onvisibilitychange.html" }
+    { "path": "page-visibility/onvisibilitychange.html" },
+    { "path": "page-visibility/unload.html" },
+    { "path": "page-visibility/unload-bubbles.html" }
   ]
 }

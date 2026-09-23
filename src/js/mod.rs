@@ -117,8 +117,6 @@ const LOAD_SCRIPT: &str = concat!(
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } ",
     "{ const event = new Event('load', { bubbles: false }); ",
-    "if (typeof window.onload === 'function') ",
-    "__omoikane_call_event_listener(window.onload, window, event); ",
     "window.dispatchEvent(event); } ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }",
@@ -1314,6 +1312,9 @@ struct HostState {
     /// value it was loaded from, so a subsequent `src` change triggers a
     /// reload while an unchanged `src` returns the same document instance.
     iframe_documents: HashMap<usize, IframeDocument>,
+    /// Auxiliary browsing contexts are independent of DOM iframe elements.
+    auxiliary_contexts: HashMap<u64, AuxiliaryContext>,
+    next_auxiliary_context_id: u64,
     /// Monotonic generation assigned to each nested Window created by iframe
     /// navigation or reconnect.
     next_iframe_generation: u64,
@@ -1436,11 +1437,10 @@ unsafe impl Trace for HostState {
         if let Some(maps) = &self.font_loading.maps {
             unsafe { maps.trace(tracer) };
         }
-        // `IframeDocument.realm` and rendering callbacks retained by the event
-        // loop are Boa `Realm` handles backed by `Rooted<RealmInner>`. They are
-        // explicit native GC roots rather than JsValue edges, so retaining the
-        // handles here keeps child intrinsics alive without a separate Trace
-        // traversal (Realm intentionally exposes no `trace` method).
+        // Iframe and auxiliary Document realms, plus rendering callbacks
+        // retained by the event loop, are Boa `Realm` handles backed by
+        // `Rooted<RealmInner>`. Retaining those handles keeps child intrinsics
+        // alive without a separate Trace traversal (Realm exposes no `trace`).
         if let Some(resolver) = &self.canonical_node_identity_resolver {
             unsafe { resolver.trace(tracer) };
         }
@@ -1691,6 +1691,17 @@ struct IframeDocument {
     /// Monotonic identity of the active Window/Document generation. Unlike a
     /// pointer-derived node identity this cannot be reused after teardown.
     generation: u64,
+}
+
+/// A popup's active Document and Realm. The numeric context id survives
+/// navigation and is never reused, so retained WindowProxies can detect close.
+#[derive(Debug)]
+struct AuxiliaryContext {
+    name: String,
+    opener_document_id: usize,
+    document: NodeHandle,
+    document_url: String,
+    realm: Option<Realm>,
 }
 
 /// Security origin used for same-origin WindowProxy access checks. Opaque
@@ -1969,6 +1980,8 @@ impl HostState {
             started_inserted_scripts: HashSet::new(),
             main_realm: None,
             iframe_documents: HashMap::new(),
+            auxiliary_contexts: HashMap::new(),
+            next_auxiliary_context_id: 1,
             next_iframe_generation: 1,
             iframe_context_ids: HashMap::new(),
             next_iframe_context_id: 1,
@@ -2379,6 +2392,169 @@ impl HostState {
             .map(DocumentSecurityOrigin::Opaque)
     }
 
+    /// Creates the initial, creator-origin `about:blank` Document of a popup.
+    /// No iframe node is created or registered in the opener's DOM.
+    fn open_auxiliary_context(
+        &mut self,
+        opener_document_id: usize,
+        name: &str,
+    ) -> Result<u64, String> {
+        if !name.is_empty()
+            && name != "_blank"
+            && let Some((id, _)) = self
+                .auxiliary_contexts
+                .iter()
+                .find(|(_, entry)| entry.name == name)
+        {
+            return Ok(*id);
+        }
+        let id = take_monotonic_id(&mut self.next_auxiliary_context_id, "auxiliary context")?;
+        let document = blank_html_document();
+        let document_id = document.identity();
+        let origin = self
+            .document_origins
+            .get(&opener_document_id)
+            .cloned()
+            .flatten();
+        let security_origin = match self.document_security_origins.get(&opener_document_id) {
+            Some(origin) => origin.clone(),
+            None => self.new_opaque_security_origin()?,
+        };
+        let base = self.base_url_for_document(opener_document_id);
+        let csp = self
+            .document_csp
+            .get(&opener_document_id)
+            .cloned()
+            .unwrap_or_default();
+        self.register_tree(&document);
+        self.document_origins.insert(document_id, origin);
+        self.document_security_origins
+            .insert(document_id, security_origin);
+        self.document_urls
+            .insert(document_id, "about:blank".to_owned());
+        if let Some(base) = base {
+            self.document_base_urls.insert(document_id, base);
+        }
+        self.document_csp.insert(document_id, csp);
+        self.document_sandbox
+            .insert(document_id, IframeSandboxPolicy::default());
+        self.document_styles.insert(
+            document_id,
+            DocumentStyleEntry {
+                resolver: None,
+                resources: Default::default(),
+                web_fonts: Default::default(),
+                dirty: true,
+                needs_full_sample: true,
+            },
+        );
+        self.web_lock_clients
+            .insert(document_id, self.storage_manager.create_web_lock_client());
+        self.auxiliary_contexts.insert(
+            id,
+            AuxiliaryContext {
+                name: name.to_owned(),
+                opener_document_id,
+                document,
+                document_url: "about:blank".to_owned(),
+                realm: None,
+            },
+        );
+        Ok(id)
+    }
+
+    fn close_auxiliary_context(&mut self, id: u64) {
+        let Some(entry) = self.auxiliary_contexts.remove(&id) else {
+            return;
+        };
+        self.retire_document_tree(&entry.document);
+    }
+
+    /// Commits a new Document while preserving the popup's browsing-context
+    /// identity. The old Realm stays rooted until the replacement is ready.
+    fn navigate_auxiliary_context(&mut self, id: u64, requested: &str) -> Result<usize, String> {
+        let (opener_document_id, current_document_id) = {
+            let entry = self
+                .auxiliary_contexts
+                .get(&id)
+                .ok_or_else(|| "auxiliary context is closed".to_owned())?;
+            (entry.opener_document_id, entry.document.identity())
+        };
+        let base = self
+            .base_url_for_document(current_document_id)
+            .or_else(|| self.base_url_for_document(opener_document_id));
+        let (document, headers, effective_url) =
+            self.load_iframe_document(requested, base.as_ref());
+        let document_id = document.identity();
+        let document_url = effective_url.unwrap_or_else(|| "about:blank".to_owned());
+        let inherits_opener = requested.is_empty() || matches_about_blank_url(requested);
+        let storage_origin = if inherits_opener {
+            self.document_origins
+                .get(&opener_document_id)
+                .cloned()
+                .flatten()
+        } else {
+            StorageOrigin::from_url(&document_url)
+        };
+        let security_origin = if inherits_opener {
+            match self.document_security_origins.get(&opener_document_id) {
+                Some(origin) => origin.clone(),
+                None => self.new_opaque_security_origin()?,
+            }
+        } else {
+            match &storage_origin {
+                Some(origin) => DocumentSecurityOrigin::Tuple(origin.clone()),
+                None => self.new_opaque_security_origin()?,
+            }
+        };
+        let new_base = if inherits_opener {
+            self.base_url_for_document(opener_document_id)
+        } else {
+            document_url.parse::<crate::http::Url>().ok()
+        };
+        let csp = if inherits_opener {
+            self.document_csp
+                .get(&opener_document_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            CspPolicy::from_headers_and_document(&headers, &document, &document_url)
+        };
+
+        self.register_tree(&document);
+        let entry = self
+            .auxiliary_contexts
+            .get_mut(&id)
+            .ok_or_else(|| "auxiliary context was closed".to_owned())?;
+        let old_document = std::mem::replace(&mut entry.document, document);
+        let _old_realm = entry.realm.take();
+        entry.document_url = document_url.clone();
+        self.retire_document_tree(&old_document);
+        self.document_origins.insert(document_id, storage_origin);
+        self.document_security_origins
+            .insert(document_id, security_origin);
+        self.document_urls.insert(document_id, document_url);
+        if let Some(base) = new_base {
+            self.document_base_urls.insert(document_id, base);
+        }
+        self.document_csp.insert(document_id, csp);
+        self.document_sandbox
+            .insert(document_id, IframeSandboxPolicy::default());
+        self.document_styles.insert(
+            document_id,
+            DocumentStyleEntry {
+                resolver: None,
+                resources: Default::default(),
+                web_fonts: Default::default(),
+                dirty: true,
+                needs_full_sample: true,
+            },
+        );
+        self.web_lock_clients
+            .insert(document_id, self.storage_manager.create_web_lock_client());
+        Ok(document_id)
+    }
+
     fn iframe_document_is_same_origin(&self, iframe: &NodeHandle, document: &NodeHandle) -> bool {
         let owner = owner_document_for_node(iframe).unwrap_or_else(|| self.document.clone());
         match (
@@ -2534,6 +2710,89 @@ impl HostState {
                     !subtree_ids.contains(&id)
                 }
             });
+    }
+
+    /// Retires a popup Document without leaving callbacks, nested iframe
+    /// contexts, or document-scoped native state alive after close/navigation.
+    fn retire_document_tree(&mut self, document: &NodeHandle) {
+        let document_id = document.identity();
+        self.pointer_lock.retire_document(document_id);
+        self.input_bridge.retire_document(document_id);
+        self.form_state.retire_document(document_id);
+        self.iframe_navigation.retire_document(document_id);
+        self.form_validation.retire_document(document_id);
+        if self.fullscreen_elements.contains_key(&document_id) {
+            self.fully_exit_fullscreen(false);
+        }
+        self.invalidate_layout_metrics_cache();
+
+        let mut tree_ids = HashSet::new();
+        Self::collect_tree_ids(document, &mut tree_ids);
+        self.smooth_scrolls
+            .retain(|animation| match animation.target {
+                SmoothScrollTarget::Document(id) | SmoothScrollTarget::Element(id) => {
+                    !tree_ids.contains(&id)
+                }
+            });
+        let nested_iframe_ids: Vec<_> = self
+            .iframe_context_ids
+            .keys()
+            .copied()
+            .filter(|id| tree_ids.contains(id))
+            .collect();
+        for iframe_id in nested_iframe_ids {
+            self.destroy_iframe_context(iframe_id);
+        }
+
+        self.iframe_window_scrolls.remove(&document_id);
+        self.observed_iframe_viewports.remove(&document_id);
+        self.pending_window_resize_documents
+            .retain(|id| *id != document_id);
+        self.pending_visual_viewport_resize_documents
+            .retain(|id| *id != document_id);
+        self.pending_visual_viewport_scroll_documents
+            .retain(|id| *id != document_id);
+        tree_ids.extend(self.retired_document_node_ids(document_id));
+        for id in &tree_ids {
+            self.nodes.remove(id);
+        }
+        self.event_loop.cancel_tasks_for_document(document_id);
+        self.document_styles.remove(&document_id);
+        self.registered_custom_properties.remove(&document_id);
+        self.font_loading.remove_document(document_id);
+        self.write_parsers.remove(&document_id);
+        self.written_script_queue
+            .retain(|script| script.document.identity() != document_id);
+        self.parser_inserted_scripts
+            .retain(|id| !tree_ids.contains(id));
+        if let Some(client_id) = self.web_lock_clients.remove(&document_id) {
+            let _ = WEB_LOCK_CLIENT_REGISTRY.try_with(|registry| {
+                registry.borrow_mut().remove(&client_id);
+            });
+            queue_web_lock_notifications(self.storage_manager.remove_web_lock_client(client_id));
+        }
+        self.document_origins.remove(&document_id);
+        self.document_urls.remove(&document_id);
+        self.document_base_urls.remove(&document_id);
+        self.document_security_origins.remove(&document_id);
+        self.document_csp.remove(&document_id);
+        self.document_sandbox.remove(&document_id);
+        #[cfg(test)]
+        self.document_script_executions.remove(&document_id);
+        self.csp_violations
+            .retain(|violation| violation.document_id != document_id);
+        self.csp_violation_keys
+            .retain(|(id, _, _)| *id != document_id);
+        if let Some(loader) = self.module_loader.as_ref().and_then(Weak::upgrade) {
+            loader.clear_csp_context_for_document(document_id);
+        }
+        self.pending_resource_loads
+            .retain(|id| !tree_ids.contains(id));
+        self.event_loop.cancel_resource_loads_for_nodes(&tree_ids);
+        self.discarded_node_ids.extend(tree_ids.iter().copied());
+        self.unregister_tree(document);
+        self.sweep_node_lifetimes();
+        self.prune_document_sandbox();
     }
 
     /// Destroys one iframe's active document and every descendant browsing
@@ -2719,6 +2978,10 @@ impl HostState {
         if document_id != self.document.identity()
             && !self
                 .iframe_documents
+                .values()
+                .any(|entry| entry.document.identity() == document_id)
+            && !self
+                .auxiliary_contexts
                 .values()
                 .any(|entry| entry.document.identity() == document_id)
         {
@@ -4465,6 +4728,11 @@ impl JsRuntime {
         })
     }
 
+    fn ensure_auxiliary_realm(&mut self, id: u64) -> JsResult<Realm> {
+        let host_state = Rc::clone(&self.host_state);
+        self.with_active_host(|context| ensure_auxiliary_realm(context, &host_state, id))
+    }
+
     /// Evaluates one iframe inline script in its child Realm and restores the
     /// caller's Realm even when evaluation or its microtask checkpoint fails.
     fn eval_iframe_script(
@@ -4493,14 +4761,14 @@ impl JsRuntime {
     /// created it. Navigation removes the `IframeDocument` entry, making any
     /// queued callback from the previous generation inert.
     fn iframe_realm_is_live(&self, document_id: usize, realm: &Realm) -> bool {
-        self.host_state
-            .borrow()
-            .iframe_documents
-            .values()
-            .any(|entry| {
-                entry.document.identity() == document_id
-                    && entry.realm.as_ref().is_some_and(|active| active == realm)
-            })
+        let state = self.host_state.borrow();
+        state.iframe_documents.values().any(|entry| {
+            entry.document.identity() == document_id
+                && entry.realm.as_ref().is_some_and(|active| active == realm)
+        }) || state.auxiliary_contexts.values().any(|entry| {
+            entry.document.identity() == document_id
+                && entry.realm.as_ref().is_some_and(|active| active == realm)
+        })
     }
 
     /// Returns the live child Realm for `document_id`, creating it when a
@@ -4510,6 +4778,15 @@ impl JsRuntime {
     fn realm_for_document(&mut self, document_id: usize) -> JsResult<Option<Realm>> {
         if document_id == self.document().identity() {
             return Ok(None);
+        }
+        let auxiliary_id = self
+            .host_state
+            .borrow()
+            .auxiliary_contexts
+            .iter()
+            .find_map(|(id, entry)| (entry.document.identity() == document_id).then_some(*id));
+        if let Some(id) = auxiliary_id {
+            return self.ensure_auxiliary_realm(id).map(Some);
         }
         let iframe_id = self
             .host_state
@@ -6428,8 +6705,10 @@ impl JsRuntime {
         &mut self,
         target_document_id: usize,
         target_iframe: Option<(usize, u64)>,
+        target_auxiliary_id: Option<u64>,
         source_document_id: usize,
         source_iframe_id: Option<usize>,
+        source_auxiliary_id: Option<u64>,
         sender_security_origin: Option<DocumentSecurityOrigin>,
         origin: &str,
         target_origin: &str,
@@ -6438,7 +6717,15 @@ impl JsRuntime {
     ) -> JsResult<()> {
         let source = (|| {
             let state = self.host_state.borrow();
-            if let Some((iframe_id, context_id)) = target_iframe {
+            if let Some(auxiliary_id) = target_auxiliary_id {
+                if !state
+                    .auxiliary_contexts
+                    .get(&auxiliary_id)
+                    .is_some_and(|entry| entry.document.identity() == target_document_id)
+                {
+                    return None;
+                }
+            } else if let Some((iframe_id, context_id)) = target_iframe {
                 let iframe = state.get_node(iframe_id)?;
                 if !state.node_is_in_active_document(&iframe)
                     || state.iframe_context_ids.get(&iframe_id) != Some(&context_id)
@@ -6471,6 +6758,15 @@ impl JsRuntime {
             }
             Some(if source_document_id == target_document_id {
                 ("self", None)
+            } else if let Some(auxiliary_id) = source_auxiliary_id {
+                ("auxiliary", Some(auxiliary_id as usize))
+            } else if target_auxiliary_id.is_some_and(|id| {
+                state
+                    .auxiliary_contexts
+                    .get(&id)
+                    .is_some_and(|entry| entry.opener_document_id == source_document_id)
+            }) {
+                ("opener", None)
             } else if target_iframe.is_some_and(|(iframe_id, _)| {
                 state
                     .get_node(iframe_id)
@@ -6492,7 +6788,9 @@ impl JsRuntime {
         let Some(source) = source else {
             return self.close_transferred_message_ports(ports);
         };
-        let realm = if let Some((iframe_id, _)) = target_iframe {
+        let realm = if let Some(auxiliary_id) = target_auxiliary_id {
+            self.ensure_auxiliary_realm(auxiliary_id)?
+        } else if let Some((iframe_id, _)) = target_iframe {
             self.ensure_iframe_realm(iframe_id, target_document_id)?
         } else {
             let state = self.host_state.borrow();
@@ -6563,6 +6861,116 @@ impl JsRuntime {
             }
             Ok(())
         })
+    }
+
+    fn run_auxiliary_navigation(&mut self, id: u64, url: &str) -> JsResult<()> {
+        if !self
+            .host_state
+            .borrow()
+            .auxiliary_contexts
+            .contains_key(&id)
+        {
+            return Ok(());
+        }
+        let document_id = self
+            .host_state
+            .borrow_mut()
+            .navigate_auxiliary_context(id, url)
+            .map_err(|message| JsNativeError::error().with_message(message))?;
+        let realm = match self.ensure_auxiliary_realm(id) {
+            Ok(realm) => realm,
+            Err(error) => {
+                if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+                    let opaque = error.to_opaque(&mut self.context);
+                    let description = opaque
+                        .to_string(&mut self.context)
+                        .map(|value| value.to_std_string_escaped())
+                        .unwrap_or_else(|_| "<unprintable>".to_owned());
+                    eprintln!("[omoikane][auxiliary-realm-error] {description}");
+                }
+                return Err(error);
+            }
+        };
+        let scripts = {
+            let state = self.host_state.borrow();
+            let document = state.get_node(document_id).ok_or_else(|| {
+                JsNativeError::reference().with_message("popup Document disappeared")
+            })?;
+            collect_script_elements(&document)
+        };
+        let previous = self.context.enter_realm(realm);
+        let result = (|| -> JsResult<()> {
+            for script in scripts {
+                let attributes = script.attributes().unwrap_or_default();
+                if !is_executable_classic_script_type(attributes.get("type").map(String::as_str)) {
+                    continue;
+                }
+                let policy = self.host_state.borrow().csp_policy_for_node(&script);
+                let source = if let Some(src) = attributes.get("src") {
+                    if !policy.allows_reference(ResourceType::Script, src) {
+                        self.host_state.borrow_mut().record_csp_violation_for_node(
+                            &script,
+                            ResourceType::Script,
+                            src,
+                        );
+                        continue;
+                    }
+                    let base = self.host_state.borrow().base_url_for_document(document_id);
+                    let fetched = {
+                        let mut state = self.host_state.borrow_mut();
+                        fetch_script_resource_with_client(
+                            src,
+                            base.as_ref(),
+                            &mut state.http_client,
+                        )
+                    };
+                    let Some((effective_url, source, redirect_count)) = fetched else {
+                        self.record_task_error(format!("[popup script: {src}] failed to fetch"));
+                        continue;
+                    };
+                    if !policy.allows_reference_after_redirects(
+                        ResourceType::Script,
+                        &effective_url,
+                        redirect_count,
+                    ) {
+                        self.host_state.borrow_mut().record_csp_violation_for_node(
+                            &script,
+                            ResourceType::Script,
+                            effective_url,
+                        );
+                        continue;
+                    }
+                    source
+                } else {
+                    if !policy.allows_inline(ResourceType::Script) {
+                        self.host_state.borrow_mut().record_csp_violation_for_node(
+                            &script,
+                            ResourceType::Script,
+                            "inline",
+                        );
+                        continue;
+                    }
+                    collect_text_content(&script)
+                };
+                self.eval(&source)?;
+            }
+            self.eval(
+                "document.__readyState = 'complete'; document.dispatchEvent(new Event('DOMContentLoaded')); window.dispatchEvent(new Event('load'));",
+            )?;
+            self.run_jobs()
+        })();
+        if let Err(error) = &result
+            && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
+        {
+            let opaque = error.to_opaque(&mut self.context);
+            let description = opaque
+                .to_string(&mut self.context)
+                .map(|value| value.to_std_string_escaped())
+                .unwrap_or_else(|_| "<unprintable>".to_owned());
+            eprintln!("[omoikane][auxiliary-navigation-error] {description}");
+        }
+        self.context.enter_realm(previous);
+        result
     }
 
     fn install_posted_message_values(&mut self, port: JsValue, data: JsValue) -> JsResult<()> {
@@ -7392,6 +7800,7 @@ impl JsRuntime {
                         Task::Geolocation { .. } => "geolocation",
                         Task::WebLock { .. } => "web-lock",
                         Task::Navigation(_) => "navigation",
+                        Task::AuxiliaryNavigate { .. } => "auxiliary-navigation",
                         Task::PostedMessage { .. } => "posted-message",
                         Task::WindowPostedMessage { .. } => "window-posted-message",
                         Task::BroadcastChannelMessage { .. } => "broadcast-channel",
@@ -7514,8 +7923,10 @@ impl JsRuntime {
             Task::WindowPostedMessage {
                 target_document_id,
                 target_iframe,
+                target_auxiliary_id,
                 source_document_id,
                 source_iframe_id,
+                source_auxiliary_id,
                 sender_security_origin,
                 origin,
                 target_origin,
@@ -7524,14 +7935,17 @@ impl JsRuntime {
             } => self.run_window_posted_message(
                 target_document_id,
                 target_iframe,
+                target_auxiliary_id,
                 source_document_id,
                 source_iframe_id,
+                source_auxiliary_id,
                 sender_security_origin,
                 &origin,
                 &target_origin,
                 &wire,
                 ports,
             ),
+            Task::AuxiliaryNavigate { id, url } => self.run_auxiliary_navigation(id, &url),
             Task::BroadcastChannelMessage {
                 channel_id,
                 data,
@@ -9507,6 +9921,145 @@ fn ensure_iframe_realm(
     Ok(realm)
 }
 
+/// Initializes a popup without allocating an iframe node in its opener DOM.
+fn ensure_auxiliary_realm(
+    context: &mut Context,
+    host_state: &Rc<RefCell<HostState>>,
+    auxiliary_id: u64,
+) -> JsResult<Realm> {
+    let (document_id, document_url, opener_document_id, existing) = {
+        let state = host_state.borrow();
+        let entry = state.auxiliary_contexts.get(&auxiliary_id).ok_or_else(|| {
+            JsNativeError::reference().with_message("auxiliary context is closed")
+        })?;
+        (
+            entry.document.identity(),
+            entry.document_url.clone(),
+            entry.opener_document_id,
+            entry.realm.clone(),
+        )
+    };
+    if let Some(realm) = existing {
+        return Ok(realm);
+    }
+
+    let same_origin = {
+        let state = host_state.borrow();
+        state.document_security_origins.get(&document_id)
+            == state.document_security_origins.get(&opener_document_id)
+    };
+
+    let opener = if context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .is_some_and(|owner| owner.0 == opener_document_id)
+    {
+        context.global_object().into()
+    } else {
+        let owner_realm = {
+            let state = host_state.borrow();
+            if opener_document_id == state.document.identity() {
+                state.main_realm.clone()
+            } else {
+                state
+                    .iframe_documents
+                    .values()
+                    .find(|entry| entry.document.identity() == opener_document_id)
+                    .and_then(|entry| entry.realm.clone())
+                    .or_else(|| {
+                        state
+                            .auxiliary_contexts
+                            .values()
+                            .find(|entry| entry.document.identity() == opener_document_id)
+                            .and_then(|entry| entry.realm.clone())
+                    })
+            }
+        };
+        let owner_realm = owner_realm.ok_or_else(|| {
+            JsNativeError::reference().with_message("popup opener is no longer live")
+        })?;
+        let previous = context.enter_realm(owner_realm);
+        let global: JsValue = context.global_object().into();
+        context.enter_realm(previous);
+        global
+    };
+    let realm = context.create_realm()?;
+    realm
+        .host_defined_mut()
+        .insert(ModuleDocumentId(document_id));
+    let previous = context.enter_realm(realm.clone());
+    let previous_resolver = host_state.borrow().canonical_node_identity_resolver.clone();
+    let setup = (|| -> JsResult<()> {
+        register_host_bindings(context, host_state)?;
+        let global = context.global_object();
+        global.set(
+            js_string!("__omoikane_document_id"),
+            JsValue::from(document_id as f64),
+            true,
+            context,
+        )?;
+        global.set(
+            js_string!("__omoikane_location_href"),
+            JsValue::from(js_string!(document_url.as_str())),
+            true,
+            context,
+        )?;
+        global.set(
+            js_string!("__omoikane_frame_element_id"),
+            JsValue::null(),
+            true,
+            context,
+        )?;
+        global.set(
+            js_string!("__omoikane_auxiliary_context_id"),
+            JsValue::from(auxiliary_id as f64),
+            true,
+            context,
+        )?;
+        let complete = |promise: JsPromise| match promise.state() {
+            PromiseState::Fulfilled(_) => Ok(()),
+            PromiseState::Rejected(error) => Err(JsError::from_opaque(error)),
+            PromiseState::Pending => Err(JsNativeError::error()
+                .with_message("popup bootstrap did not complete synchronously")
+                .into()),
+        };
+        let bootstrap = Module::parse(Source::from_bytes(DOM_BOOTSTRAP), None, context)?;
+        complete(bootstrap.load(context))?;
+        bootstrap.link(context)?;
+        complete(bootstrap.evaluate(context))?;
+        let opener = if same_origin {
+            opener
+        } else {
+            let factory = context
+                .global_object()
+                .get(js_string!("__omoikane_cross_origin_window"), context)?;
+            let factory = factory.as_callable().ok_or_else(|| {
+                JsNativeError::typ().with_message("cross-origin opener proxy is unavailable")
+            })?;
+            factory.call(
+                &JsValue::undefined(),
+                &[JsValue::from(opener_document_id as f64)],
+                context,
+            )?
+        };
+        context
+            .global_object()
+            .set(js_string!("opener"), opener, true, context)?;
+        Ok(())
+    })();
+    context.enter_realm(previous);
+    host_state.borrow_mut().canonical_node_identity_resolver = previous_resolver;
+    setup?;
+    let mut state = host_state.borrow_mut();
+    let entry = state
+        .auxiliary_contexts
+        .get_mut(&auxiliary_id)
+        .ok_or_else(|| JsNativeError::reference().with_message("auxiliary context was closed"))?;
+    entry.realm = Some(realm.clone());
+    Ok(realm)
+}
+
 fn register_host_bindings(
     context: &mut Context,
     host_state: &Rc<RefCell<HostState>>,
@@ -10043,6 +10596,31 @@ fn register_host_bindings(
             js_string!("__omoikane_window_post_message"),
             6,
             NativeFunction::from_copy_closure(window_post_message_native),
+        ),
+        (
+            js_string!("__omoikane_open_auxiliary_window"),
+            2,
+            NativeFunction::from_copy_closure(open_auxiliary_window_native),
+        ),
+        (
+            js_string!("__omoikane_auxiliary_window_global"),
+            1,
+            NativeFunction::from_copy_closure(auxiliary_window_global_native),
+        ),
+        (
+            js_string!("__omoikane_auxiliary_window_state"),
+            1,
+            NativeFunction::from_copy_closure(auxiliary_window_state_native),
+        ),
+        (
+            js_string!("__omoikane_close_auxiliary_window"),
+            1,
+            NativeFunction::from_copy_closure(close_auxiliary_window_native),
+        ),
+        (
+            js_string!("__omoikane_navigate_auxiliary_window"),
+            2,
+            NativeFunction::from_copy_closure(navigate_auxiliary_window_native),
         ),
         (
             js_string!("__omoikane_broadcast_channel_register"),
@@ -15255,6 +15833,9 @@ fn retarget_window_message_error(
     };
 
     let target_realm = with_host_state(|host| {
+        if kind == "popup" {
+            return ensure_auxiliary_realm(context, host, target_id as u64).map(Some);
+        }
         let target = {
             let state = host.borrow();
             if kind == "iframe" {
@@ -15321,7 +15902,7 @@ fn window_post_message_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    if kind != "document" && kind != "iframe" {
+    if kind != "document" && kind != "iframe" && kind != "popup" {
         return Err(JsNativeError::typ()
             .with_message("invalid Window message target")
             .into());
@@ -15404,7 +15985,15 @@ fn window_post_message_native(
         let source_iframe_id = state.iframe_documents.iter().find_map(|(id, entry)| {
             (entry.document.identity() == sender_document_id).then_some(*id)
         });
-        let (target_document_id, target_iframe) = if kind == "iframe" {
+        let source_auxiliary_id = state.auxiliary_contexts.iter().find_map(|(id, entry)| {
+            (entry.document.identity() == sender_document_id).then_some(*id)
+        });
+        let (target_document_id, target_iframe, target_auxiliary_id) = if kind == "popup" {
+            let Some(entry) = state.auxiliary_contexts.get(&(target_id as u64)) else {
+                return Ok(JsValue::undefined());
+            };
+            (entry.document.identity(), None, Some(target_id as u64))
+        } else if kind == "iframe" {
             let Some(iframe) = state.get_node(target_id) else {
                 return Ok(JsValue::undefined());
             };
@@ -15420,9 +16009,9 @@ fn window_post_message_native(
             if expected_context.is_some_and(|expected| expected != context_id) {
                 return Ok(JsValue::undefined());
             }
-            (document.identity(), Some((target_id, context_id)))
+            (document.identity(), Some((target_id, context_id)), None)
         } else if target_id == state.document.identity() {
-            (target_id, None)
+            (target_id, None, None)
         } else {
             let Some((iframe_id, _)) = state
                 .iframe_documents
@@ -15434,21 +16023,168 @@ fn window_post_message_native(
             let Some(context_id) = state.iframe_context_ids.get(iframe_id).copied() else {
                 return Ok(JsValue::undefined());
             };
-            (target_id, Some((*iframe_id, context_id)))
+            (target_id, Some((*iframe_id, context_id)), None)
         };
         state
             .event_loop
             .enqueue_window_posted_message(Task::WindowPostedMessage {
                 target_document_id,
                 target_iframe,
+                target_auxiliary_id,
                 source_document_id: sender_document_id,
                 source_iframe_id,
+                source_auxiliary_id,
                 sender_security_origin,
                 origin,
                 target_origin,
                 wire,
                 ports,
             });
+        Ok(JsValue::undefined())
+    })
+}
+
+/// Creates or reuses a named auxiliary browsing context. Its initial
+/// `about:blank` Document is independent of the opener's DOM tree.
+fn open_auxiliary_window_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let name = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| js_string!("_blank").into())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let opener_document_id = context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|owner| owner.0);
+    with_host_state(|host| {
+        let id = {
+            let mut state = host.borrow_mut();
+            let opener_document_id =
+                opener_document_id.unwrap_or_else(|| state.document.identity());
+            state
+                .open_auxiliary_context(opener_document_id, &name)
+                .map_err(|message| JsNativeError::error().with_message(message))?
+        };
+        ensure_auxiliary_realm(context, host, id)?;
+        if !url.is_empty() && !matches_about_blank_url(&url) {
+            host.borrow_mut()
+                .event_loop
+                .enqueue_auxiliary_navigation(id, url);
+        }
+        Ok(JsValue::from(id as f64))
+    })
+}
+
+fn navigate_auxiliary_window_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)? as u64;
+    let url = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    with_host_state(|host| {
+        let mut state = host.borrow_mut();
+        if state.auxiliary_contexts.contains_key(&id) {
+            state.event_loop.enqueue_auxiliary_navigation(id, url);
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn auxiliary_window_state_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)? as u64;
+    let caller_document_id = context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|owner| owner.0);
+    with_host_state(|host| {
+        let state = host.borrow();
+        let Some(entry) = state.auxiliary_contexts.get(&id) else {
+            return Ok(JsValue::from(js_string!("closed")));
+        };
+        let caller = caller_document_id.unwrap_or_else(|| state.document.identity());
+        let same_origin = state.document_security_origins.get(&caller)
+            == state
+                .document_security_origins
+                .get(&entry.document.identity());
+        Ok(JsValue::from(js_string!(if same_origin {
+            "same"
+        } else {
+            "cross"
+        })))
+    })
+}
+
+fn auxiliary_window_global_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)? as u64;
+    let state = auxiliary_window_state_native(&JsValue::undefined(), args, context)?;
+    if state
+        .as_string()
+        .is_none_or(|state| state.to_std_string_escaped() != "same")
+    {
+        return Ok(JsValue::null());
+    }
+    with_host_state(|host| {
+        let realm = ensure_auxiliary_realm(context, host, id)?;
+        let previous = context.enter_realm(realm);
+        let global: JsValue = context.global_object().into();
+        context.enter_realm(previous);
+        Ok(global)
+    })
+}
+
+fn close_auxiliary_window_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)? as u64;
+    with_host_state(|host| {
+        let realm = host
+            .borrow()
+            .auxiliary_contexts
+            .get(&id)
+            .and_then(|entry| entry.realm.clone());
+        if let Some(realm) = realm {
+            let previous = context.enter_realm(realm);
+            let _ = (|| -> JsResult<()> {
+                let global = context.global_object();
+                let close =
+                    global.get(js_string!("__omoikane_close_auxiliary_document"), context)?;
+                if let Some(callable) = close.as_callable() {
+                    callable.call(&global.into(), &[], context)?;
+                }
+                Ok(())
+            })();
+            context.enter_realm(previous);
+        }
+        host.borrow_mut().close_auxiliary_context(id);
         Ok(JsValue::undefined())
     })
 }
