@@ -16905,17 +16905,14 @@
         if (type === "characterData" && registration.options.characterDataOldValue) includeOldValue = true;
       }
       if (!matched) continue;
-      // Child-list records and observations requesting the old value can use
-      // this mutation's fresh init object without cloning it for each observer.
-      let recordInit = init;
+      const recordInit = { ...init };
       if ((type === "attributes" || type === "characterData") && !includeOldValue) {
-        recordInit = { ...init, oldValue: null };
+        recordInit.oldValue = null;
       }
       observer._records.push(new MutationRecord(type, target, recordInit));
       observer._schedule();
     }
-    if (browsingInput.hasLayoutObservers &&
-        typeof globalThis.__omoikane_layout_observers_changed === "function") {
+    if (typeof globalThis.__omoikane_layout_observers_changed === "function") {
       globalThis.__omoikane_layout_observers_changed();
     }
   }
@@ -24483,7 +24480,6 @@
       ].includes(box)) throw new TypeError("Unsupported ResizeObserver box option");
       const previous = this._targets.get(target);
       this._targets.set(target, { box, size: previous && previous.box === box ? previous.size : null });
-      browsingInput.hasLayoutObservers = true;
       activeResizeObservers.add(this);
       this.__queueCheck();
     }
@@ -24643,7 +24639,6 @@
       if (!(target instanceof Element)) throw new TypeError("IntersectionObserver target must be an Element");
       if (this._targets.has(target)) return;
       this._targets.set(target, null);
-      browsingInput.hasLayoutObservers = true;
       activeIntersectionObservers.add(this);
       this.__queueCheck();
     }
