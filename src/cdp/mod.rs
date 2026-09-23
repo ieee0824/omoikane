@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -670,6 +671,7 @@ pub struct CdpSession {
     storage_manager: StorageManager,
     storage_session_id: u64,
     http_client: Client,
+    cookie_store: Arc<Mutex<crate::http::CookieJar>>,
     current_url: String,
     last_html: String,
     frame_id: String,
@@ -772,19 +774,24 @@ impl CdpSession {
             manager: storage_manager.clone(),
             session_id: storage_session_id,
         };
-        let runtime = JsRuntime::with_document_url_and_storage(
+        let cookie_store = Arc::new(Mutex::new(crate::http::CookieJar::new()));
+        let mut runtime = JsRuntime::with_document_url_and_storage(
             TreeBuilder::parse("<html><head></head><body></body></html>").document(),
             "about:blank",
             storage_manager.clone(),
             storage_session_id,
         )
         .map_err(|error| error.to_string())?;
+        runtime.set_shared_cookie_store(Arc::clone(&cookie_store));
+        let mut http_client = Client::new();
+        http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
         let mut session = Self {
             runtime,
             _storage_lifetime: storage_lifetime,
             storage_manager,
             storage_session_id,
-            http_client: Client::new(),
+            http_client,
+            cookie_store,
             current_url: "about:blank".to_string(),
             last_html: String::new(),
             frame_id: "frame-0".to_string(),
@@ -2631,7 +2638,6 @@ impl CdpSession {
         body: Option<Vec<u8>>,
         content_type: Option<String>,
     ) -> Result<(String, u16, String, Vec<String>), String> {
-        *self.http_client.cookie_jar_mut() = self.runtime.cookie_jar_snapshot();
         if method == Method::Get {
             if url == "about:blank" {
                 return Ok((
@@ -2708,7 +2714,7 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(|error| error.to_string())?;
-        runtime.set_cookie_jar(self.http_client.cookie_jar().clone());
+        runtime.set_shared_cookie_store(Arc::clone(&self.cookie_store));
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         runtime.set_fullscreen_supported(self.fullscreen_supported);
@@ -2787,7 +2793,7 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(|error| error.to_string())?;
-        runtime.set_cookie_jar(self.http_client.cookie_jar().clone());
+        runtime.set_shared_cookie_store(Arc::clone(&self.cookie_store));
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         runtime.set_fullscreen_supported(self.fullscreen_supported);

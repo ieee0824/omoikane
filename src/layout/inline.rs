@@ -18,10 +18,10 @@ use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
     BoxDimensions, EdgeSizes, FontMetrics, FragmentStyle, HTTP_CLIENT, IMAGE_ANIMATION_CACHE,
-    IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE, InlineFragment, InlineFragmentContent,
-    LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState, TextOverflowPaint,
-    VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length, is_border_box,
-    is_display_none, is_non_rendered_html_element,
+    IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE, IMAGE_COOKIE_CONTEXT, InlineFragment,
+    InlineFragmentContent, LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState,
+    TextOverflowPaint, VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length,
+    is_border_box, is_display_none, is_non_rendered_html_element,
 };
 
 mod boxes;
@@ -1788,6 +1788,7 @@ const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Fetch an image from an HTTP/HTTPS URL with caching.
 fn fetch_image(url: &str) -> Option<Image> {
+    super::ensure_image_cache_context();
     let time = IMAGE_ANIMATION_TIME_MS.with(|cell| cell.get());
     if let Some(image) = IMAGE_ANIMATION_CACHE.with(|cache| {
         cache
@@ -1818,16 +1819,25 @@ fn fetch_image(url: &str) -> Option<Image> {
 fn fetch_image_uncached(url: &str) -> Option<Image> {
     // Use shared HTTP client for connection reuse and cookie sharing
     let mut request = HttpRequest::get(url).ok()?;
-    IMAGE_BASE_URL.with(|cell| {
-        if let Some(site) = cell.borrow().as_ref() {
-            request.set_cookie_context(site.clone(), false);
-        }
-    });
+    let context = IMAGE_COOKIE_CONTEXT.with(|cell| cell.borrow().clone());
+    let site = context
+        .as_ref()
+        .and_then(|(_, site, _)| site.clone())
+        .or_else(|| IMAGE_BASE_URL.with(|cell| cell.borrow().clone()));
+    if let Some(site) = site {
+        request.set_cookie_context(site, false);
+    }
     request.set_header(
         "Accept",
         "image/webp,image/png,image/jpeg,image/gif,image/svg+xml;q=0.9,*/*;q=0.1",
     );
-    let response = HTTP_CLIENT.with(|client| client.borrow_mut().send(request).ok())?;
+    let response = HTTP_CLIENT.with(|client| {
+        let mut client = client.borrow_mut();
+        match context {
+            Some((store, _, _)) => client.send_with_shared_cookies(request, &store).ok(),
+            None => client.send(request).ok(),
+        }
+    })?;
 
     if response.status_code() != 200 {
         return None;
@@ -1899,6 +1909,7 @@ fn decode_image_bytes(bytes: &[u8], content_type: &str, url: &str) -> Option<Ima
 /// A decoded image does stay cached after its URL is revoked, so an `<img>` that
 /// already painted keeps painting — the same thing browsers do.
 fn decode_blob_url_image(url: &str) -> Option<Image> {
+    super::ensure_image_cache_context();
     if let Some(cached) = IMAGE_CACHE.with(|cache| cache.borrow().get(url).cloned()) {
         return cached;
     }
