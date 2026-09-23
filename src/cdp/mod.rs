@@ -699,6 +699,9 @@ pub struct CdpSession {
     accessibility_enabled: bool,
     fullscreen_supported: bool,
     fullscreen_transition_allowed: bool,
+    /// Host presentation state and CDP lifecycle override are independent.
+    host_hidden: bool,
+    lifecycle_frozen: bool,
     pending_fullscreen_transition: Option<FullscreenTransition>,
     pointer_lock_deferred: bool,
     pointer_lock_focused: bool,
@@ -812,6 +815,8 @@ impl CdpSession {
             accessibility_enabled: false,
             fullscreen_supported: true,
             fullscreen_transition_allowed: true,
+            host_hidden: false,
+            lifecycle_frozen: false,
             pending_fullscreen_transition: None,
             pointer_lock_deferred: false,
             pointer_lock_focused: true,
@@ -836,6 +841,7 @@ impl CdpSession {
             "Page.navigate" => self.page_navigate(&params),
             "Page.reload" => self.page_reload(),
             "Page.getFrameTree" => Ok(self.page_get_frame_tree()),
+            "Page.setWebLifecycleState" => self.page_set_web_lifecycle_state(&params),
             "DOM.getDocument" => self.dom_get_document(&params),
             "DOM.getAttributes" => self.dom_get_attributes(&params),
             "DOM.querySelector" => self.dom_query_selector(&params),
@@ -899,6 +905,31 @@ impl CdpSession {
     /// Updates the active page's layout and script-visible viewport dimensions.
     pub fn set_viewport(&mut self, width: u32, height: u32) {
         self.runtime.set_viewport(width as f32, height as f32);
+    }
+
+    /// Updates the page visibility reported to scripts by its native host.
+    /// A frozen CDP lifecycle remains hidden until it is reactivated.
+    pub fn set_host_visibility(&mut self, hidden: bool) {
+        self.host_hidden = hidden;
+        self.runtime
+            .set_page_visibility(hidden || self.lifecycle_frozen);
+    }
+
+    fn page_set_web_lifecycle_state(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let state = require_string(params, "state")?;
+        self.lifecycle_frozen = match state.as_str() {
+            "active" => false,
+            "frozen" => true,
+            _ => {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("Unsupported lifecycle state: {state}"),
+                });
+            }
+        };
+        self.runtime
+            .set_page_visibility(self.host_hidden || self.lifecycle_frozen);
+        Ok(json!({}))
     }
 
     /// Updates the visible portion of the active page for host-driven zoom or
@@ -1067,6 +1098,21 @@ impl CdpSession {
         if let Some(transition) = self.runtime.take_fullscreen_transition() {
             self.pending_fullscreen_transition = Some(transition);
         }
+    }
+
+    fn dispatch_document_departure(&mut self) {
+        let _ = self
+            .runtime
+            .eval("window.dispatchEvent(new Event('beforeunload'))");
+        let _ = self.runtime.run_jobs();
+        self.runtime.set_page_visibility(true);
+        let _ = self.runtime.eval(
+            "window.dispatchEvent(new Event('pagehide')); \
+             window.dispatchEvent(new Event('unload')); \
+             if (typeof globalThis.__omoikane_permission_teardown === 'function') \
+             globalThis.__omoikane_permission_teardown();",
+        );
+        let _ = self.runtime.run_jobs();
     }
 
     fn page_navigate(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
@@ -2657,6 +2703,7 @@ impl CdpSession {
         )
         .map_err(|error| error.to_string())?;
         runtime.set_cookie_jar(self.http_client.cookie_jar().clone());
+        runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         runtime.set_fullscreen_supported(self.fullscreen_supported);
         runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
@@ -2686,14 +2733,7 @@ impl CdpSession {
         // future GUI integration.
         self.leave_fullscreen_for_navigation();
         self.runtime.terminate_workers();
-        let _ = self.runtime.eval(
-            "window.dispatchEvent(new Event('beforeunload')); \
-             window.dispatchEvent(new Event('pagehide')); \
-             window.dispatchEvent(new Event('unload')); \
-             if (typeof globalThis.__omoikane_permission_teardown === 'function') \
-             globalThis.__omoikane_permission_teardown();",
-        );
-        let _ = self.runtime.run_jobs();
+        self.dispatch_document_departure();
 
         let base_url = url.parse::<crate::http::Url>().ok();
         let script_errors = runtime.execute_document_scripts(base_url.as_ref());
@@ -2742,6 +2782,7 @@ impl CdpSession {
         )
         .map_err(|error| error.to_string())?;
         runtime.set_cookie_jar(self.http_client.cookie_jar().clone());
+        runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         runtime.set_fullscreen_supported(self.fullscreen_supported);
         runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
@@ -2815,14 +2856,7 @@ impl CdpSession {
         // document intact.
         self.leave_fullscreen_for_navigation();
         self.runtime.terminate_workers();
-        let _ = self.runtime.eval(
-            "window.dispatchEvent(new Event('beforeunload')); \
-             window.dispatchEvent(new Event('pagehide')); \
-             window.dispatchEvent(new Event('unload')); \
-             if (typeof globalThis.__omoikane_permission_teardown === 'function') \
-             globalThis.__omoikane_permission_teardown();",
-        );
-        let _ = self.runtime.run_jobs();
+        self.dispatch_document_departure();
 
         self.runtime = runtime;
         self.mouse_pressed_target = None;

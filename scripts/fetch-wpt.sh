@@ -139,6 +139,7 @@ git_wpt sparse-checkout add "/custom-elements/form-associated/" "/html/semantics
 git_wpt sparse-checkout add "/common/blank.html" "/FileAPI/file/resources/echo-content-escaped.py"
 git_wpt sparse-checkout add "/domxpath/"
 git_wpt sparse-checkout add "/visual-viewport/"
+git_wpt sparse-checkout add "/page-visibility/"
 git_wpt sparse-checkout add "/web-locks/"
 git_wpt sparse-checkout add "/css/css-multicol/parsing/" "/css/support/shorthand-testcommon.js"
 git_wpt sparse-checkout add \

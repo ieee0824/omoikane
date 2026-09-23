@@ -1326,6 +1326,8 @@ struct HostState {
     /// when several same-origin Window realms share this runtime.
     web_lock_clients: HashMap<usize, u64>,
     document_origins: HashMap<usize, Option<StorageOrigin>>,
+    /// Visibility of this top-level traversable, shared by its iframe Documents.
+    page_hidden: bool,
     /// Committed URL per live Document. Nested Window/Document access must not
     /// accidentally expose the top-level Location after iframe navigation.
     document_urls: HashMap<usize, String>,
@@ -1952,6 +1954,7 @@ impl HostState {
             storage_session_id,
             web_lock_clients,
             document_origins,
+            page_hidden: false,
             document_urls,
             document_base_urls,
             document_security_origins,
@@ -5026,6 +5029,47 @@ impl JsRuntime {
         self.host_state.borrow().http_client.cookie_jar().clone()
     }
 
+    /// Sets the initial visibility before a new Document runs any page script.
+    pub(crate) fn set_initial_visibility_hidden(&mut self, hidden: bool) {
+        self.host_state.borrow_mut().page_hidden = hidden;
+    }
+
+    /// Updates this page and its iframe Documents, firing `visibilitychange`
+    /// once on each live Document when the state actually changes.
+    pub fn set_page_visibility(&mut self, hidden: bool) {
+        let document_ids = {
+            let mut state = self.host_state.borrow_mut();
+            if state.page_hidden == hidden {
+                return;
+            }
+            state.page_hidden = hidden;
+            let mut ids = vec![state.document.identity()];
+            ids.extend(
+                state
+                    .iframe_documents
+                    .values()
+                    .map(|entry| entry.document.identity()),
+            );
+            ids[1..].sort_unstable();
+            ids
+        };
+        for document_id in document_ids {
+            if !self
+                .host_state
+                .borrow()
+                .document_urls
+                .contains_key(&document_id)
+            {
+                continue;
+            }
+            let result = self.eval_in_document_realm(
+                document_id,
+                &format!("__omoikane_dispatch_visibilitychange({document_id})"),
+            );
+            self.record_error_from("visibilitychange", result);
+        }
+    }
+
     /// Installs the enforced CSP for the current Document before document
     /// scripts and style resolution run.  The policy is immutable for the
     /// lifetime of this browsing-context generation; a navigation constructs a
@@ -6499,6 +6543,11 @@ impl JsRuntime {
             self.flush_pending_visual_viewport_scroll_events()?;
         }
 
+        if self.host_state.borrow().page_hidden {
+            // Keep callbacks queued until the page has a rendering opportunity.
+            return Ok(0);
+        }
+
         let (timestamp, callback_ids) = self
             .host_state
             .borrow_mut()
@@ -6604,6 +6653,9 @@ impl JsRuntime {
         }
         if self.has_pending_visual_viewport_scroll_steps() {
             self.flush_pending_visual_viewport_scroll_events()?;
+        }
+        if self.host_state.borrow().page_hidden {
+            return Ok(0);
         }
         let (timestamp, callback_ids) = self
             .host_state
@@ -6819,6 +6871,12 @@ impl JsRuntime {
     pub fn run_animation_frames(&mut self, max_frames: usize, frame_interval_ms: u64) -> usize {
         let mut callbacks_run = 0;
         for _ in 0..max_frames {
+            if self.host_state.borrow().page_hidden
+                && !self.has_pending_scroll_steps()
+                && !self.has_pending_viewport_steps()
+            {
+                break;
+            }
             if !self.has_pending_animation_frames()
                 && !self.has_pending_scroll_steps()
                 && !self.has_pending_viewport_steps()
@@ -7843,6 +7901,31 @@ impl JsRuntime {
                     }
                 }
                 if dispatch_load {
+                    let child_document_id = {
+                        let state = self.host_state.borrow();
+                        state
+                            .get_node(node_id)
+                            .filter(|node| {
+                                node.tag_name()
+                                    .is_some_and(|name| name.eq_ignore_ascii_case("iframe"))
+                            })
+                            .and_then(|_| state.iframe_documents.get(&node_id))
+                            .map(|entry| entry.document.identity())
+                    };
+                    if let Some(document_id) = child_document_id {
+                        match self.realm_for_document(document_id) {
+                            Ok(_) => {
+                                let dispatched = self.eval_in_document_realm(
+                                    document_id,
+                                    &format!("__omoikane_wire_inline_handlers(); {LOAD_SCRIPT}"),
+                                );
+                                self.record_error_from("iframe window load", dispatched);
+                            }
+                            Err(error) => {
+                                self.record_task_error(format!("[iframe window load] {error}"))
+                            }
+                        }
+                    }
                     let (timing_name, redirected, elapsed_ms) =
                         dispatch_timing.unwrap_or_else(|| (String::new(), false, 0.0));
                     let dispatched = self.eval_in_document_realm(
@@ -9121,6 +9204,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(document_cookie_set_native),
         ),
         (
+            js_string!("__omoikane_document_visibility_state"),
+            1,
+            NativeFunction::from_copy_closure(document_visibility_state_native),
+        ),
+        (
             js_string!("__omoikane_storage_length"),
             2,
             NativeFunction::from_copy_closure(storage_length_native),
@@ -9968,6 +10056,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(iframe_global_native),
         ),
         (
+            js_string!("__omoikane_existing_iframe_document"),
+            1,
+            NativeFunction::from_copy_closure(existing_iframe_document_native),
+        ),
+        (
             js_string!("__omoikane_iframe_content_document"),
             1,
             NativeFunction::from_copy_closure(iframe_content_document_native),
@@ -10767,6 +10860,23 @@ fn storage_origin_native(
             .flatten()
             .map(|origin| JsValue::from(js_string!(origin.serialize())))
             .unwrap_or_else(JsValue::null))
+    })
+}
+
+fn document_visibility_state_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let visible = state.document_urls.contains_key(&document_id) && !state.page_hidden;
+        Ok(JsValue::from(js_string!(if visible {
+            "visible"
+        } else {
+            "hidden"
+        })))
     })
 }
 
@@ -18146,6 +18256,24 @@ fn iframe_global_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         let global = context.global_object();
         context.enter_realm(previous);
         Ok(global.into())
+    })
+}
+
+/// Private visibility-dispatch lookup. Unlike `contentDocument`, this neither
+/// starts an iframe load nor applies script-origin access checks.
+fn existing_iframe_document_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let iframe_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .iframe_documents
+            .get(&iframe_id)
+            .map(|entry| JsValue::from(entry.document.identity() as f64))
+            .unwrap_or_else(JsValue::null))
     })
 }
 
