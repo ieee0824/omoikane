@@ -616,6 +616,26 @@ impl Context {
         &self.vm.realm
     }
 
+    /// Returns the Realm of the active script or module, if one is running.
+    ///
+    /// Host callbacks use this to identify the incumbent Window when a
+    /// function belonging to another Realm is called across frames.
+    #[must_use]
+    pub fn active_script_or_module_realm(&self) -> Option<Realm> {
+        self.get_active_script_or_module()
+            .map(|runnable| match runnable {
+                ActiveRunnable::Script(script) => script.realm().clone(),
+                ActiveRunnable::Module(module) => module.realm(),
+            })
+    }
+
+    /// Returns the immediate JavaScript caller's Realm, if a suspended caller
+    /// frame exists below the currently executing function.
+    #[must_use]
+    pub fn caller_realm(&self) -> Option<Realm> {
+        self.vm.frames.last().map(|frame| frame.realm.clone())
+    }
+
     /// Set the value of trace on the context
     #[cfg(feature = "trace")]
     #[inline]

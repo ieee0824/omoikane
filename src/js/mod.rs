@@ -6424,6 +6424,147 @@ impl JsRuntime {
         result
     }
 
+    fn run_window_posted_message(
+        &mut self,
+        target_document_id: usize,
+        target_iframe: Option<(usize, u64)>,
+        source_document_id: usize,
+        source_iframe_id: Option<usize>,
+        sender_security_origin: Option<DocumentSecurityOrigin>,
+        origin: &str,
+        target_origin: &str,
+        wire: &str,
+        ports: JsValue,
+    ) -> JsResult<()> {
+        let source = (|| {
+            let state = self.host_state.borrow();
+            if let Some((iframe_id, context_id)) = target_iframe {
+                let iframe = state.get_node(iframe_id)?;
+                if !state.node_is_in_active_document(&iframe)
+                    || state.iframe_context_ids.get(&iframe_id) != Some(&context_id)
+                    || !state
+                        .iframe_documents
+                        .get(&iframe_id)
+                        .is_some_and(|entry| entry.document.identity() == target_document_id)
+                {
+                    return None;
+                }
+            } else if state.document.identity() != target_document_id {
+                return None;
+            }
+            let current_origin = serialized_window_origin(
+                state
+                    .document_origins
+                    .get(&target_document_id)
+                    .and_then(Option::as_ref),
+            );
+            let matches_target = match target_origin {
+                "*" => true,
+                "/" => {
+                    sender_security_origin.as_ref()
+                        == state.document_security_origins.get(&target_document_id)
+                }
+                explicit => explicit == current_origin,
+            };
+            if !matches_target {
+                return None;
+            }
+            Some(if source_document_id == target_document_id {
+                ("self", None)
+            } else if target_iframe.is_some_and(|(iframe_id, _)| {
+                state
+                    .get_node(iframe_id)
+                    .and_then(|node| owner_document_for_node(&node))
+                    .is_some_and(|owner| owner.identity() == source_document_id)
+            }) {
+                ("parent", None)
+            } else if source_iframe_id.is_some_and(|iframe_id| {
+                state
+                    .get_node(iframe_id)
+                    .and_then(|node| owner_document_for_node(&node))
+                    .is_some_and(|owner| owner.identity() == target_document_id)
+            }) {
+                ("iframe", source_iframe_id)
+            } else {
+                ("null", None)
+            })
+        })();
+        let Some(source) = source else {
+            return self.close_transferred_message_ports(ports);
+        };
+        let realm = if let Some((iframe_id, _)) = target_iframe {
+            self.ensure_iframe_realm(iframe_id, target_document_id)?
+        } else {
+            let state = self.host_state.borrow();
+            let Some(realm) = state.main_realm.clone() else {
+                drop(state);
+                return self.close_transferred_message_ports(ports);
+            };
+            realm
+        };
+        let previous = self.context.enter_realm(realm);
+        let result = (|| {
+            self.with_active_host(|context| {
+                let global = context.global_object();
+                let source_function =
+                    global.get(js_string!("__omoikane_window_message_source"), context)?;
+                let source_function = source_function.as_callable().ok_or_else(|| {
+                    JsNativeError::typ()
+                        .with_message("Window message source resolver is unavailable")
+                })?;
+                let source_value = source_function.call(
+                    &global.clone().into(),
+                    &[
+                        JsValue::from(js_string!(source.0)),
+                        source
+                            .1
+                            .map_or(JsValue::null(), |id| JsValue::from(id as f64)),
+                    ],
+                    context,
+                )?;
+                let receiver =
+                    global.get(js_string!("__omoikane_receive_window_message"), context)?;
+                let receiver = receiver.as_callable().ok_or_else(|| {
+                    JsNativeError::typ().with_message("Window message receiver is unavailable")
+                })?;
+                receiver.call(
+                    &global.clone().into(),
+                    &[
+                        JsValue::from(js_string!(wire)),
+                        JsValue::from(js_string!(origin)),
+                        source_value,
+                        ports,
+                    ],
+                    context,
+                )?;
+                Ok(())
+            })?;
+            self.run_jobs()
+        })();
+        self.context.enter_realm(previous);
+        result
+    }
+
+    fn close_transferred_message_ports(&mut self, ports: JsValue) -> JsResult<()> {
+        self.with_active_host(|context| {
+            let Some(ports) = ports.as_object() else {
+                return Ok(());
+            };
+            let length = ports.get(js_string!("length"), context)?.to_u32(context)?;
+            for index in 0..length {
+                let port = ports.get(index, context)?;
+                let Some(object) = port.as_object() else {
+                    continue;
+                };
+                let close = object.get(js_string!("close"), context)?;
+                if let Some(close) = close.as_callable() {
+                    close.call(&port, &[], context)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
     fn install_posted_message_values(&mut self, port: JsValue, data: JsValue) -> JsResult<()> {
         let global = self.context.global_object();
         global.set(
@@ -7237,6 +7378,9 @@ impl JsRuntime {
                         owner_document_id, ..
                     } => *owner_document_id,
                     Task::WebLock { document_id, .. } => Some(*document_id),
+                    Task::WindowPostedMessage {
+                        target_document_id, ..
+                    } => Some(*target_document_id),
                     _ => None,
                 };
                 {
@@ -7249,6 +7393,7 @@ impl JsRuntime {
                         Task::WebLock { .. } => "web-lock",
                         Task::Navigation(_) => "navigation",
                         Task::PostedMessage { .. } => "posted-message",
+                        Task::WindowPostedMessage { .. } => "window-posted-message",
                         Task::BroadcastChannelMessage { .. } => "broadcast-channel",
                         Task::WorkerMessage { .. }
                         | Task::WorkerOwnerMessage { .. }
@@ -7366,6 +7511,27 @@ impl JsRuntime {
                 self.record_error_from("posted message", result);
                 Ok(())
             }
+            Task::WindowPostedMessage {
+                target_document_id,
+                target_iframe,
+                source_document_id,
+                source_iframe_id,
+                sender_security_origin,
+                origin,
+                target_origin,
+                wire,
+                ports,
+            } => self.run_window_posted_message(
+                target_document_id,
+                target_iframe,
+                source_document_id,
+                source_iframe_id,
+                sender_security_origin,
+                &origin,
+                &target_origin,
+                &wire,
+                ports,
+            ),
             Task::BroadcastChannelMessage {
                 channel_id,
                 data,
@@ -9269,15 +9435,30 @@ fn ensure_iframe_realm(
         bootstrap.link(context)?;
         complete(bootstrap.evaluate(context))?;
 
-        let parent = if same_origin {
-            parent_global
+        let (parent, top) = if same_origin {
+            (parent_global, top_global.clone())
         } else {
-            context.eval(Source::from_bytes("Object.create(null)"))?
-        };
-        let top = if same_origin {
-            top_global.clone()
-        } else {
-            parent.clone()
+            let factory = context
+                .global_object()
+                .get(js_string!("__omoikane_cross_origin_window"), context)?;
+            let factory = factory.as_callable().ok_or_else(|| {
+                JsNativeError::typ().with_message("cross-origin Window proxy is unavailable")
+            })?;
+            let create = |document_id, context: &mut Context| {
+                factory.call(
+                    &JsValue::undefined(),
+                    &[JsValue::from(document_id as f64)],
+                    context,
+                )
+            };
+            let parent = create(owner_document_id, context)?;
+            let top_document_id = host_state.borrow().document.identity();
+            let top = if top_document_id == owner_document_id {
+                parent.clone()
+            } else {
+                create(top_document_id, context)?
+            };
+            (parent, top)
         };
         let global = context.global_object();
         global.set(js_string!("parent"), parent.clone(), true, context)?;
@@ -9857,6 +10038,11 @@ fn register_host_bindings(
             js_string!("__omoikane_enqueue_posted_message"),
             2,
             NativeFunction::from_copy_closure(enqueue_posted_message_native),
+        ),
+        (
+            js_string!("__omoikane_window_post_message"),
+            6,
+            NativeFunction::from_copy_closure(window_post_message_native),
         ),
         (
             js_string!("__omoikane_broadcast_channel_register"),
@@ -15023,6 +15209,250 @@ fn enqueue_posted_message_native(
     })
 }
 
+/// Serializes a tuple origin without an explicit default port, as HTML does.
+fn serialized_window_origin(origin: Option<&StorageOrigin>) -> String {
+    origin
+        .and_then(|origin| url::Url::parse(&origin.serialize()).ok())
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+/// Web IDL reports Window.postMessage DOMExceptions from the target Window's
+/// Realm, even though the value to clone belongs to the incumbent sender.
+fn retarget_window_message_error(
+    error: JsError,
+    kind: &str,
+    target_id: usize,
+    expected_context: Option<u64>,
+    incumbent: &Realm,
+    context: &mut Context,
+) -> JsError {
+    let previous = context.enter_realm(incumbent.clone());
+    let details = (|| -> JsResult<Option<(String, String)>> {
+        let constructor = context
+            .global_object()
+            .get(js_string!("DOMException"), context)?;
+        let value = error.to_opaque(context);
+        if !value.instance_of(&constructor, context)? {
+            return Ok(None);
+        }
+        let Some(object) = value.as_object() else {
+            return Ok(None);
+        };
+        let name = object
+            .get(js_string!("name"), context)?
+            .to_string(context)?
+            .to_std_string_escaped();
+        let message = object
+            .get(js_string!("message"), context)?
+            .to_string(context)?
+            .to_std_string_escaped();
+        Ok(Some((name, message)))
+    })();
+    context.enter_realm(previous);
+    let Ok(Some((name, message))) = details else {
+        return error;
+    };
+
+    let target_realm = with_host_state(|host| {
+        let target = {
+            let state = host.borrow();
+            if kind == "iframe" {
+                state
+                    .iframe_context_ids
+                    .get(&target_id)
+                    .filter(|id| expected_context.is_none_or(|expected| **id == expected))
+                    .and_then(|_| state.iframe_documents.get(&target_id))
+                    .map(|entry| (target_id, entry.document.identity()))
+            } else {
+                state
+                    .iframe_documents
+                    .iter()
+                    .find_map(|(iframe_id, entry)| {
+                        (entry.document.identity() == target_id).then_some((*iframe_id, target_id))
+                    })
+            }
+        };
+        if let Some((iframe_id, document_id)) = target {
+            return ensure_iframe_realm(context, host, iframe_id, document_id).map(Some);
+        }
+        let state = host.borrow();
+        Ok((target_id == state.document.identity())
+            .then(|| state.main_realm.clone())
+            .flatten())
+    });
+    let Ok(Some(target_realm)) = target_realm else {
+        return error;
+    };
+    let previous = context.enter_realm(target_realm);
+    let recreated = (|| -> JsResult<JsValue> {
+        let constructor = context
+            .global_object()
+            .get(js_string!("DOMException"), context)?;
+        let constructor = constructor.as_object().ok_or_else(|| {
+            JsNativeError::typ().with_message("DOMException constructor is unavailable")
+        })?;
+        Ok(constructor
+            .construct(
+                &[
+                    JsValue::from(js_string!(message.as_str())),
+                    JsValue::from(js_string!(name.as_str())),
+                ],
+                None,
+                context,
+            )?
+            .into())
+    })();
+    context.enter_realm(previous);
+    recreated.map_or(error, JsError::from_opaque)
+}
+
+/// Serializes a Window message in the incumbent script Realm and queues it
+/// for the selected browsing context. A cross-Realm method call can execute
+/// the target Window's function, so `context.realm()` alone is not the sender.
+fn window_post_message_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let kind = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    if kind != "document" && kind != "iframe" {
+        return Err(JsNativeError::typ()
+            .with_message("invalid Window message target")
+            .into());
+    }
+    let target_id = parse_node_id(args.get(1), context)?;
+    let expected_context = args
+        .get(2)
+        .filter(|value| !value.is_null_or_undefined())
+        .map(|value| value.to_string(context))
+        .transpose()?
+        .map(|value| value.to_std_string_escaped().parse::<u64>())
+        .transpose()
+        .map_err(|_| JsNativeError::typ().with_message("invalid iframe context id"))?;
+
+    let incumbent = context
+        .caller_realm()
+        .or_else(|| context.active_script_or_module_realm())
+        .unwrap_or_else(|| context.realm().clone());
+    let sender_document_id = incumbent
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|document| document.0);
+    let previous = context.enter_realm(incumbent.clone());
+    let prepared = (|| -> JsResult<(String, String, String, JsValue)> {
+        let global = context.global_object();
+        let prepare = global.get(js_string!("__omoikane_prepare_window_message"), context)?;
+        let callable = prepare.as_callable().ok_or_else(|| {
+            JsNativeError::typ().with_message("Window message serializer is unavailable")
+        })?;
+        let prepared = callable.call(
+            &global.clone().into(),
+            &[
+                args.get(3).cloned().unwrap_or_default(),
+                args.get(4).cloned().unwrap_or_default(),
+                args.get(5).cloned().unwrap_or_default(),
+            ],
+            context,
+        )?;
+        let result = prepared.as_object().ok_or_else(|| {
+            JsNativeError::typ().with_message("invalid Window message serialization")
+        })?;
+        let value = |index, context: &mut Context| -> JsResult<String> {
+            Ok(result
+                .get(index, context)?
+                .to_string(context)?
+                .to_std_string_escaped())
+        };
+        Ok((
+            value(0, context)?,
+            value(1, context)?,
+            value(2, context)?,
+            result.get(3, context)?,
+        ))
+    })();
+    context.enter_realm(previous);
+    let (wire, _location_origin, target_origin, ports) = prepared.map_err(|error| {
+        retarget_window_message_error(
+            error,
+            &kind,
+            target_id,
+            expected_context,
+            &incumbent,
+            context,
+        )
+    })?;
+
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let sender_document_id = sender_document_id.unwrap_or_else(|| state.document.identity());
+        let origin = serialized_window_origin(
+            state
+                .document_origins
+                .get(&sender_document_id)
+                .and_then(Option::as_ref),
+        );
+        let sender_security_origin = state
+            .document_security_origins
+            .get(&sender_document_id)
+            .cloned();
+        let source_iframe_id = state.iframe_documents.iter().find_map(|(id, entry)| {
+            (entry.document.identity() == sender_document_id).then_some(*id)
+        });
+        let (target_document_id, target_iframe) = if kind == "iframe" {
+            let Some(iframe) = state.get_node(target_id) else {
+                return Ok(JsValue::undefined());
+            };
+            if !state.node_is_in_active_document(&iframe) {
+                return Ok(JsValue::undefined());
+            }
+            let document = state
+                .iframe_content_document(&iframe)
+                .map_err(|message| JsNativeError::error().with_message(message))?;
+            let Some(context_id) = state.iframe_context_ids.get(&target_id).copied() else {
+                return Ok(JsValue::undefined());
+            };
+            if expected_context.is_some_and(|expected| expected != context_id) {
+                return Ok(JsValue::undefined());
+            }
+            (document.identity(), Some((target_id, context_id)))
+        } else if target_id == state.document.identity() {
+            (target_id, None)
+        } else {
+            let Some((iframe_id, _)) = state
+                .iframe_documents
+                .iter()
+                .find(|(_, entry)| entry.document.identity() == target_id)
+            else {
+                return Ok(JsValue::undefined());
+            };
+            let Some(context_id) = state.iframe_context_ids.get(iframe_id).copied() else {
+                return Ok(JsValue::undefined());
+            };
+            (target_id, Some((*iframe_id, context_id)))
+        };
+        state
+            .event_loop
+            .enqueue_window_posted_message(Task::WindowPostedMessage {
+                target_document_id,
+                target_iframe,
+                source_document_id: sender_document_id,
+                source_iframe_id,
+                sender_security_origin,
+                origin,
+                target_origin,
+                wire,
+                ports,
+            });
+        Ok(JsValue::undefined())
+    })
+}
+
 fn broadcast_channel_id_argument(value: Option<&JsValue>, context: &mut Context) -> JsResult<u64> {
     let value = value.cloned().unwrap_or_default();
     if let Some(string) = value.as_string() {
@@ -20061,10 +20491,11 @@ mod tests {
                       { transfer: [duplicate, duplicate] });
                   } catch (error) { duplicateName = error.name; }
 
-                  let unsupportedPortName = "";
-                  try {
-                    structuredClone(null, { transfer: [new MessageChannel().port1] });
-                  } catch (error) { unsupportedPortName = error.name; }
+                  const portChannel = new MessageChannel();
+                  const transferredPort = structuredClone(
+                    { port: portChannel.port1 }, { transfer: [portChannel.port1] }).port;
+                  const portTransferSupported = transferredPort instanceof MessagePort &&
+                    transferredPort !== portChannel.port1;
 
                   const throwing = new ArrayBuffer(3);
                   let throwingName = "";
@@ -20105,7 +20536,7 @@ mod tests {
                     unused.byteLength === 0 && unusedCopy.ok === true &&
                     invalidName === "DataCloneError" && invalidGetterCalls === 0 &&
                     duplicateName === "DataCloneError" && duplicateGetterCalls === 0 && duplicate.byteLength === 1 &&
-                    unsupportedPortName === "DataCloneError" &&
+                    portTransferSupported &&
                     throwingName === "Error" && throwing.byteLength === 3 &&
                     mutable.byteLength === 0 && new Uint8Array(mutated.buffer)[0] === 99 &&
                     detachedName === "DataCloneError" && stillAttached.byteLength === 4 &&

@@ -32,6 +32,13 @@ git_wpt sparse-checkout add \
   "/webmessaging/Channel_postMessage_event_properties.any.js" \
   "/webmessaging/Channel_postMessage_DataCloneErr.any.js" \
   "/webmessaging/MessageEvent.any.js" \
+  "/webmessaging/postMessage_invalid_targetOrigin.htm" \
+  "/webmessaging/postMessage_Document.htm" \
+  "/webmessaging/postMessage_Function.htm" \
+  "/webmessaging/postMessage_dup_transfer_objects.htm" \
+  "/webmessaging/postMessage_solidus_sorigin.htm" \
+  "/webmessaging/postMessage_MessagePorts_sorigin.htm" \
+  "/webmessaging/support/ChildWindowPostMessage.htm" \
   "/workers/Worker_basic.htm" \
   "/workers/support/WorkerBasic.js" \
   "/css/css-shadow/part/support/shadow-helper.js" \

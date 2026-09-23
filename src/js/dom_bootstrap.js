@@ -8508,6 +8508,10 @@
           if (!owner || owner === globalThis.document) return globalThis;
           return owner.defaultView || globalThis;
         };
+        const postMessage = (message, targetOriginOrOptions = "/", transfer = undefined) => {
+          __omoikane_window_post_message("iframe", iframe.__id, expectedContext,
+            message, targetOriginOrOptions, transfer);
+        };
         const handler = {
           get(_target, property, receiver) {
             refresh();
@@ -8520,7 +8524,7 @@
             if (property === "length") return 0;
             if (property === "location") return locationFacade;
             if (property === "close" || property === "focus" || property === "blur") return () => {};
-            if (property === "postMessage") return () => {};
+            if (property === "postMessage") return postMessage;
             if (access === "closed") {
               if (property === "document" || property === "customElements" ||
                   property === "localStorage" || property === "sessionStorage" ||
@@ -8578,6 +8582,9 @@
           },
           getOwnPropertyDescriptor(_target, property) {
             refresh();
+            if (property === "postMessage") {
+              return { value: postMessage, writable: false, enumerable: true, configurable: true };
+            }
             if (access !== "same") throw securityError();
             const descriptor = Reflect.getOwnPropertyDescriptor(getActiveWindow(), property);
             // This JS Proxy has an empty, extensible target. Its forwarded
@@ -14661,6 +14668,19 @@
   globalThis.dispatchEvent = function(event) {
     return dispatchEventOnTarget(globalThis, event);
   };
+  for (const type of ["message", "messageerror"]) {
+    let handler = null;
+    Object.defineProperty(globalThis, `on${type}`, {
+      configurable: true,
+      enumerable: true,
+      get() { return handler; },
+      set(callback) {
+        if (handler) globalThis.removeEventListener(type, handler);
+        handler = typeof callback === "function" ? callback : null;
+        if (handler) globalThis.addEventListener(type, handler);
+      },
+    });
+  }
 
   // Wire `on*` inline event-handler content attributes (e.g.
   // `<body onload="update()">`, `<h1 onclick="report(event)">`) to real event
@@ -20262,7 +20282,9 @@
     const seen = new IntrinsicSet();
     for (let index = 0; index < list.length; index++) {
       const transferable = list[index];
-      if (nativeArrayBufferInfo(transferable) === null || hasSetValue(seen, transferable)) {
+      const port = transferable instanceof MessagePort;
+      if ((nativeArrayBufferInfo(transferable) === null && !port) ||
+          (port && transferable._closed) || hasSetValue(seen, transferable)) {
         throw dataCloneError("The transfer list contains an invalid or duplicate object.");
       }
       addSetValue(seen, transferable);
@@ -20283,14 +20305,20 @@
         typeof value === "boolean" || typeof value === "number" ||
         typeof value === "string" || typeof value === "bigint") return ["p", value];
     if (typeof value === "symbol" || typeof value === "function") throw dataCloneError();
-    if (value instanceof Node || value instanceof EventTarget) throw dataCloneError();
+    if (value instanceof Node ||
+        (value instanceof EventTarget && !(value instanceof MessagePort))) throw dataCloneError();
     if (safeMapHas(state.memory, value)) return ["r", safeMapGet(state.memory, value)];
 
     const id = state.nodes.length;
     safeMapSet(state.memory, value, id);
     state.nodes.push(null);
 
-    if (value instanceof IntrinsicDate) {
+    if (value instanceof MessagePort) {
+      if (!safeMapHas(state.transferSet, value)) {
+        throw dataCloneError("A MessagePort must be transferred to be cloned.");
+      }
+      state.nodes[id] = ["P", value];
+    } else if (value instanceof IntrinsicDate) {
       state.nodes[id] = ["d", intrinsicDateGetTime(value)];
     } else if (value instanceof IntrinsicRegExp) {
       state.nodes[id] = ["x", safeApply(regexpSourceGetter, value, []),
@@ -20367,6 +20395,7 @@
         case "d": objects[index] = new IntrinsicDate(node[1]); break;
         case "x": objects[index] = new IntrinsicRegExp(node[1], node[2]); break;
         case "b": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1]; break;
+        case "P": objects[index] = safeMapGet(transferred, node[1]); break;
         case "m": objects[index] = new IntrinsicMap(); break;
         case "t": objects[index] = new IntrinsicSet(); break;
         case "a": objects[index] = new IntrinsicArray(node[1]); break;
@@ -20422,7 +20451,7 @@
     return resolveStructuredCloneToken(root, objects);
   }
 
-  function cloneStructuredValue(value, transferList) {
+  function cloneStructuredValue(value, transferList, transferredPorts = undefined) {
     const transferSet = new IntrinsicMap();
     for (let index = 0; index < transferList.length; index++) {
       safeMapSet(transferSet, transferList[index], index);
@@ -20433,6 +20462,10 @@
     // Serialization can invoke getters. Recheck every buffer and view before
     // detaching anything so one bad entry cannot partially consume the list.
     for (let index = 0; index < transferList.length; index++) {
+      if (transferList[index] instanceof MessagePort) {
+        if (transferList[index]._closed) throw dataCloneError("A closed MessagePort cannot be transferred.");
+        continue;
+      }
       const info = nativeArrayBufferInfo(transferList[index]);
       if (info === null || info[0]) throw dataCloneError("A detached ArrayBuffer cannot be transferred.");
     }
@@ -20451,15 +20484,26 @@
     for (let index = 0; index < transferList.length; index++) {
       const source = transferList[index];
       let target;
-      try { target = nativeTransferArrayBuffer(source); }
-      catch (_) { throw dataCloneError("The ArrayBuffer could not be transferred."); }
+      if (source instanceof MessagePort) {
+        target = new MessagePort(messagePortConstructionToken);
+        target._entangled = source._entangled;
+        target._pendingMessages = source._pendingMessages;
+        if (target._entangled) target._entangled._entangled = target;
+        source._entangled = null;
+        source._pendingMessages = [];
+        source._closed = true;
+        if (transferredPorts) transferredPorts.push(target);
+      } else {
+        try { target = nativeTransferArrayBuffer(source); }
+        catch (_) { throw dataCloneError("The ArrayBuffer could not be transferred."); }
+      }
       safeMapSet(transferred, source, target);
     }
     return deserializeStructuredValue(root, state, transferred);
   }
 
-  function clonePostMessageValue(value, options) {
-    return cloneStructuredValue(value, transferListFromOptions(options, true));
+  function clonePostMessageValue(value, options, transferredPorts = undefined) {
+    return cloneStructuredValue(value, transferListFromOptions(options, true), transferredPorts);
   }
 
   globalThis.structuredClone = function(value, options = undefined) {
@@ -21786,8 +21830,12 @@
     return Number(value);
   }
 
-  function encodeWorkerMessage(value, options = undefined) {
-    const cloned = clonePostMessageValue(value, options);
+  function encodeWorkerMessage(value, options = undefined, ports = undefined) {
+    const transferList = transferListFromOptions(options, true);
+    if (!ports && transferList.some(item => item instanceof MessagePort)) {
+      throw dataCloneError("MessagePort transfer requires a Window receiver.");
+    }
+    const cloned = cloneStructuredValue(value, transferList, ports);
     const nodes = [];
     const memory = new IntrinsicMap();
     const visit = item => {
@@ -21804,7 +21852,11 @@
       const id = nodes.length;
       safeMapSet(memory, item, id);
       nodes.push(null);
-      if (item instanceof IntrinsicDate) {
+      if (item instanceof MessagePort) {
+        const portIndex = ports ? ports.indexOf(item) : -1;
+        if (portIndex < 0) throw dataCloneError();
+        nodes[id] = ["P", portIndex];
+      } else if (item instanceof IntrinsicDate) {
         nodes[id] = ["d", encodeWorkerNumber(intrinsicDateGetTime(item))];
       } else if (item instanceof IntrinsicRegExp) {
         nodes[id] = ["x", safeApply(regexpSourceGetter, item, []),
@@ -21849,7 +21901,7 @@
     return JSON.stringify({ version: 1, root: visit(cloned), nodes });
   }
 
-  function decodeWorkerMessage(wire) {
+  function decodeWorkerMessage(wire, ports = undefined) {
     const encoded = JSON.parse(String(wire));
     if (!encoded || encoded.version !== 1 || !intrinsicArrayIsArray(encoded.nodes)) {
       throw dataCloneError();
@@ -21890,6 +21942,11 @@
           break;
         }
         case "m": objects[index] = new IntrinsicMap(); break;
+        case "P": {
+          if (!ports || !ports[node[1]]) throw dataCloneError();
+          objects[index] = ports[node[1]];
+          break;
+        }
         case "t": objects[index] = new IntrinsicSet(); break;
         case "a": objects[index] = new IntrinsicArray(node[1]); break;
         case "o": objects[index] = intrinsicObjectCreate(node[1] === 0 ? null : IntrinsicObjectPrototype); break;
@@ -21956,10 +22013,14 @@
       this._onmessageerror = null;
     }
     postMessage(message, options = undefined) {
-      const data = clonePostMessageValue(message, options);
       const destination = this._entangled;
+      const ports = new IntrinsicArray();
+      const sameRealm = destination instanceof MessagePort;
+      const packet = sameRealm
+        ? { direct: true, data: clonePostMessageValue(message, options, ports), ports }
+        : { direct: false, wire: encodeWorkerMessage(message, options, ports), ports };
       if (this._closed || !destination || destination._closed) return;
-      destination._queueMessage(data);
+      destination._queueMessage(packet);
     }
     start() {
       if (this._closed || this._started) return;
@@ -21977,13 +22038,26 @@
       if (!this._started) { this._pendingMessages.push(data); return; }
       __omoikane_enqueue_posted_message(this, data);
     }
-    _acceptMessage(data) {
+    _acceptMessage(packet) {
       if (this._closed) return;
+      let ports = packet.ports;
+      let data = packet.data;
+      if (!packet.direct) {
+        ports = receiveTransferredMessagePorts(ports);
+        try {
+          data = decodeWorkerMessage(packet.wire, ports);
+        } catch (_) {
+          this.dispatchEvent(new MessageEvent("messageerror", {
+            data: null, origin: "", source: null, ports,
+          }));
+          return;
+        }
+      }
       this.dispatchEvent(new MessageEvent("message", {
         data,
         origin: "",
         source: null,
-        ports: [],
+        ports,
       }));
     }
     get onmessage() { return this._onmessage; }
@@ -22013,6 +22087,90 @@
   }
   globalThis.MessagePort = MessagePort;
   globalThis.MessageChannel = MessageChannel;
+
+  function receiveTransferredMessagePorts(ports) {
+    const received = new IntrinsicArray();
+    for (let index = 0; index < ports.length; index++) {
+      const oldPort = ports[index];
+      const port = new MessagePort(messagePortConstructionToken);
+      port._entangled = oldPort._entangled;
+      port._pendingMessages = oldPort._pendingMessages;
+      if (port._entangled) port._entangled._entangled = port;
+      oldPort._entangled = null;
+      oldPort._pendingMessages = [];
+      oldPort._closed = true;
+      received.push(port);
+    }
+    return received;
+  }
+
+  function windowMessageTargetOrigin(value) {
+    const requested = value === undefined ? "/" : String(value);
+    if (requested === "*") return requested;
+    if (requested === "/") return requested;
+    // The target origin is parsed before serialization, even when no Window
+    // currently matches it.
+    if (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(requested)) {
+      throw new DOMException("Invalid target origin.", "SyntaxError");
+    }
+    try {
+      const origin = new URL(requested).origin;
+      if (origin !== "null") return origin;
+    } catch (_) { /* converted to the Web IDL SyntaxError below */ }
+    throw new DOMException("Invalid target origin.", "SyntaxError");
+  }
+
+  globalThis.__omoikane_prepare_window_message = function(message, targetOriginOrOptions = "/", transfer = undefined) {
+    const dictionary = targetOriginOrOptions !== null &&
+      typeof targetOriginOrOptions === "object";
+    const options = dictionary ? targetOriginOrOptions :
+      (transfer === undefined ? undefined : { transfer });
+    const targetOrigin = windowMessageTargetOrigin(
+      dictionary ? targetOriginOrOptions.targetOrigin : targetOriginOrOptions,
+    );
+    const origin = String(globalThis.location.origin);
+    const ports = new IntrinsicArray();
+    const wire = encodeWorkerMessage(message, options, ports);
+    return [wire, origin, targetOrigin, ports];
+  };
+  globalThis.__omoikane_window_message_source = function(kind, iframeId) {
+    if (kind === "self") return globalThis;
+    if (kind === "parent") return globalThis.parent;
+    if (kind === "iframe") {
+      const iframe = wrapNode(iframeId);
+      return iframe ? iframe.contentWindow : null;
+    }
+    return null;
+  };
+  globalThis.__omoikane_receive_window_message = function(wire, origin, source, ports) {
+    const receivedPorts = receiveTransferredMessagePorts(ports);
+    let data;
+    try {
+      data = decodeWorkerMessage(wire, receivedPorts);
+    } catch (_) {
+      dispatchEventOnTarget(globalThis, new MessageEvent("messageerror", {
+        data: null, origin, source, ports: receivedPorts,
+      }));
+      return;
+    }
+    dispatchEventOnTarget(globalThis, new MessageEvent("message", {
+      data, origin, source, ports: receivedPorts,
+    }));
+  };
+  globalThis.__omoikane_cross_origin_window = function(documentId) {
+    const facade = Object.create(null);
+    facade.postMessage = function(message, targetOriginOrOptions = "/", transfer = undefined) {
+      __omoikane_window_post_message("document", documentId, null,
+        message, targetOriginOrOptions, transfer);
+    };
+    facade.closed = false;
+    facade.window = facade.self = facade.frames = facade;
+    return facade;
+  };
+  globalThis.postMessage = function(message, targetOriginOrOptions = "/", transfer = undefined) {
+    __omoikane_window_post_message("document", __omoikane_document_id, null,
+      message, targetOriginOrOptions, transfer);
+  };
 
   // SharedWorker ports are message endpoints whose other side lives in a
   // dedicated shared-worker runtime.  The native bridge carries only the
