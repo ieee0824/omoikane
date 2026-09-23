@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use boa_engine::{JsValue, realm::Realm};
 use boa_gc::{Finalize, Trace, Tracer};
 
-use super::{NavigationRequest, TimerPayload};
+use super::{DocumentSecurityOrigin, NavigationRequest, TimerPayload};
 
 /// The HTML task source responsible for a queued task.
 #[allow(dead_code)]
@@ -54,6 +54,18 @@ pub(crate) enum Task {
     PostedMessage {
         port: JsValue,
         data: JsValue,
+    },
+    /// A cross-Document Window message, serialized in the incumbent Realm.
+    WindowPostedMessage {
+        target_document_id: usize,
+        target_iframe: Option<(usize, u64)>,
+        source_document_id: usize,
+        source_iframe_id: Option<usize>,
+        sender_security_origin: Option<DocumentSecurityOrigin>,
+        origin: String,
+        target_origin: String,
+        wire: String,
+        ports: JsValue,
     },
     /// A message delivered to a page-owned `BroadcastChannel` endpoint.
     ///
@@ -193,6 +205,7 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
             unsafe { port.trace(tracer) };
             unsafe { data.trace(tracer) };
         }
+        Task::WindowPostedMessage { ports, .. } => unsafe { ports.trace(tracer) },
         Task::WorkerOwnerMessage { owner, .. } => unsafe { owner.trace(tracer) },
         Task::SharedWorkerOwnerMessage { port, .. } => unsafe { port.trace(tracer) },
         Task::WorkerError {
@@ -369,6 +382,12 @@ impl EventLoop {
             TaskSource::PostedMessage,
             Task::PostedMessage { port, data },
         );
+    }
+
+    /// Queues a serialized Window message on the posted-message task source.
+    pub(crate) fn enqueue_window_posted_message(&mut self, task: Task) {
+        debug_assert!(matches!(task, Task::WindowPostedMessage { .. }));
+        self.enqueue(TaskSource::PostedMessage, task);
     }
 
     /// Queues a message on a target `BroadcastChannel`'s posted-message task
