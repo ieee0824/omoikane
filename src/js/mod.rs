@@ -7910,7 +7910,20 @@ impl JsRuntime {
                                     .is_some_and(|name| name.eq_ignore_ascii_case("iframe"))
                             })
                             .and_then(|_| state.iframe_documents.get(&node_id))
-                            .map(|entry| entry.document.identity())
+                            .and_then(|entry| {
+                                // A Window load listener requires a live Realm. An inline
+                                // body/frameset onload attribute is the one exception: it
+                                // needs a Realm to be wired before dispatch.
+                                let has_inline_load = || {
+                                    ["body", "frameset"].iter().any(|tag| {
+                                        entry.document.query_selector(tag).is_some_and(|node| {
+                                            node.get_attribute("onload").is_some()
+                                        })
+                                    })
+                                };
+                                (entry.realm.is_some() || has_inline_load())
+                                    .then_some(entry.document.identity())
+                            })
                     };
                     if let Some(document_id) = child_document_id {
                         match self.realm_for_document(document_id) {

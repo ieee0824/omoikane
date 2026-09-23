@@ -128,6 +128,37 @@ fn iframe_window_load_handler_can_initiate_visibility_work() {
 }
 
 #[test]
+fn iframe_body_onload_without_script_runs() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let _ = stream.read(&mut request).unwrap();
+        let body = "<body onload='parent.bodyOnlyLoaded = true'></body>";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    let url = format!("http://{address}/index.html");
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe src='http://{address}/child.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(document, &url).unwrap();
+    runtime.eval("globalThis.bodyOnlyLoaded = false").unwrap();
+    let base = url.parse().unwrap();
+    assert!(runtime.execute_document_scripts(Some(&base)).is_empty());
+    runtime.tick(0).unwrap();
+    assert!(runtime.eval("bodyOnlyLoaded").unwrap().to_boolean());
+    server.join().unwrap();
+}
+
+#[test]
 fn cdp_lifecycle_changes_visibility_and_new_navigation_inherits_it() {
     let mut session = CdpSession::new().unwrap();
     assert_eq!(
