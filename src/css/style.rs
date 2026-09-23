@@ -3234,6 +3234,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if name.eq_ignore_ascii_case("scroll-behavior") {
         return validate_keyword_value(value, &["auto", "smooth"]);
     }
+    if let Some(validation) = validate_scroll_snap_declaration(name, value) {
+        return validation;
+    }
     if matches!(
         name.to_ascii_lowercase().as_str(),
         "overscroll-behavior-x"
@@ -3957,6 +3960,108 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn validate_scroll_snap_declaration(name: &str, value: &Value) -> Option<DeclarationValidation> {
+    let name = name.to_ascii_lowercase();
+    if matches!(
+        name.as_str(),
+        "scroll-padding"
+            | "scroll-margin"
+            | "scroll-padding-inline"
+            | "scroll-padding-block"
+            | "scroll-margin-inline"
+            | "scroll-margin-block"
+    ) {
+        // A valid shorthand is expanded before reaching the cascade. Keeping
+        // an invalid one intact prevents any of its sides from winning.
+        return Some(DeclarationValidation::Invalid);
+    }
+    if matches!(name.as_str(), "scroll-snap-type" | "scroll-snap-align") {
+        let values = match value {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        let keywords = values
+            .iter()
+            .map(|value| match value {
+                Value::Keyword(keyword) => Some(keyword.to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(keywords) = keywords else {
+            return Some(DeclarationValidation::Invalid);
+        };
+        let valid = match (name.as_str(), keywords.as_slice()) {
+            (_, [keyword]) if is_css_wide_keyword(keyword) => true,
+            ("scroll-snap-type", [axis]) => {
+                matches!(
+                    axis.as_str(),
+                    "none" | "x" | "y" | "block" | "inline" | "both"
+                )
+            }
+            ("scroll-snap-type", [axis, strictness]) => {
+                matches!(axis.as_str(), "x" | "y" | "block" | "inline" | "both")
+                    && matches!(strictness.as_str(), "mandatory" | "proximity")
+            }
+            ("scroll-snap-align", [alignment]) => {
+                matches!(alignment.as_str(), "none" | "start" | "end" | "center")
+            }
+            ("scroll-snap-align", [block, inline]) => {
+                matches!(block.as_str(), "none" | "start" | "end" | "center")
+                    && matches!(inline.as_str(), "none" | "start" | "end" | "center")
+            }
+            _ => false,
+        };
+        return Some(if valid {
+            DeclarationValidation::Valid(ComputedValue::Keyword(keywords.join(" ")))
+        } else {
+            DeclarationValidation::Invalid
+        });
+    }
+    let padding = name.starts_with("scroll-padding-");
+    let margin = name.starts_with("scroll-margin-");
+    if !padding && !margin {
+        return None;
+    }
+    let valid = match value {
+        Value::Keyword(keyword) => {
+            is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                || (padding && keyword.eq_ignore_ascii_case("auto"))
+        }
+        Value::Length(number, unit) => {
+            number.is_finite()
+                && (!padding || *number >= 0.0)
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some()
+        }
+        Value::Percentage(number) => padding && number.is_finite() && *number >= 0.0,
+        Value::Number(number) => *number == 0.0,
+        Value::Function { name: function, .. } if is_length_percentage_math_function(function) => {
+            match compute_value(value, &name, ResolutionContext::default()) {
+                ComputedValue::Px(number) => number.is_finite() && (!padding || number >= 0.0),
+                ComputedValue::Percentage(number) => padding && number.is_finite() && number >= 0.0,
+                ComputedValue::LengthPercentage(_) => padding,
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    Some(if valid {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    })
+}
+
+pub(super) fn scroll_offset_shorthand_component_is_valid(name: &str, value: &Value) -> bool {
+    if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    {
+        return false;
+    }
+    matches!(
+        validate_scroll_snap_declaration(&format!("{name}-top"), value),
+        Some(DeclarationValidation::Valid(_) | DeclarationValidation::Unvalidated)
+    )
 }
 
 fn validate_contain_intrinsic_size(value: &Value) -> DeclarationValidation {
@@ -6824,6 +6929,30 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "right",
     "row-gap",
     "scroll-behavior",
+    "scroll-snap-type",
+    "scroll-snap-align",
+    "scroll-padding",
+    "scroll-padding-top",
+    "scroll-padding-right",
+    "scroll-padding-bottom",
+    "scroll-padding-left",
+    "scroll-padding-inline",
+    "scroll-padding-block",
+    "scroll-padding-inline-start",
+    "scroll-padding-inline-end",
+    "scroll-padding-block-start",
+    "scroll-padding-block-end",
+    "scroll-margin",
+    "scroll-margin-top",
+    "scroll-margin-right",
+    "scroll-margin-bottom",
+    "scroll-margin-left",
+    "scroll-margin-inline",
+    "scroll-margin-block",
+    "scroll-margin-inline-start",
+    "scroll-margin-inline-end",
+    "scroll-margin-block-start",
+    "scroll-margin-block-end",
     "mix-blend-mode",
     "transform",
     "transform-origin",
@@ -6926,6 +7055,12 @@ fn is_shorthand_or_legacy_alias(name: &str) -> bool {
             | "mask-position"
             | "overflow"
             | "overscroll-behavior"
+            | "scroll-padding"
+            | "scroll-margin"
+            | "scroll-padding-inline"
+            | "scroll-padding-block"
+            | "scroll-margin-inline"
+            | "scroll-margin-block"
             | "place-content"
             | "place-items"
             | "place-self"
@@ -9211,6 +9346,28 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
         properties
             .entry(property.to_string())
             .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+    }
+    for (property, initial) in [("scroll-snap-type", "none"), ("scroll-snap-align", "none")] {
+        properties
+            .entry(property.to_string())
+            .or_insert_with(|| ComputedValue::Keyword(initial.to_string()));
+    }
+    for side in [
+        "top",
+        "right",
+        "bottom",
+        "left",
+        "inline-start",
+        "inline-end",
+        "block-start",
+        "block-end",
+    ] {
+        properties
+            .entry(format!("scroll-padding-{side}"))
+            .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
+        properties
+            .entry(format!("scroll-margin-{side}"))
+            .or_insert(ComputedValue::Px(0.0));
     }
     properties
         .entry("position".to_string())

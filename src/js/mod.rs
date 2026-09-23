@@ -78,6 +78,7 @@ mod node_lifetime_tests;
 mod popover_tests;
 #[cfg(test)]
 mod query_tests;
+mod scroll_snap;
 mod text_stream;
 #[cfg(test)]
 mod text_stream_tests;
@@ -1246,6 +1247,11 @@ struct HostState {
     layout_generation: u64,
     paint_generation: u64,
     scroll_generation: u64,
+    /// Snap geometry is rebuilt at most once per scroll container and layout
+    /// generation. User scrolls only scan that container's candidate areas.
+    scroll_snap_cache: HashMap<usize, Option<scroll_snap::Geometry>>,
+    /// The area selected on each axis, retained across layout changes.
+    scroll_snap_selection: HashMap<usize, scroll_snap::Selection>,
     /// CSSOM geometry also observes child document roots and their lifetime.
     /// Advance this from the existing invalidation paths without changing the
     /// main document's public render generations for iframe-only mutations.
@@ -1919,6 +1925,8 @@ impl HostState {
             layout_generation: 0,
             paint_generation: 0,
             scroll_generation: 0,
+            scroll_snap_cache: HashMap::new(),
+            scroll_snap_selection: HashMap::new(),
             layout_metrics_generation: 0,
             adjusted_layout_cache: None,
             #[cfg(test)]
@@ -3470,12 +3478,18 @@ impl HostState {
         // This is a generation of rebuild attempts, not only successful trees:
         // a failed rebuild must not leave an older adjusted tree reusable.
         self.layout_generation = self.layout_generation.saturating_add(1);
+        self.scroll_snap_cache.clear();
         self.invalidate_layout_metrics_cache();
         self.layout_root = layout;
+        let previous_scroll_offsets = std::mem::take(&mut self.scroll_offsets_before_layout);
+        let mut resnap_targets: Vec<_> = previous_scroll_offsets.keys().copied().collect();
+        if self.window_scroll != (0.0, 0.0) {
+            resnap_targets.push(document_id);
+        }
         let mut clamped_targets = Vec::new();
         let mut paint_invalidated = false;
         if let Some(layout_root) = self.layout_root.as_ref() {
-            for (node_id, previous) in std::mem::take(&mut self.scroll_offsets_before_layout) {
+            for (node_id, previous) in previous_scroll_offsets {
                 let Some(node) = self.nodes.get(&node_id) else {
                     continue;
                 };
@@ -3500,6 +3514,7 @@ impl HostState {
         for node_id in clamped_targets {
             self.queue_scroll_target(node_id);
         }
+        self.resnap_after_layout(resnap_targets);
     }
 
     fn content_visibility_ancestor_ids(node: &NodeHandle) -> HashSet<usize> {
@@ -3747,9 +3762,95 @@ impl HostState {
             .retain(|animation| animation.target != target);
     }
 
+    fn scroll_snap_geometry(
+        &mut self,
+        target: SmoothScrollTarget,
+    ) -> Option<&scroll_snap::Geometry> {
+        let node_id = match target {
+            SmoothScrollTarget::Document(document_id) => {
+                if document_id != self.document.identity() {
+                    return None;
+                }
+                document_id
+            }
+            SmoothScrollTarget::Element(node_id) => node_id,
+        };
+        self.ensure_layout();
+        if !self.scroll_snap_cache.contains_key(&node_id) {
+            let root = self.layout_root.as_ref()?;
+            let resolver = self
+                .document_styles
+                .get_mut(&self.document.identity())?
+                .resolver
+                .as_mut()?;
+            let geometry = match target {
+                SmoothScrollTarget::Document(_) => {
+                    scroll_snap::Geometry::for_viewport(root, resolver, self.viewport)
+                }
+                SmoothScrollTarget::Element(node_id) => {
+                    let node = self.nodes.get(&node_id)?;
+                    let layout = find_layout_box(root, node)?;
+                    scroll_snap::Geometry::for_element(layout, resolver)
+                }
+            };
+            self.scroll_snap_cache.insert(node_id, geometry);
+        }
+        self.scroll_snap_cache
+            .get(&node_id)
+            .and_then(Option::as_ref)
+    }
+
+    fn snapped_scroll_endpoint(
+        &mut self,
+        target: SmoothScrollTarget,
+        requested: (f32, f32),
+        preserve: scroll_snap::Selection,
+    ) -> (f32, f32) {
+        let selected = self
+            .scroll_snap_geometry(target)
+            .map(|geometry| geometry.choose(requested, preserve));
+        let node_id = match target {
+            SmoothScrollTarget::Document(node_id) | SmoothScrollTarget::Element(node_id) => node_id,
+        };
+        if let Some((position, selection)) = selected {
+            if selection.x.is_some() || selection.y.is_some() {
+                self.scroll_snap_selection.insert(node_id, selection);
+            } else {
+                self.scroll_snap_selection.remove(&node_id);
+            }
+            position
+        } else {
+            self.scroll_snap_selection.remove(&node_id);
+            requested
+        }
+    }
+
+    fn resnap_after_layout(&mut self, additional_targets: Vec<usize>) {
+        let mut selected = self.scroll_snap_selection.clone();
+        for node_id in additional_targets {
+            selected.entry(node_id).or_default();
+        }
+        for (node_id, preserve) in selected {
+            if node_id == self.document.identity() {
+                let target = SmoothScrollTarget::Document(node_id);
+                let position = self.snapped_scroll_endpoint(target, self.window_scroll, preserve);
+                self.set_window_scroll(position.0, position.1);
+            } else if let Some(node) = self.nodes.get(&node_id).cloned() {
+                let target = SmoothScrollTarget::Element(node_id);
+                let current = node.scroll_offset();
+                let position = self.snapped_scroll_endpoint(target, current, preserve);
+                self.set_element_scroll(&node, position.0, position.1);
+            } else {
+                self.scroll_snap_selection.remove(&node_id);
+            }
+        }
+    }
+
     fn scroll_document_to(&mut self, document_id: usize, x: f32, y: f32, smooth: bool) {
         let target = SmoothScrollTarget::Document(document_id);
         self.cancel_smooth_scroll(target);
+        let (x, y) =
+            self.snapped_scroll_endpoint(target, (x, y), scroll_snap::Selection::default());
         if !smooth {
             self.set_window_scroll_for_document(document_id, x, y);
             return;
@@ -3775,6 +3876,8 @@ impl HostState {
     fn scroll_element_to(&mut self, node: &NodeHandle, x: f32, y: f32, smooth: bool) {
         let target = SmoothScrollTarget::Element(node.identity());
         self.cancel_smooth_scroll(target);
+        let (x, y) =
+            self.snapped_scroll_endpoint(target, (x, y), scroll_snap::Selection::default());
         if !smooth {
             self.set_element_scroll(node, x, y);
             return;

@@ -9287,3 +9287,79 @@ fn multicol_shorthands_expand_and_invalid_values_do_not_win() {
         );
     }
 }
+
+#[test]
+fn scroll_snap_properties_validate_and_compute_each_side() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "h1 { scroll-snap-type: y mandatory; scroll-snap-align: start end; \
+             scroll-padding: 10px 20%; scroll-margin: 5px 12px; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("scroll-snap-type"),
+        Some(&ComputedValue::Keyword("y mandatory".into()))
+    );
+    assert_eq!(
+        style.get("scroll-snap-align"),
+        Some(&ComputedValue::Keyword("start end".into()))
+    );
+    assert_eq!(
+        style.get("scroll-padding-top"),
+        Some(&ComputedValue::Px(10.0))
+    );
+    assert_eq!(
+        style.get("scroll-padding-right"),
+        Some(&ComputedValue::Percentage(20.0))
+    );
+    assert_eq!(
+        style.get("scroll-margin-top"),
+        Some(&ComputedValue::Px(5.0))
+    );
+    assert_eq!(
+        style.get("scroll-margin-right"),
+        Some(&ComputedValue::Px(12.0))
+    );
+
+    for (property, valid, invalid) in [
+        ("scroll-snap-type", "block mandatory", "y strong"),
+        ("scroll-snap-align", "start end", "left"),
+        ("scroll-padding", "10px 20%", "-1px"),
+        ("scroll-margin", "-4px 2px", "20%"),
+    ] {
+        assert!(supports_declaration(property, valid), "{property}: {valid}");
+        assert!(
+            !supports_declaration(property, invalid),
+            "{property}: {invalid}"
+        );
+    }
+}
+
+#[test]
+fn invalid_scroll_offset_shorthand_does_not_partially_override_longhands() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "h1 { scroll-padding-top: 7px; scroll-padding: 10px -1px; \
+             scroll-margin-left: 3px; scroll-margin: 5px 20%; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("scroll-padding-top"),
+        Some(&ComputedValue::Px(7.0))
+    );
+    assert_eq!(
+        style.get("scroll-margin-left"),
+        Some(&ComputedValue::Px(3.0))
+    );
+    assert!(!supports_declaration("scroll-padding", "10px inherit"));
+}

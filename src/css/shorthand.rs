@@ -19,11 +19,49 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
     if let Some(declarations) = expand_css_wide_shorthand(name, &value, important) {
         return declarations;
     }
-    match name {
-        "margin" | "padding" => expand_box_shorthand(name, value, important),
-        "margin-inline" | "margin-block" | "padding-inline" | "padding-block" => {
-            expand_logical_axis_shorthand(name, value, important)
+    if matches!(
+        name,
+        "scroll-padding"
+            | "scroll-margin"
+            | "scroll-padding-inline"
+            | "scroll-padding-block"
+            | "scroll-margin-inline"
+            | "scroll-margin-block"
+    ) {
+        let values = match &value {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        let maximum = if name.ends_with("-inline") || name.ends_with("-block") {
+            2
+        } else {
+            4
+        };
+        if values.is_empty()
+            || values.len() > maximum
+            || values
+                .iter()
+                .any(|value| !super::style::scroll_offset_shorthand_component_is_valid(name, value))
+        {
+            return vec![Declaration {
+                name: name.to_string(),
+                value,
+                important,
+            }];
         }
+    }
+    match name {
+        "margin" | "padding" | "scroll-padding" | "scroll-margin" => {
+            expand_box_shorthand(name, value, important)
+        }
+        "margin-inline"
+        | "margin-block"
+        | "padding-inline"
+        | "padding-block"
+        | "scroll-padding-inline"
+        | "scroll-padding-block"
+        | "scroll-margin-inline"
+        | "scroll-margin-block" => expand_logical_axis_shorthand(name, value, important),
         "border-width" | "border-style" | "border-color" => {
             expand_border_axis_shorthand(name, value, important)
         }
@@ -84,6 +122,12 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "margin-block"
             | "padding-inline"
             | "padding-block"
+            | "scroll-padding"
+            | "scroll-margin"
+            | "scroll-padding-inline"
+            | "scroll-padding-block"
+            | "scroll-margin-inline"
+            | "scroll-margin-block"
             | "border-width"
             | "border-style"
             | "border-color"
@@ -159,18 +203,24 @@ fn expand_css_wide_shorthand(
     }
 
     let longhands: Vec<String> = match name {
-        "margin" | "padding" => ["top", "right", "bottom", "left"]
-            .into_iter()
-            .map(|side| format!("{name}-{side}"))
-            .collect(),
-        "margin-inline" | "padding-inline" => ["inline-start", "inline-end"]
-            .into_iter()
-            .map(|side| format!("{}-{side}", name.split('-').next().unwrap_or(name)))
-            .collect(),
-        "margin-block" | "padding-block" => ["block-start", "block-end"]
-            .into_iter()
-            .map(|side| format!("{}-{side}", name.split('-').next().unwrap_or(name)))
-            .collect(),
+        "margin" | "padding" | "scroll-padding" | "scroll-margin" => {
+            ["top", "right", "bottom", "left"]
+                .into_iter()
+                .map(|side| format!("{name}-{side}"))
+                .collect()
+        }
+        "margin-inline" | "padding-inline" | "scroll-padding-inline" | "scroll-margin-inline" => {
+            ["inline-start", "inline-end"]
+                .into_iter()
+                .map(|side| format!("{}-{side}", name.strip_suffix("-inline").unwrap_or(name)))
+                .collect()
+        }
+        "margin-block" | "padding-block" | "scroll-padding-block" | "scroll-margin-block" => {
+            ["block-start", "block-end"]
+                .into_iter()
+                .map(|side| format!("{}-{side}", name.strip_suffix("-block").unwrap_or(name)))
+                .collect()
+        }
         "border-width" | "border-style" | "border-color" => {
             let suffix = name.strip_prefix("border-").unwrap_or(name);
             ["top", "right", "bottom", "left"]
@@ -573,7 +623,10 @@ fn expand_logical_axis_shorthand(name: &str, value: Value, important: bool) -> V
     } else {
         ("block-start", "block-end")
     };
-    let prefix = name.split('-').next().unwrap_or(name);
+    let prefix = name
+        .strip_suffix("-inline")
+        .or_else(|| name.strip_suffix("-block"))
+        .unwrap_or(name);
     vec![
         Declaration {
             name: format!("{prefix}-{start_suffix}"),

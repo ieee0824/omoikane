@@ -148,7 +148,10 @@ git_wpt sparse-checkout add \
   "/css/css-overscroll-behavior/parsing/overscroll-behavior-computed.html" \
   "/css/cssom-view/parsing/scroll-behavior-valid.html" \
   "/css/cssom-view/parsing/scroll-behavior-invalid.html" \
-  "/css/cssom-view/parsing/scroll-behavior-computed.html"
+  "/css/cssom-view/parsing/scroll-behavior-computed.html" \
+  "/css/css-scroll-snap/scroll-snap-type.html" \
+  "/css/css-scroll-snap/scrollTo-scrollBy-snaps.html" \
+  "/css/css-scroll-snap/scroll-padding-and-margin.html"
 git_wpt sparse-checkout add "/css/css-break/parsing/"
 git_wpt sparse-checkout add \
   "/css/css-contain/content-visibility/parsing/" \
