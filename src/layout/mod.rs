@@ -764,7 +764,7 @@ pub enum AlignItems {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PositionScheme {
+pub(crate) enum PositionScheme {
     Static,
     Relative,
     Sticky,
@@ -876,6 +876,10 @@ pub struct LayoutBox {
     pub dimensions: BoxDimensions,
     pub visibility: Visibility,
     pub overflow: Overflow,
+    /// Positioning mode needed when a descendant escapes an intermediate clip.
+    pub(crate) position_scheme: PositionScheme,
+    /// Whether this box establishes a containing block for fixed descendants.
+    pub(crate) fixed_containing_block: bool,
     pub z_index: i32,
     /// Paint-time CSS transform in the document's absolute coordinate space.
     /// It does not participate in normal-flow layout sizing or placement.
@@ -883,6 +887,9 @@ pub struct LayoutBox {
     /// Whether this subtree can need paint-time scroll/sticky translation even
     /// when all currently stored scroll offsets are zero.
     pub(crate) needs_scroll_translation: bool,
+    /// Cached after layout to skip clipped subtrees without positioned boxes.
+    /// `None` keeps hand-built or in-progress layout boxes conservative.
+    pub(crate) has_out_of_flow_descendants: Option<bool>,
     /// Whether this box's contents are skipped by `content-visibility` for the
     /// current layout pass. Geometry queries can force descendants into the
     /// layout tree without making those descendants paintable.
@@ -968,9 +975,9 @@ impl LayoutBox {
     ///
     /// Layout coordinates are absolute (see `layout_document` / `layout_element`),
     /// so descendant border-box edges compare directly against this box's
-    /// padding-box edges. Traversal stops at a descendant that clips its own
-    /// overflow: that descendant scrolls its own content, so what it clips is not
-    /// part of this box's scrolling area.
+    /// padding-box edges. A descendant's clip bounds its ordinary content,
+    /// but not an absolutely positioned descendant whose containing block is
+    /// outside that clip.
     pub(crate) fn scrollable_overflow(&self) -> (f32, f32) {
         let content = self.dimensions.content;
         let padding = self.dimensions.padding;
@@ -985,7 +992,17 @@ impl LayoutBox {
             max_bottom = max_bottom.max(multicol.overflow.y + multicol.overflow.height);
         }
         expand_line_overflow(&self.lines, &mut max_right, &mut max_bottom, true, true);
-        expand_scrollable_overflow(&self.children, &mut max_right, &mut max_bottom);
+        let absolute_cb = (self.position_scheme != PositionScheme::Static
+            || self.fixed_containing_block)
+            .then_some((true, true));
+        let fixed_cb = self.fixed_containing_block.then_some((true, true));
+        expand_scrollable_overflow(
+            &self.children,
+            &mut max_right,
+            &mut max_bottom,
+            absolute_cb,
+            fixed_cb,
+        );
         // Once descendant content crosses the padding-box end edge, the
         // scrollable overflow region includes the box's end padding after that
         // content. Content which still fits leaves the padding box unchanged.
@@ -1052,11 +1069,25 @@ impl LayoutBox {
     }
 }
 
-/// Expands `max_right` / `max_bottom` to enclose the border boxes of `boxes` and
-/// their descendants. A clipped axis stops contributing below that box while
-/// the other axis can continue through the same subtree.
-fn expand_scrollable_overflow(boxes: &[LayoutBox], max_right: &mut f32, max_bottom: &mut f32) {
-    expand_scrollable_overflow_axes(boxes, max_right, max_bottom, true, true);
+/// Expands `max_right` / `max_bottom` to enclose eligible descendant boxes.
+/// Each axis follows its own clip chain; positioned descendants use the chain
+/// rooted at their containing block.
+fn expand_scrollable_overflow(
+    boxes: &[LayoutBox],
+    max_right: &mut f32,
+    max_bottom: &mut f32,
+    absolute_cb: Option<(bool, bool)>,
+    fixed_cb: Option<(bool, bool)>,
+) {
+    expand_scrollable_overflow_axes(
+        boxes,
+        max_right,
+        max_bottom,
+        true,
+        true,
+        absolute_cb,
+        fixed_cb,
+    );
 }
 
 fn expand_scrollable_overflow_axes(
@@ -1065,11 +1096,25 @@ fn expand_scrollable_overflow_axes(
     max_bottom: &mut f32,
     include_x: bool,
     include_y: bool,
+    absolute_cb: Option<(bool, bool)>,
+    fixed_cb: Option<(bool, bool)>,
 ) {
-    if !include_x && !include_y {
+    if !include_x
+        && !include_y
+        && absolute_cb.is_some_and(|(x, y)| !x && !y)
+        && fixed_cb.is_none_or(|(x, y)| !x && !y)
+    {
         return;
     }
     for child in boxes {
+        // Absolute positioning uses its containing block's clip chain. Clips
+        // between that block and this child do not apply. Fixed descendants
+        // anchored to the viewport never enlarge the document's scroll area.
+        let (include_x, include_y) = match child.position_scheme {
+            PositionScheme::Absolute => absolute_cb.unwrap_or((true, true)),
+            PositionScheme::Fixed => fixed_cb.unwrap_or((false, false)),
+            _ => (include_x, include_y),
+        };
         if child
             .block_fragments
             .iter()
@@ -1104,6 +1149,17 @@ fn expand_scrollable_overflow_axes(
         }
         let include_child_x = include_x && !child.overflow.clips_x();
         let include_child_y = include_y && !child.overflow.clips_y();
+        let absolute_cb =
+            if child.position_scheme != PositionScheme::Static || child.fixed_containing_block {
+                Some((include_child_x, include_child_y))
+            } else {
+                absolute_cb
+            };
+        let fixed_cb = if child.fixed_containing_block {
+            Some((include_child_x, include_child_y))
+        } else {
+            fixed_cb
+        };
         expand_line_overflow(
             &child.lines,
             max_right,
@@ -1111,13 +1167,17 @@ fn expand_scrollable_overflow_axes(
             include_child_x,
             include_child_y,
         );
-        expand_scrollable_overflow_axes(
-            &child.children,
-            max_right,
-            max_bottom,
-            include_child_x,
-            include_child_y,
-        );
+        if include_child_x || include_child_y || child.has_out_of_flow_descendants != Some(false) {
+            expand_scrollable_overflow_axes(
+                &child.children,
+                max_right,
+                max_bottom,
+                include_child_x,
+                include_child_y,
+                absolute_cb,
+                fixed_cb,
+            );
+        }
     }
 }
 
@@ -1333,6 +1393,12 @@ fn populate_layout_transforms(
         .children
         .iter()
         .any(|child| child.needs_scroll_translation);
+    layout.has_out_of_flow_descendants = Some(layout.children.iter().any(|child| {
+        matches!(
+            child.position_scheme,
+            PositionScheme::Absolute | PositionScheme::Fixed
+        ) || child.has_out_of_flow_descendants.unwrap_or(true)
+    }));
 }
 
 fn computed_keyword<'a>(style: &'a ComputedStyle, property: &str) -> Option<&'a str> {
@@ -1714,9 +1780,12 @@ fn layout_document(
         dimensions,
         visibility: Visibility::Visible,
         overflow: Overflow::Visible,
+        position_scheme: PositionScheme::Static,
+        fixed_containing_block: false,
         z_index: 0,
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
         block_fragments: Vec::new(),
@@ -2283,9 +2352,12 @@ fn skipped_content_visibility_box(
         },
         visibility: visibility(style),
         overflow: overflow(style),
+        position_scheme: position_scheme(style),
+        fixed_containing_block: establishes_fixed_containing_block(style),
         z_index: z_index(style),
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
         block_fragments: Vec::new(),
@@ -2414,9 +2486,12 @@ fn layout_generated_pseudo_box(
         },
         visibility: visibility(style),
         overflow: overflow(style),
+        position_scheme: position_scheme(style),
+        fixed_containing_block: establishes_fixed_containing_block(style),
         z_index: z_index(style),
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
         block_fragments: Vec::new(),
@@ -2642,9 +2717,12 @@ fn layout_element_with_cell(
                 },
                 visibility: visibility(&style),
                 overflow: overflow(&style),
+                position_scheme: position_scheme(&style),
+                fixed_containing_block: establishes_fixed_containing_block(&style),
                 z_index: z_index(&style),
                 transform: AffineTransform::identity(),
                 needs_scroll_translation: false,
+                has_out_of_flow_descendants: None,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 block_fragments: Vec::new(),
@@ -2719,9 +2797,12 @@ fn layout_element_with_cell(
                 dimensions,
                 visibility: visibility(&style),
                 overflow: overflow(&style),
+                position_scheme: position_scheme(&style),
+                fixed_containing_block: establishes_fixed_containing_block(&style),
                 z_index: z_index(&style),
                 transform: AffineTransform::identity(),
                 needs_scroll_translation: false,
+                has_out_of_flow_descendants: None,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 block_fragments: Vec::new(),
@@ -2912,9 +2993,12 @@ fn layout_element_with_cell(
         dimensions,
         visibility: visibility(&style),
         overflow: overflow(&style),
+        position_scheme: position_scheme(&style),
+        fixed_containing_block: establishes_fixed_containing_block(&style),
         z_index: z_index(&style),
         transform: AffineTransform::identity(),
         needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
         block_fragments: Vec::new(),
@@ -4022,7 +4106,7 @@ pub(crate) fn establishes_fixed_containing_block(style: &ComputedStyle) -> bool 
         || has_containment(style, "paint")
 }
 
-fn position_scheme(style: &ComputedStyle) -> PositionScheme {
+pub(super) fn position_scheme(style: &ComputedStyle) -> PositionScheme {
     match style.get("position") {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("relative") => {
             PositionScheme::Relative

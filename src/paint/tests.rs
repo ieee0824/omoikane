@@ -1753,9 +1753,12 @@ fn absolute_inline_content_paints_above_float_siblings() {
         },
         visibility: Visibility::Visible,
         overflow: crate::layout::Overflow::Visible,
+        position_scheme: crate::layout::PositionScheme::Static,
+        fixed_containing_block: false,
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
         block_fragments: Vec::new(),
@@ -1776,9 +1779,12 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 },
                 visibility: Visibility::Visible,
                 overflow: crate::layout::Overflow::Visible,
+                position_scheme: crate::layout::PositionScheme::Static,
+                fixed_containing_block: false,
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                has_out_of_flow_descendants: None,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 block_fragments: Vec::new(),
@@ -1801,9 +1807,12 @@ fn absolute_inline_content_paints_above_float_siblings() {
                 },
                 visibility: Visibility::Visible,
                 overflow: crate::layout::Overflow::Visible,
+                position_scheme: crate::layout::PositionScheme::Static,
+                fixed_containing_block: false,
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                has_out_of_flow_descendants: None,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 block_fragments: Vec::new(),
@@ -1932,9 +1941,12 @@ fn float_grandchild_paints_above_block_uncle() {
         },
         visibility: Visibility::Visible,
         overflow: crate::layout::Overflow::Visible,
+        position_scheme: crate::layout::PositionScheme::Static,
+        fixed_containing_block: false,
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
         block_fragments: Vec::new(),
@@ -1955,9 +1967,12 @@ fn float_grandchild_paints_above_block_uncle() {
                 },
                 visibility: Visibility::Visible,
                 overflow: crate::layout::Overflow::Visible,
+                position_scheme: crate::layout::PositionScheme::Static,
+                fixed_containing_block: false,
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                has_out_of_flow_descendants: None,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 block_fragments: Vec::new(),
@@ -1977,9 +1992,12 @@ fn float_grandchild_paints_above_block_uncle() {
                     },
                     visibility: Visibility::Visible,
                     overflow: crate::layout::Overflow::Visible,
+                    position_scheme: crate::layout::PositionScheme::Static,
+                    fixed_containing_block: false,
                     z_index: 0,
                     transform: crate::css::AffineTransform::identity(),
                     needs_scroll_translation: false,
+                    has_out_of_flow_descendants: None,
                     content_visibility_contents_skipped: false,
                     paint_scroll: None,
                     block_fragments: Vec::new(),
@@ -2004,9 +2022,12 @@ fn float_grandchild_paints_above_block_uncle() {
                 },
                 visibility: Visibility::Visible,
                 overflow: crate::layout::Overflow::Visible,
+                position_scheme: crate::layout::PositionScheme::Static,
+                fixed_containing_block: false,
                 z_index: 0,
                 transform: crate::css::AffineTransform::identity(),
                 needs_scroll_translation: false,
+                has_out_of_flow_descendants: None,
                 content_visibility_contents_skipped: false,
                 paint_scroll: None,
                 block_fragments: Vec::new(),
@@ -10466,9 +10487,12 @@ fn form_control_label_uses_web_font_variant() {
         },
         visibility: crate::layout::Visibility::Visible,
         overflow: crate::layout::Overflow::Visible,
+        position_scheme: crate::layout::PositionScheme::Static,
+        fixed_containing_block: false,
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
         block_fragments: Vec::new(),
@@ -10585,9 +10609,12 @@ fn focused_text_control_paints_selection_and_caret() {
         },
         visibility: crate::layout::Visibility::Visible,
         overflow: crate::layout::Overflow::Visible,
+        position_scheme: crate::layout::PositionScheme::Static,
+        fixed_containing_block: false,
         z_index: 0,
         transform: crate::css::AffineTransform::identity(),
         needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
         content_visibility_contents_skipped: false,
         paint_scroll: None,
         block_fragments: Vec::new(),
@@ -10981,6 +11008,20 @@ fn absolute_descendant_uses_its_containing_blocks_scroll_and_clip_chain() {
         "containing block scroll must move target"
     );
     assert_eq!(both.pixel(35, 10).unwrap().a, 0);
+}
+
+#[test]
+fn viewport_absolute_escapes_body_clip_and_fixed_stays_put_when_scrolled() {
+    let html = "<html><head><style>\
+         html, body { margin: 0; overflow: scroll } \
+         #target { position: absolute; left: 80px; top: 80px; width: 20px; height: 20px; \
+                   background-color: red } \
+         #fixed { position: fixed; left: 0; top: 0; width: 5px; height: 5px; \
+                  background-color: blue } \
+         </style></head><body><div id=\"target\"></div><div id=\"fixed\"></div></body></html>";
+    let canvas = render_with_scroll(html, 40.0, &[], (50.0, 50.0));
+    assert_eq!(canvas.pixel(30, 30), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(2, 2), Some(Color::rgb(0, 0, 255)));
 }
 
 #[test]

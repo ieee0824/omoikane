@@ -3,7 +3,7 @@
 use crate::css::AffineTransform;
 use crate::css::style::{ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{Node, NodeType};
-use crate::layout::{LayoutBox, Rect, layout_box_style};
+use crate::layout::{LayoutBox, PositionScheme, Rect, layout_box_style};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Selection {
@@ -29,6 +29,14 @@ struct Area {
     rect: Rect,
     block_align: Align,
     inline_align: Align,
+}
+
+#[derive(Clone, Copy)]
+struct AreaScope {
+    viewport: bool,
+    included: bool,
+    absolute_cb: Option<bool>,
+    fixed_cb: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,12 +141,20 @@ fn collect_areas(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     areas: &mut Vec<Area>,
-    viewport_root: bool,
+    scope: AreaScope,
     ancestor_transform: AffineTransform,
 ) {
     for child in &layout.children {
+        // Snap areas belong to the nearest scroll container on the containing
+        // block chain. An absolute child can bypass an intermediate scroller
+        // when its containing block is outside that scroller.
+        let included = match child.position_scheme {
+            PositionScheme::Absolute => scope.absolute_cb.unwrap_or(scope.viewport),
+            PositionScheme::Fixed => scope.fixed_cb.unwrap_or(false),
+            _ => scope.included,
+        };
         let transform = ancestor_transform.multiply(child.transform);
-        if child.node.node_type() == NodeType::Element && child.pseudo.is_none() {
+        if included && child.node.node_type() == NodeType::Element && child.pseudo.is_none() {
             let style = layout_box_style(child, resolver);
             let alignment = keyword(&style, "scroll-snap-align");
             let mut parts = alignment.split_ascii_whitespace();
@@ -163,14 +179,37 @@ fn collect_areas(
                 });
             }
         }
-        // The root HTML element is the viewport's scrolling element, rather
-        // than a nested scroll container. Other scrollers own their own areas.
-        if child.is_scroll_container()
-            && !(viewport_root && layout.node.node_type() == NodeType::Document)
-        {
-            continue;
+        // The document's root element scrolls the viewport. Other scroll
+        // containers capture ordinary descendants but can be bypassed by
+        // positioned descendants anchored outside them.
+        let viewport_root_element = scope.viewport && layout.node.node_type() == NodeType::Document;
+        let descendant_included =
+            included && (!child.is_scroll_container() || viewport_root_element);
+        let absolute_cb =
+            if child.position_scheme != PositionScheme::Static || child.fixed_containing_block {
+                Some(descendant_included)
+            } else {
+                scope.absolute_cb
+            };
+        let fixed_cb = if child.fixed_containing_block {
+            Some(descendant_included)
+        } else {
+            scope.fixed_cb
+        };
+        if descendant_included || child.has_out_of_flow_descendants != Some(false) {
+            collect_areas(
+                child,
+                resolver,
+                areas,
+                AreaScope {
+                    viewport: scope.viewport,
+                    included: descendant_included,
+                    absolute_cb,
+                    fixed_cb,
+                },
+                transform,
+            );
         }
-        collect_areas(child, resolver, areas, false, transform);
     }
 }
 
@@ -256,7 +295,14 @@ impl Geometry {
             layout,
             resolver,
             &mut areas,
-            viewport_root,
+            AreaScope {
+                viewport: viewport_root,
+                included: true,
+                absolute_cb: (layout.position_scheme != PositionScheme::Static
+                    || layout.fixed_containing_block)
+                    .then_some(true),
+                fixed_cb: layout.fixed_containing_block.then_some(true),
+            },
             AffineTransform::identity(),
         );
         Some(Self {

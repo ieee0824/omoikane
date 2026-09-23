@@ -11805,10 +11805,9 @@ fn json_number(value: f32) -> String {
 /// - `scrollWidth` / `scrollHeight` are the padding box extended to enclose the
 ///   box's inline line content and the border boxes or unclipped line content
 ///   of every overflowing descendant plus the container's end-edge padding.
-///   Traversal stops at any descendant that clips its overflow
-///   (`overflow` other than `visible`): such a box still contributes its own
-///   border box, but its clipped content cannot overflow past it into this
-///   element's scrollable area. See [`expand_scroll_bounds`].
+///   A descendant that clips its overflow contributes its border box, while
+///   absolutely positioned descendants whose containing block is outside
+///   that clip can still extend this element's scrolling area.
 fn compute_layout_metrics(layout: &LayoutBox) -> LayoutMetrics {
     let content = layout.dimensions.content;
     let padding = layout.dimensions.padding;
