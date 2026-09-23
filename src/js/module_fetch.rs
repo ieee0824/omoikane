@@ -1,7 +1,7 @@
 //! Bounded HTTP workers for module graphs. Only HTTP data crosses threads;
 //! Boa module records, parsing, and evaluation stay on the owning JS thread.
 
-use crate::http::{Client, CookieJar, HttpRequest, HttpResponse};
+use crate::http::{Client, CookieJar, HttpRequest, HttpResponse, Url};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,6 +80,7 @@ impl Future for ModuleFetch {
 struct Request {
     url: String,
     public_only: bool,
+    site_for_cookies: Option<Url>,
     fetch: ModuleFetch,
 }
 
@@ -124,6 +125,9 @@ impl ModuleFetchPool {
                             if request.public_only {
                                 http.require_public_ip();
                             }
+                            if let Some(site) = request.site_for_cookies.as_ref() {
+                                http.set_cookie_context(site.clone(), false);
+                            }
                             let response = client
                                 .send_with_shared_cookies(http, &cookies)
                                 .map_err(|error| Arc::<str>::from(error.to_string()))?;
@@ -139,13 +143,19 @@ impl ModuleFetchPool {
         Ok(Self { sender, live })
     }
 
-    pub fn fetch(&self, url: String, public_only: bool) -> ModuleFetch {
+    pub fn fetch(
+        &self,
+        url: String,
+        public_only: bool,
+        site_for_cookies: Option<Url>,
+    ) -> ModuleFetch {
         let fetch = ModuleFetch::default();
         if self
             .sender
             .send(Request {
                 url,
                 public_only,
+                site_for_cookies,
                 fetch: fetch.clone(),
             })
             .is_err()
@@ -215,7 +225,7 @@ mod tests {
         let url = format!("http://{}/module.js", listener.local_addr().unwrap());
         let pool = ModuleFetchPool::new().unwrap();
         let active: Vec<_> = (0..WORKERS)
-            .map(|_| pool.fetch(url.clone(), false))
+            .map(|_| pool.fetch(url.clone(), false, None))
             .collect();
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut connections = Vec::new();
@@ -229,7 +239,7 @@ mod tests {
                 Err(error) => panic!("accept: {error}"),
             }
         }
-        let mut queued = pool.fetch(url, false);
+        let mut queued = pool.fetch(url, false, None);
         drop(pool);
         // Teardown returned even though all transports are still waiting.
         for mut stream in connections {

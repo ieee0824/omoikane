@@ -125,6 +125,9 @@ impl Client {
         mut request: HttpRequest,
         shared_cookies: Option<&Mutex<CookieJar>>,
     ) -> Result<HttpResponse, HttpParseError> {
+        if request.site_for_cookies().is_none() {
+            request.set_cookie_context(request.url().clone(), request.is_top_level_navigation());
+        }
         let mut redirects_remaining = self.max_redirects;
         let built_in_user_agent = default_user_agent();
 
@@ -137,9 +140,20 @@ impl Client {
             }
 
             // Attach cookies
+            let site_for_cookies = request.site_for_cookies().unwrap_or(request.url());
             let cookie_header = match shared_cookies {
-                Some(cookies) => cookies.lock().unwrap().cookie_header(request.url()),
-                None => self.cookie_jar.cookie_header(request.url()),
+                Some(cookies) => cookies.lock().unwrap().cookie_header_for_request(
+                    request.url(),
+                    site_for_cookies,
+                    request.is_top_level_navigation(),
+                    request.method(),
+                ),
+                None => self.cookie_jar.cookie_header_for_request(
+                    request.url(),
+                    site_for_cookies,
+                    request.is_top_level_navigation(),
+                    request.method(),
+                ),
             };
             if let Some(cookie_header) = cookie_header {
                 request.add_header("Cookie", cookie_header);
@@ -154,7 +168,12 @@ impl Client {
                 let cookies = shared.as_deref_mut().unwrap_or(&mut self.cookie_jar);
                 for (name, value) in response.headers() {
                     if name.eq_ignore_ascii_case("set-cookie") {
-                        cookies.add_from_header_for_url(value, &origin);
+                        cookies.add_from_header_for_request(
+                            value,
+                            &origin,
+                            request.site_for_cookies().unwrap_or(&origin),
+                            request.is_top_level_navigation(),
+                        );
                     }
                 }
             }
@@ -189,6 +208,9 @@ impl Client {
             let mut new_request = HttpRequest::new(new_method, new_url);
             if request.requires_public_ip() {
                 new_request.require_public_ip();
+            }
+            if let Some(site) = request.site_for_cookies() {
+                new_request.set_cookie_context(site.clone(), request.is_top_level_navigation());
             }
 
             for (name, value) in request.headers() {
@@ -229,7 +251,14 @@ impl Client {
             request.set_header("User-Agent", self.user_agent.clone());
         }
         request.remove_header("cookie");
-        if credentials && let Some(cookie_header) = self.cookie_jar.cookie_header(request.url()) {
+        if credentials
+            && let Some(cookie_header) = self.cookie_jar.cookie_header_for_request(
+                request.url(),
+                request.site_for_cookies().unwrap_or(request.url()),
+                request.is_top_level_navigation(),
+                request.method(),
+            )
+        {
             request.add_header("Cookie", cookie_header);
         }
 
@@ -240,7 +269,12 @@ impl Client {
             let origin = request.url().clone();
             for (name, value) in response.headers() {
                 if name.eq_ignore_ascii_case("set-cookie") {
-                    self.cookie_jar.add_from_header_for_url(value, &origin);
+                    self.cookie_jar.add_from_header_for_request(
+                        value,
+                        &origin,
+                        request.site_for_cookies().unwrap_or(&origin),
+                        request.is_top_level_navigation(),
+                    );
                 }
             }
         }

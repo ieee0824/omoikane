@@ -566,10 +566,17 @@ impl ModuleLoader for HttpModuleLoader {
                             JsNativeError::typ().with_message(error.to_string())
                         })?);
                     }
-                    let fetch = pool
-                        .as_ref()
-                        .unwrap()
-                        .fetch(resolved_string.clone(), public_only);
+                    let fetch = pool.as_ref().unwrap().fetch(
+                        resolved_string.clone(),
+                        public_only,
+                        self.owner.upgrade().and_then(|owner| {
+                            owner
+                                .borrow()
+                                .location_href
+                                .parse::<crate::http::Url>()
+                                .ok()
+                        }),
+                    );
                     pending.insert(key.clone(), fetch.clone());
                     fetch
                 }
@@ -2384,20 +2391,33 @@ impl HostState {
                 Some(ResolvedResource::Data { mime_type, data }) => {
                     Some((mime_type, data, Vec::new(), Some(src.to_string())))
                 }
-                Some(ResolvedResource::Url(url)) => self.http_client.get(&url).ok().map(|resp| {
-                    let mime = resp.header("Content-Type").unwrap_or("").to_string();
-                    let csp_headers = resp
-                        .headers()
-                        .iter()
-                        .filter(|(name, _)| name.eq_ignore_ascii_case("content-security-policy"))
-                        .map(|(_, value)| value.clone())
-                        .collect();
-                    let effective_url = resp
-                        .effective_url()
-                        .map(ToString::to_string)
-                        .or_else(|| Some(url.to_string()));
-                    (mime, resp.body().to_vec(), csp_headers, effective_url)
-                }),
+                Some(ResolvedResource::Url(url)) => {
+                    let response =
+                        crate::http::HttpRequest::get(&url)
+                            .ok()
+                            .and_then(|mut request| {
+                                if let Some(site) = base_url {
+                                    request.set_cookie_context(site.clone(), false);
+                                }
+                                self.http_client.send(request).ok()
+                            });
+                    response.map(|resp| {
+                        let mime = resp.header("Content-Type").unwrap_or("").to_string();
+                        let csp_headers = resp
+                            .headers()
+                            .iter()
+                            .filter(|(name, _)| {
+                                name.eq_ignore_ascii_case("content-security-policy")
+                            })
+                            .map(|(_, value)| value.clone())
+                            .collect();
+                        let effective_url = resp
+                            .effective_url()
+                            .map(ToString::to_string)
+                            .or_else(|| Some(url.to_string()));
+                        (mime, resp.body().to_vec(), csp_headers, effective_url)
+                    })
+                }
                 None => None,
             };
 
@@ -4994,6 +5014,16 @@ impl JsRuntime {
     /// driving the runtime without running document scripts.
     pub fn set_base_url(&mut self, url: crate::http::Url) {
         self.host_state.borrow_mut().set_main_base_url(url);
+    }
+
+    /// Shares navigation cookies with the document's HTTP client.
+    pub(crate) fn set_cookie_jar(&mut self, cookies: crate::http::CookieJar) {
+        *self.host_state.borrow_mut().http_client.cookie_jar_mut() = cookies;
+    }
+
+    /// Returns the cookies accumulated by document APIs and resource requests.
+    pub(crate) fn cookie_jar_snapshot(&self) -> crate::http::CookieJar {
+        self.host_state.borrow().http_client.cookie_jar().clone()
     }
 
     /// Installs the enforced CSP for the current Document before document
@@ -8658,11 +8688,14 @@ fn fetch_script_resource_with_client(
         ResolvedResource::Url(url) => {
             let resolved = url.parse::<crate::http::Url>().ok()?;
             let public_only = requires_public_fetch(&resolved, base_url);
-            let response = if public_only {
-                client.get_public(&url).ok()?
-            } else {
-                client.get(&url).ok()?
-            };
+            let mut request = crate::http::HttpRequest::new(crate::http::Method::Get, resolved);
+            if public_only {
+                request.require_public_ip();
+            }
+            if let Some(site) = base_url {
+                request.set_cookie_context(site.clone(), false);
+            }
+            let response = client.send(request).ok()?;
             // Scripts require a successful (200) response; error pages are not
             // executed. This differs deliberately from iframe loading, which
             // adopts even an error response's body as the sub-document.
@@ -9076,6 +9109,16 @@ fn register_host_bindings(
             js_string!("__omoikane_storage_origin"),
             1,
             NativeFunction::from_copy_closure(storage_origin_native),
+        ),
+        (
+            js_string!("__omoikane_document_cookie_get"),
+            1,
+            NativeFunction::from_copy_closure(document_cookie_get_native),
+        ),
+        (
+            js_string!("__omoikane_document_cookie_set"),
+            2,
+            NativeFunction::from_copy_closure(document_cookie_set_native),
         ),
         (
             js_string!("__omoikane_storage_length"),
@@ -10634,6 +10677,78 @@ fn storage_arguments(
             state.storage_session_id,
             origin,
         ))
+    })
+}
+
+fn document_cookie_get_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let visible = state
+            .document_origins
+            .get(&document_id)
+            .is_some_and(Option::is_some);
+        let document_url = state
+            .document_urls
+            .get(&document_id)
+            .and_then(|url| url.parse::<crate::http::Url>().ok());
+        let text = if visible {
+            document_url
+                .map(|url| {
+                    let site = state
+                        .location_href
+                        .parse::<crate::http::Url>()
+                        .unwrap_or_else(|_| url.clone());
+                    state.http_client.cookie_jar().document_cookie(&url, &site)
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(JsValue::from(js_string!(text)))
+    })
+}
+
+fn document_cookie_set_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    let value = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if !state
+            .document_origins
+            .get(&document_id)
+            .is_some_and(Option::is_some)
+        {
+            return Ok(JsValue::undefined());
+        }
+        if let Some(url) = state
+            .document_urls
+            .get(&document_id)
+            .and_then(|url| url.parse::<crate::http::Url>().ok())
+        {
+            let site = state
+                .location_href
+                .parse::<crate::http::Url>()
+                .unwrap_or_else(|_| url.clone());
+            state
+                .http_client
+                .cookie_jar_mut()
+                .add_from_document(&value, &url, &site);
+        }
+        Ok(JsValue::undefined())
     })
 }
 
@@ -15865,6 +15980,9 @@ fn event_source_fetch_native(
             .map(CorsOrigin::from_url)
             .unwrap_or_else(CorsOrigin::opaque);
         let mut request = HttpRequest::new(Method::Get, parsed);
+        if let Ok(site) = state.location_href.parse::<crate::http::Url>() {
+            request.set_cookie_context(site, false);
+        }
         request.set_header("Accept", "text/event-stream");
         if !last_event_id.is_empty() {
             request.set_header("Last-Event-ID", last_event_id);
@@ -16026,6 +16144,9 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             .map(CorsOrigin::from_url)
             .unwrap_or_else(CorsOrigin::opaque);
         let mut request = HttpRequest::new(method, parsed_url);
+        if let Ok(site) = state.location_href.parse::<crate::http::Url>() {
+            request.set_cookie_context(site, false);
+        }
         for (name, value) in headers {
             if !crate::http::is_valid_header(&name, &value) {
                 return Err(JsNativeError::typ()
@@ -23534,9 +23655,13 @@ mod tests {
 
     #[test]
     fn document_cookie_round_trips_name_value_pairs() {
-        let mut runtime = JsRuntime::new().unwrap();
+        let mut runtime = JsRuntime::with_document_and_url(
+            crate::html::TreeBuilder::parse("<body></body>").document(),
+            "https://example.com/account/page",
+        )
+        .unwrap();
         assert!(runtime
-            .eval(r#"document.cookie = "theme=dark; Path=/"; document.cookie = "token=abc"; document.cookie === "theme=dark; token=abc" && navigator.cookieEnabled"#)
+            .eval(r#"document.cookie = "theme=dark; Path=/"; document.cookie = "token=abc"; document.cookie === "token=abc; theme=dark" && navigator.cookieEnabled"#)
             .unwrap()
             .as_boolean()
             .unwrap());
@@ -24444,8 +24569,9 @@ b</textarea></form>"#,
                 .unwrap();
         });
 
-        let mut runtime = JsRuntime::new().unwrap();
-        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        let mut runtime =
+            JsRuntime::with_document_and_url(default_document(), &format!("http://{address}/"))
+                .unwrap();
         runtime
             .eval(&format!(
                 r#"globalThis.cookieResponse = null; fetch("http://127.0.0.1:{}/session").then(response => cookieResponse = response);"#,
@@ -24622,22 +24748,32 @@ b</textarea></form>"#,
     fn credentials_mode_and_xhr_with_credentials_send_cookies() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        // Different ports are cross-origin but same-site, so Lax cookies may
+        // still be sent when credentials are explicitly included.
+        let origin_port = if address.port() == 43210 {
+            43211
+        } else {
+            43210
+        };
+        let origin = format!("http://127.0.0.1:{origin_port}");
+        let response_origin = origin.clone();
         let handle = thread::spawn(move || {
             for index in 0..4 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
                 if index < 2 {
                     assert!(!request.contains("Cookie:"));
-                    stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: http://origin.test\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                    write!(stream, "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: {response_origin}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
                 } else {
                     assert!(request.contains("Cookie: session=miku\r\n"));
-                    stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: http://origin.test\r\nAccess-Control-Allow-Credentials: true\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                    write!(stream, "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: {response_origin}\r\nAccess-Control-Allow-Credentials: true\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
                 }
             }
         });
 
-        let mut runtime = JsRuntime::new().unwrap();
-        runtime.set_base_url("http://origin.test/page".parse().unwrap());
+        let mut runtime =
+            JsRuntime::with_document_and_url(default_document(), &format!("{origin}/page"))
+                .unwrap();
         let target: crate::http::Url = format!("http://{address}/data").parse().unwrap();
         runtime
             .host_state

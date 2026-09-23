@@ -15077,26 +15077,11 @@
       control.selectionStart + inserted.length,
     );
   };
-  const __documentCookies = new Map();
   Object.defineProperty(Document.prototype, "cookie", {
     configurable: true,
     enumerable: true,
-    get() {
-      return Array.from(__documentCookies.entries())
-        .map(entry => entry[0] + "=" + entry[1])
-        .join("; ");
-    },
-    set(serialized) {
-      const parts = String(serialized).split(";");
-      const pair = parts.shift() || "";
-      const separator = pair.indexOf("=");
-      if (separator <= 0) return;
-      const name = pair.slice(0, separator).trim();
-      const value = pair.slice(separator + 1).trim();
-      const expired = parts.some(part => /^\s*max-age\s*=\s*0\s*$/i.test(part));
-      if (expired) __documentCookies.delete(name);
-      else __documentCookies.set(name, value);
-    },
+    get() { return __omoikane_document_cookie_get(this.__id); },
+    set(serialized) { __omoikane_document_cookie_set(this.__id, String(serialized)); },
   });
 
   const navigationDocumentId = __omoikane_document_id;

@@ -224,6 +224,9 @@ pub fn fetch_with_timeout(
             if request.requires_public_ip() {
                 next.require_public_ip();
             }
+            if let Some(site) = request.site_for_cookies() {
+                next.set_cookie_context(site.clone(), request.is_top_level_navigation());
+            }
             for (name, value) in request.headers() {
                 if copy_header_on_redirect(name, preserve_body, previous_origin == next_origin) {
                     next.add_header(name.clone(), value.clone());

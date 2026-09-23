@@ -89,6 +89,8 @@ softbuffer = { version = "0.4.8", optional = true }
 winit = { version = "0.30.12", optional = true }
 # HTTP URL authority, IDNA, and request-target normalization use the WHATWG parser.
 url = "2.5.8"
+# Pure Rust Public Suffix List for rejecting supercookies and computing schemeful sites.
+psl = "2.1.236"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Use an exclusive X11 grab so raw input is delivered exactly once while locked.
