@@ -77,6 +77,8 @@ pub struct HttpRequest {
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
     require_public_ip: bool,
+    site_for_cookies: Option<Url>,
+    top_level_navigation: bool,
 }
 
 impl HttpRequest {
@@ -92,6 +94,8 @@ impl HttpRequest {
             headers: Vec::new(),
             body: None,
             require_public_ip: false,
+            site_for_cookies: None,
+            top_level_navigation: true,
         };
         req.headers.push(("Host".to_string(), host));
         req.headers
@@ -143,6 +147,22 @@ impl HttpRequest {
 
     pub(crate) fn requires_public_ip(&self) -> bool {
         self.require_public_ip
+    }
+
+    /// Sets the initiating site and whether this request navigates the top-level context.
+    pub fn set_cookie_context(&mut self, site_for_cookies: Url, top_level_navigation: bool) {
+        self.site_for_cookies = Some(site_for_cookies);
+        self.top_level_navigation = top_level_navigation;
+    }
+
+    /// Returns the initiating site used for `SameSite` cookie selection.
+    pub fn site_for_cookies(&self) -> Option<&Url> {
+        self.site_for_cookies.as_ref()
+    }
+
+    /// Returns whether this request navigates the top-level browsing context.
+    pub fn is_top_level_navigation(&self) -> bool {
+        self.top_level_navigation
     }
 
     /// Returns the first header value matching `name`, ignoring ASCII case.

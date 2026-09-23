@@ -170,10 +170,14 @@ impl HostState {
         submission: &Submission,
     ) -> Result<(NodeHandle, Vec<String>, Option<String>), String> {
         if submission.method.eq_ignore_ascii_case("GET") {
-            return Ok(self.load_iframe_document(&submission.url, None));
+            let site = self.location_href.parse::<crate::http::Url>().ok();
+            return Ok(self.load_iframe_document(&submission.url, site.as_ref()));
         }
         let url: crate::http::Url = submission.url.parse().map_err(|error| format!("{error}"))?;
         let mut request = crate::http::HttpRequest::new(crate::http::Method::Post, url);
+        if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
+            request.set_cookie_context(site, false);
+        }
         if let Some(body) = &submission.body {
             request.set_body(body.clone());
         }

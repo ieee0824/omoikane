@@ -2,7 +2,7 @@
 
 use super::csp::{CspPolicy, ResourceType};
 use crate::dom::NodeHandle;
-use crate::http::{Client, Url};
+use crate::http::{Client, HttpRequest, Url};
 use crate::paint::{DataUri, image::parse_data_uri, stylesheet as css};
 use std::collections::{HashMap, HashSet};
 
@@ -158,12 +158,16 @@ impl StylesheetLoader {
                     && base.host() == url.host()
                     && base.port() == url.port()
             });
-            let response = if same_origin {
-                self.client.get(&key)
-            } else {
-                self.client.get_public(&key)
-            };
-            response.ok().and_then(|response| {
+            let response = HttpRequest::get(&key).ok().and_then(|mut request| {
+                if !same_origin {
+                    request.require_public_ip();
+                }
+                if let Some(site) = document_base {
+                    request.set_cookie_context(site.clone(), false);
+                }
+                self.client.send(request).ok()
+            });
+            response.and_then(|response| {
                 let effective = response.effective_url().cloned().unwrap_or(url);
                 if !policy.allows_url_after_redirects(
                     ResourceType::Style,

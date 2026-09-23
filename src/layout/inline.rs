@@ -1818,6 +1818,11 @@ fn fetch_image(url: &str) -> Option<Image> {
 fn fetch_image_uncached(url: &str) -> Option<Image> {
     // Use shared HTTP client for connection reuse and cookie sharing
     let mut request = HttpRequest::get(url).ok()?;
+    IMAGE_BASE_URL.with(|cell| {
+        if let Some(site) = cell.borrow().as_ref() {
+            request.set_cookie_context(site.clone(), false);
+        }
+    });
     request.set_header(
         "Accept",
         "image/webp,image/png,image/jpeg,image/gif,image/svg+xml;q=0.9,*/*;q=0.1",

@@ -2579,6 +2579,7 @@ impl CdpSession {
         body: Option<Vec<u8>>,
         content_type: Option<String>,
     ) -> Result<(String, u16, String, Vec<String>), String> {
+        *self.http_client.cookie_jar_mut() = self.runtime.cookie_jar_snapshot();
         if method == Method::Get {
             if url == "about:blank" {
                 return Ok((
@@ -2596,6 +2597,9 @@ impl CdpSession {
             .parse()
             .map_err(|error: crate::http::url::UrlParseError| error.to_string())?;
         let mut request = HttpRequest::new(method, parsed);
+        if let Ok(site) = self.current_url.parse::<crate::http::Url>() {
+            request.set_cookie_context(site, true);
+        }
         if let Some(content_type) = content_type {
             request.set_header("Content-Type", content_type);
         }
@@ -2652,6 +2656,7 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(|error| error.to_string())?;
+        runtime.set_cookie_jar(self.http_client.cookie_jar().clone());
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         runtime.set_fullscreen_supported(self.fullscreen_supported);
         runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
@@ -2736,6 +2741,7 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(|error| error.to_string())?;
+        runtime.set_cookie_jar(self.http_client.cookie_jar().clone());
         runtime.set_user_agent(self.http_client.user_agent().to_string());
         runtime.set_fullscreen_supported(self.fullscreen_supported);
         runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
