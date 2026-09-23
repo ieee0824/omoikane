@@ -34,3 +34,39 @@ fn native_attribute_rows_remain_live_while_building_the_outer_array() {
 
     assert_eq!(actual, "data-0|value-0|24");
 }
+
+#[test]
+fn indexed_attributes_and_namespace_values_remain_live_after_mutations() {
+    let actual = JsRuntime::new()
+        .expect("create attribute runtime")
+        .eval(
+            r#"(() => {
+                const element = document.createElement('div');
+                element.setAttribute('data-a', 'first');
+                const first = element.attributes.item(0);
+                element.setAttribute('data-b', 'second');
+                const second = element.attributes.item(1);
+                element.setAttribute('data-a', 'updated');
+                const live = [element.attributes.length, element.attributes.item(0) === first,
+                              first.value, second.value].join('|');
+                element.removeAttribute('data-a');
+                const removed = [element.attributes.length, element.attributes.item(0) === second,
+                                 element.attributes.item(1) === null, first.value].join('|');
+                element.setAttributeNS('urn:test', 'p:kind', 'namespaced');
+                element.setAttribute('xlink:href', 'legacy');
+                const ns = [element.getAttributeNS('urn:test', 'kind'),
+                            element.getAttributeNS('http://www.w3.org/1999/xlink', 'href'),
+                            element.getAttributeNS(null, 'href') === null].join('|');
+                return live + ';' + removed + ';' + ns;
+            })()"#,
+        )
+        .expect("evaluate live attribute probe")
+        .as_string()
+        .expect("attribute probe must return a string")
+        .to_std_string_escaped();
+
+    assert_eq!(
+        actual,
+        "2|true|updated|second;1|true|true|updated;namespaced|legacy|true"
+    );
+}

@@ -27,9 +27,16 @@ class GateTests(unittest.TestCase):
         for shard in gate.SHARDS:
             folder = self.root / shard
             folder.mkdir()
+            steps = [{"name": name, "exit": 0} for name in gate.STEPS[shard]]
+            if shard == "acid3":
+                for step in steps:
+                    step["test26_ms"] = {
+                        mode: {"driver_ms": 2000.0, "fixture_ms": 1999}
+                        for mode in ("faithful", "direct")
+                    }
             gate.write_json(folder / "shard.json", {
                 "shard": shard, "identity": self.identity, "error": None, "passed_tests": 1,
-                "steps": [{"name": name, "exit": 0} for name in gate.STEPS[shard]],
+                "steps": steps,
             })
             if shard.startswith("unit-"):
                 gate.write_json(folder / "all-tests.json", names)
@@ -141,6 +148,26 @@ class GateTests(unittest.TestCase):
             {"name": "print_page_wpt", "kind": ["test"]},
         ]}
         self.assertEqual(gate.integration_targets(package), ["native", "new_test"])
+
+    def test_acid3_test26_timing_retains_driver_and_fixture_values(self):
+        report = {
+            "faithful": {"test26_step_wall_ms": 2376.25,
+                         "log": "Test 26 passed, but took 2310ms (less than 30fps)\n"},
+            "direct": {"test26_step_wall_ms": 5012.0,
+                       "log": "Test 25 passed, but took 40ms (less than 30fps)\n"},
+        }
+        self.assertEqual(gate.acid3_test26_timing(report), {
+            "faithful": {"driver_ms": 2376.25, "fixture_ms": 2310},
+            "direct": {"driver_ms": 5012.0, "fixture_ms": None},
+        })
+
+    def test_missing_or_nonfinite_acid3_timing_fails_gate(self):
+        original = (self.root / "acid3/shard.json").read_text()
+        for value in (None, float("inf"), -1, True):
+            with self.subTest(value=value):
+                self.modify("acid3/shard.json", lambda row: row["steps"][0]["test26_ms"]["direct"].update(driver_ms=value))
+                self.assertFalse(self.decide())
+                (self.root / "acid3/shard.json").write_text(original)
 
 
 if __name__ == "__main__":

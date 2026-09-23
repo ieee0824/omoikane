@@ -221,6 +221,10 @@ fn runner_scores_100_in_both_drive_modes() {
         )
         .unwrap();
         for (name, run) in [("faithful", faithful), ("direct", direct)] {
+            assert!(
+                run.test26_step_wall_ms.is_some_and(|ms| ms >= 0.0),
+                "{name}: test26 wall time missing: {report}"
+            );
             assert_eq!(
                 (run.score, run.total),
                 (Some(100), Some(100)),

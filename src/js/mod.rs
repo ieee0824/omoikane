@@ -9263,6 +9263,21 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(attribute_records_native),
         ),
         (
+            js_string!("__omoikane_attribute_record_count"),
+            1,
+            NativeFunction::from_copy_closure(attribute_record_count_native),
+        ),
+        (
+            js_string!("__omoikane_attribute_record_at"),
+            2,
+            NativeFunction::from_copy_closure(attribute_record_at_native),
+        ),
+        (
+            js_string!("__omoikane_attribute_value_ns"),
+            3,
+            NativeFunction::from_copy_closure(attribute_value_ns_native),
+        ),
+        (
             js_string!("__omoikane_array_buffer_info"),
             1,
             NativeFunction::from_copy_closure(array_buffer_info_native),
@@ -13118,6 +13133,87 @@ fn attribute_records_native(
     // `TryIntoJs` roots each row array and the outer array while it appends
     // values. A plain Rust `Vec<JsValue>` is invisible to Boa's collector.
     rows.try_into_js(context)
+}
+
+fn attribute_record_count_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let count = state
+            .borrow()
+            .get_node(node_id)
+            .and_then(|node| node.attribute_record_count())
+            .unwrap_or(0);
+        Ok(JsValue::from(count as f64))
+    })
+}
+
+fn attribute_record_at_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let Some(index) = args
+        .get(1)
+        .and_then(JsValue::as_number)
+        .filter(|index| index.is_finite() && *index >= 0.0)
+        .map(|index| index as usize)
+    else {
+        return Ok(JsValue::null());
+    };
+    let record = with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .get_node(node_id)
+            .and_then(|node| node.attribute_record_at(index)))
+    })?;
+    let Some((name, namespace, local_name, value)) = record else {
+        return Ok(JsValue::null());
+    };
+    let row: (JsValue, JsValue, JsValue, JsValue) = (
+        js_string!(name.as_str()).into(),
+        namespace
+            .map(|namespace| js_string!(namespace.as_str()).into())
+            .unwrap_or_else(JsValue::null),
+        js_string!(local_name.as_str()).into(),
+        js_string!(value.as_str()).into(),
+    );
+    row.try_into_js(context)
+}
+
+fn attribute_value_ns_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    let namespace = args
+        .get(1)
+        .filter(|value| !value.is_null_or_undefined())
+        .map(|value| {
+            value
+                .to_string(context)
+                .map(|value| value.to_std_string_escaped())
+        })
+        .transpose()?;
+    let local_name = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .get_node(node_id)
+            .and_then(|node| node.attribute_value_ns(namespace.as_deref(), &local_name))
+            .map(|value| js_string!(value.as_str()).into())
+            .unwrap_or_else(JsValue::null))
+    })
 }
 
 fn array_buffer_argument(args: &[JsValue]) -> JsResult<JsArrayBuffer> {
@@ -28282,6 +28378,40 @@ b</textarea></form>"#,
             })()"#,
         );
         assert_eq!(actual, "TypeError|1|before|0|1|");
+    }
+
+    #[test]
+    fn mutation_observer_preserves_child_list_siblings_after_observe() {
+        let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        let actual = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const parent = document.createElement('div');
+                const first = parent.appendChild(document.createElement('a'));
+                const middle = parent.appendChild(document.createElement('b'));
+                const last = parent.appendChild(document.createElement('i'));
+                const observer = new MutationObserver(() => {});
+                observer.observe(parent, { childList: true });
+                const inserted = parent.insertBefore(document.createElement('em'), middle);
+                const insertion = observer.takeRecords()[0];
+                parent.removeChild(middle);
+                const removal = observer.takeRecords()[0];
+                document.createElement('div').appendChild(last);
+                const move = observer.takeRecords()[0];
+                return [
+                    insertion.addedNodes[0] === inserted,
+                    insertion.previousSibling === first,
+                    insertion.nextSibling === middle,
+                    removal.removedNodes[0] === middle,
+                    removal.previousSibling === inserted,
+                    removal.nextSibling === last,
+                    move.removedNodes[0] === last,
+                    move.previousSibling === inserted,
+                    move.nextSibling === null,
+                ].join('|');
+            })()"#,
+        );
+        assert_eq!(actual, "true|true|true|true|true|true|true|true|true");
     }
 
     #[test]
