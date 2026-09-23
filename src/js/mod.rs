@@ -9975,6 +9975,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(resolve_url_native),
         ),
         (
+            js_string!("__omoikane_parse_url"),
+            2,
+            NativeFunction::from_copy_closure(parse_url_native),
+        ),
+        (
             js_string!("__omoikane_schedule_navigation"),
             3,
             NativeFunction::from_copy_closure(schedule_navigation_native),
@@ -10239,19 +10244,17 @@ fn is_secure_context_parsed_url(url: &crate::http::Url) -> bool {
     let host = url.host();
     host.eq_ignore_ascii_case("localhost")
         || host
-            .parse::<std::net::Ipv4Addr>()
-            .is_ok_and(|address| address.octets()[0] == 127)
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn host_is_secure_context(state: &HostState) -> bool {
     if let Some(secure) = state.secure_context_override {
         return secure;
     }
-    // The base URL is already parsed and is the canonical origin used by the
-    // runtime. Avoid formatting and reparsing it on every secure-context or
-    // clipboard check. The lightweight URL type does not model fragments, so
-    // retain the string path for fragment-bearing URLs (and IPv6 loopback,
-    // which is handled by its dedicated fast path).
+    // The parsed base URL is the canonical origin used by the runtime. Avoid
+    // formatting and reparsing it on every secure-context or clipboard check.
     if let Some(base_url) = state.base_url.as_ref()
         && !state.location_href.contains('#')
     {
@@ -16022,6 +16025,14 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             .unwrap_or_else(CorsOrigin::opaque);
         let mut request = HttpRequest::new(method, parsed_url);
         for (name, value) in headers {
+            if !crate::http::is_valid_header(&name, &value) {
+                return Err(JsNativeError::typ()
+                    .with_message("invalid request header")
+                    .into());
+            }
+            if crate::http::is_forbidden_request_header(&name, &value) {
+                continue;
+            }
             request.set_header(name, value);
         }
         if let Some(body) = body {
@@ -17757,6 +17768,54 @@ fn resolve_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     })
 }
 
+/// Supplies the JS URL class with the same WHATWG parser used by HTTP requests.
+fn parse_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let input = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let base = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let parsed = url::Url::parse(&base)
+        .and_then(|base| base.join(&input))
+        .map_err(|error| JsNativeError::typ().with_message(format!("invalid URL: {error}")))?;
+    let hostname = parsed.host_str().unwrap_or("");
+    let host = match parsed.port() {
+        Some(port) => format!("{hostname}:{port}"),
+        None => hostname.to_owned(),
+    };
+    let search = parsed
+        .query()
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let hash = parsed
+        .fragment()
+        .filter(|fragment| !fragment.is_empty())
+        .map(|fragment| format!("#{fragment}"))
+        .unwrap_or_default();
+    let data = serde_json::json!({
+        "protocol": format!("{}:", parsed.scheme()),
+        "host": host,
+        "hostname": hostname,
+        "username": parsed.username(),
+        "password": parsed.password().unwrap_or(""),
+        "port": parsed.port().map(|port| port.to_string()).unwrap_or_default(),
+        "pathname": parsed.path(),
+        "search": search,
+        "hash": hash,
+        "origin": parsed.origin().ascii_serialization(),
+        "href": parsed.as_str(),
+    });
+    Ok(js_string!(data.to_string()).into())
+}
+
 /// Resolve an IDL URL reference while retaining its fragment and raw fallback.
 fn resolve_url_reference(reference: &str, base: Option<&crate::http::Url>) -> String {
     match base {
@@ -18155,7 +18214,7 @@ mod tests {
         let owner: crate::http::Url = "https://EXAMPLE.com/".parse().unwrap();
         let worker: crate::http::Url = "https://example.COM/worker.js".parse().unwrap();
 
-        assert_ne!(owner.host(), worker.host());
+        assert_eq!(owner.host(), worker.host());
         assert!(same_origin_url(&owner, &worker));
     }
 
@@ -23349,13 +23408,38 @@ mod tests {
                 r##"(() => {
                     const url = new URL("../asset.js?q=hello+world", "https://example.com/app/page.js");
                     return url.origin === "https://example.com" &&
-                      url.pathname === "/app/../asset.js" &&
+                      url.pathname === "/asset.js" &&
                       url.searchParams.get("q") === "hello world";
                 })()"##,
             )
             .unwrap()
             .as_boolean()
             .unwrap());
+    }
+
+    #[test]
+    fn js_url_uses_network_host_canonicalization() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(
+            runtime
+                .eval(
+                    r#"(() => {
+                    const domain = new URL("http://user:pass@BÜCHER.Example:80/a#secret");
+                    const ipv6 = new URL("http://[::1]/");
+                    const relative = new URL("/a b", "http://EXAMPLE.com:80/old");
+                    return domain.host === "xn--bcher-kva.example" &&
+                        domain.hostname === "xn--bcher-kva.example" &&
+                        domain.port === "" &&
+                        domain.origin === "http://xn--bcher-kva.example" &&
+                        domain.toString() === domain.href &&
+                        ipv6.host === "[::1]" &&
+                        relative.href === "http://example.com/a%20b";
+                })()"#,
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -23377,6 +23461,38 @@ mod tests {
                 .as_boolean()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn request_headers_validate_fields_and_ignore_forbidden_names() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert!(runtime
+            .eval(
+                r#"(() => {
+                    let invalidName = false, invalidValue = false;
+                    try { new Headers({ "Bad Name": "x" }); } catch (error) { invalidName = error instanceof TypeError; }
+                    try { new Headers({ "X-Test": "one\r\nInjected: yes" }); } catch (error) { invalidValue = error instanceof TypeError; }
+                    const normalized = new Headers({ "X-Test": " \tok\t " });
+                    const request = new Request("https://example.com/", {
+                        headers: { Host: "other.example", Cookie: "forged=1", "X-Allowed": "yes" }
+                    });
+                    const xhr = new XMLHttpRequest();
+                    xhr.open("GET", "https://example.com/");
+                    xhr.setRequestHeader("Host", "other.example");
+                    let xhrInvalid = false;
+                    try { xhr.setRequestHeader("X-Test", "a\r\nb"); }
+                    catch (error) { xhrInvalid = error.name === "SyntaxError"; }
+                    return invalidName && invalidValue && xhrInvalid &&
+                        normalized.get("x-test") === "ok" &&
+                        request.headers.get("host") === null &&
+                        request.headers.get("cookie") === null &&
+                        request.headers.get("x-allowed") === "yes" &&
+                        !Object.prototype.hasOwnProperty.call(xhr._headers, "host");
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap());
     }
 
     #[test]

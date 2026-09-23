@@ -219,6 +219,7 @@ HTTP クライアントの現状仕様:
 - 既定で `Accept-Encoding: gzip` を送信します
 - `Content-Encoding: gzip` のレスポンスは自動で展開されます
 - `Transfer-Encoding: chunked` と `gzip` の組み合わせも扱えます
+- HTTP/1.1応答の本文は圧縮前後とも、HTTP/2応答は受信本文を既定で64 MiBまでバッファします。必要に応じて `OMOIKANE_MAX_HTTP_BODY_BYTES` にバイト数を指定できます
 - `h2` で応答ヘッダ解釈に失敗した場合は `HTTP/1.1` へフォールバックします
 
 ### C FFI

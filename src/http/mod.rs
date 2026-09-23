@@ -26,5 +26,6 @@ pub use connection::{send, send_with_options};
 pub use cookie::{Cookie, CookieJar, SameSite};
 pub use data_uri::{DataUri, parse_data_uri};
 pub use request::{HttpRequest, Method, default_user_agent};
+pub(crate) use request::{is_forbidden_request_header, is_valid_header};
 pub use response::HttpResponse;
 pub use url::Url;

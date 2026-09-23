@@ -2,9 +2,9 @@
 
 use super::connection;
 use super::cookie::CookieJar;
-use super::request::{HttpRequest, Method, default_user_agent};
+use super::request::{HttpRequest, Method, copy_header_on_redirect, default_user_agent};
 use super::response::{HttpParseError, HttpResponse};
-use super::url::Url;
+use super::url::{Url, resolve_url};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -181,24 +181,23 @@ impl Client {
             // Determine method for redirect
             let new_method = redirect_method(response.status_code(), request.method());
 
+            let same_origin = request.url().scheme() == new_url.scheme()
+                && request.url().host().eq_ignore_ascii_case(new_url.host())
+                && request.url().port() == new_url.port();
+            let preserve_body = new_method == request.method();
+
             let mut new_request = HttpRequest::new(new_method, new_url);
             if request.requires_public_ip() {
                 new_request.require_public_ip();
             }
 
-            // Preserve headers (except Host, which is set by HttpRequest::new)
             for (name, value) in request.headers() {
-                if !name.eq_ignore_ascii_case("host")
-                    && !name.eq_ignore_ascii_case("cookie")
-                    && !name.eq_ignore_ascii_case("content-length")
-                {
+                if copy_header_on_redirect(name, preserve_body, same_origin) {
                     new_request.add_header(name.clone(), value.clone());
                 }
             }
 
-            if matches!(response.status_code(), 307 | 308)
-                && let Some(body) = request.body()
-            {
+            if preserve_body && let Some(body) = request.body() {
                 new_request.set_body(body.to_vec());
             }
 
@@ -278,48 +277,7 @@ pub(crate) fn redirect_method(status: u16, original: Method) -> Method {
 ///
 /// Handles both absolute URLs and relative paths.
 pub(crate) fn resolve_redirect_url(base: &Url, location: &str) -> Result<Url, HttpParseError> {
-    // Try absolute URL first
-    if location.starts_with("http://") || location.starts_with("https://") {
-        return location.parse::<Url>().map_err(|e| {
-            HttpParseError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-        });
-    }
-
-    // Relative path — resolve against base URL
-    let new_path = if location.starts_with('/') {
-        location.to_string()
-    } else {
-        // Relative to current path directory
-        let base_path = base.path();
-        let dir = match base_path.rfind('/') {
-            Some(i) => &base_path[..=i],
-            None => "/",
-        };
-        format!("{}{}", dir, location)
-    };
-
-    // Split path and query from new_path
-    let (path, query) = if let Some(i) = new_path.find('?') {
-        let q = &new_path[i + 1..];
-        let query = if q.is_empty() { None } else { Some(q) };
-        (&new_path[..i], query)
-    } else {
-        (new_path.as_str(), None)
-    };
-
-    // Construct new URL string and parse
-    let new_url_str = match query {
-        Some(q) => format!(
-            "{}://{}:{}{path}?{q}",
-            base.scheme(),
-            base.host(),
-            base.port()
-        ),
-        None => format!("{}://{}:{}{path}", base.scheme(), base.host(), base.port()),
-    };
-
-    new_url_str
-        .parse::<Url>()
+    resolve_url(base, location)
         .map_err(|e| HttpParseError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))
 }
 
@@ -794,5 +752,71 @@ mod tests {
 
         let resp = client.send(request).unwrap();
         assert_eq!(resp.status_code(), 200);
+    }
+
+    #[test]
+    fn cross_origin_redirect_drops_credentials_and_rewritten_body_headers() {
+        let redirect = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination_port = destination.local_addr().unwrap().port();
+        let redirect_port = redirect.local_addr().unwrap().port();
+
+        let source_thread = std::thread::spawn(move || {
+            let (mut stream, _) = redirect.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            write!(stream, "HTTP/1.1 303 See Other\r\nLocation: http://127.0.0.1:{destination_port}/next\r\nContent-Length: 0\r\n\r\n").unwrap();
+        });
+        let destination_thread = std::thread::spawn(move || {
+            let (mut stream, _) = destination.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line.to_ascii_lowercase());
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            (first, headers)
+        });
+
+        let mut request = HttpRequest::post(
+            &format!("http://127.0.0.1:{redirect_port}/start"),
+            b"data".to_vec(),
+        )
+        .unwrap();
+        request.set_header("Authorization", "Bearer secret");
+        request.set_header("Proxy-Authorization", "Basic secret");
+        request.set_header("Content-Type", "text/plain");
+        let mut client = Client::new();
+        assert_eq!(client.send(request).unwrap().status_code(), 200);
+        source_thread.join().unwrap();
+        let (first, headers) = destination_thread.join().unwrap();
+        assert!(first.starts_with("GET /next HTTP/1.1"));
+        for absent in [
+            "authorization:",
+            "proxy-authorization:",
+            "content-type:",
+            "content-length:",
+        ] {
+            assert!(
+                !headers.contains(absent),
+                "unexpected {absent} in {headers}"
+            );
+        }
     }
 }

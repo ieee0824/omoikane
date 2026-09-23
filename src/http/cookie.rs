@@ -375,73 +375,112 @@ fn default_path(request_path: &str) -> String {
     }
 }
 
-/// Parses a subset of HTTP-date formats (RFC 7231 §7.1.1.1).
-///
-/// Supports the preferred format: `Thu, 01 Dec 2025 00:00:00 GMT`.
+/// Parses a cookie expiry date using the token order from RFC 6265 §5.1.1.
 fn parse_http_date(s: &str) -> Option<SystemTime> {
-    // Minimal parser for "Day, DD Mon YYYY HH:MM:SS GMT"
-    let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() < 4 {
+    let mut day = None;
+    let mut month = None;
+    let mut year = None;
+    let mut time = None;
+    for token in s.split(|c: char| !c.is_ascii_alphanumeric() && c != ':') {
+        if token.is_empty() {
+            continue;
+        }
+        if time.is_none() {
+            let parts: Vec<_> = token.split(':').collect();
+            if parts.len() == 3
+                && parts.iter().all(|part| !part.is_empty() && part.len() <= 2)
+                && let (Ok(h), Ok(m), Ok(sec)) = (
+                    parts[0].parse::<u8>(),
+                    parts[1].parse::<u8>(),
+                    parts[2].parse::<u8>(),
+                )
+            {
+                time = Some((h, m, sec));
+                continue;
+            }
+        }
+        if day.is_none()
+            && (1..=2).contains(&token.len())
+            && token.bytes().all(|b| b.is_ascii_digit())
+        {
+            day = token.parse::<u8>().ok();
+            continue;
+        }
+        if month.is_none() && token.len() >= 3 {
+            month = match token[..3].to_ascii_lowercase().as_str() {
+                "jan" => Some(1u8),
+                "feb" => Some(2),
+                "mar" => Some(3),
+                "apr" => Some(4),
+                "may" => Some(5),
+                "jun" => Some(6),
+                "jul" => Some(7),
+                "aug" => Some(8),
+                "sep" => Some(9),
+                "oct" => Some(10),
+                "nov" => Some(11),
+                "dec" => Some(12),
+                _ => None,
+            };
+            if month.is_some() {
+                continue;
+            }
+        }
+        if year.is_none()
+            && (2..=4).contains(&token.len())
+            && token.bytes().all(|b| b.is_ascii_digit())
+        {
+            year = token.parse::<i64>().ok();
+        }
+    }
+    let day = day?;
+    let month = month?;
+    let mut year = year?;
+    let (hour, min, sec) = time?;
+    if (0..=69).contains(&year) {
+        year += 2000;
+    } else if (70..=99).contains(&year) {
+        year += 1900;
+    }
+    if year < 1601 || hour > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+    let month_days = [
+        31,
+        if is_leap_year(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if day == 0 || day > month_days[(month - 1) as usize] {
         return None;
     }
 
-    // Find date parts - skip day name
-    let (day, mon, year, time) = if parts[0].ends_with(',') {
-        // "Thu, 01 Dec 2025 00:00:00 GMT"
-        if parts.len() < 5 {
-            return None;
-        }
-        (parts[1], parts[2], parts[3], parts[4])
+    // Civil date to days since 1970-01-01, with constant work for any year.
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let year_of_era_day = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + year_of_era_day - 719_468;
+    let seconds = days * 86_400 + i64::from(hour) * 3600 + i64::from(min) * 60 + i64::from(sec);
+    if seconds >= 0 {
+        SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
     } else {
-        return None;
-    };
-
-    let day: u64 = day.parse().ok()?;
-    let month = match mon.to_ascii_lowercase().as_str() {
-        "jan" => 1u64,
-        "feb" => 2,
-        "mar" => 3,
-        "apr" => 4,
-        "may" => 5,
-        "jun" => 6,
-        "jul" => 7,
-        "aug" => 8,
-        "sep" => 9,
-        "oct" => 10,
-        "nov" => 11,
-        "dec" => 12,
-        _ => return None,
-    };
-    let year: u64 = year.parse().ok()?;
-
-    let time_parts: Vec<&str> = time.split(':').collect();
-    if time_parts.len() != 3 {
-        return None;
+        SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(seconds.unsigned_abs()))
     }
-    let hour: u64 = time_parts[0].parse().ok()?;
-    let min: u64 = time_parts[1].parse().ok()?;
-    let sec: u64 = time_parts[2].parse().ok()?;
-
-    // Convert to seconds since UNIX_EPOCH (simplified, not accounting for leap seconds)
-    let mut days: u64 = 0;
-    for y in 1970..year {
-        days += if is_leap_year(y) { 366 } else { 365 };
-    }
-    let month_days = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    for m in 1..month {
-        days += month_days[m as usize];
-        if m == 2 && is_leap_year(year) {
-            days += 1;
-        }
-    }
-    days += day - 1;
-
-    let secs = days * 86400 + hour * 3600 + min * 60 + sec;
-    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
-fn is_leap_year(y: u64) -> bool {
-    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 #[cfg(test)]
@@ -723,5 +762,29 @@ mod tests {
     #[test]
     fn parse_http_date_invalid() {
         assert!(parse_http_date("not a date").is_none());
+    }
+
+    #[test]
+    fn invalid_cookie_dates_do_not_panic_or_loop() {
+        for value in [
+            "Thu, 00 Jan 2030 00:00:00 GMT",
+            "Thu, 01 Jan 999999999999 00:00:00 GMT",
+            "Thu, 01 Jan 2030 18446744073709551615:00:00 GMT",
+            "Thu, 29 Feb 2023 00:00:00 GMT",
+            "Thu, 01 Jan 2030 24:00:00 GMT",
+        ] {
+            assert!(parse_http_date(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn cookie_date_accepts_common_formats_and_leap_days() {
+        let expected = parse_http_date("Wed, 09 Jun 2021 10:18:14 GMT").unwrap();
+        assert_eq!(
+            parse_http_date("Wed, 09-Jun-2021 10:18:14 GMT"),
+            Some(expected)
+        );
+        assert_eq!(parse_http_date("09 Jun 21 10:18:14 GMT"), Some(expected));
+        assert!(parse_http_date("Thu, 29 Feb 2024 00:00:00 GMT").is_some());
     }
 }
