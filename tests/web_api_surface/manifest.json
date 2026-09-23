@@ -838,6 +838,14 @@
       "baseline_supported": true
     },
     {
+      "id": "css.scroll-snap-position",
+      "area": "cssom",
+      "description": "Mandatory scroll snap changes the scroll endpoint using scroll-padding and scroll-margin",
+      "setup": "globalThis.__snapHost = document.createElement('div'); __snapHost.style.cssText = 'overflow:auto;width:100px;height:100px;scroll-snap-type:y mandatory;scroll-padding-top:20px'; __snapHost.innerHTML = '<div style=\"height:100px;scroll-snap-align:start\"></div><div style=\"height:100px;scroll-snap-align:start;scroll-margin-top:10px\"></div><div style=\"height:100px\"></div>'; document.body.appendChild(__snapHost)",
+      "probe": "(() => { const computed = getComputedStyle(__snapHost).scrollSnapType === 'y mandatory'; __snapHost.scrollTo(0, 65); const snapped = __snapHost.scrollTop === 70; __snapHost.style.scrollSnapType = 'none'; __snapHost.scrollTo(0, 65); return computed && snapped && __snapHost.scrollTop === 65 && CSS.supports('scroll-snap-type', 'y mandatory') && !CSS.supports('scroll-snap-type', 'y strong'); })()",
+      "baseline_supported": true
+    },
+    {
       "id": "css.element-scroll-geometry-and-event",
       "area": "cssom",
       "description": "Element scroll events are deferred, coalesced per frame, and do not bubble",

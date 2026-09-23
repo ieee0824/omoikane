@@ -395,12 +395,27 @@
     "counter-reset", "counter-increment",
     "scroll-behavior", "overscroll-behavior", "overscroll-behavior-x",
     "overscroll-behavior-y", "overscroll-behavior-inline", "overscroll-behavior-block",
+    "scroll-snap-type", "scroll-snap-align",
+    "scroll-padding", "scroll-margin", "scroll-padding-inline", "scroll-padding-block",
+    "scroll-margin-inline", "scroll-margin-block",
+    "scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left",
+    "scroll-margin-top", "scroll-margin-right", "scroll-margin-bottom", "scroll-margin-left",
+    "scroll-padding-inline-start", "scroll-padding-inline-end",
+    "scroll-padding-block-start", "scroll-padding-block-end",
+    "scroll-margin-inline-start", "scroll-margin-inline-end",
+    "scroll-margin-block-start", "scroll-margin-block-end",
   ]);
   const styleShorthandLonghands = Object.freeze({
     "columns": ["column-width", "column-count"],
     "column-rule": ["column-rule-width", "column-rule-style", "column-rule-color"],
     "contain-intrinsic-size": ["contain-intrinsic-width", "contain-intrinsic-height"],
     "overscroll-behavior": ["overscroll-behavior-x", "overscroll-behavior-y"],
+    "scroll-padding": ["scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left"],
+    "scroll-margin": ["scroll-margin-top", "scroll-margin-right", "scroll-margin-bottom", "scroll-margin-left"],
+    "scroll-padding-inline": ["scroll-padding-inline-start", "scroll-padding-inline-end"],
+    "scroll-padding-block": ["scroll-padding-block-start", "scroll-padding-block-end"],
+    "scroll-margin-inline": ["scroll-margin-inline-start", "scroll-margin-inline-end"],
+    "scroll-margin-block": ["scroll-margin-block-start", "scroll-margin-block-end"],
   });
 
   // CSSOM serializes the two physical contain-intrinsic-size axes back through
@@ -3722,10 +3737,60 @@
       }
       const view = this.ownerDocument?.defaultView;
       if (!view) return;
-      const rect = this.getBoundingClientRect();
-      const alignEnd = options === false || (options && typeof options === "object" && options.block === "end");
-      const top = alignEnd ? rect.bottom - view.innerHeight : rect.top;
-      view.scrollBy(rect.left, top);
+      const settings = options && typeof options === "object" ? options : {};
+      const block = options === false ? "end" : settings.block || "start";
+      const inline = settings.inline || "nearest";
+      const behavior = settings.behavior || "auto";
+      const inset = (value, basis) => {
+        const text = String(value || "").trim();
+        if (text.endsWith("%")) return (parseFloat(text) || 0) * basis / 100;
+        return text.endsWith("px") ? parseFloat(text) || 0 : 0;
+      };
+      const margin = getComputedStyle(this);
+      const delta = (start, end, portStart, portEnd, alignment) => {
+        if (alignment === "start") return start - portStart;
+        if (alignment === "end") return end - portEnd;
+        if (alignment === "center") return (start + end - portStart - portEnd) / 2;
+        const larger = end - start > portEnd - portStart;
+        if ((start <= portStart && end >= portEnd) ||
+            (start >= portStart && end <= portEnd)) return 0;
+        if (start < portStart) return larger ? end - portEnd : start - portStart;
+        return larger ? start - portStart : end - portEnd;
+      };
+      const scrollContainer = (container, viewport = false, scrollsX = true, scrollsY = true) => {
+        const rect = this.getBoundingClientRect();
+        const port = viewport ? { left: 0, top: 0, width: view.innerWidth, height: view.innerHeight }
+          : (() => {
+              const box = container.getBoundingClientRect();
+              return { left: box.left + container.clientLeft,
+                       top: box.top + container.clientTop,
+                       width: container.clientWidth, height: container.clientHeight };
+            })();
+        const style = getComputedStyle(container);
+        const leftPadding = inset(style.scrollPaddingLeft, port.width);
+        const rightPadding = inset(style.scrollPaddingRight, port.width);
+        const topPadding = inset(style.scrollPaddingTop, port.height);
+        const bottomPadding = inset(style.scrollPaddingBottom, port.height);
+        const left = scrollsX ? delta(rect.left - inset(margin.scrollMarginLeft, rect.width),
+          rect.right + inset(margin.scrollMarginRight, rect.width),
+          port.left + leftPadding, port.left + port.width - rightPadding, inline) : 0;
+        const top = scrollsY ? delta(rect.top - inset(margin.scrollMarginTop, rect.height),
+          rect.bottom + inset(margin.scrollMarginBottom, rect.height),
+          port.top + topPadding, port.top + port.height - bottomPadding, block) : 0;
+        if (left || top) {
+          (viewport ? view : container).scrollBy({ left, top, behavior });
+        }
+      };
+      for (let ancestor = composedParent(this); ancestor; ancestor = composedParent(ancestor)) {
+        if (ancestor.nodeType !== 1 || ancestor === this.ownerDocument.documentElement) continue;
+        const style = getComputedStyle(ancestor);
+        const scrollsX = !["visible", "clip"].includes(style.overflowX) &&
+          ancestor.scrollWidth > ancestor.clientWidth;
+        const scrollsY = !["visible", "clip"].includes(style.overflowY) &&
+          ancestor.scrollHeight > ancestor.clientHeight;
+        if (scrollsX || scrollsY) scrollContainer(ancestor, false, scrollsX, scrollsY);
+      }
+      scrollContainer(this.ownerDocument.documentElement, true);
     }
 
     focus(options) {
