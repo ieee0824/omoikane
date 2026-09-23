@@ -1147,6 +1147,12 @@ struct HostState {
     event_loop: EventLoop,
     document: NodeHandle,
     nodes: HashMap<usize, NodeHandle>,
+    /// Composed ancestor paths carrying user-action selector state.
+    hover_path: Vec<usize>,
+    active_path: Vec<usize>,
+    focus_path: Vec<usize>,
+    focus_subjects: Vec<usize>,
+    focus_visible_id: Option<usize>,
     node_lifetimes: node_lifetime::NodeLifetimes,
     pointer_lock: pointer_lock::State,
     input_bridge: input_bridge::State,
@@ -1860,6 +1866,11 @@ impl HostState {
             event_loop: EventLoop::default(),
             document: document.clone(),
             nodes: HashMap::new(),
+            hover_path: Vec::new(),
+            active_path: Vec::new(),
+            focus_path: Vec::new(),
+            focus_subjects: Vec::new(),
+            focus_visible_id: None,
             node_lifetimes: node_lifetime::NodeLifetimes::default(),
             pointer_lock: pointer_lock::State::default(),
             input_bridge: input_bridge::State::default(),
@@ -3027,6 +3038,143 @@ impl HostState {
         {
             let child_document = child.document.clone();
             self.mark_document_style_dirty(&child_document);
+        }
+    }
+
+    /// Composed paths cross shadow hosts; hover also crosses iframe boundaries.
+    /// Store only node ids, so a detached subtree is not kept alive by input.
+    fn user_action_path(&self, target_id: Option<usize>, cross_iframes: bool) -> Vec<usize> {
+        let mut current = target_id
+            .and_then(|id| self.get_node(id))
+            .filter(|node| self.node_is_in_active_document(node));
+        let mut path = Vec::new();
+        let mut seen = HashSet::new();
+        while let Some(node) = current {
+            if !seen.insert(node.identity()) {
+                break;
+            }
+            if node.node_type() == NodeType::Element {
+                path.push(node.identity());
+            }
+            current = node
+                .assigned_slot()
+                .or_else(|| node.parent_node())
+                .or_else(|| node.shadow_host());
+            if cross_iframes && current.is_none() && node.node_type() == NodeType::Document {
+                current = self
+                    .iframe_documents
+                    .iter()
+                    .find(|(_, entry)| entry.document.identity() == node.identity())
+                    .and_then(|(iframe_id, _)| self.get_node(*iframe_id));
+            }
+        }
+        path
+    }
+
+    /// Focus also matches shadow hosts whose shadow tree contains the focused
+    /// element. Slotted light-DOM children do not focus their host.
+    fn focus_subjects(&self, target_id: Option<usize>) -> Vec<usize> {
+        let mut current = target_id
+            .and_then(|id| self.get_node(id))
+            .filter(|node| self.node_is_in_active_document(node));
+        let mut subjects = Vec::new();
+        let mut seen = HashSet::new();
+        if let Some(node) = &current {
+            subjects.push(node.identity());
+        }
+        while let Some(node) = current {
+            if !seen.insert(node.identity()) {
+                break;
+            }
+            if let Some(host) = node.shadow_host() {
+                subjects.push(host.identity());
+            }
+            current = node.parent_node().or_else(|| node.shadow_host());
+        }
+        subjects
+    }
+
+    /// Changes dynamic selector flags once per input transition and invalidates
+    /// the affected documents without reparsing their stylesheets.
+    fn update_user_action_target(&mut self, kind: &str, target_id: Option<usize>, visible: bool) {
+        let next = self.user_action_path(target_id, kind == "hover");
+        let next_subjects = (kind == "focus").then(|| self.focus_subjects(target_id));
+        let next_visible = if kind == "focus" && visible {
+            next.first().copied()
+        } else {
+            None
+        };
+        let unchanged = match kind {
+            "hover" => self.hover_path == next,
+            "active" => self.active_path == next,
+            "focus" => {
+                self.focus_path == next
+                    && next_subjects
+                        .as_ref()
+                        .is_some_and(|subjects| &self.focus_subjects == subjects)
+                    && self.focus_visible_id == next_visible
+            }
+            _ => return,
+        };
+        if unchanged {
+            return;
+        }
+        let old_subjects = next_subjects
+            .as_ref()
+            .map(|subjects| std::mem::replace(&mut self.focus_subjects, subjects.clone()));
+        let old = match kind {
+            "hover" => std::mem::replace(&mut self.hover_path, next.clone()),
+            "active" => std::mem::replace(&mut self.active_path, next.clone()),
+            "focus" => std::mem::replace(&mut self.focus_path, next.clone()),
+            _ => return,
+        };
+        let flag = if kind == "focus" {
+            "focus-within"
+        } else {
+            kind
+        };
+        let old_ids: HashSet<_> = old.iter().copied().collect();
+        let next_ids: HashSet<_> = next.iter().copied().collect();
+        let previous_visible = self.focus_visible_id;
+        let mut affected = HashMap::new();
+        let mut set_flag = |id, name, enabled| {
+            if let Some(node) = self.get_node(id)
+                && node.set_user_action_state(name, enabled)
+                && let Some(document) = document_root_for_node(&node)
+            {
+                affected.insert(document.identity(), document);
+            }
+        };
+        for id in old_ids.difference(&next_ids) {
+            set_flag(*id, flag, false);
+        }
+        for id in next_ids.difference(&old_ids) {
+            set_flag(*id, flag, true);
+        }
+        if kind == "focus" {
+            let old_focus: HashSet<_> = old_subjects.unwrap_or_default().into_iter().collect();
+            let new_focus: HashSet<_> = next_subjects.unwrap_or_default().into_iter().collect();
+            for id in old_focus.difference(&new_focus) {
+                set_flag(*id, "focus", false);
+            }
+            for id in new_focus.difference(&old_focus) {
+                set_flag(*id, "focus", true);
+            }
+            if previous_visible != next_visible {
+                if let Some(id) = previous_visible {
+                    set_flag(id, "focus-visible", false);
+                }
+                if let Some(id) = next_visible {
+                    set_flag(id, "focus-visible", true);
+                }
+            }
+        }
+        drop(set_flag);
+        if kind == "focus" {
+            self.focus_visible_id = next_visible;
+        }
+        for document in affected.into_values() {
+            self.invalidate_document_style_cache(&document);
         }
     }
 
@@ -4969,6 +5117,13 @@ impl JsRuntime {
         if let Ok(quoted) = serde_json::to_string(&user_agent) {
             let _ = self.eval(&format!("globalThis.navigator.userAgent = {quoted};"));
         }
+    }
+
+    /// Clears hover when the pointer leaves the presentation surface.
+    pub(crate) fn clear_pointer_hover(&mut self) {
+        self.host_state
+            .borrow_mut()
+            .update_user_action_target("hover", None, false);
     }
 
     /// Sets the viewport dimensions (px) used by `getComputedStyle` and the
@@ -9888,6 +10043,11 @@ fn register_host_bindings(
             js_string!("__omoikane_matches_selector"),
             2,
             NativeFunction::from_copy_closure(matches_selector_native),
+        ),
+        (
+            js_string!("__omoikane_set_user_action_target"),
+            3,
+            NativeFunction::from_copy_closure(set_user_action_target_native),
         ),
         (
             js_string!("__omoikane_node_type"),
@@ -17240,6 +17400,36 @@ fn query_selector_all_native(
         Ok(boa_engine::JsValue::from(
             boa_engine::object::builtins::JsArray::from_iter(ids, context),
         ))
+    })
+}
+
+fn set_user_action_target_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let kind = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    if !matches!(kind.as_str(), "hover" | "active" | "focus") {
+        return Err(JsNativeError::typ()
+            .with_message("invalid user-action state")
+            .into());
+    }
+    let target_id = args
+        .get(1)
+        .filter(|value| !value.is_null_or_undefined())
+        .map(|value| parse_node_id(Some(value), context))
+        .transpose()?;
+    let visible = args.get(2).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .update_user_action_target(&kind, target_id, visible);
+        Ok(JsValue::undefined())
     })
 }
 
@@ -45941,6 +46131,161 @@ b</textarea></form>"#,
           }
         };
     "#;
+
+    #[test]
+    fn user_action_focus_selectors_follow_focus_and_input_modality() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 #group:focus-within { color: rgb(1, 2, 3) }
+                 #button:focus-visible { background-color: rgb(4, 5, 6) }
+                 </style></head><body><div id="group"><button id="button">Go</button></div></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const group = document.getElementById('group');
+                const button = document.getElementById('button');
+                const before = [button.matches(':focus'), group.matches(':focus-within')];
+                button.focus();
+                const programmatic = [button.matches(':focus'), button.matches(':focus-visible'),
+                  group.matches(':focus-within'), getComputedStyle(group).color];
+                button.blur();
+                __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+                const pointer = [button.matches(':focus'), button.matches(':focus-visible'),
+                  getComputedStyle(button).backgroundColor !== 'rgb(4, 5, 6)'];
+                __omoikane_dispatch_keyboard_input('keydown', { key: 'a' });
+                const keyboard = [button.matches(':focus-visible'),
+                  getComputedStyle(button).backgroundColor];
+                button.blur();
+                return JSON.stringify([before, programmatic, pointer, keyboard,
+                  group.matches(':focus-within')]);
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            r#"[[false,false],[true,true,true,"rgb(1, 2, 3)"],[true,false,true],[true,"rgb(4, 5, 6)"],false]"#,
+        );
+    }
+
+    #[test]
+    fn user_action_hover_and_active_selectors_follow_pointer_target() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>#outer:hover { color: rgb(7, 8, 9) }</style></head>
+               <body><div id="outer"><button id="inner">Go</button></div></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const outer = document.getElementById('outer');
+                const inner = document.getElementById('inner');
+                const before = outer.matches(':hover');
+                let invalidFunction = false;
+                try { inner.matches(':hover()'); }
+                catch (error) { invalidFunction = error.name === 'SyntaxError'; }
+                __omoikane_dispatch_mouse_input(inner.__id, 'mousemove', {}, false);
+                const hover = [inner.matches(':hover'), outer.matches(':hover'),
+                  getComputedStyle(outer).color];
+                __omoikane_dispatch_mouse_input(inner.__id, 'mousedown', {}, false);
+                const active = [inner.matches(':active'), outer.matches(':active')];
+                __omoikane_dispatch_mouse_input(inner.__id, 'mouseup', {}, false);
+                const released = inner.matches(':active');
+                __omoikane_dispatch_touch_input(inner.__id, 'touchstart', { touches: [{}] });
+                const touchActive = [inner.matches(':active'), outer.matches(':active')];
+                __omoikane_dispatch_touch_input(inner.__id, 'touchend', { touches: [] });
+                const touchReleased = inner.matches(':active');
+                return JSON.stringify([before, hover, active, released,
+                  touchActive, touchReleased, invalidFunction]);
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            r#"[false,[true,true,"rgb(7, 8, 9)"],[true,true],false,[true,true],false,true]"#
+        );
+    }
+
+    #[test]
+    fn user_action_focus_crosses_shadow_roots_but_not_iframe_documents() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><div id="outer"><div id="host"></div><iframe id="frame"></iframe></div></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const outer = document.getElementById('outer');
+                const host = document.getElementById('host');
+                const root = host.attachShadow({ mode: 'open' });
+                root.innerHTML = '<button id="button">Go</button>';
+                const button = root.getElementById('button');
+                button.focus();
+                const shadow = [host.matches(':focus'), host.matches(':focus-within'),
+                  host.matches(':focus-visible'), button.matches(':focus'),
+                  button.matches(':focus-visible'), outer.matches(':focus-within')];
+                const frame = document.getElementById('frame');
+                const sub = frame.contentDocument;
+                const inner = sub.createElement('input');
+                sub.body.appendChild(inner);
+                inner.focus();
+                const iframe = [frame.matches(':focus'), frame.matches(':focus-within'),
+                  outer.matches(':focus-within'), inner.matches(':focus'),
+                  sub.body.matches(':focus-within'), host.matches(':focus')];
+                return JSON.stringify([shadow, iframe]);
+            })()"#,
+        );
+        assert_eq!(
+            result,
+            "[[true,true,false,true,true,true],[false,false,false,true,true,false]]"
+        );
+    }
+
+    #[test]
+    fn blur_handler_focus_move_keeps_only_the_final_focus_within_path() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><div id="wrapper"><div id="outer"><input id="tab"><input id="initial"></div><input id="outside"></div></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const initial = document.getElementById('initial');
+                const tab = document.getElementById('tab');
+                const outside = document.getElementById('outside');
+                const outer = document.getElementById('outer');
+                const wrapper = document.getElementById('wrapper');
+                initial.addEventListener('blur', () => outside.focus());
+                initial.focus();
+                tab.focus();
+                return JSON.stringify([document.activeElement === outside,
+                  initial.matches(':focus'), tab.matches(':focus'),
+                  outside.matches(':focus'), outer.matches(':focus-within'),
+                  wrapper.matches(':focus-within')]);
+            })()"#,
+        );
+        assert_eq!(result, "[true,false,false,true,false,true]");
+    }
+
+    #[test]
+    fn user_action_hover_but_not_active_crosses_iframe_boundary() {
+        let mut runtime = runtime_from_html(
+            r#"<html><body><div id="outer"><iframe id="frame"></iframe></div></body></html>"#,
+        );
+        let result = eval_str(
+            &mut runtime,
+            r#"(() => {
+                const outer = document.getElementById('outer');
+                const frame = document.getElementById('frame');
+                const inner = frame.contentDocument.createElement('button');
+                frame.contentDocument.body.appendChild(inner);
+                __omoikane_dispatch_mouse_input(inner.__id, 'mousemove', {}, false);
+                const hover = [inner.matches(':hover'), frame.matches(':hover'),
+                  outer.matches(':hover')];
+                __omoikane_dispatch_mouse_input(inner.__id, 'mousedown', {}, false);
+                const active = [inner.matches(':active'), frame.matches(':active'),
+                  outer.matches(':active')];
+                __omoikane_dispatch_mouse_input(inner.__id, 'mouseup', {}, false);
+                return JSON.stringify([hover, active, inner.matches(':active')]);
+            })()"#,
+        );
+        assert_eq!(result, "[[true,true,true],[true,false,false],false]");
+    }
 
     #[test]
     fn focus_tracks_active_element_and_blur_falls_back_to_body() {

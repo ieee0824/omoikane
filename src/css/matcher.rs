@@ -678,6 +678,9 @@ fn matches_pseudo_class(
         "popover-open" => pseudo.is_none() && node.is_popover_open(),
         "modal" => pseudo.is_none() && node.is_modal_dialog(),
         "fullscreen" => pseudo.is_none() && node.is_fullscreen(),
+        "hover" | "active" | "focus" | "focus-visible" | "focus-within" => {
+            pseudo.is_none() && node.has_user_action_state(&name)
+        }
         "root" => node
             .parent_node()
             .is_some_and(|parent| parent.node_type() == NodeType::Document),

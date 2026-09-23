@@ -47,6 +47,10 @@ git_wpt sparse-checkout add "/compression/"
 git_wpt sparse-checkout add "/encoding/streams/" "/common/sab.js"
 git_wpt sparse-checkout add "/css/selectors/is-where-error-recovery.html"
 git_wpt sparse-checkout add "/css/selectors/has-matches-to-uninserted-elements.html"
+git_wpt sparse-checkout add \
+  "/css/selectors/focus-visible-script-focus-001.html" \
+  "/css/selectors/focus-within-focus-move.html" \
+  "/css/selectors/focus-within-removal.html"
 git_wpt sparse-checkout add "/css/css-conditional/js/CSS-supports-L3.html"
 git_wpt sparse-checkout add "/css/css-conditional/js/supports-conditionText.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-cssom.html"
