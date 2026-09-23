@@ -8,7 +8,7 @@ use std::time::Duration;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 
 use super::request::HttpRequest;
-use super::response::{HttpParseError, HttpResponse};
+use super::response::{HttpParseError, HttpResponse, response_body_limit};
 
 const CONNECTION_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const DEFAULT_WINDOW_SIZE: i32 = 65_535;
@@ -241,6 +241,7 @@ impl<IO: Read + Write> Http2Connection<IO> {
 
     fn read_response(&mut self, target_stream_id: u32) -> Result<HttpResponse, HttpParseError> {
         let mut state = StreamState::default();
+        let max_body_bytes = response_body_limit();
         loop {
             let frame = Frame::read(&mut self.io)?;
             match frame.frame_type {
@@ -264,6 +265,9 @@ impl<IO: Read + Write> Http2Connection<IO> {
                     }
                 }
                 FrameType::Data if frame.stream_id == target_stream_id => {
+                    if frame.payload.len() > max_body_bytes.saturating_sub(state.body.len()) {
+                        return Err(HttpParseError::BodyTooLarge);
+                    }
                     self.connection_window -= frame.payload.len() as i32;
                     if let Some(window) = self.stream_windows.get_mut(&target_stream_id) {
                         *window -= frame.payload.len() as i32;
@@ -332,7 +336,7 @@ impl Http1Session {
             .write_all(&request.serialize())
             .map_err(HttpParseError::Io)?;
         self.stream.flush().map_err(HttpParseError::Io)?;
-        HttpResponse::parse(&mut self.stream)
+        HttpResponse::parse_for_method(&mut self.stream, request.method())
     }
 }
 
@@ -403,7 +407,7 @@ pub(super) fn send_over_tls(
             .write_all(&request.serialize())
             .map_err(HttpParseError::Io)?;
         tls_stream.flush().map_err(HttpParseError::Io)?;
-        HttpResponse::parse(&mut tls_stream)
+        HttpResponse::parse_for_method(&mut tls_stream, request.method())
     }
 }
 
@@ -412,13 +416,15 @@ fn connect_tls(
     request: &HttpRequest,
     config: std::sync::Arc<ClientConfig>,
 ) -> Result<TlsStream, HttpParseError> {
-    let server_name = rustls::pki_types::ServerName::try_from(request.url().host().to_string())
-        .map_err(|e| {
-            HttpParseError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid server name for SNI: {e}"),
-            ))
-        })?;
+    let server_name = rustls::pki_types::ServerName::try_from(
+        request.url().host().trim_matches(['[', ']']).to_string(),
+    )
+    .map_err(|e| {
+        HttpParseError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid server name for SNI: {e}"),
+        ))
+    })?;
 
     let mut conn = ClientConnection::new(config, server_name).map_err(|e| {
         HttpParseError::Io(std::io::Error::new(

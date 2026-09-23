@@ -1,6 +1,7 @@
 //! URL parsing for HTTP(S) URLs.
 
 use std::fmt;
+use url::{Host, Url as StandardUrl};
 
 /// A parsed HTTP or HTTPS URL.
 ///
@@ -99,6 +100,8 @@ pub enum UrlParseError {
     EmptyHost,
     /// The port number could not be parsed as a valid `u16`.
     InvalidPort,
+    /// The URL contains another invalid component.
+    InvalidUrl,
 }
 
 impl fmt::Display for UrlParseError {
@@ -108,6 +111,7 @@ impl fmt::Display for UrlParseError {
             Self::MissingSchemeSeparator => write!(f, "missing '://' in URL"),
             Self::EmptyHost => write!(f, "empty host in URL"),
             Self::InvalidPort => write!(f, "invalid port number"),
+            Self::InvalidUrl => write!(f, "invalid URL"),
         }
     }
 }
@@ -118,77 +122,59 @@ impl std::str::FromStr for Url {
     type Err = UrlParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // scheme
-        let (scheme, rest) = s
+        // The URL parser also performs these transformations. Do them before
+        // checking the scheme separator so tabs/newlines cannot bypass it.
+        let input: String = s
+            .trim_matches(|c: char| c <= ' ')
+            .chars()
+            .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
+            .collect();
+        let (scheme, authority_and_path) = input
             .split_once("://")
             .ok_or(UrlParseError::MissingSchemeSeparator)?;
-        let scheme = scheme.to_ascii_lowercase();
-        if scheme != "http" && scheme != "https" {
+        if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
             return Err(UrlParseError::UnsupportedScheme);
         }
-
-        // Split authority from path+query.
-        // Authority ends at the first '/' or '?' (handles "http://host?q=1").
-        let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
-        let authority = &rest[..authority_end];
-        let path_and_query = if authority_end < rest.len() {
-            let remainder = &rest[authority_end..];
-            // If remainder starts with '?', there is no path — prepend '/'.
-            if remainder.starts_with('?') {
-                // We'll handle this by treating path as "/" and the rest as query below.
-                remainder
-            } else {
-                remainder
-            }
-        } else {
-            "/"
-        };
-
-        // host:port
-        let (host, port) = if let Some(colon) = authority.rfind(':') {
-            let host = &authority[..colon];
-            let port_str = &authority[colon + 1..];
-            let port: u16 = port_str.parse().map_err(|_| UrlParseError::InvalidPort)?;
-            (host.to_string(), port)
-        } else {
-            (authority.to_string(), default_port_for(&scheme))
-        };
-
-        if host.is_empty() {
+        if authority_and_path.is_empty() || authority_and_path.starts_with('/') {
             return Err(UrlParseError::EmptyHost);
         }
+        let parsed = StandardUrl::parse(&input).map_err(map_parse_error)?;
+        Self::from_standard(parsed)
+    }
+}
 
-        // path ? query
-        let (path, query) = if let Some(q) = path_and_query.strip_prefix('?') {
-            // No explicit path, e.g. "http://example.com?x=1"
-            let query = if q.is_empty() {
-                None
-            } else {
-                Some(q.to_string())
-            };
-            ("/".to_string(), query)
-        } else {
-            match path_and_query.find('?') {
-                Some(i) => {
-                    let q = &path_and_query[i + 1..];
-                    let query = if q.is_empty() {
-                        None
-                    } else {
-                        Some(q.to_string())
-                    };
-                    (path_and_query[..i].to_string(), query)
-                }
-                None => (path_and_query.to_string(), None),
-            }
+impl Url {
+    fn from_standard(parsed: StandardUrl) -> Result<Self, UrlParseError> {
+        let scheme = parsed.scheme();
+        if !matches!(scheme, "http" | "https") {
+            return Err(UrlParseError::UnsupportedScheme);
+        }
+        let host = match parsed.host() {
+            Some(Host::Domain(domain)) => domain.to_owned(),
+            Some(Host::Ipv4(ip)) => ip.to_string(),
+            Some(Host::Ipv6(ip)) => format!("[{ip}]"),
+            None => return Err(UrlParseError::EmptyHost),
         };
-
-        Ok(Url {
-            scheme,
+        Ok(Self {
+            scheme: scheme.to_owned(),
             host,
-            port,
-            path,
-            query,
+            port: parsed
+                .port_or_known_default()
+                .ok_or(UrlParseError::InvalidPort)?,
+            path: parsed.path().to_owned(),
+            query: parsed
+                .query()
+                .filter(|query| !query.is_empty())
+                .map(str::to_owned),
         })
+    }
+}
+
+fn map_parse_error(error: url::ParseError) -> UrlParseError {
+    match error {
+        url::ParseError::EmptyHost => UrlParseError::EmptyHost,
+        url::ParseError::InvalidPort => UrlParseError::InvalidPort,
+        _ => UrlParseError::InvalidUrl,
     }
 }
 
@@ -214,108 +200,9 @@ impl std::str::FromStr for Url {
 /// );
 /// ```
 pub fn resolve_url(base: &Url, reference: &str) -> Result<Url, UrlParseError> {
-    let reference = reference.trim();
-
-    // Strip fragment first (fragments must not be sent in HTTP requests).
-    let reference = match reference.find('#') {
-        Some(i) => &reference[..i],
-        None => reference,
-    };
-
-    // Absolute HTTP(S) URL — parse directly.
-    if reference.starts_with("http://") || reference.starts_with("https://") {
-        return reference.parse();
-    }
-
-    // References with an explicit scheme followed by ":" before any "/", "?", or "#"
-    // are absolute URIs per RFC 3986 §3.1 and must not be treated as relative paths.
-    //
-    // For "http" or "https", hand off to the URL parser (which may still reject
-    // unusual forms like "http:foo"). For any other scheme (e.g. "mailto:foo"),
-    // also let the parser decide; since this crate only supports HTTP(S), such
-    // inputs will be rejected instead of incorrectly merged.
-    if let Some(colon_idx) = reference.find(':') {
-        let first_delim = reference.find(['/', '?', '#']);
-        let colon_before_delim = match first_delim {
-            Some(idx) => colon_idx < idx,
-            None => true,
-        };
-
-        if colon_before_delim {
-            // Let the parser handle it (both HTTP(S) and non-HTTP(S) schemes).
-            return reference.parse();
-        }
-    }
-
-    // Protocol-relative URL (e.g. "//cdn.example.com/style.css").
-    if let Some(rest) = reference.strip_prefix("//") {
-        return format!("{}://{}", base.scheme, rest).parse();
-    }
-
-    // Absolute path (e.g. "/css/style.css").
-    if reference.starts_with('/') {
-        let (raw_path, query) = split_path_query(reference);
-        let normalized = normalize_path(&raw_path);
-        return Ok(Url {
-            scheme: base.scheme.clone(),
-            host: base.host.clone(),
-            port: base.port,
-            path: normalized,
-            query,
-        });
-    }
-
-    // Relative path (e.g. "style.css" or "../style.css").
-    let base_dir = match base.path.rfind('/') {
-        Some(i) => &base.path[..=i],
-        None => "/",
-    };
-    let merged = format!("{}{}", base_dir, reference);
-    let (raw_path, query) = split_path_query(&merged);
-    let normalized = normalize_path(&raw_path);
-    Ok(Url {
-        scheme: base.scheme.clone(),
-        host: base.host.clone(),
-        port: base.port,
-        path: normalized,
-        query,
-    })
-}
-
-/// Splits a path-and-query string into `(path, Option<query>)`.
-fn split_path_query(s: &str) -> (String, Option<String>) {
-    match s.find('?') {
-        Some(i) => {
-            let q = &s[i + 1..];
-            let query = if q.is_empty() {
-                None
-            } else {
-                Some(q.to_string())
-            };
-            (s[..i].to_string(), query)
-        }
-        None => (s.to_string(), None),
-    }
-}
-
-/// Removes `.` and `..` segments from an absolute path (RFC 3986 §5.2.4).
-fn normalize_path(path: &str) -> String {
-    let mut segments: Vec<&str> = Vec::new();
-    for seg in path.split('/') {
-        match seg {
-            "." => {}
-            ".." => {
-                segments.pop();
-            }
-            s => segments.push(s),
-        }
-    }
-    let result = segments.join("/");
-    if result.starts_with('/') {
-        result
-    } else {
-        format!("/{}", result)
-    }
+    let parsed_base = StandardUrl::parse(&base.to_string()).map_err(map_parse_error)?;
+    let parsed = parsed_base.join(reference).map_err(map_parse_error)?;
+    Url::from_standard(parsed)
 }
 
 fn default_port_for(scheme: &str) -> u16 {
@@ -447,6 +334,41 @@ mod tests {
     fn case_insensitive_scheme() {
         let url: Url = "HTTP://EXAMPLE.COM".parse().unwrap();
         assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host(), "example.com");
+    }
+
+    #[test]
+    fn parses_userinfo_ipv6_and_canonical_host() {
+        let url: Url = "http://user:pass@BÜCHER.Example:80/a".parse().unwrap();
+        assert_eq!(url.host(), "xn--bcher-kva.example");
+        assert_eq!(url.authority(), "xn--bcher-kva.example");
+        assert_eq!(url.request_target(), "/a");
+        assert!(!url.to_string().contains("user:pass"));
+
+        let ipv6: Url = "http://[::1]/".parse().unwrap();
+        assert_eq!(ipv6.host(), "[::1]");
+        assert_eq!(ipv6.authority(), "[::1]");
+        assert_eq!(ipv6.port(), 80);
+
+        let encoded: Url = "http://%65XAMPLE.com:/".parse().unwrap();
+        assert_eq!(encoded.host(), "example.com");
+    }
+
+    #[test]
+    fn request_target_excludes_fragment_and_control_characters() {
+        let base: Url = "http://example.com/dir/page".parse().unwrap();
+        let url = resolve_url(&base, "/a.css\r\nX-Injected: 1#secret").unwrap();
+        let target = url.request_target();
+        assert!(!target.contains(['\r', '\n', '#']));
+        assert!(target.contains("X-Injected"));
+        assert!(target.contains("%20"));
+        assert_eq!(
+            "http://example.com/p#secret"
+                .parse::<Url>()
+                .unwrap()
+                .request_target(),
+            "/p"
+        );
     }
 
     #[test]

@@ -13,6 +13,29 @@ fn get_request_serialization() {
 }
 
 #[test]
+fn request_line_cannot_be_split_by_url_controls() {
+    let request = HttpRequest::get("http://example.com/a.css\r\nX-Injected: 1#secret").unwrap();
+    let text = String::from_utf8(request.serialize()).unwrap();
+    let request_line = text.split("\r\n").next().unwrap();
+    assert!(request_line.starts_with("GET /a.css"));
+    assert!(request_line.ends_with(" HTTP/1.1"));
+    assert!(!request_line.contains(['\r', '\n', '#']));
+    assert!(!text.contains("\r\nX-Injected:"));
+}
+
+#[test]
+fn invalid_native_headers_are_rejected_before_serialization() {
+    let mut request = HttpRequest::get("http://example.com/").unwrap();
+    assert!(!request.try_set_header("X-Test", "safe\r\nInjected: yes"));
+    assert!(!request.try_add_header("Bad Name", "value"));
+    assert!(!request.try_add_header("X-Test", "bad\0value"));
+    let text = String::from_utf8(request.serialize()).unwrap();
+    assert!(!text.contains("Injected:"));
+    assert!(!text.contains("Bad Name:"));
+    assert!(!text.contains("X-Test:"));
+}
+
+#[test]
 fn post_request_with_body() {
     let body = b"hello=world".to_vec();
     let req = HttpRequest::post("http://example.com/submit", body.clone()).unwrap();

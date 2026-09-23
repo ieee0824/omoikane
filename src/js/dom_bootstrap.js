@@ -16604,34 +16604,27 @@
     }
     class URL {
       constructor(input, base) {
-        let value = String(input);
-        if (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) {
-          const baseValue = base === undefined ? globalThis.location.href : String(base);
-          const match = baseValue.match(/^([A-Za-z][A-Za-z0-9+.-]*:)(?:\/\/([^/?#]*))?([^?#]*)/);
-          if (!match) throw new TypeError("invalid base URL");
-          if (value === "" || value.startsWith("#")) value = baseValue.split("#")[0] + value;
-          else if (value.startsWith("?")) value = baseValue.split(/[?#]/)[0] + value;
-          else if (value.startsWith("//")) value = match[1] + value;
-          else if (value.startsWith("/")) value = match[1] + "//" + (match[2] || "") + value;
-          else {
-            const directory = (match[3] || "/").replace(/[^/]*$/, "");
-            value = match[1] + "//" + (match[2] || "") + directory + value;
-          }
-        }
-        const parsed = value.match(/^([A-Za-z][A-Za-z0-9+.-]*:)(?:\/\/([^/?#]*))?([^?#]*)(\?[^#]*)?(#.*)?$/);
-        if (!parsed) throw new TypeError("invalid URL");
-        this.protocol = parsed[1];
-        this.host = parsed[2] || "";
-        this.hostname = this.host.replace(/:\d+$/, "");
-        this.port = this.host.slice(this.hostname.length).replace(/^:/, "");
-        this.pathname = parsed[3] || (this.host ? "/" : "");
-        this.search = parsed[4] || "";
-        this.hash = parsed[5] || "";
-        this.origin = this.host ? this.protocol + "//" + this.host : "null";
+        const parsed = JSON.parse(__omoikane_parse_url(String(input), base === undefined ? globalThis.location.href : String(base)));
+        this.protocol = parsed.protocol;
+        this.host = parsed.host;
+        this.hostname = parsed.hostname;
+        this.username = parsed.username;
+        this.password = parsed.password;
+        this.port = parsed.port;
+        this.pathname = parsed.pathname;
+        this.search = parsed.search;
+        this.hash = parsed.hash;
+        this.origin = parsed.origin;
         this.searchParams = new URLSearchParams(this.search);
-        this.href = this.toString();
+        this.href = parsed.href;
       }
-      toString() { return this.protocol + (this.host ? "//" + this.host : "") + this.pathname + this.search + this.hash; }
+      toString() {
+        const credentials = this.username || this.password
+          ? this.username + (this.password ? ":" + this.password : "") + "@"
+          : "";
+        return this.protocol + (this.host ? "//" + credentials + this.host : "") +
+          this.pathname + this.search + this.hash;
+      }
       toJSON() { return this.toString(); }
       static canParse(input, base) { try { new URL(input, base); return true; } catch (_) { return false; } }
     }
@@ -17843,7 +17836,7 @@
       this.onabort = null;
       this.ontimeout = null;
       this.onloadend = null;
-      this._headers = {};
+      this._headers = Object.create(null);
       this._responseHeaders = [];
       this._requestId = 0;
       this._sendFlag = false;
@@ -17906,7 +17899,7 @@
       this._responseText = "";
       this.response = null;
       this.responseURL = "";
-      this._headers = {};
+      this._headers = Object.create(null);
       this._responseHeaders = [];
       this._sendFlag = false;
       this._terminal = false;
@@ -17924,7 +17917,9 @@
     setRequestHeader(name, value) {
       if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
       const key = String(name).toLowerCase();
-      const text = String(value).trim();
+      if (!isHttpHeaderName(key)) throw new DOMException("Invalid header name", "SyntaxError");
+      const text = normalizeHttpHeaderValue(value, true);
+      if (isForbiddenRequestHeader(key, text)) return;
       this._headers[key] = key in this._headers ? this._headers[key] + ", " + text : text;
     }
     getAllResponseHeaders() {
@@ -22991,22 +22986,68 @@
   globalThis.EventSource = EventSource;
   globalThis.CloseEvent = CloseEvent;
 
+  const forbiddenRequestHeaderNames = new Set([
+    "accept-charset", "accept-encoding", "access-control-request-headers",
+    "access-control-request-method", "connection", "content-length", "cookie",
+    "cookie2", "date", "dnt", "expect", "host", "keep-alive", "origin",
+    "referer", "set-cookie", "te", "trailer", "transfer-encoding", "upgrade", "via",
+  ]);
+  function isHttpHeaderName(name) {
+    return /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name);
+  }
+  function normalizeHttpHeaderValue(value, xhr = false) {
+    const text = String(value).replace(/^[\t ]+|[\t ]+$/g, "");
+    if (/[\u0000-\u0008\u000A-\u001F\u007F]/.test(text) || /[^\u0000-\u00FF]/.test(text)) {
+      if (xhr) throw new DOMException("Invalid header value", "SyntaxError");
+      throw new TypeError("Invalid header value");
+    }
+    return text;
+  }
+  function isForbiddenRequestHeader(name, value) {
+    const lower = name.toLowerCase();
+    if (forbiddenRequestHeaderNames.has(lower) || lower.startsWith("proxy-") || lower.startsWith("sec-")) return true;
+    return ["x-http-method", "x-http-method-override", "x-method-override"].includes(lower) &&
+      value.split(",").some(method => ["CONNECT", "TRACE", "TRACK"].includes(method.trim().toUpperCase()));
+  }
+
   class Headers {
-    constructor(init = undefined) {
+    constructor(init = undefined, guard = "none") {
       this._headers = new Map();
+      this._guard = guard;
       if (init instanceof Headers) init.forEach((value, name) => this.append(name, value));
       else if (Array.isArray(init)) for (const entry of init) this.append(entry[0], entry[1]);
       else if (init && typeof init === "object") for (const name of Object.keys(init)) this.append(name, init[name]);
     }
     append(name, value) {
       const key = String(name).toLowerCase();
-      const text = String(value).trim();
+      if (!isHttpHeaderName(key)) throw new TypeError("Invalid header name");
+      const text = normalizeHttpHeaderValue(value);
+      if (this._guard === "request" && isForbiddenRequestHeader(key, text)) return;
       this._headers.set(key, this._headers.has(key) ? this._headers.get(key) + ", " + text : text);
     }
-    set(name, value) { this._headers.set(String(name).toLowerCase(), String(value).trim()); }
-    get(name) { return this._headers.get(String(name).toLowerCase()) ?? null; }
-    has(name) { return this._headers.has(String(name).toLowerCase()); }
-    delete(name) { this._headers.delete(String(name).toLowerCase()); }
+    set(name, value) {
+      const key = String(name).toLowerCase();
+      if (!isHttpHeaderName(key)) throw new TypeError("Invalid header name");
+      const text = normalizeHttpHeaderValue(value);
+      if (this._guard === "request" && isForbiddenRequestHeader(key, text)) return;
+      this._headers.set(key, text);
+    }
+    get(name) {
+      const key = String(name).toLowerCase();
+      if (!isHttpHeaderName(key)) throw new TypeError("Invalid header name");
+      return this._headers.get(key) ?? null;
+    }
+    has(name) {
+      const key = String(name).toLowerCase();
+      if (!isHttpHeaderName(key)) throw new TypeError("Invalid header name");
+      return this._headers.has(key);
+    }
+    delete(name) {
+      const key = String(name).toLowerCase();
+      if (!isHttpHeaderName(key)) throw new TypeError("Invalid header name");
+      if (this._guard === "request" && isForbiddenRequestHeader(key, "")) return;
+      this._headers.delete(key);
+    }
     forEach(callback, thisArg) { for (const [name, value] of this._headers) callback.call(thisArg, value, name, this); }
     *entries() { yield* this._headers.entries(); }
     *keys() { yield* this._headers.keys(); }
@@ -23251,7 +23292,7 @@
         : isBlobUrl(input) ? String(input)
         : resolveNetworkUrl(input);
       this.method = String(init.method || (source && source.method) || "GET").toUpperCase();
-      this.headers = new Headers(init.headers || (source && source.headers));
+      this.headers = new Headers(init.headers || (source && source.headers), "request");
       const body = init.body === undefined
         ? (source ? source.__body : EMPTY_BODY)
         : extractBody(init.body);

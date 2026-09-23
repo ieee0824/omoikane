@@ -12,7 +12,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
 use super::http2;
-use super::request::HttpRequest;
+use super::request::{HttpRequest, Method};
 use super::response::{HttpParseError, HttpResponse};
 
 /// Default timeout in seconds for both connection and read operations.
@@ -72,10 +72,7 @@ impl ConnectionPool {
             session.set_timeout(session_timeout)?;
             match session.send_request(request) {
                 Ok(response) => {
-                    if response
-                        .header("connection")
-                        .is_some_and(|value| value.eq_ignore_ascii_case("close"))
-                    {
+                    if !can_reuse_http1_connection(request, &response) {
                         self.http1.remove(&key);
                     }
                     if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
@@ -117,9 +114,7 @@ impl ConnectionPool {
             }
             Err(mut session) => {
                 let response = session.send_request(request)?;
-                let should_keep = !response
-                    .header("connection")
-                    .is_some_and(|value| value.eq_ignore_ascii_case("close"));
+                let should_keep = can_reuse_http1_connection(request, &response);
                 if should_keep {
                     if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
                         eprintln!("[omoikane][http1] opened {key}");
@@ -146,9 +141,7 @@ impl ConnectionPool {
         };
         let mut session = http2::connect_http1_session(stream, request, config)?;
         let response = session.send_request(request)?;
-        let should_keep = !response
-            .header("connection")
-            .is_some_and(|value| value.eq_ignore_ascii_case("close"));
+        let should_keep = can_reuse_http1_connection(request, &response);
         if should_keep {
             if std::env::var_os("OMOIKANE_LOG_HTTP").is_some() {
                 eprintln!("[omoikane][http1] opened {key}");
@@ -157,6 +150,43 @@ impl ConnectionPool {
         }
         Ok(response)
     }
+}
+
+fn can_reuse_http1_connection(request: &HttpRequest, response: &HttpResponse) -> bool {
+    let mut has_transfer_encoding = false;
+    let mut last_transfer_coding = None;
+    let mut has_content_length = false;
+    for (name, value) in response.headers() {
+        if name.eq_ignore_ascii_case("connection")
+            && value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("close"))
+        {
+            return false;
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            has_transfer_encoding = true;
+            last_transfer_coding = value.split(',').last().map(str::trim);
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            has_content_length = true;
+        }
+    }
+    // Conflicting lengths cannot be used as a boundary for the next response.
+    if has_transfer_encoding && has_content_length {
+        return false;
+    }
+    if response.status_code() == 101 {
+        return false;
+    }
+    if request.method() == Method::Head || matches!(response.status_code(), 204 | 304) {
+        return true;
+    }
+    // An unframed body is delimited by EOF, so there is no live connection to reuse.
+    if has_transfer_encoding {
+        return last_transfer_coding.is_some_and(|coding| coding.eq_ignore_ascii_case("chunked"));
+    }
+    has_content_length
 }
 
 /// A [`ServerCertVerifier`] that accepts any server certificate without validation.
@@ -304,7 +334,7 @@ fn send_over_tcp(
         .write_all(&request.serialize())
         .map_err(HttpParseError::Io)?;
     stream.flush().map_err(HttpParseError::Io)?;
-    HttpResponse::parse(&mut stream)
+    HttpResponse::parse_for_method(&mut stream, request.method())
 }
 
 fn connect_stream(request: &HttpRequest) -> Result<TcpStream, HttpParseError> {
@@ -448,6 +478,47 @@ mod tests {
     use rustls::{ClientConnection, StreamOwned};
     use std::io::{BufRead, BufReader, Read};
     use std::net::TcpListener;
+
+    #[test]
+    fn http1_reuse_requires_unambiguous_response_framing() {
+        let request = HttpRequest::get("https://example.com/").unwrap();
+        let response = |status, headers: &[(&str, &str)]| {
+            HttpResponse::new(
+                status,
+                "OK",
+                headers
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+                Vec::new(),
+            )
+        };
+        assert!(can_reuse_http1_connection(
+            &request,
+            &response(200, &[("Content-Length", "0")])
+        ));
+        assert!(can_reuse_http1_connection(
+            &request,
+            &response(200, &[("Transfer-Encoding", "gzip, chunked")])
+        ));
+        assert!(!can_reuse_http1_connection(
+            &request,
+            &response(
+                200,
+                &[("Transfer-Encoding", "chunked"), ("Content-Length", "0")]
+            )
+        ));
+        assert!(!can_reuse_http1_connection(&request, &response(200, &[])));
+        assert!(!can_reuse_http1_connection(
+            &request,
+            &response(
+                200,
+                &[("Content-Length", "0"), ("Connection", "keep-alive, close")]
+            )
+        ));
+        assert!(!can_reuse_http1_connection(&request, &response(101, &[])));
+        assert!(can_reuse_http1_connection(&request, &response(204, &[])));
+    }
 
     #[test]
     fn tls_configs_are_shared_by_transport_mode() {

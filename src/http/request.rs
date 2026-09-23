@@ -153,17 +153,40 @@ impl HttpRequest {
             .map(|(_, value)| value.as_str())
     }
 
-    /// Appends a header. Does not check for duplicates.
+    /// Appends a header. Invalid names or values are ignored.
+    /// Use [`Self::try_add_header`] when the caller needs to detect rejection.
     pub fn add_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        self.headers.push((name.into(), value.into()));
+        self.try_add_header(name, value);
+    }
+
+    /// Appends a valid header and reports whether it was accepted.
+    pub fn try_add_header(&mut self, name: impl Into<String>, value: impl Into<String>) -> bool {
+        let name = name.into();
+        let value = value.into();
+        if !is_valid_header(&name, &value) {
+            return false;
+        }
+        self.headers.push((name, value));
+        true
     }
 
     /// Sets a header, replacing any existing values with the same name.
+    /// Invalid names or values are ignored.
     pub fn set_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.try_set_header(name, value);
+    }
+
+    /// Sets a valid header and reports whether it was accepted.
+    pub fn try_set_header(&mut self, name: impl Into<String>, value: impl Into<String>) -> bool {
         let name = name.into();
+        let value = value.into();
+        if !is_valid_header(&name, &value) {
+            return false;
+        }
         self.headers
             .retain(|(header_name, _)| !header_name.eq_ignore_ascii_case(&name));
-        self.headers.push((name, value.into()));
+        self.headers.push((name, value));
+        true
     }
 
     /// Removes every header whose name matches `name`, ignoring ASCII case.
@@ -213,4 +236,102 @@ impl HttpRequest {
 
         buf
     }
+}
+
+/// Validates an HTTP field before it can be serialized into a request.
+pub(crate) fn is_valid_header(name: &str, value: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+        && value
+            .bytes()
+            .all(|byte| byte == b'\t' || byte >= b' ' && byte != 0x7f)
+}
+
+/// Returns whether script is forbidden to set this request field.
+pub(crate) fn is_forbidden_request_header(name: &str, value: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if name.starts_with("proxy-") || name.starts_with("sec-") {
+        return true;
+    }
+    if [
+        "accept-charset",
+        "accept-encoding",
+        "access-control-request-headers",
+        "access-control-request-method",
+        "connection",
+        "content-length",
+        "cookie",
+        "cookie2",
+        "date",
+        "dnt",
+        "expect",
+        "host",
+        "keep-alive",
+        "origin",
+        "referer",
+        "set-cookie",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "via",
+    ]
+    .contains(&name.as_str())
+    {
+        return true;
+    }
+    [
+        "x-http-method",
+        "x-http-method-override",
+        "x-method-override",
+    ]
+    .contains(&name.as_str())
+        && value.split(',').any(|method| {
+            ["CONNECT", "TRACE", "TRACK"].contains(&method.trim().to_ascii_uppercase().as_str())
+        })
+}
+
+/// Whether a caller-supplied header survives an HTTP redirect.
+pub(crate) fn copy_header_on_redirect(name: &str, preserve_body: bool, same_origin: bool) -> bool {
+    if ["host", "cookie", "content-length", "origin"]
+        .iter()
+        .any(|internal| name.eq_ignore_ascii_case(internal))
+    {
+        return false;
+    }
+    if !same_origin
+        && ["authorization", "proxy-authorization"]
+            .iter()
+            .any(|credential| name.eq_ignore_ascii_case(credential))
+    {
+        return false;
+    }
+    preserve_body
+        || ![
+            "content-encoding",
+            "content-language",
+            "content-location",
+            "content-type",
+        ]
+        .iter()
+        .any(|body_header| name.eq_ignore_ascii_case(body_header))
 }

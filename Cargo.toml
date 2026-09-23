@@ -87,6 +87,8 @@ webpki-roots = "1.0"
 image-webp = "0.2.4"
 softbuffer = { version = "0.4.8", optional = true }
 winit = { version = "0.30.12", optional = true }
+# HTTP URL authority, IDNA, and request-target normalization use the WHATWG parser.
+url = "2.5.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Use an exclusive X11 grab so raw input is delivered exactly once while locked.

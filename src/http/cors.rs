@@ -5,6 +5,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use super::client::{is_redirect, redirect_method, resolve_redirect_url};
+use super::request::copy_header_on_redirect;
 use super::{Client, HttpRequest, HttpResponse, Method, Url};
 
 const MAX_REDIRECTS: usize = 10;
@@ -218,17 +219,13 @@ pub fn fetch_with_timeout(
             let previous_origin = Origin::from_url(request.url());
             let next_origin = Origin::from_url(&next_url);
             let method = redirect_method(response.status_code(), request.method());
-            let preserve_body = matches!(response.status_code(), 307 | 308);
+            let preserve_body = method == request.method();
             let mut next = HttpRequest::new(method, next_url);
             if request.requires_public_ip() {
                 next.require_public_ip();
             }
             for (name, value) in request.headers() {
-                if !is_redirect_internal_header(name)
-                    && (preserve_body || !is_request_body_header(name))
-                    && !(previous_origin != next_origin
-                        && name.eq_ignore_ascii_case("authorization"))
-                {
+                if copy_header_on_redirect(name, preserve_body, previous_origin == next_origin) {
                     next.add_header(name.clone(), value.clone());
                 }
             }
@@ -459,23 +456,6 @@ fn header_tokens(response: &HttpResponse, name: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
-}
-
-fn is_redirect_internal_header(name: &str) -> bool {
-    ["host", "cookie", "content-length", "origin"]
-        .iter()
-        .any(|ignored| name.eq_ignore_ascii_case(ignored))
-}
-
-fn is_request_body_header(name: &str) -> bool {
-    [
-        "content-encoding",
-        "content-language",
-        "content-location",
-        "content-type",
-    ]
-    .iter()
-    .any(|header| name.eq_ignore_ascii_case(header))
 }
 
 #[cfg(test)]
