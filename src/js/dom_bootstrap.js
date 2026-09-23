@@ -5687,13 +5687,21 @@
     __preRemove(parent, removed, index) {
       // Update boundary fields directly instead of allocating a closure and
       // two result arrays for every live range on every DOM removal.
-      if (isInclusiveDescendant(this.__startContainer, removed)) {
+      // A Document cannot be inside a removed child. Common collapsed ranges
+      // also share a container, so only ask native ancestry once for both.
+      const startContainer = this.__startContainer;
+      const endContainer = this.__endContainer;
+      const startInsideRemoved = startContainer !== this.__doc &&
+        isInclusiveDescendant(startContainer, removed);
+      const endInsideRemoved = endContainer === startContainer ? startInsideRemoved :
+        endContainer !== this.__doc && isInclusiveDescendant(endContainer, removed);
+      if (startInsideRemoved) {
         this.__startContainer = parent;
         this.__startOffset = index;
       } else if (this.__startContainer === parent && this.__startOffset > index) {
         this.__startOffset--;
       }
-      if (isInclusiveDescendant(this.__endContainer, removed)) {
+      if (endInsideRemoved) {
         this.__endContainer = parent;
         this.__endOffset = index;
       } else if (this.__endContainer === parent && this.__endOffset > index) {
