@@ -289,6 +289,17 @@ struct AttributeRecord {
     value: String,
 }
 
+fn cloned_attribute_record(
+    attribute: &AttributeRecord,
+) -> (String, Option<String>, String, String) {
+    (
+        attribute.qualified_name.clone(),
+        attribute.namespace_uri.clone(),
+        attribute.local_name.clone(),
+        attribute.value.clone(),
+    )
+}
+
 fn rebuild_attribute_projection(element: &mut Element) {
     element.attributes.clear();
     for attribute in &element.attribute_records {
@@ -923,18 +934,63 @@ impl NodeHandle {
                 element
                     .attribute_records
                     .iter()
-                    .map(|attribute| {
-                        (
-                            attribute.qualified_name.clone(),
-                            attribute.namespace_uri.clone(),
-                            attribute.local_name.clone(),
-                            attribute.value.clone(),
-                        )
-                    })
+                    .map(cloned_attribute_record)
                     .collect(),
             ),
             _ => None,
         }
+    }
+
+    /// Returns the number of attributes without cloning their records.
+    pub fn attribute_record_count(&self) -> Option<usize> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => Some(element.attribute_records.len()),
+            _ => None,
+        }
+    }
+
+    /// Returns one attribute in insertion order without cloning the others.
+    pub fn attribute_record_at(
+        &self,
+        index: usize,
+    ) -> Option<(String, Option<String>, String, String)> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element
+                .attribute_records
+                .get(index)
+                .map(cloned_attribute_record),
+            _ => None,
+        }
+    }
+
+    /// Returns the value of one namespace/local-name pair without cloning the
+    /// other attributes. Legacy prefixed records are normalized like the DOM
+    /// binding's attribute-record path.
+    pub fn attribute_value_ns(&self, namespace: Option<&str>, local_name: &str) -> Option<String> {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return None;
+        };
+        element.attribute_records.iter().find_map(|attribute| {
+            let (effective_namespace, effective_local_name) = if attribute.namespace_uri.is_none() {
+                if let Some(local) = attribute.qualified_name.strip_prefix("xlink:") {
+                    (Some("http://www.w3.org/1999/xlink"), local)
+                } else if attribute.qualified_name == "xmlns" {
+                    (Some("http://www.w3.org/2000/xmlns/"), "xmlns")
+                } else if let Some(local) = attribute.qualified_name.strip_prefix("xmlns:") {
+                    (Some("http://www.w3.org/2000/xmlns/"), local)
+                } else {
+                    (None, attribute.local_name.as_str())
+                }
+            } else {
+                (
+                    attribute.namespace_uri.as_deref(),
+                    attribute.local_name.as_str(),
+                )
+            };
+            (effective_namespace == namespace && effective_local_name == local_name)
+                .then(|| attribute.value.clone())
+        })
     }
 
     /// Returns a clone of one element attribute value, if it exists.

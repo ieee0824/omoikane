@@ -104,6 +104,9 @@
   delete globalThis.__omoikane_fullscreen_subtree_removed;
   const nativeGetTextContent = globalThis.__omoikane_get_text_content;
   const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
+  const nativeAttributeRecordCount = globalThis.__omoikane_attribute_record_count;
+  const nativeAttributeRecordAt = globalThis.__omoikane_attribute_record_at;
+  const nativeAttributeValueNS = globalThis.__omoikane_attribute_value_ns;
   const nativeCreateElementNS = globalThis.__omoikane_create_element_ns;
   const nativeCreateCdataSection = globalThis.__omoikane_create_cdata_section;
   const nativeSerializeXml = globalThis.__omoikane_serialize_xml;
@@ -161,6 +164,9 @@
   delete globalThis.__omoikane_array_buffer_view_info;
   delete globalThis.__omoikane_node_is_html_element;
   delete globalThis.__omoikane_attribute_records;
+  delete globalThis.__omoikane_attribute_record_count;
+  delete globalThis.__omoikane_attribute_record_at;
+  delete globalThis.__omoikane_attribute_value_ns;
   delete globalThis.__omoikane_create_element_ns;
   delete globalThis.__omoikane_create_cdata_section;
   delete globalThis.__omoikane_serialize_xml;
@@ -2022,8 +2028,8 @@
     }
     const parent = internalParentNode(node);
     if (!parent) return;
-    const previousSibling = internalPreviousSibling(node);
-    const nextSibling = internalNextSibling(node);
+    const previousSibling = browsingInput.hasMutationObservers ? internalPreviousSibling(node) : null;
+    const nextSibling = browsingInput.hasMutationObservers ? internalNextSibling(node) : null;
     preRemove(parent, node);
     queueMutation(parent, "childList", { removedNodes: [node], previousSibling, nextSibling });
   }
@@ -2061,12 +2067,14 @@
       }
     }
 
-    let previousSibling;
-    if (refNode) {
-      previousSibling = internalPreviousSibling(refNode);
-    } else {
-      const childIds = __omoikane_child_node_ids(parentId) || [];
-      previousSibling = childIds.length ? wrapNode(childIds[childIds.length - 1]) : null;
+    let previousSibling = null;
+    if (browsingInput.hasMutationObservers) {
+      if (refNode) {
+        previousSibling = internalPreviousSibling(refNode);
+      } else {
+        const childIds = __omoikane_child_node_ids(parentId) || [];
+        previousSibling = childIds.length ? wrapNode(childIds[childIds.length - 1]) : null;
+      }
     }
 
     if (__omoikane_node_type(newId) === 11) {
@@ -2984,10 +2992,14 @@
     }
 
     removeChild(child) {
-      const previousSibling = child.previousSibling;
-      const nextSibling = child.nextSibling;
-      fullscreenSubtreeWillBeRemoved(child);
-      popoverSubtreeWillBeRemoved(child);
+      const previousSibling = browsingInput.hasMutationObservers ? child.previousSibling : null;
+      const nextSibling = browsingInput.hasMutationObservers ? child.nextSibling : null;
+      if (browsingInput.removalMayAffectFullscreen) {
+        fullscreenSubtreeWillBeRemoved(child);
+      }
+      if (browsingInput.removalMayAffectTopLayer) {
+        popoverSubtreeWillBeRemoved(child);
+      }
       preRemove(this, child);
       const wasConnected = child.isConnected;
       __omoikane_remove_child(this.__id, child.__id);
@@ -3223,8 +3235,7 @@
     getAttributeNS(namespace, localName) {
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       const id = canonicalNodeId(requireNodeReceiver(this));
-      const entry = namespacedAttributeRecord(id, ns, String(localName));
-      return entry ? entry[3] : null;
+      return nativeAttributeValueNS(id, ns, String(localName));
     }
 
     removeAttributeNS(namespace, localName) {
@@ -5059,13 +5070,12 @@
 
     get length() {
       const element = requireNamedNodeMap(this);
-      return (nativeAttributeRecords(element.__id) || []).length;
+      return nativeAttributeRecordCount(element.__id);
     }
 
     item(index) {
       const element = requireNamedNodeMap(this);
-      const records = nativeAttributeRecords(element.__id) || [];
-      const record = records[Number(index) >>> 0];
+      const record = nativeAttributeRecordAt(element.__id, Number(index) >>> 0);
       return record ? materializeAttribute(element, record) : null;
     }
 
@@ -5677,13 +5687,21 @@
     __preRemove(parent, removed, index) {
       // Update boundary fields directly instead of allocating a closure and
       // two result arrays for every live range on every DOM removal.
-      if (isInclusiveDescendant(this.__startContainer, removed)) {
+      // A Document cannot be inside a removed child. Common collapsed ranges
+      // also share a container, so only ask native ancestry once for both.
+      const startContainer = this.__startContainer;
+      const endContainer = this.__endContainer;
+      const startInsideRemoved = startContainer !== this.__doc &&
+        isInclusiveDescendant(startContainer, removed);
+      const endInsideRemoved = endContainer === startContainer ? startInsideRemoved :
+        endContainer !== this.__doc && isInclusiveDescendant(endContainer, removed);
+      if (startInsideRemoved) {
         this.__startContainer = parent;
         this.__startOffset = index;
       } else if (this.__startContainer === parent && this.__startOffset > index) {
         this.__startOffset--;
       }
-      if (isInclusiveDescendant(this.__endContainer, removed)) {
+      if (endInsideRemoved) {
         this.__endContainer = parent;
         this.__endOffset = index;
       } else if (this.__endContainer === parent && this.__endOffset > index) {
@@ -6075,8 +6093,10 @@
       if (element.localName.toLowerCase() === "script") {
         __omoikane_mark_inserted_script(element.__id);
       }
-      const registry = customElementRegistryByDocument.get(this);
-      if (registry) considerCustomElement(registry, element);
+      if (browsingInput.hasCustomElementDefinitions) {
+        const registry = customElementRegistryByDocument.get(this);
+        if (registry) considerCustomElement(registry, element);
+      }
       return element;
     }
 
@@ -6090,7 +6110,7 @@
       if (info.namespace === HTML_NAMESPACE && info.localName.toLowerCase() === "script") {
         __omoikane_mark_inserted_script(node.__id);
       }
-      if (info.namespace === HTML_NAMESPACE) {
+      if (info.namespace === HTML_NAMESPACE && browsingInput.hasCustomElementDefinitions) {
         const registry = customElementRegistryByDocument.get(this);
         if (registry) considerCustomElement(registry, node);
       }
@@ -13396,6 +13416,7 @@
   }
 
   function disconnectCustomElementTree(root) {
+    if (!browsingInput.hasCustomElementDefinitions) return;
     customElementTreeWalk(root, element => {
       if (element.__customElementState !== "custom" ||
           !element.__customElementConnected) {
@@ -13493,6 +13514,7 @@
   }
 
   function upgradeInsertedCustomElements(parent, nodes) {
+    if (!browsingInput.hasCustomElementDefinitions) return;
     if (!parent || !internalIsConnected(parent)) return;
     const owner = internalNodeType(parent) === 9 ? parent : internalOwnerDocument(parent);
     const registry = owner && customElementRegistryByDocument.get(owner);
@@ -13641,6 +13663,7 @@
         callbacks: { ...callbacks },
       });
       this.__definitions.set(name, definition);
+      browsingInput.hasCustomElementDefinitions = true;
       this.__constructors.set(constructor, name);
       if (!customElementDefinitionByConstructor.has(constructor)) {
         customElementDefinitionByConstructor.set(constructor, definition);
@@ -16923,6 +16946,7 @@
           (!normalized.childList && !normalized.attributes && !normalized.characterData)) {
         throw new TypeError("At least one mutation type must be observed");
       }
+      browsingInput.hasMutationObservers = true;
       if (!mutationObservers.includes(this)) mutationObservers.push(this);
       const existing = this._registrations.find(entry => entry.target === target);
       if (existing) existing.options = normalized;

@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -76,6 +77,41 @@ def unit_partition(names, index):
 
 def passed_tests(log):
     return sum(map(int, re.findall(r"^test result: ok\. (\d+) passed", log, re.M)))
+
+
+def acid3_test26_timing(report):
+    """Retain both the driver-step wall time and the fixture's own test time."""
+    timing = {}
+    for mode in ("faithful", "direct"):
+        row = report.get(mode, {}) if isinstance(report, dict) else {}
+        if not isinstance(row, dict):
+            row = {}
+        match = re.search(r"(?m)^Test 26 passed, but took (\d+)ms\b", row.get("log") or "")
+        timing[mode] = {
+            "driver_ms": row.get("test26_step_wall_ms"),
+            "fixture_ms": int(match.group(1)) if match else None,
+        }
+    return timing
+
+
+def has_acid3_test26_timing(shard):
+    if not isinstance(shard, dict):
+        return False
+    steps = shard.get("steps", [])
+    if [step.get("name") for step in steps] != STEPS["acid3"]:
+        return False
+    return all(
+        isinstance(step.get("test26_ms"), dict)
+        and all(
+            isinstance(step["test26_ms"].get(mode), dict)
+            and isinstance(step["test26_ms"][mode].get("driver_ms"), (int, float))
+            and not isinstance(step["test26_ms"][mode]["driver_ms"], bool)
+            and math.isfinite(step["test26_ms"][mode]["driver_ms"])
+            and step["test26_ms"][mode]["driver_ms"] >= 0
+            for mode in ("faithful", "direct")
+        )
+        for step in steps
+    )
 
 
 def integration_targets(package):
@@ -163,8 +199,14 @@ def run_shard(shard, root):
             run("build", ["cargo", "build", "--locked", "--features", "jit-stress"])
         elif shard == "acid3":
             test("acid3", ["--test", "acid3_harness"])
+            result["steps"][-1]["test26_ms"] = acid3_test26_timing(
+                read_json(folder / "acid3.json"))
+            write_json(folder / "shard.json", result)
             # jit_deopt also embeds the harness; keep its existing coverage.
             test("embedded-acid3", ["--test", "jit_deopt"], ["acid3::"])
+            result["steps"][-1]["test26_ms"] = acid3_test26_timing(
+                read_json(folder / "acid3.json"))
+            write_json(folder / "shard.json", result)
         elif shard == "compatibility":
             run("fetch-wpt", ["scripts/fetch-wpt.sh"])
             test("wpt", ["--test", "wpt_smoke"])
@@ -222,6 +264,7 @@ def aggregate(root, jobs_succeeded=True):
         "acid3_100": isinstance(acid3, dict) and all(
             acid3.get(mode, {}).get("score") == 100 and acid3[mode].get("total") == 100
             for mode in ("faithful", "direct")),
+        "acid3_test26_reported": has_acid3_test26_timing(shards.get("acid3")),
         "wpt_regression_zero": isinstance(wpt, dict) and wpt.get("summary", {}).get("regression") == 0,
         "web_api_regression_zero": isinstance(web_api, dict) and web_api.get("regressions") == [],
         "stress_64_seeds": isinstance(stress, dict) and stress.get("gc_profile") is True

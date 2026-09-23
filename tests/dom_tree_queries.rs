@@ -176,13 +176,16 @@ fn removal_adjusts_only_ranges_in_the_ordinary_removed_subtree() {
                     const shadowRange = document.createRange();
                     shadowRange.setStart(shadowText, 1);
                     shadowRange.setEnd(shadowText, 3);
+                    const documentRange = document.createRange();
                     parent.removeChild(removed);
                     return inside.startContainer === parent && inside.endContainer === parent &&
                         inside.startOffset === 1 && inside.endOffset === 1 &&
                         after.startContainer === parent && after.endContainer === parent &&
                         after.startOffset === 1 && after.endOffset === 2 &&
                         shadowRange.startContainer === shadowText && shadowRange.startOffset === 1 &&
-                        shadowRange.endContainer === shadowText && shadowRange.endOffset === 3;
+                        shadowRange.endContainer === shadowText && shadowRange.endOffset === 3 &&
+                        documentRange.startContainer === document && documentRange.endContainer === document &&
+                        documentRange.startOffset === 0 && documentRange.endOffset === 0;
                 })()"#,
             )
             .unwrap()
