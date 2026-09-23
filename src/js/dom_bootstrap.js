@@ -1978,6 +1978,19 @@
     return null;
   }
 
+  // activeElement is observed from one node tree at a time. Keep the actual
+  // focus target for focus events and selectors, but retarget the value exposed
+  // by Document or ShadowRoot to the host at each intervening shadow boundary.
+  function activeElementForRoot(root) {
+    const doc = root instanceof Document ? root : root.host.ownerDocument;
+    const focused = focusedElementOf(doc);
+    if (focused) {
+      const candidate = retargetNode(focused, root);
+      return nodeRoot(candidate) === root ? candidate : null;
+    }
+    return root instanceof Document ? root.body || root.documentElement || null : null;
+  }
+
   // `doc` and its ancestor documents, innermost first, each paired with the
   // iframe element hosting it (`null` for the top-level document).
   //
@@ -6561,9 +6574,7 @@
     // the viewport's stand-in: the body element, or the document element when
     // there is no body.
     get activeElement() {
-      const focused = focusedElementOf(this);
-      if (focused) return focused;
-      return this.body || this.documentElement || null;
+      return activeElementForRoot(this);
     }
 
     get head() {
@@ -6821,6 +6832,7 @@
     get host() { return wrapNode(__omoikane_shadow_host(this.__id)); }
     get mode() { return __omoikane_shadow_mode(this.__id); }
     get delegatesFocus() { return false; }
+    get activeElement() { return activeElementForRoot(this); }
     get pointerLockElement() { return pointerLockElementForRoot(this); }
     get fullscreenElement() {
       const candidate = rawFullscreenElementForDocument(internalOwnerDocument(this.host));
