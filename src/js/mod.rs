@@ -12301,7 +12301,9 @@ fn call_event_listener_native(
         };
         let handle_event = listener.get(js_string!("handleEvent"), context)?;
         let Some(callback) = handle_event.as_callable() else {
-            return Ok(JsValue::undefined());
+            return Err(JsNativeError::typ()
+                .with_message("event listener handleEvent is not callable")
+                .into());
         };
         callback.clone()
     };
@@ -19952,12 +19954,12 @@ mod tests {
             asyncCallbackLog.push('returned:' + target.dispatchEvent(event));
             const throwingTarget = document.createElement('div');
             const throwingEvent = new Event('throwing');
+            addEventListener('error', event => asyncCallbackLog.push('error:' + event.message));
             throwingTarget.addEventListener('throwing', () => {
                 alert('throw'); throw new Error('listener failure');
             });
-            try { throwingTarget.dispatchEvent(throwingEvent); } catch (error) {
-                asyncCallbackLog.push('throw:' + error.message + ':' + !throwingEvent.__dispatching);
-            }
+            throwingTarget.addEventListener('throwing', () => asyncCallbackLog.push('throwing-second'));
+            asyncCallbackLog.push('throwing-returned:' + throwingTarget.dispatchEvent(throwingEvent) + ':' + !throwingEvent.__dispatching);
             setTimeout(() => {
                 asyncCallbackLog.push('timer-before'); alert('timer'); asyncCallbackLog.push('timer-after');
             }, 0);
@@ -19998,7 +20000,7 @@ mod tests {
                 .as_string()
                 .unwrap()
                 .to_std_string_escaped(),
-            "event-before,event-after,event-second,returned:false,throw:listener failure:true,timer-before,timer-after,frame-before,frame-after"
+            "event-before,event-after,event-second,returned:false,error:listener failure,throwing-second,throwing-returned:true:true,timer-before,timer-after,frame-before,frame-after"
         );
     }
 
@@ -47465,7 +47467,8 @@ b</textarea></form>"#,
         let mut runtime = JsRuntime::new().unwrap();
         eval_str(
             &mut runtime,
-            r#"(() => { globalThis.log = [];
+            r#"(() => { globalThis.log = []; globalThis.listenerErrors = [];
+               window.addEventListener('error', event => listenerErrors.push(event.message));
                globalThis.channel = new MessageChannel();
                channel.port2.addEventListener("message", event => {
                  log.push(event.data);
@@ -47481,7 +47484,14 @@ b</textarea></form>"#,
             eval_str(&mut runtime, "log.join('|')"),
             "first|second|third"
         );
-        assert_eq!(runtime.take_task_errors().len(), 1);
+        assert_eq!(runtime.take_task_errors().len(), 0);
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "listenerErrors.length === 1 && listenerErrors[0].includes('listener failed')"
+            ),
+            "true"
+        );
         eval_str(
             &mut runtime,
             "(() => { channel.port2.close(); channel.port1.postMessage('third'); })()",
