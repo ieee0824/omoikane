@@ -51,6 +51,10 @@ pub(crate) enum Task {
         stolen: bool,
     },
     Navigation(NavigationRequest),
+    AuxiliaryNavigate {
+        id: u64,
+        url: String,
+    },
     PostedMessage {
         port: JsValue,
         data: JsValue,
@@ -59,8 +63,10 @@ pub(crate) enum Task {
     WindowPostedMessage {
         target_document_id: usize,
         target_iframe: Option<(usize, u64)>,
+        target_auxiliary_id: Option<u64>,
         source_document_id: usize,
         source_iframe_id: Option<usize>,
+        source_auxiliary_id: Option<u64>,
         sender_security_origin: Option<DocumentSecurityOrigin>,
         origin: String,
         target_origin: String,
@@ -214,6 +220,7 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
         Task::Geolocation { .. }
         | Task::WebLock { .. }
         | Task::Navigation(_)
+        | Task::AuxiliaryNavigate { .. }
         | Task::BroadcastChannelMessage { .. }
         | Task::WorkerMessage { .. }
         | Task::SharedWorkerMessage { .. }
@@ -309,6 +316,10 @@ impl EventLoop {
 
     pub(crate) fn enqueue_navigation(&mut self, request: NavigationRequest) {
         self.enqueue(TaskSource::Navigation, Task::Navigation(request));
+    }
+
+    pub(crate) fn enqueue_auxiliary_navigation(&mut self, id: u64, url: String) {
+        self.enqueue(TaskSource::Navigation, Task::AuxiliaryNavigate { id, url });
     }
 
     /// Queues `payload` on the file reading task source.

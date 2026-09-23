@@ -14067,6 +14067,13 @@
       changedDocument.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     }
   };
+  globalThis.__omoikane_close_auxiliary_document = function() {
+    if (browsingInput.visibilityHiddenDocumentIds.has(__omoikane_document_id)) return;
+    browsingInput.visibilityHiddenDocumentIds.add(__omoikane_document_id);
+    globalThis.dispatchEvent(new Event("pagehide"));
+    document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+    globalThis.dispatchEvent(new Event("unload"));
+  };
 
   const pointerLockDispatchEvent = Node.prototype.dispatchEvent;
   globalThis.Node = Node;
@@ -14668,7 +14675,7 @@
   globalThis.dispatchEvent = function(event) {
     return dispatchEventOnTarget(globalThis, event);
   };
-  for (const type of ["message", "messageerror"]) {
+  for (const type of ["message", "messageerror", "load", "unload", "pagehide", "pageshow"]) {
     let handler = null;
     Object.defineProperty(globalThis, `on${type}`, {
       configurable: true,
@@ -15287,10 +15294,15 @@
   });
 
   const navigationDocumentId = __omoikane_document_id;
-  const isChildWindow = navigationDocumentId !== browsingInput.topDocumentId;
+  const auxiliaryNavigationId = globalThis.__omoikane_auxiliary_context_id;
+  const isChildWindow = navigationDocumentId !== browsingInput.topDocumentId &&
+    auxiliaryNavigationId === undefined;
   const childNavigation = (kind, value, extra) =>
     nativeChildNavigation(navigationDocumentId, kind, value, extra);
   const scheduleWindowNavigation = (kind, value, extra) => {
+    if (auxiliaryNavigationId !== undefined) {
+      return __omoikane_navigate_auxiliary_window(auxiliaryNavigationId, value || String(globalThis.location.href));
+    }
     if (isChildWindow) return childNavigation(kind, value, extra);
     return __omoikane_schedule_navigation(kind, value, extra);
   };
@@ -22136,6 +22148,8 @@
   globalThis.__omoikane_window_message_source = function(kind, iframeId) {
     if (kind === "self") return globalThis;
     if (kind === "parent") return globalThis.parent;
+    if (kind === "opener") return globalThis.opener;
+    if (kind === "auxiliary") return auxiliaryWindowProxy(iframeId);
     if (kind === "iframe") {
       const iframe = wrapNode(iframeId);
       return iframe ? iframe.contentWindow : null;
@@ -22171,6 +22185,81 @@
     __omoikane_window_post_message("document", __omoikane_document_id, null,
       message, targetOriginOrOptions, transfer);
   };
+
+  const auxiliaryWindowProxies = new Map();
+  function auxiliaryWindowProxy(id) {
+    if (auxiliaryWindowProxies.has(id)) return auxiliaryWindowProxies.get(id);
+    let proxy;
+    const access = () => String(__omoikane_auxiliary_window_state(id));
+    const activeWindow = () => __omoikane_auxiliary_window_global(id);
+    const location = {
+      get href() {
+        const target = activeWindow();
+        if (target === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        return target.location.href;
+      },
+      set href(value) { __omoikane_navigate_auxiliary_window(id, String(value)); },
+      assign(value) { this.href = value; },
+      replace(value) { this.href = value; },
+      reload() { this.href = this.href; },
+    };
+    const handler = {
+      get(_target, property) {
+        const state = access();
+        if (property === Symbol.toStringTag) return "Window";
+        if (property === "closed") return state === "closed";
+        if (property === "close") return () => __omoikane_close_auxiliary_window(id);
+        if (property === "location") return location;
+        if (property === "window" || property === "self" || property === "frames" ||
+            property === "parent" || property === "top") return proxy;
+        if (property === "postMessage") return (message, targetOriginOrOptions = "/", transfer = undefined) => {
+          __omoikane_window_post_message("popup", id, null,
+            message, targetOriginOrOptions, transfer);
+        };
+        if (state === "closed") return undefined;
+        if (state === "cross") {
+          if (property === "opener") return null;
+          throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        }
+        const target = activeWindow();
+        return target === null ? undefined : Reflect.get(target, property, target);
+      },
+      set(_target, property, value) {
+        if (property === "location") {
+          location.href = value;
+          return true;
+        }
+        const target = activeWindow();
+        if (target === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        return Reflect.set(target, property, value, target);
+      },
+    };
+    proxy = new Proxy(Object.create(null), handler);
+    auxiliaryWindowProxies.set(id, proxy);
+    return proxy;
+  }
+  globalThis.__omoikane_auxiliary_window_proxy = auxiliaryWindowProxy;
+  globalThis.open = function(url = "", target = "_blank") {
+    const targetName = String(target);
+    const existing = targetName === "_self" ? globalThis.window :
+      targetName === "_parent" ? globalThis.parent :
+      targetName === "_top" ? globalThis.top : null;
+    if (existing !== null) {
+      if (String(url) !== "") existing.location.assign(String(url));
+      return existing;
+    }
+    const id = __omoikane_open_auxiliary_window(url, targetName);
+    return auxiliaryWindowProxy(id);
+  };
+  if (globalThis.__omoikane_auxiliary_context_id !== undefined) {
+    Object.defineProperty(globalThis, "closed", {
+      configurable: true,
+      get() { return __omoikane_auxiliary_window_state(__omoikane_auxiliary_context_id) === "closed"; },
+    });
+    globalThis.close = function() {
+      __omoikane_close_auxiliary_window(__omoikane_auxiliary_context_id);
+    };
+  }
 
   // SharedWorker ports are message endpoints whose other side lives in a
   // dedicated shared-worker runtime.  The native bridge carries only the
@@ -22383,6 +22472,7 @@
     // browsing-context objects before user script evaluates.
     try { delete globalThis.document; } catch (_) { globalThis.document = undefined; }
     try { delete globalThis.window; } catch (_) { globalThis.window = undefined; }
+    try { delete globalThis.open; } catch (_) { globalThis.open = undefined; }
     try { delete globalThis.customElements; } catch (_) { globalThis.customElements = undefined; }
     for (const domName of [
       "Node", "Element", "HTMLElement", "Document", "DocumentFragment", "Text",
