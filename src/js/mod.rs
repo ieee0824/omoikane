@@ -11033,6 +11033,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(layout_metrics_native),
         ),
         (
+            js_string!("__omoikane_hit_test_point"),
+            4,
+            NativeFunction::from_copy_closure(hit_test_point_native),
+        ),
+        (
             js_string!("__omoikane_element_scroll_offset"),
             1,
             NativeFunction::from_copy_closure(element_scroll_offset_native),
@@ -13373,6 +13378,187 @@ fn layout_metrics_generation_native(
     })
 }
 
+/// Returns one or all painted element IDs at a viewport point. `null` means
+/// the point is outside the target document's viewport; an empty array means
+/// it is inside but no painted element accepted pointer events there.
+fn hit_test_point_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    let x = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as f32;
+    let y = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_number(context)? as f32;
+    let all = args.get(3).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let Some(document) = state.get_node(document_id) else {
+            return Ok(JsValue::null());
+        };
+        if document.node_type() != NodeType::Document || !state.document_is_active(document_id) {
+            return Ok(JsValue::null());
+        }
+        let viewport = state.viewport_for_document(&document);
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < 0.0
+            || y < 0.0
+            || x > viewport.width
+            || y > viewport.height
+        {
+            return Ok(JsValue::null());
+        }
+        let hits = hit_test_document_point(&mut state, &document, viewport, x, y, all);
+        let ids = hits
+            .into_iter()
+            .map(|node| state.retarget_content_visibility_hit(node))
+            .map(|node| JsValue::from(node.identity() as f64))
+            .collect::<Vec<_>>();
+        drop(state);
+        Ok(JsValue::from(
+            boa_engine::object::builtins::JsArray::from_iter(ids, context),
+        ))
+    })
+}
+
+fn hit_test_document_point(
+    state: &mut HostState,
+    document: &NodeHandle,
+    viewport: Rect,
+    x: f32,
+    y: f32,
+    all: bool,
+) -> Vec<NodeHandle> {
+    let document_id = document.identity();
+    if document_id == state.document.identity() {
+        state.ensure_adjusted_layout();
+        let Some(layout) = state
+            .adjusted_layout_cache
+            .as_ref()
+            .map(|cache| &cache.root)
+        else {
+            return Vec::new();
+        };
+        let Some(resolver) = state
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+        else {
+            return Vec::new();
+        };
+        return if all {
+            crate::paint::hit_test_layout_all(layout, resolver, viewport, x, y)
+        } else {
+            crate::paint::hit_test_layout(layout, resolver, viewport, x, y)
+                .into_iter()
+                .collect()
+        };
+    }
+
+    let Some(mut layout) = build_child_document_layout(state, document, viewport) else {
+        return Vec::new();
+    };
+    let scroll = state.window_scroll_for_document(document_id);
+    let Some(resolver) = state
+        .document_styles
+        .get_mut(&document_id)
+        .and_then(|entry| entry.resolver.as_mut())
+    else {
+        return Vec::new();
+    };
+    crate::paint::apply_scroll_offsets(&mut layout, resolver, viewport, scroll);
+    if all {
+        crate::paint::hit_test_layout_all(&layout, resolver, viewport, x, y)
+    } else {
+        crate::paint::hit_test_layout(&layout, resolver, viewport, x, y)
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Lays out an active child document in its own viewport. The main document's
+/// cached tree contains its iframe box, but not the iframe's document boxes.
+fn build_child_document_layout(
+    state: &mut HostState,
+    document: &NodeHandle,
+    viewport: Rect,
+) -> Option<LayoutBox> {
+    let document_id = document.identity();
+    state.ensure_style_resolver(document);
+    let base = crate::paint::stylesheet::extract_document_base_url(
+        document,
+        state.base_url_for_document(document_id).as_ref(),
+    );
+    let image_site = state.location_href.parse::<crate::http::Url>().ok();
+    let image_cookies = Arc::clone(&state.cookie_store);
+    let animation_time = state.event_loop.rendering_time_ms() as u64;
+    let entry = state.document_styles.get_mut(&document_id)?;
+    let resolver = entry.resolver.as_mut()?;
+    crate::layout::with_layout_fonts(
+        crate::paint::text::load_text_fonts(),
+        Some(entry.web_fonts.clone()),
+        || {
+            crate::layout::with_image_cookie_store(image_cookies, image_site, document_id, || {
+                crate::layout::with_image_base_url(base, || {
+                    crate::layout::with_image_animation_time(animation_time, || {
+                        crate::layout::layout_tree(document, resolver, viewport)
+                    })
+                })
+            })
+        },
+    )
+}
+
+fn metrics_in_layout(root: &LayoutBox, node: &NodeHandle) -> LayoutMetrics {
+    let mut fragments = Vec::new();
+    if let Some((layout, transform)) =
+        find_layout_box_with_transform(root, node, AffineTransform::identity(), &mut fragments)
+    {
+        compute_transformed_layout_metrics(layout, transform)
+    } else {
+        compute_replaced_fragment_metrics(fragments)
+    }
+}
+
+fn child_document_layout_metrics(
+    state: &mut HostState,
+    document: &NodeHandle,
+    node: &NodeHandle,
+    viewport: Rect,
+) -> LayoutMetrics {
+    let Some(layout) = build_child_document_layout(state, document, viewport) else {
+        return LayoutMetrics::zero();
+    };
+    let mut metrics = metrics_in_layout(&layout, node);
+    let scroll = state.window_scroll_for_document(document.identity());
+    let Some(resolver) = state
+        .document_styles
+        .get_mut(&document.identity())
+        .and_then(|entry| entry.resolver.as_mut())
+    else {
+        return metrics;
+    };
+    let mut painted_layout = layout.clone();
+    crate::paint::apply_scroll_offsets(&mut painted_layout, resolver, viewport, scroll);
+    let painted = metrics_in_layout(&painted_layout, node);
+    if painted.has_box {
+        metrics.x = painted.x;
+        metrics.y = painted.y;
+        metrics.width = painted.width;
+        metrics.height = painted.height;
+        metrics.client_rects = painted.client_rects;
+    }
+    metrics
+}
+
 /// `__omoikane_layout_metrics(nodeId)` -> JSON string of geometry metrics for
 /// the element (see [`compute_layout_metrics`]). Forces a synchronous reflow if
 /// the DOM changed since the last query. Elements that produce no box (e.g.
@@ -13414,8 +13600,8 @@ fn layout_metrics_native(
             if is_main_document {
                 state.ensure_adjusted_layout();
             }
-            let mut metrics = LayoutMetrics::zero();
-            {
+            let mut metrics = if is_main_document {
+                let mut metrics = LayoutMetrics::zero();
                 if let Some(root) = state.layout_root.as_ref() {
                     let mut fragments = Vec::new();
                     if let Some((layout, transform)) = find_layout_box_with_transform(
@@ -13429,11 +13615,10 @@ fn layout_metrics_native(
                         metrics = compute_replaced_fragment_metrics(fragments);
                     }
 
-                    if is_main_document
-                        && let Some(painted_root) = state
-                            .adjusted_layout_cache
-                            .as_ref()
-                            .map(|cache| &cache.root)
+                    if let Some(painted_root) = state
+                        .adjusted_layout_cache
+                        .as_ref()
+                        .map(|cache| &cache.root)
                     {
                         let mut painted_fragments = Vec::new();
                         let painted = if let Some((layout, transform)) =
@@ -13456,7 +13641,15 @@ fn layout_metrics_native(
                         }
                     }
                 }
-            }
+                metrics
+            } else {
+                document.as_ref().zip(viewport).map_or_else(
+                    LayoutMetrics::zero,
+                    |(document, viewport)| {
+                        child_document_layout_metrics(&mut state, document, &node, viewport)
+                    },
+                )
+            };
             if is_root_element && let Some(viewport) = viewport {
                 metrics.client_width = viewport.width;
                 metrics.client_height = viewport.height;

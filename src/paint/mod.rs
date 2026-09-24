@@ -8,6 +8,7 @@ pub(crate) mod stylesheet;
 pub(crate) mod text;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1896,6 +1897,7 @@ pub(crate) fn hit_test_layout(
     x: f32,
     y: f32,
 ) -> Option<NodeHandle> {
+    let mut hits = HitCollector::First(None);
     hit_test_box(
         layout,
         resolver,
@@ -1904,7 +1906,68 @@ pub(crate) fn hit_test_layout(
         viewport,
         x,
         y,
-    )
+        &mut hits,
+    );
+    let HitCollector::First(hit) = hits else {
+        unreachable!();
+    };
+    hit
+}
+
+/// Returns all event-target elements at a viewport point, topmost first.
+/// This follows the same paint traversal as pointer hit testing and visits
+/// each layout box once, even when several painted boxes overlap.
+pub(crate) fn hit_test_layout_all(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    x: f32,
+    y: f32,
+) -> Vec<NodeHandle> {
+    let mut hits = HitCollector::All {
+        hits: Vec::new(),
+        seen: HashSet::new(),
+    };
+    hit_test_box(
+        layout,
+        resolver,
+        AffineTransform::identity(),
+        Some(viewport),
+        viewport,
+        x,
+        y,
+        &mut hits,
+    );
+    let HitCollector::All { hits, .. } = hits else {
+        unreachable!();
+    };
+    hits
+}
+
+enum HitCollector {
+    First(Option<NodeHandle>),
+    All {
+        hits: Vec<NodeHandle>,
+        seen: HashSet<(usize, Option<PseudoElement>)>,
+    },
+}
+
+impl HitCollector {
+    /// Returns true when the first-hit search can stop.
+    fn record(&mut self, target: NodeHandle, pseudo: Option<PseudoElement>) -> bool {
+        match self {
+            Self::First(hit) => {
+                *hit = Some(target);
+                true
+            }
+            Self::All { hits, seen } => {
+                if seen.insert((target.identity(), pseudo)) {
+                    hits.push(target);
+                }
+                false
+            }
+        }
+    }
 }
 
 fn hit_test_box(
@@ -1915,18 +1978,21 @@ fn hit_test_box(
     viewport: Rect,
     x: f32,
     y: f32,
-) -> Option<NodeHandle> {
+    hits: &mut HitCollector,
+) -> bool {
     if layout.visibility == Visibility::Hidden
         || inherited_clip.is_some_and(|clip| !rect_contains_point(clip, x, y))
     {
-        return None;
+        return false;
     }
     let transform = ancestor_transform.multiply(layout.transform);
-    let inverse = transform.inverse()?;
+    let Some(inverse) = transform.inverse() else {
+        return false;
+    };
     let mut query_point = (x, y);
     let mut local_point = inverse.transform_point(x, y);
     if !local_point.0.is_finite() || !local_point.1.is_finite() {
-        return None;
+        return false;
     }
     let fragment_source_clip = if !layout
         .block_fragments
@@ -1935,12 +2001,15 @@ fn hit_test_box(
     {
         None
     } else {
-        let fragment = layout
+        let Some(fragment) = layout
             .block_fragments
             .iter()
             .rev()
             .filter(|fragment| fragment.owns_paint)
-            .find(|fragment| rect_contains_point(fragment.clip, local_point.0, local_point.1))?;
+            .find(|fragment| rect_contains_point(fragment.clip, local_point.0, local_point.1))
+        else {
+            return false;
+        };
         let (dx, dy) = fragment.translation();
         local_point.0 -= dx;
         local_point.1 -= dy;
@@ -1953,23 +2022,25 @@ fn hit_test_box(
     let clip_shape = clip_path_shape(&style, border_box);
     let mut clip = fragment_source_clip.or(inherited_clip);
     if let Some(inset) = clip_path_inset_rect(&style, border_box) {
-        let inset = inset?;
+        let Some(inset) = inset else {
+            return false;
+        };
         clip = intersect_optional_clip(clip, transformed_rect_bounds(inset, transform));
         if clip.is_none()
             || clip.is_some_and(|area| !rect_contains_point(area, query_point.0, query_point.1))
         {
-            return None;
+            return false;
         }
     }
     if let Some(shape) = clip_shape {
         if !shape.contains(local_point) {
-            return None;
+            return false;
         }
         clip = intersect_optional_clip(clip, transformed_rect_bounds(shape.bounds(), transform));
         if clip.is_none()
             || clip.is_some_and(|area| !rect_contains_point(area, query_point.0, query_point.1))
         {
-            return None;
+            return false;
         }
     }
     let paint_containment = crate::layout::has_containment(&style, "paint");
@@ -2000,7 +2071,7 @@ fn hit_test_box(
         };
         clip = intersect_optional_clip(clip, overflow_clip);
         if clip.is_none() {
-            return None;
+            return false;
         }
     }
 
@@ -2031,7 +2102,7 @@ fn hit_test_box(
 
     for group in [&positive, &auto_positioned, &inline] {
         for child in group.iter().rev() {
-            if let Some(target) = hit_test_box(
+            if hit_test_box(
                 child,
                 resolver,
                 transform,
@@ -2039,8 +2110,9 @@ fn hit_test_box(
                 viewport,
                 query_point.0,
                 query_point.1,
+                hits,
             ) {
-                return Some(target);
+                return true;
             }
         }
     }
@@ -2087,7 +2159,9 @@ fn hit_test_box(
                 svg_box.height,
                 &mut computed_pointer_events,
             ) {
-                return Some(target);
+                if hits.record(target, None) {
+                    return true;
+                }
             }
         }
     }
@@ -2131,22 +2205,28 @@ fn hit_test_box(
                             svg_box.height,
                             &mut computed_pointer_events,
                         ) {
-                            return Some(target);
+                            if hits.record(target, None) {
+                                return true;
+                            }
                         }
                     }
                 }
-                let target = event_target_element(&fragment.node)?;
+                let Some(target) = event_target_element(&fragment.node) else {
+                    return false;
+                };
                 if accepts_pointer_events_value(
                     resolver.computed_property(&target, "pointer-events"),
                 ) {
-                    return Some(target);
+                    if hits.record(target, layout.pseudo) {
+                        return true;
+                    }
                 }
             }
         }
     }
     for group in [&floats, &normal, &negative] {
         for child in group.iter().rev() {
-            if let Some(target) = hit_test_box(
+            if hit_test_box(
                 child,
                 resolver,
                 transform,
@@ -2154,17 +2234,20 @@ fn hit_test_box(
                 viewport,
                 query_point.0,
                 query_point.1,
+                hits,
             ) {
-                return Some(target);
+                return true;
             }
         }
     }
     if rect_contains_point(border_box, local_point.0, local_point.1)
         && accepts_pointer_events(&style)
     {
-        return event_target_element(&layout.node);
+        if let Some(target) = event_target_element(&layout.node) {
+            return hits.record(target, layout.pseudo);
+        }
     }
-    None
+    false
 }
 
 fn accepts_pointer_events(style: &ComputedStyle) -> bool {
