@@ -23,11 +23,17 @@ class GateTests(unittest.TestCase):
                          "rustc": "same-rustc", "target": "host", "lock_sha256": "same-lock"}
         (self.root / "inputs").mkdir()
         gate.write_json(self.root / "inputs/identity.json", self.identity)
+        targets = ["jit_native_gate", "new_test"]
+        gate.write_json(self.root / "inputs/integration-targets.json", targets)
         names = [f"module::test_{i}" for i in range(100)]
         for shard in gate.SHARDS:
             folder = self.root / shard
             folder.mkdir()
             steps = [{"name": name, "exit": 0} for name in gate.STEPS[shard]]
+            if shard == "integration":
+                steps[0]["command"] = gate.integration_command(targets)
+            if shard == "stress":
+                steps[0]["command"] = gate.stress_command()
             if shard == "acid3":
                 for step in steps:
                     step["test26_ms"] = {
@@ -37,10 +43,30 @@ class GateTests(unittest.TestCase):
             gate.write_json(folder / "shard.json", {
                 "shard": shard, "identity": self.identity, "error": None, "passed_tests": 1,
                 "steps": steps,
+                **({"stress_artifacts": ".artifacts/test-stress"} if shard == "stress" else {}),
             })
             if shard.startswith("unit-"):
                 gate.write_json(folder / "all-tests.json", names)
                 gate.write_json(folder / "selected-tests.json", gate.unit_partition(names, int(shard[-1])))
+        gate.write_json(self.root / "integration/targets.json", targets)
+        (self.root / "integration/integration.log").write_text(
+            "Running tests/jit_native_gate.rs (native)\n"
+            "test native_policy_and_seeded_workloads_produce_execution_evidence ... ok\n"
+            "test stress::child_failure_preserves_seed_source_code_and_stack_maps ... ok\n"
+            "test stress::seed_replay ... ok\n"
+            "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; "
+            "1 filtered out; finished in 0.1s\n"
+            "Running tests/new_test.rs (ordinary)\n"
+            "test ordinary ... ok\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+            "0 filtered out; finished in 0.1s\n")
+        (self.root / "stress/stress.log").write_text(
+            "Running tests/jit_deopt.rs (stress)\n"
+            "test stress::reproducible_stress_matrix ... "
+            "JIT stress: 64 seeds passed in 600.1s; .artifacts/test-stress\n"
+            "ok\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+            "0 filtered out; finished in 600.1s\n")
         gate.write_json(self.root / "acid3/acid3.json", {
             mode: {"score": 100, "total": 100} for mode in ("faithful", "direct")})
         gate.write_json(self.root / "compatibility/wpt.json", {"summary": {"regression": 0}})
@@ -65,7 +91,8 @@ class GateTests(unittest.TestCase):
 
     def test_missing_and_malformed_artifacts_fail(self):
         for name in [f"{s}/shard.json" for s in gate.SHARDS] + [
-                "inputs/identity.json", "acid3/acid3.json", "compatibility/wpt.json",
+                "inputs/identity.json", "inputs/integration-targets.json",
+                "integration/targets.json", "acid3/acid3.json", "compatibility/wpt.json",
                 "compatibility/web-api.json", "stress/stress.json"]:
             path = self.root / name
             original = path.read_text()
@@ -148,6 +175,58 @@ class GateTests(unittest.TestCase):
             {"name": "print_page_wpt", "kind": ["test"]},
         ]}
         self.assertEqual(gate.integration_targets(package), ["native", "new_test"])
+
+    def test_integration_target_or_command_drift_fails(self):
+        changes = [
+            ("inputs/integration-targets.json", lambda row: row.append({"invalid": True})),
+            ("integration/targets.json", lambda row: row.pop()),
+            ("integration/targets.json", lambda row: row.append(row[0])),
+            ("integration/shard.json", lambda row: row["steps"][0]["command"].remove("--skip")),
+            ("integration/shard.json", lambda row: row["steps"][0]["command"].remove("jit_native_gate")),
+            ("stress/shard.json", lambda row: row["steps"][0]["command"].append("--skip")),
+        ]
+        for name, change in changes:
+            path = self.root / name
+            original = path.read_text()
+            with self.subTest(path=name, change=str(change)):
+                self.modify(name, change)
+                self.assertFalse(self.decide())
+                path.write_text(original)
+
+    def test_integration_log_requires_one_native_skip_and_all_targets(self):
+        path = self.root / "integration/integration.log"
+        original = path.read_text()
+        changes = [
+            lambda text: text.replace("1 filtered out", "0 filtered out"),
+            lambda text: text.replace("Running tests/new_test.rs", "Running tests/other.rs"),
+            lambda text: text.replace("test native_policy_and_seeded_workloads_produce_execution_evidence ... ok\n", ""),
+            lambda text: text.replace("test stress::seed_replay ... ok", "test stress::reproducible_stress_matrix ... ok"),
+            lambda text: text.replace("0 filtered out", "1 filtered out"),
+        ]
+        for change in changes:
+            with self.subTest(change=str(change)):
+                path.write_text(change(original))
+                self.assertFalse(self.decide())
+        path.write_text(original)
+        path.unlink()
+        self.assertFalse(self.decide())
+
+    def test_stress_log_requires_one_matrix_and_matching_summary(self):
+        path = self.root / "stress/stress.log"
+        original = path.read_text()
+        changes = [
+            lambda text: text.replace("test stress::reproducible_stress_matrix ... ", ""),
+            lambda text: text.replace("test stress::reproducible_stress_matrix ... ",
+                                      "test stress::reproducible_stress_matrix ...\n"
+                                      "test stress::reproducible_stress_matrix ... "),
+            lambda text: text.replace(".artifacts/test-stress", ".artifacts/other"),
+        ]
+        for change in changes:
+            with self.subTest(change=str(change)):
+                path.write_text(change(original))
+                self.assertFalse(self.decide())
+        path.unlink()
+        self.assertFalse(self.decide())
 
     def test_acid3_test26_timing_retains_driver_and_fixture_values(self):
         report = {

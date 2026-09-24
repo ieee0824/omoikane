@@ -24,6 +24,8 @@ DEDICATED_TARGETS = {
     "acid3_harness", "jit_deopt", "web_api_surface", "wpt_smoke", "print_page_wpt",
 }
 TEST_ARGS = ["--include-ignored", "--nocapture", "--test-threads=1"]
+STRESS_MATRIX_TEST = "stress::reproducible_stress_matrix"
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 STEPS = {**{f"unit-{i}": ["list", "unit"] for i in range(UNIT_SHARDS)},
          "integration": ["integration", "examples-and-bins", "doc", "build"],
          "acid3": ["acid3", "embedded-acid3"],
@@ -64,6 +66,10 @@ def prepare(root):
     shutil.copyfile("Cargo.lock", root / "Cargo.lock")
     current = identity()
     write_json(root / "identity.json", current)
+    targets = integration_targets_from_metadata()
+    if not targets:
+        raise ValueError("no integration targets found")
+    write_json(root / "integration-targets.json", targets)
     (root / "revision.txt").write_text(current["revision"] + "\n")
     (root / "rustc.txt").write_text(current["rustc"] + "\n")
     (root / "source-status.txt").write_text(
@@ -129,6 +135,93 @@ def integration_targets(package):
                   and set(target.get("required-features", [])) <= enabled)
 
 
+def integration_targets_from_metadata():
+    metadata = json.loads(output("cargo", "metadata", "--locked", "--no-deps",
+                                 "--format-version", "1"))
+    package = next(p for p in metadata["packages"] if p["name"] == "omoikane")
+    return integration_targets(package)
+
+
+def test_command(selectors, filters=()):
+    return ["cargo", "test", "--locked", "--features", FEATURES,
+            "--no-fail-fast", *selectors, "--", *TEST_ARGS, *filters]
+
+
+def integration_command(targets):
+    selectors = [arg for target in targets for arg in ("--test", target)]
+    return test_command(selectors, ["--skip", STRESS_MATRIX_TEST])
+
+
+def stress_command():
+    return test_command(["--test", "jit_deopt"],
+                        ["--skip", "acid3::", "--skip", "web_api_surface::"])
+
+
+def integration_log_covers_targets(log, targets):
+    """Require every selected binary to pass with only the duplicate matrix filtered."""
+    if (not isinstance(targets, list) or not targets
+            or any(not isinstance(target, str) for target in targets)
+            or targets != sorted(set(targets)) or "jit_native_gate" not in targets):
+        return False
+    seen = {}
+    active = None
+    for line in ANSI_ESCAPE.sub("", log).splitlines():
+        match = re.search(r"\bRunning tests/([\w-]+)\.rs\b", line)
+        if match:
+            active = match.group(1)
+            if active in seen:
+                return False
+            seen[active] = {"filtered": None, "native_policy": False}
+        if active == "jit_native_gate" and line.startswith(
+                "test native_policy_and_seeded_workloads_produce_execution_evidence ..."):
+            seen[active]["native_policy"] = True
+        if line.startswith(f"test {STRESS_MATRIX_TEST} ..."):
+            return False
+        result = re.match(
+            r"test result: ok\. \d+ passed; 0 failed; \d+ ignored; "
+            r"\d+ measured; (\d+) filtered out;", line)
+        if result and active:
+            seen[active]["filtered"] = int(result.group(1))
+    return (sorted(seen) == targets
+            and seen["jit_native_gate"]["native_policy"]
+            and all(row["filtered"] == (1 if name == "jit_native_gate" else 0)
+                    for name, row in seen.items()))
+
+
+def complete_integration_coverage(root, shard):
+    expected = read_json(root / "inputs/integration-targets.json")
+    selected = read_json(root / "integration/targets.json")
+    steps = shard.get("steps") if isinstance(shard, dict) else None
+    if (not isinstance(expected, list) or not expected
+            or any(not isinstance(target, str) for target in expected)
+            or selected != expected or not isinstance(steps, list) or not steps
+            or not isinstance(steps[0], dict)
+            or steps[0].get("command") != integration_command(expected)):
+        return False
+    try:
+        log = (root / "integration/integration.log").read_text(errors="replace")
+    except OSError:
+        return False
+    return integration_log_covers_targets(log, expected)
+
+
+def complete_stress_matrix_execution(root, shard):
+    steps = shard.get("steps") if isinstance(shard, dict) else None
+    if (not isinstance(steps, list) or not steps or not isinstance(steps[0], dict)
+            or steps[0].get("command") != stress_command()):
+        return False
+    try:
+        log = (root / "stress/stress.log").read_text(errors="replace")
+    except OSError:
+        return False
+    matches = re.findall(rf"(?m)^test {re.escape(STRESS_MATRIX_TEST)} \.\.\.",
+                         ANSI_ESCAPE.sub("", log))
+    paths = re.findall(r"JIT stress: \d+ seeds passed in [\d.]+s; (.+)", log)
+    return (len(matches) == 1 and len(paths) == 1
+            and shard.get("stress_artifacts") == paths[0]
+            and isinstance(read_json(root / "stress/stress.json"), dict))
+
+
 def run_shard(shard, root):
     folder = root / shard
     folder.mkdir(parents=True, exist_ok=False)
@@ -163,8 +256,7 @@ def run_shard(shard, root):
         return status, contents
 
     def test(label, selectors, filters=()):
-        return run(label, ["cargo", "test", "--locked", "--features", FEATURES,
-                           "--no-fail-fast", *selectors, "--", *TEST_ARGS, *filters])
+        return run(label, test_command(selectors, filters))
 
     try:
         if not Path("Cargo.lock").exists():
@@ -187,13 +279,13 @@ def run_shard(shard, root):
             if status == 0 and passed_tests(log) != len(selected):
                 raise ValueError("unit test count does not match the selected partition")
         elif shard == "integration":
-            metadata = json.loads(output("cargo", "metadata", "--no-deps", "--format-version", "1"))
-            package = next(p for p in metadata["packages"] if p["name"] == "omoikane")
-            targets = integration_targets(package)
+            targets = integration_targets_from_metadata()
             write_json(folder / "targets.json", targets)
-            if not targets:
-                raise ValueError("no integration targets found")
-            test("integration", [arg for target in targets for arg in ("--test", target)])
+            if not targets or targets != read_json(root / "inputs/integration-targets.json"):
+                raise ValueError("integration targets differ from prepared target list")
+            status, _ = run("integration", integration_command(targets))
+            if status == 0 and not complete_integration_coverage(root, result):
+                raise ValueError("integration target or stress-matrix selection is incomplete")
             test("examples-and-bins", ["--examples", "--bins"])
             test("doc", ["--doc"])
             run("build", ["cargo", "build", "--locked", "--features", "jit-stress"])
@@ -213,12 +305,13 @@ def run_shard(shard, root):
             test("web-api", ["--test", "web_api_surface"])
             test("embedded-web-api", ["--test", "jit_deopt"], ["web_api_surface::"])
         elif shard == "stress":
-            _, log = test("stress", ["--test", "jit_deopt"],
-                          ["--skip", "acid3::", "--skip", "web_api_surface::"])
+            status, log = run("stress", stress_command())
             paths = re.findall(r"JIT stress: \d+ seeds passed in [\d.]+s; (.+)", log)
             if paths:
                 result["stress_artifacts"] = paths[-1]
                 shutil.copyfile(Path(paths[-1]) / "summary.json", folder / "stress.json")
+            if status == 0 and not complete_stress_matrix_execution(root, result):
+                raise ValueError("dedicated stress matrix or its summary is missing")
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         result["error"] = str(error)
         print(f"[{shard}] {error}", file=sys.stderr, flush=True)
@@ -254,11 +347,14 @@ def aggregate(root, jobs_succeeded=True):
     wpt = read_json(root / "compatibility/wpt.json")
     web_api = read_json(root / "compatibility/web-api.json")
     stress = read_json(root / "stress/stress.json")
+    integration_coverage = complete_integration_coverage(root, shards.get("integration"))
+    stress_matrix_execution = complete_stress_matrix_execution(root, shards.get("stress"))
     checks = {
         "jobs_succeeded": jobs_succeeded,
         "same_revision": bool(expected) and expected["revision"] == output("git", "rev-parse", "HEAD"),
         "source_clean": bool(expected) and not expected["source_dirty"],
-        "full_suite": complete and complete_unit_coverage(root),
+        "full_suite": complete and complete_unit_coverage(root) and integration_coverage,
+        "stress_matrix_once": integration_coverage and stress_matrix_execution,
         "build": any(s.get("name") == "build" and s.get("exit") == 0
                      for s in (shards.get("integration") or {}).get("steps", [])),
         "acid3_100": isinstance(acid3, dict) and all(
