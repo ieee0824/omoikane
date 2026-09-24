@@ -2384,6 +2384,10 @@ impl HostState {
                 generation,
             },
         );
+        // A parsed child Document can itself contain connected iframes. Their
+        // initial about:blank navigations must enqueue load events even when no
+        // script ever reads their contentDocument.
+        self.schedule_connected_resource_loads(&document, false);
         Ok(document)
     }
 
@@ -9877,6 +9881,9 @@ fn ensure_iframe_realm(
         let global = context.global_object();
         global.set(js_string!("parent"), parent.clone(), true, context)?;
         global.set(js_string!("top"), top, true, context)?;
+        context.eval(Source::from_bytes(
+            "__omoikane_install_window_named_properties()",
+        ))?;
         Ok::<(), JsError>(())
     })();
     context.enter_realm(old_realm);
@@ -11133,6 +11140,11 @@ fn register_host_bindings(
             js_string!("__omoikane_iframe_global"),
             1,
             NativeFunction::from_copy_closure(iframe_global_native),
+        ),
+        (
+            js_string!("__omoikane_dispatch_iframe_departure_native"),
+            1,
+            NativeFunction::from_copy_closure(dispatch_iframe_departure_native),
         ),
         (
             js_string!("__omoikane_existing_iframe_document"),
@@ -19954,7 +19966,9 @@ fn iframe_content_document_native(
 }
 
 /// Returns the live same-origin iframe global for the private WindowProxy
-/// forwarding path. Origin and sandbox checks also apply at this native boundary.
+/// forwarding path. A false second argument only looks up an existing Realm,
+/// so event-listener access does not bootstrap a scriptless child Document.
+/// Origin and sandbox checks also apply at this native boundary.
 fn iframe_global_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let document = iframe_content_document_native(&JsValue::undefined(), args, context)?;
     if document.is_null() {
@@ -19962,12 +19976,53 @@ fn iframe_global_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
     }
     let iframe_id = parse_node_id(args.first(), context)?;
     let document_id = document.to_number(context)? as usize;
+    let create_if_missing = args.get(1).is_none_or(JsValue::to_boolean);
     with_host_state(|state| {
-        let realm = ensure_iframe_realm(context, state, iframe_id, document_id)?;
+        let realm = if create_if_missing {
+            ensure_iframe_realm(context, state, iframe_id, document_id)?
+        } else {
+            let Some(realm) = state
+                .borrow()
+                .iframe_documents
+                .get(&iframe_id)
+                .and_then(|entry| entry.realm.clone())
+            else {
+                return Ok(JsValue::null());
+            };
+            realm
+        };
         let previous = context.enter_realm(realm);
         let global = context.global_object();
         context.enter_realm(previous);
         Ok(global.into())
+    })
+}
+
+/// Dispatches lifecycle events in the departing iframe's existing Realm.
+/// A scriptless Document has no Realm to dispatch through yet; callers use
+/// their same-origin wrapper without creating a full Realm just for departure.
+fn dispatch_iframe_departure_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let iframe_id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        let realm = {
+            let state = state.borrow();
+            let Some(entry) = state.iframe_documents.get(&iframe_id) else {
+                return Ok(JsValue::from(false));
+            };
+            entry.realm.clone()
+        };
+        let realm = match realm {
+            Some(realm) => realm,
+            None => return Ok(JsValue::from(false)),
+        };
+        let previous = context.enter_realm(realm);
+        let result = context.eval(Source::from_bytes("__omoikane_dispatch_iframe_departure()"));
+        context.enter_realm(previous);
+        result.map(|_| JsValue::from(true))
     })
 }
 

@@ -86,6 +86,7 @@
     browsingInput.pointerFocusInProgress = false;
   }
   browsingInput.visibilityHiddenDocumentIds ||= new Set();
+  browsingInput.departingIframeDocumentIds ||= new Set();
   if (__omoikane_document_id !== browsingInput.topDocumentId) {
     browsingInput.removalMayAffectIframeVisibility = true;
   }
@@ -124,6 +125,9 @@
   const nativeIframeGlobal = globalThis.__omoikane_iframe_global;
   const nativeExistingIframeDocument = globalThis.__omoikane_existing_iframe_document;
   delete globalThis.__omoikane_existing_iframe_document;
+  const nativeDispatchIframeDeparture =
+    globalThis.__omoikane_dispatch_iframe_departure_native;
+  delete globalThis.__omoikane_dispatch_iframe_departure_native;
   const nativeIframeContextState = globalThis.__omoikane_iframe_context_state;
   const nativeCaptureIframeFormState = globalThis.__omoikane_capture_iframe_form_state;
   const nativeRestoreIframeFormState = globalThis.__omoikane_restore_iframe_form_state;
@@ -346,6 +350,7 @@
     for (let index = 0; index < ids.length; index += 1) {
       const id = ids[index];
       browsingInput.visibilityHiddenDocumentIds.delete(id);
+      browsingInput.departingIframeDocumentIds.delete(id);
       // If teardown retired the browsing context which currently owns focus,
       // hand focus back to the top Document before any later hasFocus() walk
       // attempts to wrap the now-unregistered Document identity.
@@ -8104,6 +8109,43 @@
     }
   }
 
+  function dispatchIframeNavigationDeparture(iframe) {
+    const documentId = nativeExistingIframeDocument(iframe.__id);
+    if (documentId === null || documentId === undefined ||
+        browsingInput.departingIframeDocumentIds.has(documentId)) return;
+    const sameOriginDocumentId = nativeIframeContentDocument(iframe.__id);
+    if (sameOriginDocumentId !== null && iframe.__contentWindowFacade) {
+      // The child may have started a Realm after its WindowProxy received
+      // listeners. Attach those listeners to the existing Window before its
+      // pagehide event is dispatched in that Realm.
+      void iframe.__contentWindowFacade.__listeners;
+    }
+    if (nativeDispatchIframeDeparture(iframe.__id)) return;
+    const departingDocument = sameOriginDocumentId !== null ? wrapNode(documentId) : null;
+    browsingInput.departingIframeDocumentIds.add(documentId);
+    if (departingDocument) {
+      departingDocument.dispatchEvent(new Event("pagehide", {
+        bubbles: true, cancelable: true,
+      }));
+    }
+    if (!browsingInput.visibilityHiddenDocumentIds.has(documentId)) {
+      browsingInput.visibilityHiddenDocumentIds.add(documentId);
+      if (departingDocument) {
+        departingDocument.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+      }
+    }
+  }
+  globalThis.__omoikane_dispatch_iframe_departure = function() {
+    const documentId = __omoikane_document_id;
+    if (browsingInput.departingIframeDocumentIds.has(documentId)) return;
+    browsingInput.departingIframeDocumentIds.add(documentId);
+    document.dispatchEvent(new Event("pagehide", { bubbles: true, cancelable: true }));
+    if (!browsingInput.visibilityHiddenDocumentIds.has(documentId)) {
+      browsingInput.visibilityHiddenDocumentIds.add(documentId);
+      document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+    }
+  };
+
   // An <iframe> owns a nested browsing context whose document is reachable via
   // contentDocument (and, as a facade, contentWindow.document). The document is
   // created lazily by the host on first access: an empty/absent src yields an
@@ -8317,15 +8359,27 @@
         // A connected about:blank frame already has a Realm, even before it
         // executes a script. Forward ordinary properties to that Realm so its
         // constructors, expandos, and reflection all describe the same global.
-        const getActiveWindow = () => {
+        const getActiveWindow = (createIfMissing = true) => {
           if (activeRealmReady) {
             const global = weakRefDeref(activeWindow);
             if (global) return global;
             activeRealmReady = false;
             activeWindow = { __listeners: new Map() };
           }
-          const global = nativeIframeGlobal(iframe.__id);
+          const global = nativeIframeGlobal(iframe.__id, createIfMissing);
           if (global !== null) {
+            // WindowProxy listeners can be registered before page code needs a
+            // child Realm. Move those listeners to the live Window when the
+            // Realm is finally created.
+            const pendingListeners = activeWindow.__listeners;
+            if (pendingListeners.size) {
+              const liveListeners = global.__listeners;
+              for (const [type, entries] of pendingListeners) {
+                const liveEntries = liveListeners.get(type) || [];
+                liveEntries.push(...entries);
+                liveListeners.set(type, liveEntries);
+              }
+            }
             // The native live Realm roots its global. Keeping only a weak
             // cache here also releases the last backing Window immediately
             // after navigation, even when no later proxy property is read.
@@ -8361,6 +8415,7 @@
           // state URLs deliberately continue to use the target Document below.
           const destination = new URL(String(value), callerBaseURL()).href;
           captureActiveHistory();
+          dispatchIframeNavigationDeparture(iframe);
           pendingHistoryAction = disposition;
           iframe.removeAttribute("srcdoc");
           iframe.src = destination;
@@ -8375,6 +8430,7 @@
             requireHistoryAccess(expectedGeneration);
           }
           captureActiveHistory();
+          dispatchIframeNavigationDeparture(iframe);
           const entry = historyEntries[historyIndex];
           pendingHistoryAction = "reload";
           if (entry.submission !== null) {
@@ -8424,6 +8480,7 @@
             proxy.dispatchEvent(event);
             return;
           }
+          dispatchIframeNavigationDeparture(iframe);
           pendingHistoryAction = "traverse";
           if (entry.submission !== null) {
             nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
@@ -8587,7 +8644,10 @@
             if (property === "top") return globalThis;
             if (property === "parent") return parentWindow();
             if (property === "opener") return null;
-            if (property === "length") return 0;
+            if (property === "length") {
+              const document = iframe.contentDocument;
+              return document ? document.querySelectorAll("iframe").length : 0;
+            }
             if (property === "location") return locationFacade;
             if (property === "close" || property === "focus" || property === "blur") return () => {};
             if (property === "postMessage") return postMessage;
@@ -8601,6 +8661,9 @@
               if (property === "frameElement") return null;
               if (safeCrossOriginProperties.has(property)) return undefined;
               throw securityError();
+            }
+            if (property === "__listeners" && !activeRealmReady) {
+              return getActiveWindow(false).__listeners;
             }
             const document = iframe.contentDocument;
             if (property === "document") return document;
@@ -8727,16 +8790,29 @@
 
     setAttribute(name, value) {
       const attribute = String(name).toLowerCase();
+      const normalized = String(value);
       if (attribute === "src" || attribute === "srcdoc") {
         this.__prepareResourceNavigation();
+        const previous = this.getAttribute(attribute);
+        const changesResource = attribute === "srcdoc"
+          ? previous !== normalized
+          : !this.hasAttribute("srcdoc") &&
+            (previous ?? "").trim() !== normalized.trim();
+        if (changesResource && this.isConnected) {
+          dispatchIframeNavigationDeparture(this);
+        }
       }
-      super.setAttribute(name, value);
+      super.setAttribute(name, normalized);
     }
 
     removeAttribute(name) {
       const attribute = String(name).toLowerCase();
       if ((attribute === "src" || attribute === "srcdoc") && this.hasAttribute(name)) {
         this.__prepareResourceNavigation();
+        if (this.isConnected &&
+            (attribute === "srcdoc" || !this.hasAttribute("srcdoc"))) {
+          dispatchIframeNavigationDeparture(this);
+        }
       }
       super.removeAttribute(name);
     }
