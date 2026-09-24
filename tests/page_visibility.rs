@@ -82,6 +82,298 @@ fn iframe_document_inherits_visibility_and_receives_change_event() {
 }
 
 #[test]
+fn removing_iframe_hides_departing_document_before_teardown() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.frame = document.createElement('iframe'); \
+             frame.srcdoc = '<p>child</p>'; document.body.appendChild(frame); \
+             globalThis.childDocument = frame.contentDocument; \
+             globalThis.departure = []; \
+             childDocument.addEventListener('visibilitychange', () => \
+               departure.push(childDocument.visibilityState)); \
+             frame.remove();",
+        )
+        .unwrap();
+    assert!(
+        runtime
+            .eval("childDocument.visibilityState === 'hidden' && departure.join(',') === 'hidden'")
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
+fn nested_iframe_loads_then_hides_all_departing_documents() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let _ = stream.read(&mut request).unwrap();
+        let body = "<body onload='parent.startTest()'><iframe onload='parent.parent.startTest()'></iframe><iframe onload='parent.parent.startTest()'></iframe></body>";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    let url = format!("http://{address}/index.html");
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='outer' src='http://{address}/child.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(document, &url).unwrap();
+    runtime
+        .eval("globalThis.loadCount = 0; globalThis.startTest = () => loadCount++")
+        .unwrap();
+    let base = url.parse().unwrap();
+    assert!(runtime.execute_document_scripts(Some(&base)).is_empty());
+    runtime.run_timers(5_000, 10, 2_000);
+    runtime.run_jobs().unwrap();
+    let count = runtime.eval("loadCount").unwrap().as_number().unwrap();
+    assert_eq!(count, 3.0, "nested load callbacks must all run");
+    runtime
+        .eval(
+            "globalThis.departure = []; \
+             const outer = document.getElementById('outer'); \
+             const frameDocuments = [outer.contentDocument, \
+               outer.contentWindow[0].document, outer.contentWindow[1].document]; \
+             for (let index = 0; index < frameDocuments.length; index++) { \
+               const childDocument = frameDocuments[index]; \
+               childDocument.addEventListener('visibilitychange', () => \
+                 departure.push(index + ':' + childDocument.visibilityState)); \
+             } \
+             outer.remove();",
+        )
+        .unwrap_or_else(|error| panic!("nested iframe departure: {error}"));
+    assert_eq!(
+        runtime
+            .eval("departure.sort().join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "0:hidden,1:hidden,2:hidden"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn iframe_navigation_dispatches_pagehide_before_visibilitychange() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.frame = document.createElement('iframe'); \
+             frame.srcdoc = '<p>old</p>'; document.body.appendChild(frame); \
+             globalThis.oldDocument = frame.contentDocument; \
+             globalThis.departure = []; \
+             frame.contentWindow.addEventListener('pagehide', event => \
+               departure.push('pagehide:' + event.target.nodeName + ':' + \
+                 oldDocument.visibilityState + ':' + event.cancelable)); \
+             oldDocument.addEventListener('visibilitychange', event => \
+               departure.push('visibilitychange:' + event.target.nodeName + ':' + \
+                 oldDocument.visibilityState + ':' + event.cancelable)); \
+             frame.contentWindow.location.href = 'data:text/html,<p>next</p>';",
+        )
+        .unwrap_or_else(|error| panic!("iframe navigation departure: {error}"));
+    let events = runtime
+        .eval("departure.join(',')")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        events,
+        "pagehide:#document:visible:true,visibilitychange:#document:hidden:false"
+    );
+}
+
+#[test]
+fn iframe_srcdoc_navigation_notifies_departing_document() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.frame = document.createElement('iframe'); \
+             document.body.appendChild(frame); \
+             globalThis.oldDocument = frame.contentDocument; \
+             globalThis.departure = []; \
+             frame.contentWindow.addEventListener('pagehide', event => \
+               departure.push('pagehide:' + oldDocument.visibilityState)); \
+             oldDocument.addEventListener('visibilitychange', () => \
+               departure.push('visibilitychange:' + oldDocument.visibilityState)); \
+             frame.srcdoc = '<p>next</p>';",
+        )
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
+    assert_eq!(
+        runtime
+            .eval("departure.join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "pagehide:visible,visibilitychange:hidden"
+    );
+}
+
+#[test]
+fn iframe_window_listener_survives_lazy_realm_creation_before_departure() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert!(
+        runtime
+            .eval(
+                "const frame = document.createElement('iframe'); \
+                 document.body.appendChild(frame); \
+                 let pagehideCount = 0; \
+                 frame.contentWindow.addEventListener('pagehide', () => pagehideCount++); \
+                 void frame.contentWindow.Date; \
+                 frame.srcdoc = '<p>next</p>'; \
+                 pagehideCount === 1;",
+            )
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
+fn scripted_iframe_realm_receives_later_window_proxy_departure_listener() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.frame = document.createElement('iframe'); \
+             frame.srcdoc = '<script>window.loaded = true<\\/script>'; \
+             document.body.appendChild(frame);",
+        )
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
+    runtime
+        .eval(
+            "globalThis.departure = []; \
+             const oldDocument = frame.contentDocument; \
+             oldDocument.addEventListener('visibilitychange', () => \
+               departure.push('visibilitychange:' + oldDocument.visibilityState)); \
+             frame.contentWindow.addEventListener('pagehide', () => \
+               departure.push('pagehide:' + oldDocument.visibilityState)); \
+             frame.srcdoc = '<p>next</p>';",
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("departure.join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "pagehide:visible,visibilitychange:hidden"
+    );
+}
+
+#[test]
+fn iframe_listener_registered_before_child_script_survives_realm_creation() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.scriptRan = false; globalThis.departure = []; \
+             globalThis.frame = document.createElement('iframe'); \
+             frame.srcdoc = '<script>parent.scriptRan = true<\\/script>'; \
+             document.body.appendChild(frame); \
+             frame.contentWindow.addEventListener('pagehide', () => \
+               departure.push('pagehide'));",
+        )
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
+    assert!(runtime.eval("scriptRan").unwrap().to_boolean());
+    runtime.eval("frame.srcdoc = '<p>next</p>'").unwrap();
+    assert_eq!(
+        runtime
+            .eval("departure.join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "pagehide"
+    );
+}
+
+#[test]
+fn unchanged_iframe_srcdoc_does_not_depart() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert!(
+        runtime
+            .eval(
+                "const frame = document.createElement('iframe'); \
+             frame.srcdoc = '<p>old</p>'; document.body.appendChild(frame); \
+             const oldDocument = frame.contentDocument; \
+             let departures = 0; \
+             oldDocument.addEventListener('visibilitychange', () => departures++); \
+             frame.srcdoc = '<p>old</p>'; \
+             departures === 0 && frame.contentDocument === oldDocument;",
+            )
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
+fn cross_origin_iframe_navigation_does_not_throw_departure_error() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.frame = document.createElement('iframe'); \
+             frame.src = 'data:text/html,<p>old</p>'; document.body.appendChild(frame);",
+        )
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
+    assert!(
+        runtime
+            .eval("frame.contentDocument === null")
+            .unwrap()
+            .to_boolean()
+    );
+    runtime
+        .eval("frame.contentWindow.location.href = 'data:text/html,<p>next</p>'")
+        .unwrap_or_else(|error| panic!("cross-origin iframe departure: {error}"));
+}
+
+#[test]
+fn cross_origin_iframe_receives_departure_events_in_its_own_realm() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"
+            globalThis.departureMessages = [];
+            window.addEventListener('message', event => departureMessages.push(event.data));
+            globalThis.frame = document.createElement('iframe');
+            const child = `<script>
+              window.addEventListener('pagehide', () =>
+                parent.postMessage('pagehide:' + document.visibilityState, '*'));
+              document.addEventListener('visibilitychange', () =>
+                parent.postMessage('visibilitychange:' + document.visibilityState, '*'));
+            <\/script>`;
+            frame.src = 'data:text/html,' + encodeURIComponent(child);
+            document.body.appendChild(frame);
+            "#,
+        )
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
+    runtime
+        .eval("frame.contentWindow.location.href = 'data:text/html,<p>next</p>'")
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
+    runtime.run_jobs().unwrap();
+    let messages = runtime
+        .eval("departureMessages.join(',')")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(messages, "pagehide:visible,visibilitychange:hidden");
+}
+
+#[test]
 fn iframe_window_load_handler_can_initiate_visibility_work() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
