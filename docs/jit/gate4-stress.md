@@ -38,8 +38,12 @@ remain valid after the runtime is dropped.
 The existing native CI deoptimization target keeps the baseline JIT deopt,
 exception and interrupt contracts lightweight. The `jit-stress` feature adds
 this corpus, the Acid3 harness and Web API surface checks without changing the
-default build. The complete gate runs every test with JIT enabled, including
-ignored tests and the required pinned WPT subset, as well as a build.
+default build. The complete gate covers every test with JIT enabled, including
+ignored tests and the required pinned WPT subset, as well as a build. The
+`stress::reproducible_stress_matrix` test is included by both `jit_native_gate`
+and `jit_deopt`; Gate 4 runs its ten-minute, GC-profiled instance only in the
+dedicated `stress` partition. The native-target workflow still runs the
+`jit_native_gate` instance with its normal seed count.
 Every test process still uses `--test-threads=1`: the Gate 4 feature enables
 GC/JIT diagnostics with process-wide counters and timeout state. CI parallelism
 uses separate Ubuntu 24.04 x86_64 runners with Rust 1.98.1:
@@ -47,7 +51,7 @@ uses separate Ubuntu 24.04 x86_64 runners with Rust 1.98.1:
 | Partition | Coverage |
 | --- | --- |
 | `unit-0` through `unit-3` | All library tests, assigned by a stable hash of each exact test name |
-| `integration` | Remaining integration targets, examples, enabled binaries, doctests, and build |
+| `integration` | Remaining integration targets (skipping only the duplicate `jit_native_gate` stress matrix), examples, enabled binaries, doctests, and build |
 | `acid3` | Standalone and embedded Acid3 harness, both drive modes |
 | `compatibility` | Required pinned WPT and standalone/embedded Web API surface |
 | `stress` | Deopt/exception/interrupt contracts and the generated stress corpus |
@@ -66,6 +70,12 @@ all four lists agree and that their selections cover every test exactly once.
 New integration targets are discovered through Cargo metadata. Acid3 and Web API
 modules embedded in `jit_deopt` run in their corresponding partitions, so its
 stress partition does not duplicate those heavy tests.
+The preparation job records the complete integration-target list. The
+integration log must show every selected test binary and exactly one filtered
+test, in `jit_native_gate`; its native execution-policy contract still runs.
+The dedicated stress log must show the matrix once and match its retained
+summary. The aggregator checks those logs, commands, target lists and the
+existing minimum seed/duration requirements before issuing `go`.
 
 One preparation job resolves `Cargo.lock` and distributes it to every runner.
 Each partition records its revision, compiler, target, lockfile digest, tracked
@@ -75,6 +85,8 @@ including on failure. The matrix disables fail-fast so a failure in Acid3 does
 not prevent WPT or the ten-minute stress from running. This reduces elapsed time
 at the cost of more concurrent runners and compilation on an initially cold
 cache; measured timings must distinguish cold and warm runs.
+This removes duplicate runner work, but another CI job can become the workflow's
+longest path, so overall latency must be measured separately.
 
 The final `jit-stress` job always runs and retains the existing required-check
 name. It collects the partition reports and writes `gate.json`. A missing,
