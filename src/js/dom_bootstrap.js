@@ -1728,6 +1728,42 @@
     return target;
   }
 
+  function hitTestForRoot(root, x, y, all) {
+    const px = +x;
+    const py = +y;
+    if (!Number.isFinite(px) || !Number.isFinite(py)) {
+      throw new TypeError("Point coordinates must be finite numbers");
+    }
+    const doc = root instanceof Document ? root : root.host.ownerDocument;
+    flushStyleSheets();
+    const ids = __omoikane_hit_test_point(doc.__id, px, py, all);
+    if (ids === null) return all ? [] : null;
+    if (!all) {
+      return ids.length ? retargetNode(wrapNode(ids[0]), root) : doc.documentElement;
+    }
+    const hits = [];
+    const firstSource = new Map();
+    for (const id of ids) {
+      const source = wrapNode(id);
+      const target = retargetNode(source, root);
+      if (!target) continue;
+      const previous = firstSource.get(target);
+      if (previous === undefined) {
+        hits.push(target);
+        firstSource.set(target, source);
+      } else if (previous === source && source === target) {
+        // Separate painted boxes of one element can appear more than once.
+        // Only collapse distinct shadow-tree sources retargeted to one host.
+        hits.push(target);
+      }
+    }
+    const documentElement = doc.documentElement;
+    if (documentElement && hits[hits.length - 1] !== documentElement) {
+      hits.push(documentElement);
+    }
+    return hits;
+  }
+
   function eventParent(node, event, originalRoot) {
     if (!(node instanceof Node) || !isLiveNode(node)) return null;
     const assignedSlotId = internalAssignedSlot(node.__id);
@@ -6577,6 +6613,16 @@
       return activeElementForRoot(this);
     }
 
+    elementFromPoint(x, y) {
+      if (arguments.length < 2) throw new TypeError("elementFromPoint requires 2 arguments");
+      return hitTestForRoot(this, x, y, false);
+    }
+
+    elementsFromPoint(x, y) {
+      if (arguments.length < 2) throw new TypeError("elementsFromPoint requires 2 arguments");
+      return hitTestForRoot(this, x, y, true);
+    }
+
     get head() {
       return this.getElementsByTagName("head")[0] || null;
     }
@@ -6833,6 +6879,14 @@
     get mode() { return __omoikane_shadow_mode(this.__id); }
     get delegatesFocus() { return false; }
     get activeElement() { return activeElementForRoot(this); }
+    elementFromPoint(x, y) {
+      if (arguments.length < 2) throw new TypeError("elementFromPoint requires 2 arguments");
+      return hitTestForRoot(this, x, y, false);
+    }
+    elementsFromPoint(x, y) {
+      if (arguments.length < 2) throw new TypeError("elementsFromPoint requires 2 arguments");
+      return hitTestForRoot(this, x, y, true);
+    }
     get pointerLockElement() { return pointerLockElementForRoot(this); }
     get fullscreenElement() {
       const candidate = rawFullscreenElementForDocument(internalOwnerDocument(this.host));

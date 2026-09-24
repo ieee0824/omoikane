@@ -16,6 +16,43 @@ fn number(runtime: &mut JsRuntime, source: &str) -> f64 {
 }
 
 #[test]
+fn document_point_query_matches_pointer_hit_test_after_style_change() {
+    let mut runtime = runtime(
+        "<html><head><style>html,body{margin:0}#back,#front{position:absolute;left:10px;top:10px;width:60px;height:60px}#back{background:red}#front{background:blue}</style></head><body><div id='back'></div><div id='front'></div></body></html>",
+    );
+    runtime.set_viewport(160.0, 120.0);
+    assert_eq!(
+        runtime
+            .hit_test(20.0, 20.0)
+            .and_then(|node| node.get_attribute("id"))
+            .as_deref(),
+        Some("front"),
+    );
+    assert!(
+        runtime
+            .eval("document.elementFromPoint(20,20) === document.getElementById('front')")
+            .unwrap()
+            .to_boolean()
+    );
+    runtime
+        .eval("document.getElementById('front').style.pointerEvents='none'")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .hit_test(20.0, 20.0)
+            .and_then(|node| node.get_attribute("id"))
+            .as_deref(),
+        Some("back"),
+    );
+    assert!(
+        runtime
+            .eval("document.elementFromPoint(20,20) === document.getElementById('back')")
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
 fn inline_block_uses_its_internal_line_box_for_border_box_geometry() {
     let mut runtime = runtime(
         "<html><head><style>html,body{margin:0}body{padding:24px}#before{font:10px/10px monospace}#target{display:inline-block;font:40px/50px monospace;padding:8px;border:2px solid}</style></head><body><span id='before'>A</span><span id='target'>ABBA BAAB</span></body></html>",

@@ -163,6 +163,15 @@ git_wpt sparse-checkout add \
   "/css/css-scroll-snap/scroll-snap-type.html" \
   "/css/css-scroll-snap/scrollTo-scrollBy-snaps.html" \
   "/css/css-scroll-snap/scroll-padding-and-margin.html"
+git_wpt sparse-checkout add \
+  "/css/cssom-view/elementFromPoint-001.html" \
+  "/css/cssom-view/elementFromPoint-parameters.html" \
+  "/css/cssom-view/elementsFromPoint-invalid-cases.html" \
+  "/css/cssom-view/elementsFromPoint-shadowroot.html" \
+  "/css/cssom-view/elementsFromPoint-iframes.html" \
+  "/css/cssom-view/resources/elementsFromPoint.js" \
+  "/css/cssom-view/resources/iframe1.html" \
+  "/css/cssom-view/resources/iframe2.html"
 git_wpt sparse-checkout add "/css/css-break/parsing/"
 git_wpt sparse-checkout add \
   "/css/css-contain/content-visibility/parsing/" \
