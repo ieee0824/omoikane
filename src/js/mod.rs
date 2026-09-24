@@ -5605,6 +5605,8 @@ impl JsRuntime {
     /// Sets the initial visibility before a new Document runs any page script.
     pub(crate) fn set_initial_visibility_hidden(&mut self, hidden: bool) {
         self.host_state.borrow_mut().page_hidden = hidden;
+        let result = self.eval("__omoikane_sync_initial_visibility_entry()");
+        self.record_error_from("initial visibility entry", result);
     }
 
     /// Updates this page and its iframe Documents, firing `visibilitychange`
@@ -35785,7 +35787,7 @@ b</textarea></form>"#,
                     throwsTypeError(() => observer.observe({ type: "mark", entryTypes: ["mark"] })) &&
                     throwsTypeError(() => observer.observe({ entryTypes: [] })) && modeError &&
                     Object.isFrozen(PerformanceObserver.supportedEntryTypes) &&
-                    PerformanceObserver.supportedEntryTypes.join(",") === "navigation,resource,mark,measure";
+                    PerformanceObserver.supportedEntryTypes.join(",") === "navigation,resource,mark,measure,visibility-state";
                 })()"#,
             )
             .unwrap()

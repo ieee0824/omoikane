@@ -8142,6 +8142,7 @@
     document.dispatchEvent(new Event("pagehide", { bubbles: true, cancelable: true }));
     if (!browsingInput.visibilityHiddenDocumentIds.has(documentId)) {
       browsingInput.visibilityHiddenDocumentIds.add(documentId);
+      recordVisibilityStateEntry("hidden", nativePerformanceNow());
       document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     }
   };
@@ -14206,6 +14207,9 @@
   globalThis.__omoikane_dispatch_visibilitychange = function(documentId) {
     const changedDocument = wrapNode(documentId);
     if (changedDocument) {
+      if (documentId === __omoikane_document_id) {
+        recordVisibilityStateEntry(changedDocument.visibilityState, nativePerformanceNow());
+      }
       changedDocument.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     }
   };
@@ -14213,6 +14217,7 @@
     if (browsingInput.visibilityHiddenDocumentIds.has(__omoikane_document_id)) return;
     browsingInput.visibilityHiddenDocumentIds.add(__omoikane_document_id);
     globalThis.dispatchEvent(new Event("pagehide"));
+    recordVisibilityStateEntry("hidden", nativePerformanceNow());
     document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     globalThis.dispatchEvent(new Event("unload"));
   };
@@ -17479,6 +17484,13 @@
     }
   }
 
+  class VisibilityStateEntry extends PerformanceEntry {
+    constructor(token, visibilityState, startTime) {
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, visibilityState, "visibility-state", startTime, 0);
+    }
+  }
+
   class PerformanceMark extends PerformanceEntry {
     constructor(name, options = {}) {
       options = options ?? {};
@@ -17710,7 +17722,7 @@
     }
   }
   Object.defineProperty(PerformanceObserver, "supportedEntryTypes", {
-    get() { return Object.freeze(["navigation", "resource", "mark", "measure"]); },
+    get() { return Object.freeze(["navigation", "resource", "mark", "measure", "visibility-state"]); },
     enumerable: true,
   });
 
@@ -17758,6 +17770,12 @@
       schedulePerformanceObserver(observer);
     }
     return entry;
+  }
+
+  function recordVisibilityStateEntry(visibilityState, startTime) {
+    addPerformanceEntry(new VisibilityStateEntry(
+      performanceEntryToken, visibilityState, startTime,
+    ));
   }
 
   function normalizeTimingNumber(value, fallback = 0) {
@@ -18063,6 +18081,7 @@
     enumerable: true,
   });
   globalThis.PerformanceEntry = PerformanceEntry;
+  globalThis.VisibilityStateEntry = VisibilityStateEntry;
   globalThis.PerformanceMark = PerformanceMark;
   globalThis.PerformanceMeasure = PerformanceMeasure;
   globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
@@ -18070,6 +18089,13 @@
   globalThis.PerformanceObserver = PerformanceObserver;
   globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
   globalThis.performance = performance;
+  recordVisibilityStateEntry(document.visibilityState, 0);
+  globalThis.__omoikane_sync_initial_visibility_entry = function() {
+    const index = performanceEntries.findIndex(entry => entry.entryType === "visibility-state");
+    if (index >= 0 && performanceEntries[index].name === document.visibilityState) return;
+    if (index >= 0) performanceEntries.splice(index, 1);
+    recordVisibilityStateEntry(document.visibilityState, 0);
+  };
   addPerformanceEntry(initialNavigationEntry);
   navigationEntryForLifecycle = initialNavigationEntry;
   globalThis.__omoikane_performance_navigation_event = function(type) {
