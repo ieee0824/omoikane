@@ -242,6 +242,22 @@ add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Numb
         respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
         return;
     }
+    if path == "/resources/testdriver-vendor.js" {
+        // The pinned visibility-state WPT asks the browser to minimize and
+        // restore its window. Queue these requests for the Rust test runner,
+        // which owns the page's host visibility state.
+        let body = br#"
+globalThis.__wpt_window_commands = [];
+test_driver_internal.minimize_window = () => new Promise(resolve => {
+  __wpt_window_commands.push({hidden: true, resolve});
+});
+test_driver_internal.set_window_rect = () => new Promise(resolve => {
+  __wpt_window_commands.push({hidden: false, resolve});
+});
+"#;
+        respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
+        return;
+    }
     let relative = path.trim_start_matches("/");
     if relative.split("/").any(|part| part == "..") {
         respond(&mut stream, 403, "text/plain", b"forbidden");
@@ -304,6 +320,32 @@ fn js_bool(runtime: &mut JsRuntime, source: &str) -> bool {
         .ok()
         .and_then(|value| value.as_boolean())
         .unwrap_or(false)
+}
+
+fn drive_visibility_state_testdriver(runtime: &mut JsRuntime, errors: &mut Vec<String>) {
+    // Keep this bridge scoped to the one WPT that needs host window-state
+    // automation. Each queued Promise resolves only after host visibility has
+    // changed, so its observer can see the matching entry before continuing.
+    for _ in 0..64 {
+        if js_bool(runtime, "globalThis.__wpt_complete === true") {
+            break;
+        }
+        if js_bool(runtime, "globalThis.__wpt_window_commands.length > 0") {
+            let hidden = js_bool(runtime, "__wpt_window_commands[0].hidden");
+            runtime.set_page_visibility(hidden);
+            if let Err(error) = runtime
+                .eval("__wpt_window_commands.shift().resolve({x:0,y:0,width:800,height:600})")
+            {
+                errors.push(format!("window-state testdriver: {error}"));
+                break;
+            }
+        }
+        runtime.run_timers(500, 10, 500);
+        if let Err(error) = runtime.run_jobs() {
+            errors.push(format!("window-state testdriver jobs: {error}"));
+            break;
+        }
+    }
 }
 
 impl ActualStatus {
@@ -939,7 +981,11 @@ fn selected_wpt_testharness_cases_match_expectations() {
             .wire_inline_event_handlers()
             .expect("wire WPT handlers");
         runtime.fire_load().expect("fire WPT load");
-        runtime.run_timers(5_000, 10, 2_000);
+        if case.path == "page-visibility/visibility-state-entry.tentative.html" {
+            drive_visibility_state_testdriver(&mut runtime, &mut errors);
+        } else {
+            runtime.run_timers(5_000, 10, 2_000);
+        }
         // WPTs commonly observe rendering steps through nested
         // requestAnimationFrame callbacks. Drive a bounded number of explicit
         // opportunities after load so resize/scroll events queued for a frame

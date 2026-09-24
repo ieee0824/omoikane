@@ -290,6 +290,7 @@
     { "path": "page-visibility/onvisibilitychange.html" },
     { "path": "page-visibility/iframe-unload.html" },
     { "path": "page-visibility/iframe-session-history.html" },
+    { "path": "page-visibility/visibility-state-entry.tentative.html" },
     { "path": "page-visibility/unload.html" },
     { "path": "page-visibility/unload-bubbles.html" }
   ]
