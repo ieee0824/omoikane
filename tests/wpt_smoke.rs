@@ -4,196 +4,20 @@ use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::thread;
 
 #[path = "wpt_smoke/manifest.rs"]
 mod manifest;
 #[path = "wpt_smoke/model.rs"]
 mod model;
+#[path = "wpt_smoke/server.rs"]
+mod server;
 use manifest::validate_manifest;
 use model::{
     ActualStatus, Classification, KnownFailure, Manifest, WptAreaReport, WptReport, WptResult,
     WptResultChange, WptRevisionDiff, WptSummary,
 };
-
-struct StaticServer {
-    base_url: String,
-}
-impl StaticServer {
-    fn start(root: PathBuf) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind WPT server");
-        let address = listener.local_addr().expect("WPT server address");
-        let root = Arc::new(root);
-        thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                serve(stream, &root);
-            }
-        });
-        Self {
-            base_url: format!("http://{address}"),
-        }
-    }
-}
-
-fn escaped_request_body(body: &[u8]) -> Vec<u8> {
-    let mut escaped = Vec::new();
-    let mut index = 0;
-    while index < body.len() {
-        if body[index..].starts_with(b"\r\n") {
-            escaped.extend_from_slice(b"\r\n");
-            index += 2;
-            continue;
-        }
-        match body[index] {
-            b'\\' => escaped.extend_from_slice(b"\\\\"),
-            value if value < 0x20 || value >= 0x7f => {
-                escaped.extend_from_slice(format!("\\x{value:02x}").as_bytes())
-            }
-            value => escaped.push(value),
-        }
-        index += 1;
-    }
-    escaped
-}
-
-#[test]
-fn echo_endpoint_preserves_crlf_and_escapes_request_bytes() {
-    assert_eq!(
-        escaped_request_body(b"a\r\n\n\0\x7f\xff\\<p>"),
-        b"a\r\n\\x0a\\x00\\x7f\\xff\\\\<p>"
-    );
-}
-
-fn serve(mut stream: TcpStream, root: &Path) {
-    let mut request_line = String::new();
-    let mut request_content_type = String::new();
-    let mut content_length = 0;
-    let mut body = Vec::new();
-    {
-        let mut reader = BufReader::new(&stream);
-        if reader.read_line(&mut request_line).is_err() {
-            return;
-        }
-        loop {
-            let mut header = String::new();
-            if reader.read_line(&mut header).is_err() {
-                return;
-            }
-            if header == "\r\n" || header.is_empty() {
-                break;
-            }
-            if let Some((key, value)) = header.split_once(':') {
-                if key.eq_ignore_ascii_case("content-length") {
-                    let Ok(length) = value.trim().parse::<usize>() else {
-                        return;
-                    };
-                    content_length = length;
-                } else if key.eq_ignore_ascii_case("content-type") {
-                    request_content_type = value.trim().to_string();
-                }
-            }
-        }
-        body.resize(content_length, 0);
-        if reader.read_exact(&mut body).is_err() {
-            return;
-        }
-    }
-    let target = request_line.split_whitespace().nth(1).unwrap_or("/");
-    let path = target.split("?").next().unwrap_or("/");
-    if path == "/FileAPI/file/resources/echo-content-escaped.py" {
-        // Equivalent to the pinned wptserve endpoint: echo actual request
-        // bytes, escaping controls/non-ASCII/backslashes and preserving CRLF.
-        let escaped = escaped_request_body(&body);
-        let method = request_line.split_whitespace().next().unwrap_or("GET");
-        let _ = write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Length: {}\r\nX-Request-Method: {method}\r\nX-Request-Content-Length: {content_length}\r\nX-Request-Content-Type: {request_content_type}\r\nConnection: close\r\n\r\n",
-            escaped.len()
-        );
-        let _ = stream.write_all(&escaped);
-        return;
-    }
-    if path == "/common/sab.js" {
-        // Upstream's buffer factory uses WebAssembly.Memory only to discover
-        // the SharedArrayBuffer constructor in browsers that hide its global.
-        // Omoikane exposes the real constructor but has no WebAssembly.Memory.
-        // Adapt constructor discovery, retaining actual shared buffers and all
-        // original test assertions (including transfer/detachment assertions).
-        let body = br#"
-const createBuffer = (type, length, opts) => {
-  if (type === "ArrayBuffer") return new ArrayBuffer(length, opts);
-  if (type === "SharedArrayBuffer") return new SharedArrayBuffer(length, opts);
-  throw new Error("type has to be ArrayBuffer or SharedArrayBuffer");
-};
-"#;
-        respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
-        return;
-    }
-    if path == "/resources/testharnessreport.js" {
-        // This runner consumes result callbacks rather than the interactive
-        // HTML report. Disable that report before tests start so its DOM-heavy
-        // rendering cannot consume a page callback's execution budget.
-        let body = br#"
-setup({output:false});
-globalThis.__wpt_results = [];
-globalThis.__wpt_harness_status = -1;
-globalThis.__wpt_complete = false;
-add_result_callback(test => globalThis.__wpt_results.push({name:String(test.name),status:Number(test.status),message:String(test.message||"")}));
-add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Number(status.status); globalThis.__wpt_complete=true; });
-"#;
-        respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
-        return;
-    }
-    if path == "/resources/testdriver-vendor.js" {
-        // The pinned visibility-state WPT asks the browser to minimize and
-        // restore its window. Queue these requests for the Rust test runner,
-        // which owns the page's host visibility state.
-        let body = br#"
-globalThis.__wpt_window_commands = [];
-test_driver_internal.minimize_window = () => new Promise(resolve => {
-  __wpt_window_commands.push({hidden: true, resolve});
-});
-test_driver_internal.set_window_rect = () => new Promise(resolve => {
-  __wpt_window_commands.push({hidden: false, resolve});
-});
-"#;
-        respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
-        return;
-    }
-    let relative = path.trim_start_matches("/");
-    if relative.split("/").any(|part| part == "..") {
-        respond(&mut stream, 403, "text/plain", b"forbidden");
-        return;
-    }
-    let file = root.join(relative);
-    match fs::read(&file) {
-        Ok(body) => respond(&mut stream, 200, content_type(&file), &body),
-        Err(_) => respond(&mut stream, 404, "text/plain", b"not found"),
-    }
-}
-
-fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
-    let reason = if status == 200 { "OK" } else { "Error" };
-    let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    let _ = stream.write_all(header.as_bytes());
-    let _ = stream.write_all(body);
-}
-fn content_type(path: &Path) -> &str {
-    match path.extension().and_then(|value| value.to_str()) {
-        Some("html" | "htm") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("json") => "application/json",
-        _ => "application/octet-stream",
-    }
-}
+use server::StaticServer;
 
 fn script_dependencies(source: &[u8], test_path: &str) -> Vec<String> {
     let parent = Path::new(test_path)
