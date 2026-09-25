@@ -96,6 +96,7 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - WebSocket + JSON-RPC ベースの最小 CDP サーバー
 - `Page` / `DOM` / `Runtime` / `Network` / `Target` / `Input` の最小 CDP ドメイン
 - C FFI（スクリーンショット API 含む）
+- [ページ内検索](docs/find-in-page.md)（GUI、`Omoikane.findInPage`、C FFI）
 
 ### 開発者向け
 - 未対応 CSS プロパティの観測ログ（stderr / SQLite 永続化）

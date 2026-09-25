@@ -389,7 +389,9 @@ const DOM_BOOTSTRAP: &str = concat!(
     "\n",
     include_str!("xpath.js"),
     "\n",
-    include_str!("font_loading.js")
+    include_str!("font_loading.js"),
+    "\n",
+    include_str!("find_in_page.js")
 );
 
 #[derive(Debug)]
@@ -4560,6 +4562,45 @@ pub struct JsRuntime {
     sandbox: SandboxConfig,
 }
 
+/// Operation on the browser-owned page search session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindInPageAction {
+    /// Start a new search with the supplied query.
+    Start,
+    /// Move to the following match, wrapping at the end.
+    Next,
+    /// Move to the preceding match, wrapping at the beginning.
+    Previous,
+    /// Return the current result after refreshing the document matches.
+    Status,
+    /// End the search and release its active selection.
+    Stop,
+}
+
+impl FindInPageAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Next => "next",
+            Self::Previous => "previous",
+            Self::Status => "status",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// Current page-search result. The active ordinal is one-based, or zero for no match.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindInPageResult {
+    /// Search text for the current session.
+    pub query: String,
+    /// Number of matches in the active document and its searchable subtrees.
+    pub match_count: usize,
+    /// One-based position of the active match, or zero if none exists.
+    pub active_match_ordinal: usize,
+}
+
 impl std::fmt::Debug for JsRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JsRuntime")
@@ -4716,6 +4757,27 @@ impl JsRuntime {
     /// Returns the current DOM document.
     pub fn document(&self) -> NodeHandle {
         self.host_state.borrow().document.clone()
+    }
+
+    /// Searches the active page and moves the browser-owned active match.
+    ///
+    /// `query` is used only for [`FindInPageAction::Start`]. Other actions
+    /// operate on the current search session. The result is refreshed against
+    /// the current DOM so removed nodes are never returned as live matches.
+    pub fn find_in_page(
+        &mut self,
+        action: FindInPageAction,
+        query: &str,
+    ) -> Result<FindInPageResult, String> {
+        let action = serde_json::to_string(action.as_str()).map_err(|error| error.to_string())?;
+        let query = serde_json::to_string(query).map_err(|error| error.to_string())?;
+        let script = format!("JSON.stringify(__omoikane_find_in_page({action}, {query}))");
+        let value = self.eval(&script).map_err(|error| error.to_string())?;
+        let payload = value
+            .as_string()
+            .ok_or_else(|| "page search did not return a JSON string".to_string())?
+            .to_std_string_escaped();
+        serde_json::from_str(&payload).map_err(|error| error.to_string())
     }
 
     /// Creates (or returns) the Boa Realm used by an iframe's document.
