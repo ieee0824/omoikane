@@ -52,6 +52,28 @@ fn find_matches_navigate_wrap_and_end() {
 }
 
 #[test]
+fn empty_query_and_invalid_cdp_parameters_leave_search_state_valid() {
+    let mut session = session_for("<p>needle</p>");
+    let empty = find(&mut session, "start", "");
+    assert_eq!(empty["matchCount"], 0);
+    assert_eq!(empty["activeMatchOrdinal"], 0);
+    assert_eq!(find(&mut session, "start", "needle")["matchCount"], 1);
+    for params in [
+        json!({}),
+        json!({ "action": "unknown" }),
+        json!({ "action": "start" }),
+        json!({ "action": "start", "query": 7 }),
+    ] {
+        let error = session.dispatch("Omoikane.findInPage", params).unwrap_err();
+        assert_eq!(error.code, -32602);
+    }
+    let current = find(&mut session, "status", "");
+    assert_eq!(current["query"], "needle");
+    assert_eq!(current["matchCount"], 1);
+    assert_eq!(current["activeMatchOrdinal"], 1);
+}
+
+#[test]
 fn hidden_text_is_excluded_but_offscreen_auto_is_found_and_revealed() {
     let mut session = session_for(
         r#"<style>
@@ -90,6 +112,24 @@ fn hidden_text_is_excluded_but_offscreen_auto_is_found_and_revealed() {
     assert_eq!(
         eval(&mut session, "document.getElementById('auto').innerText"),
         ""
+    );
+}
+
+#[test]
+fn offscreen_auto_is_counted_without_becoming_relevant_until_selected() {
+    let mut session = session_for(
+        "<style>#auto{content-visibility:auto;contain-intrinsic-size:80px}</style><p>needle</p><div style='height:1400px'></div><p id='auto'>needle</p>",
+    );
+    assert_eq!(find(&mut session, "start", "needle")["matchCount"], 2);
+    assert_eq!(eval(&mut session, "String(getSelection())"), "needle");
+    assert_eq!(
+        eval(&mut session, "document.getElementById('auto').innerText"),
+        ""
+    );
+    assert_eq!(find(&mut session, "next", "")["activeMatchOrdinal"], 2);
+    assert_eq!(
+        eval(&mut session, "document.getElementById('auto').innerText"),
+        "needle"
     );
 }
 
@@ -276,6 +316,43 @@ fn finding_text_in_offscreen_iframe_scrolls_the_outer_page() {
         "frameword"
     );
     assert!(eval(&mut session, "window.scrollY").as_f64().unwrap_or(0.0) > 0.0);
+}
+
+#[test]
+fn iframe_reorder_and_removal_refresh_search_order_without_stale_matches() {
+    let mut session = session_for(
+        "<p id='before'>needle</p><iframe id='child' srcdoc='<p>needle</p>'></iframe><p id='after'>needle</p>",
+    );
+    assert_eq!(find(&mut session, "start", "needle")["matchCount"], 3);
+    assert_eq!(
+        eval(&mut session, "getSelection().anchorNode.parentElement.id"),
+        "before"
+    );
+    assert_eq!(find(&mut session, "next", "")["activeMatchOrdinal"], 2);
+    assert_eq!(
+        eval(
+            &mut session,
+            "String(document.getElementById('child').contentDocument.getSelection())"
+        ),
+        "needle"
+    );
+    eval(
+        &mut session,
+        "document.body.append(document.getElementById('child'))",
+    );
+    let moved = find(&mut session, "status", "");
+    assert_eq!(moved["matchCount"], 3);
+    // Reattaching an iframe replaces its document. The old active range must
+    // not be reused even though a new frame occupies the same DOM position.
+    assert_eq!(moved["activeMatchOrdinal"], 0);
+    eval(&mut session, "document.getElementById('child').remove()");
+    assert_eq!(find(&mut session, "status", "")["matchCount"], 2);
+    assert_eq!(find(&mut session, "next", "")["activeMatchOrdinal"], 1);
+    assert_eq!(find(&mut session, "next", "")["activeMatchOrdinal"], 2);
+    assert_eq!(
+        eval(&mut session, "getSelection().anchorNode.parentElement.id"),
+        "after"
+    );
 }
 
 #[test]
