@@ -24,3 +24,10 @@ two paragraphs was not.
 The assigned slot words were found once each in first-then-second order.
 An inserted `addedtoken` was found, then disappeared from search after its
 paragraph was removed. Clearing the selection left no selected text.
+The repeated ordinary word was found twice in forward order (offsets 0, 14)
+and once when searching backward from the second hit (offset 0); another
+search in either direction returned false. The per-token `count` records
+distinct forward hits. The iframe count is `null`: with `searchInFrames=true`,
+Firefox's `window.find` repeatedly reports the same selected child-frame
+word, so that API cannot establish its total count. The first hit and its
+child-frame selection are recorded without inferring a count.
