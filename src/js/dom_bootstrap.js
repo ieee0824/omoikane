@@ -8095,7 +8095,9 @@
       const documentId = nativeExistingIframeDocument(root.__id);
       if (documentId !== null && documentId !== undefined &&
           !browsingInput.visibilityHiddenDocumentIds.has(documentId)) {
-        const childDocument = wrapNode(documentId);
+        const accessibleId = nativeIframeContentDocument(root.__id);
+        const childDocument = accessibleId === documentId ? wrapNode(documentId) : null;
+        if (!childDocument) nativeDispatchIframeDeparture(root.__id);
         browsingInput.visibilityHiddenDocumentIds.add(documentId);
         if (childDocument) {
           affectedDocuments.push(childDocument);
@@ -8269,12 +8271,12 @@
         const callerBaseURL = () => {
           return effectiveDocumentBaseURL(globalThis.document);
         };
-        const captureHistoryEntry = generation => {
+        const captureHistoryEntry = (generation, nextAccess) => {
           const attribute = iframe.hasAttribute("srcdoc") ? "srcdoc" : "src";
           const value = iframe.getAttribute(attribute) || "";
           const documentId = nativeIframeContentDocument(iframe.__id);
           forgetDiscardedNodeWrappers();
-          const committedDocument = wrapNode(documentId);
+          const committedDocument = nextAccess === "same" ? wrapNode(documentId) : null;
           let href = attribute === "srcdoc" ? "about:srcdoc" : "about:blank";
           if (committedDocument) href = committedDocument.URL;
           else if (nativeIframeDocumentURL(iframe.__id) !== null) href = nativeIframeDocumentURL(iframe.__id);
@@ -8285,8 +8287,8 @@
           const submission = nativeIframeSubmissionSnapshot(iframe.__id);
           return { attribute, value, href, state: null, generation, submission, persisted: null };
         };
-        const commitHistoryEntry = generation => {
-          const entry = captureHistoryEntry(generation);
+        const commitHistoryEntry = (generation, nextAccess) => {
+          const entry = captureHistoryEntry(generation, nextAccess);
           const action = pendingHistoryAction;
           pendingHistoryAction = null;
           if (historyIndex < 0) {
@@ -8315,7 +8317,7 @@
             }
             const documentId = nativeIframeContentDocument(iframe.__id);
             forgetDiscardedNodeWrappers();
-            const restoredDocument = wrapNode(documentId);
+            const restoredDocument = nextAccess === "same" ? wrapNode(documentId) : null;
             if (restoredDocument) {
               safeWeakMapSet(
                 documentHistoryURLs,
@@ -8349,7 +8351,7 @@
             return;
           }
           if (generation !== activeGeneration) {
-            commitHistoryEntry(generation);
+            commitHistoryEntry(generation, nextAccess);
             activeGeneration = generation;
             activeWindow = { __listeners: new Map() };
             activeRealmReady = false;
@@ -8728,9 +8730,17 @@
         proxy = new Proxy({}, handler);
         this.__contentWindowFacade = proxy;
         this.__contentWindowRefresh = refresh;
-        safeWeakMapSet(iframeChildNavigators, this, (documentId, kind, value, extra) => {
+        safeWeakMapSet(iframeChildNavigators, this, (documentId, kind, value, extra, committedURL, eventState) => {
           const previous = childNavigationDocument;
-          childNavigationDocument = wrapNode(documentId);
+          const navigationDocument = {};
+          safeDefineProperty(navigationDocument, "URL", {
+            get() {
+              const historyURL = eventState && safeWeakMapGet(documentHistoryURLs, eventState);
+              return historyURL !== undefined ? historyURL : committedURL;
+            },
+          });
+          if (eventState) safeWeakMapSet(nodeEventStates, navigationDocument, eventState);
+          childNavigationDocument = navigationDocument;
           try {
             refresh();
             switch (kind) {
@@ -10846,8 +10856,7 @@
     reportValidity() { return this.__validate(true); }
     __navigate(submitter) {
       const submit = (...args) => {
-        const frameId = __omoikane_submit_form(...args);
-        if (frameId !== null) wrapNode(frameId).__prepareResourceNavigation();
+        __omoikane_submit_form(...args);
       };
       const target = submitter?.getAttribute("formtarget") ?? this.getAttribute("target") ??
         this.ownerDocument.querySelector("base[target]")?.getAttribute("target") ?? "";
@@ -22308,10 +22317,10 @@
     const targetOrigin = windowMessageTargetOrigin(
       dictionary ? targetOriginOrOptions.targetOrigin : targetOriginOrOptions,
     );
-    const origin = String(globalThis.location.origin);
     const ports = new IntrinsicArray();
     const wire = encodeWorkerMessage(message, options, ports);
-    return [wire, origin, targetOrigin, ports];
+    // The native caller supplies the authoritative sender origin.
+    return [wire, "", targetOrigin, ports];
   };
   globalThis.__omoikane_window_message_source = function(kind, iframeId) {
     if (kind === "self") return globalThis;
@@ -25398,10 +25407,11 @@
   nativeRegisterValidation(internalNodeId(globalThis.document), snapshotCssValidity);
   validationReady = true;
   formStateDocument = globalThis.document;
-  nativeRegisterIframeNavigation(internalNodeId(globalThis.document), (frameId, documentId, kind, value, extra) => {
+  nativeRegisterIframeNavigation(internalNodeId(globalThis.document), (frameId, documentId, kind, value, extra, committedURL, eventState) => {
     const frame = wrapNode(frameId);
+    if (kind === "prepare") return frame.__prepareResourceNavigation();
     void frame.contentWindow;
-    return safeWeakMapGet(iframeChildNavigators, frame)(documentId, kind, value, extra);
+    return safeWeakMapGet(iframeChildNavigators, frame)(documentId, kind, value, extra, committedURL, eventState);
   });
   nativeRegisterFormState(internalNodeId(formStateDocument), captureCustomFormState, restoreCustomFormState);
 })();

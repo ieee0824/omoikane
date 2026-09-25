@@ -22,7 +22,7 @@ use boa_engine::job::AsyncContext;
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::native_function::{NativeCallContinuation, NativeCallSuspension, NativeFunction};
 use boa_engine::object::{
-    JsObject,
+    FunctionObjectBuilder, JsObject,
     builtins::{
         AlignedVec, JsArray, JsArrayBuffer, JsDataView, JsPromise, JsTypedArray, JsUint8Array,
     },
@@ -123,6 +123,12 @@ const LOAD_SCRIPT: &str = concat!(
 );
 
 thread_local! {
+    #[cfg(test)]
+    static TEST_LAYOUT_METRICS_CALLS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static TEST_STYLE_NORMALIZATION_CALLS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static TEST_FETCH_RESPONSE_OVERRIDE: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
     static ACTIVE_MODULE_DOCUMENT: Cell<Option<ActiveModuleDocument>> = const { Cell::new(None) };
     /// Same-thread registry for page-owned BroadcastChannel endpoints.
@@ -435,12 +441,183 @@ impl HostHooks for BrowserHostHooks {
 #[derive(Debug, Clone, Trace, Finalize, boa_engine::JsData)]
 struct ModuleDocumentId(usize);
 
+// A Realm may outlive its Document after navigation when page code retains a
+// function or DOM wrapper from that Realm. Keep its immutable origin with the
+// Realm so access checks still work after the old Document's native records
+// have been collected.
+#[derive(Debug, Clone, Trace, Finalize, boa_engine::JsData)]
+struct ModuleDocumentOrigin(#[unsafe_ignore_trace] DocumentSecurityOrigin);
+
+fn realm_origin_snapshot(
+    host_state: &Rc<RefCell<HostState>>,
+    document_id: usize,
+) -> JsResult<ModuleDocumentOrigin> {
+    host_state
+        .borrow()
+        .document_security_origins
+        .get(&document_id)
+        .cloned()
+        .map(ModuleDocumentOrigin)
+        .ok_or_else(|| {
+            JsNativeError::error()
+                .with_message("Document security origin is unavailable")
+                .into()
+        })
+}
+
+/// Host capabilities are handed only to the trusted bootstrap module. Page
+/// scripts never receive these functions as properties of their global object.
+struct BootstrapBindings {
+    object: JsObject,
+    names: Vec<String>,
+}
+
+impl BootstrapBindings {
+    fn new() -> Self {
+        Self {
+            object: JsObject::with_null_proto(),
+            names: Vec::new(),
+        }
+    }
+
+    fn value(
+        &mut self,
+        name: JsString,
+        value: impl Into<JsValue>,
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let text = name.to_std_string_escaped();
+        if !self.names.contains(&text) {
+            self.names.push(text);
+        }
+        self.object.set(name, value.into(), true, context)?;
+        Ok(())
+    }
+
+    fn callable(
+        &mut self,
+        name: JsString,
+        length: usize,
+        function: NativeFunction,
+        constructor: bool,
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let callable = FunctionObjectBuilder::new(context.realm(), function)
+            .name(name.clone())
+            .length(length)
+            .constructor(constructor)
+            .build();
+        self.value(name, callable, context)
+    }
+
+    fn module_source(&self) -> String {
+        let names: HashSet<&str> = self.names.iter().map(String::as_str).collect();
+        let mut source = format!(
+            "const {{ {} }} = import.meta.__omoikane_private_bindings;\n\
+             delete import.meta.__omoikane_private_bindings;\n",
+            self.names.join(", ")
+        );
+        // Legacy bootstrap files refer to some bindings as globalThis.name.
+        // Resolve those references to the module-private lexical binding.
+        // Explicit old delete statements become no-ops: no capability was
+        // installed on the page global in the first place.
+        let prefix = "globalThis.__omoikane_";
+        let mut body = String::new();
+        let mut cursor = 0;
+        while let Some(offset) = DOM_BOOTSTRAP[cursor..].find(prefix) {
+            let start = cursor + offset;
+            body.push_str(&DOM_BOOTSTRAP[cursor..start]);
+            let mut end = start + prefix.len();
+            while DOM_BOOTSTRAP
+                .as_bytes()
+                .get(end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
+            {
+                end += 1;
+            }
+            let name = &DOM_BOOTSTRAP[start + "globalThis.".len()..end];
+            if names.contains(name) {
+                if body.ends_with("delete ") {
+                    body.truncate(body.len() - "delete ".len());
+                    body.push_str("void 0");
+                } else {
+                    body.push_str(name);
+                }
+            } else {
+                body.push_str(&DOM_BOOTSTRAP[start..end]);
+            }
+            cursor = end;
+        }
+        body.push_str(&DOM_BOOTSTRAP[cursor..]);
+        source.push_str(&body);
+        source
+    }
+}
+
+fn evaluate_dom_bootstrap(
+    context: &mut Context,
+    host_state: &Rc<RefCell<HostState>>,
+    bindings: &BootstrapBindings,
+) -> JsResult<()> {
+    let document_id = context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .expect("document realm has an identity")
+        .0;
+    let loader = host_state
+        .borrow()
+        .module_loader
+        .as_ref()
+        .and_then(Weak::upgrade)
+        .expect("browser module loader is live during bootstrap");
+    let source = bindings.module_source();
+    let module = Module::parse(Source::from_bytes(source.as_bytes()), None, context)?;
+    loader
+        .bootstrap_modules
+        .borrow_mut()
+        .insert(module.clone(), document_id);
+    let complete = |promise: JsPromise| match promise.state() {
+        PromiseState::Fulfilled(_) => Ok(()),
+        PromiseState::Rejected(error) => Err(JsError::from_opaque(error)),
+        PromiseState::Pending => Err(JsNativeError::error()
+            .with_message("DOM bootstrap did not complete synchronously")
+            .into()),
+    };
+    let result: JsResult<()> = (|| {
+        complete(module.load(context))?;
+        module.link(context)?;
+        complete(module.evaluate(context))?;
+        // Keep the invariant checked at every realm creation, including future
+        // bindings added by a subsystem that might accidentally use a global.
+        for name in &bindings.names {
+            if context
+                .global_object()
+                .has_own_property(js_string!(name.as_str()), context)?
+            {
+                return Err(JsNativeError::error()
+                    .with_message("a private host binding was exposed on the page global")
+                    .into());
+            }
+        }
+        Ok(())
+    })();
+    loader.bootstrap_modules.borrow_mut().remove(&module);
+    host_state
+        .borrow_mut()
+        .bootstrap_bindings
+        .remove(&document_id);
+    result
+}
+
 #[derive(Debug, Default)]
 struct HttpModuleLoader {
     /// Module records are scoped to the owning Document.  Boa can reuse a
     /// loader while iframe Documents execute in the same JS runtime, and a
     /// URL alone is not enough to identify the CSP context for an import.
     modules: RefCell<HashMap<(usize, String), Module>>,
+    /// Exact module records allowed to receive bootstrap-only host bindings.
+    bootstrap_modules: RefCell<HashMap<Module, usize>>,
     fetch_pool: RefCell<Option<ModuleFetchPool>>,
     pending: RefCell<HashMap<(usize, String), ModuleFetch>>,
     owner: Weak<RefCell<HostState>>,
@@ -669,6 +846,19 @@ impl ModuleLoader for HttpModuleLoader {
         module: &Module,
         context: &mut Context,
     ) {
+        if let Some(document_id) = self.bootstrap_modules.borrow_mut().remove(module) {
+            if let Some(owner) = self.owner.upgrade() {
+                let bindings = owner.borrow().bootstrap_bindings.get(&document_id).cloned();
+                if let Some(bindings) = bindings {
+                    let _ = import_meta.set(
+                        js_string!("__omoikane_private_bindings"),
+                        bindings,
+                        true,
+                        context,
+                    );
+                }
+            }
+        }
         if let Some(url) = module.path().and_then(|path| path.to_str()) {
             let _ = import_meta.set(js_string!("url"), js_string!(url), false, context);
         }
@@ -1171,6 +1361,9 @@ struct HostState {
     /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
     /// returns their native node identity.
     canonical_node_identity_resolver: Option<JsValue>,
+    /// Keeps newly constructed native capabilities rooted until the trusted
+    /// bootstrap module receives them through its private import.meta hook.
+    bootstrap_bindings: HashMap<usize, JsObject>,
     /// CDP remote object handles are retained by the host rather than by a
     /// page-visible global property.  Keeping these values in HostState also
     /// lets the runtime root provider trace them across Boa collections.
@@ -1361,6 +1554,9 @@ struct HostState {
     /// of falling back to the top-level base.
     document_base_urls: HashMap<usize, crate::http::Url>,
     document_security_origins: HashMap<usize, DocumentSecurityOrigin>,
+    /// Origin metadata for retained, retired Documents. It is released with
+    /// their JS wrapper leases, so old same-origin wrappers remain usable.
+    retired_document_security_origins: HashMap<usize, DocumentSecurityOrigin>,
     next_opaque_origin_id: u64,
     /// Enforced CSP policies keyed by the root Document node identity.  A
     /// fresh runtime starts with an empty (allow-all) policy and navigation
@@ -1445,6 +1641,9 @@ unsafe impl Trace for HostState {
         // alive without a separate Trace traversal (Realm exposes no `trace`).
         if let Some(resolver) = &self.canonical_node_identity_resolver {
             unsafe { resolver.trace(tracer) };
+        }
+        for bindings in self.bootstrap_bindings.values() {
+            unsafe { bindings.trace(tracer) };
         }
         for value in self.remote_objects.values() {
             unsafe { value.trace(tracer) };
@@ -1904,6 +2103,7 @@ impl HostState {
             iframe_navigation: iframe_navigation::State::default(),
             form_validation: form_validation::State::default(),
             canonical_node_identity_resolver: None,
+            bootstrap_bindings: HashMap::new(),
             remote_objects: HashMap::new(),
             console_logs: Vec::new(),
             task_errors: Vec::new(),
@@ -2006,6 +2206,7 @@ impl HostState {
             document_urls,
             document_base_urls,
             document_security_origins,
+            retired_document_security_origins: HashMap::new(),
             next_opaque_origin_id: 2,
             document_csp: HashMap::from([(document.identity(), CspPolicy::default())]),
             document_sandbox: HashMap::new(),
@@ -2676,6 +2877,10 @@ impl HostState {
     }
 
     fn register_tree(&mut self, node: &NodeHandle) {
+        self.register_tree_for_document(node, None);
+    }
+
+    fn register_tree_for_document(&mut self, node: &NodeHandle, creator: Option<usize>) {
         fn register(nodes: &mut HashMap<usize, NodeHandle>, node: &NodeHandle) {
             nodes.insert(node.identity(), node.clone());
             if let Some(content) = node.template_content() {
@@ -2689,7 +2894,24 @@ impl HostState {
             }
         }
         register(&mut self.nodes, node);
-        self.enroll_registered_tree(node, None);
+        // Detached nodes still belong to the Document whose script created
+        // them. Record that owner before their first JS wrapper is built, so
+        // native access checks do not mistake them for foreign nodes.
+        // register_tree is also called while HostState is mutably borrowed;
+        // reading ACTIVE_HOST_STATE here would borrow it a second time.
+        let owner = creator
+            .or_else(|| {
+                ACTIVE_HOST_STATE.with(|slot| {
+                    let active_host = slot.borrow();
+                    let active_document = ACTIVE_MODULE_DOCUMENT.with(|slot| slot.get())?;
+                    active_host
+                        .as_ref()
+                        .is_some_and(|host| Rc::as_ptr(host) == active_document.host_state)
+                        .then_some(active_document.document_id)
+                })
+            })
+            .unwrap_or_else(|| self.document.identity());
+        self.enroll_registered_tree(node, Some(owner));
     }
 
     fn collect_tree_ids(node: &NodeHandle, ids: &mut HashSet<usize>) {
@@ -2780,7 +3002,10 @@ impl HostState {
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_base_urls.remove(&document_id);
-        self.document_security_origins.remove(&document_id);
+        if let Some(origin) = self.document_security_origins.remove(&document_id) {
+            self.retired_document_security_origins
+                .insert(document_id, origin);
+        }
         self.document_csp.remove(&document_id);
         self.document_sandbox.remove(&document_id);
         #[cfg(test)]
@@ -2877,7 +3102,10 @@ impl HostState {
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_base_urls.remove(&document_id);
-        self.document_security_origins.remove(&document_id);
+        if let Some(origin) = self.document_security_origins.remove(&document_id) {
+            self.retired_document_security_origins
+                .insert(document_id, origin);
+        }
         self.document_csp.remove(&document_id);
         self.document_sandbox.remove(&document_id);
         #[cfg(test)]
@@ -2932,6 +3160,7 @@ impl HostState {
         self.nodes.remove(&node.identity());
         if self.retained_node(node.identity()).is_none() {
             self.adopted_stylesheets.remove(&node.identity());
+            self.forget_unretained_node(node.identity());
         }
         if let Some(content) = node.template_content() {
             self.unregister_tree(&content);
@@ -3033,8 +3262,13 @@ impl HostState {
     fn iframe_allows_fullscreen(&self, iframe: &NodeHandle, child_document: usize) -> bool {
         let owner_document = owner_document_for_node(iframe);
         let same_origin = owner_document.as_ref().is_some_and(|owner| {
-            self.document_security_origins.get(&owner.identity())
-                == self.document_security_origins.get(&child_document)
+            match (
+                self.document_security_origins.get(&owner.identity()),
+                self.document_security_origins.get(&child_document),
+            ) {
+                (Some(owner), Some(child)) => owner == child,
+                _ => false,
+            }
         });
         let allow = iframe.get_attribute("allow");
         if let Some(policy) = allow {
@@ -4718,6 +4952,10 @@ impl JsRuntime {
             .realm()
             .host_defined_mut()
             .insert(ModuleDocumentId(document.identity()));
+        context
+            .realm()
+            .host_defined_mut()
+            .insert(realm_origin_snapshot(&host_state, document.identity())?);
 
         host_state.borrow_mut().main_realm = Some(context.realm().clone());
 
@@ -4731,10 +4969,10 @@ impl JsRuntime {
             module_loader,
             sandbox,
         };
-        register_host_bindings(&mut runtime.context, &runtime.host_state)?;
+        let bindings = register_host_bindings(&mut runtime.context, &runtime.host_state)?;
         {
             let _host = activate_host_state(Rc::clone(&runtime.host_state));
-            runtime.context.eval(Source::from_bytes(DOM_BOOTSTRAP))?;
+            evaluate_dom_bootstrap(&mut runtime.context, &runtime.host_state, &bindings)?;
         }
         // DOM bootstrap is runtime initialization rather than page code. Apply
         // the caller's budget only after it has completed so a deliberately
@@ -6815,9 +7053,15 @@ impl JsRuntime {
             );
             let matches_target = match target_origin {
                 "*" => true,
+                "/" if source_document_id == target_document_id => true,
                 "/" => {
-                    sender_security_origin.as_ref()
-                        == state.document_security_origins.get(&target_document_id)
+                    match (
+                        sender_security_origin.as_ref(),
+                        state.document_security_origins.get(&target_document_id),
+                    ) {
+                        (Some(sender), Some(target)) => sender == target,
+                        _ => false,
+                    }
                 }
                 explicit => explicit == current_origin,
             };
@@ -7102,7 +7346,7 @@ impl JsRuntime {
             return Ok(());
         }
         let result = self.eval(
-            "const __omoikane_broadcast_channel_ref_value = __omoikane_broadcast_channel_ref; const __omoikane_broadcast_channel_target = (__omoikane_broadcast_channel_ref_value && typeof __omoikane_broadcast_channel_ref_value.deref === 'function') ? __omoikane_broadcast_channel_ref_value.deref() : __omoikane_broadcast_channel_ref_value; if (!__omoikane_broadcast_channel_target) { __omoikane_broadcast_channel_close(__omoikane_broadcast_channel_id); } if (__omoikane_broadcast_channel_target && !__omoikane_broadcast_channel_target._closed) { \
+            "const __omoikane_broadcast_channel_ref_value = __omoikane_broadcast_channel_ref; const __omoikane_broadcast_channel_target = (__omoikane_broadcast_channel_ref_value && typeof __omoikane_broadcast_channel_ref_value.deref === 'function') ? __omoikane_broadcast_channel_ref_value.deref() : __omoikane_broadcast_channel_ref_value; if (__omoikane_broadcast_channel_target && !__omoikane_broadcast_channel_target._closed) { \
              let __omoikane_broadcast_channel_decoded; \
              let __omoikane_broadcast_channel_decoded_ok = false; \
              try { __omoikane_broadcast_channel_decoded = __omoikane_decode_worker_message(__omoikane_broadcast_channel_wire); __omoikane_broadcast_channel_decoded_ok = true; } \
@@ -7116,8 +7360,14 @@ impl JsRuntime {
                  data: __omoikane_broadcast_channel_decoded, origin: __omoikane_broadcast_channel_origin, source: null, ports: [] \
                })); \
              } \
-             }",
+             } !__omoikane_broadcast_channel_target",
         );
+        if result.as_ref().ok().and_then(JsValue::as_boolean) == Some(true) {
+            unregister_broadcast_channel(&self.host_state, channel_id);
+            let mut state = self.host_state.borrow_mut();
+            state.broadcast_channels.remove(&channel_id);
+            state.broadcast_channel_metadata.remove(&channel_id);
+        }
         let cleanup_result = self.clear_broadcast_channel_values();
         self.record_error_from("broadcast channel cleanup", cleanup_result);
         self.record_error_from("broadcast channel", result);
@@ -9873,49 +10123,35 @@ fn ensure_iframe_realm(
     realm
         .host_defined_mut()
         .insert(ModuleDocumentId(document_id));
+    realm
+        .host_defined_mut()
+        .insert(realm_origin_snapshot(host_state, document_id)?);
     let old_realm = context.enter_realm(realm.clone());
     let previous_resolver = host_state.borrow().canonical_node_identity_resolver.clone();
     let setup = (|| {
-        register_host_bindings(context, host_state)?;
-        let global = context.global_object();
-        global.set(
+        let mut bindings = register_host_bindings(context, host_state)?;
+        bindings.value(
             js_string!("__omoikane_document_id"),
             JsValue::from(document_id as f64),
-            true,
             context,
         )?;
-        global.set(
+        bindings.value(
             js_string!("__omoikane_location_href"),
             JsValue::from(js_string!(document_url.as_str())),
-            true,
             context,
         )?;
-        global.set(
+        bindings.value(
             js_string!("__omoikane_frame_element_id"),
             if same_origin {
                 JsValue::from(iframe_id as f64)
             } else {
                 JsValue::null()
             },
-            true,
             context,
         )?;
-        // A module starts with its own lexical environment. Nested Script
-        // evaluation inherits the caller's active environments in Boa, which
-        // would corrupt the parent bootstrap's captured wrapper state here.
-        // This static bootstrap has neither imports nor top-level await, so
-        // loading and evaluation must finish without a microtask checkpoint.
-        let complete = |promise: JsPromise| match promise.state() {
-            PromiseState::Fulfilled(_) => Ok(()),
-            PromiseState::Rejected(error) => Err(JsError::from_opaque(error)),
-            PromiseState::Pending => Err(JsNativeError::error()
-                .with_message("iframe bootstrap did not complete synchronously")
-                .into()),
-        };
-        let bootstrap = Module::parse(Source::from_bytes(DOM_BOOTSTRAP), None, context)?;
-        complete(bootstrap.load(context))?;
-        bootstrap.link(context)?;
-        complete(bootstrap.evaluate(context))?;
+        // A module has a private lexical environment; nested Script evaluation
+        // would inherit the active bootstrap environment in Boa.
+        evaluate_dom_bootstrap(context, host_state, &bindings)?;
 
         let (parent, top) = if same_origin {
             (parent_global, top_global.clone())
@@ -10016,8 +10252,13 @@ fn ensure_auxiliary_realm(
 
     let same_origin = {
         let state = host_state.borrow();
-        state.document_security_origins.get(&document_id)
-            == state.document_security_origins.get(&opener_document_id)
+        match (
+            state.document_security_origins.get(&document_id),
+            state.document_security_origins.get(&opener_document_id),
+        ) {
+            (Some(document), Some(opener)) => document == opener,
+            _ => false,
+        }
     };
 
     let opener = if context
@@ -10059,46 +10300,34 @@ fn ensure_auxiliary_realm(
     realm
         .host_defined_mut()
         .insert(ModuleDocumentId(document_id));
+    realm
+        .host_defined_mut()
+        .insert(realm_origin_snapshot(host_state, document_id)?);
     let previous = context.enter_realm(realm.clone());
     let previous_resolver = host_state.borrow().canonical_node_identity_resolver.clone();
     let setup = (|| -> JsResult<()> {
-        register_host_bindings(context, host_state)?;
-        let global = context.global_object();
-        global.set(
+        let mut bindings = register_host_bindings(context, host_state)?;
+        bindings.value(
             js_string!("__omoikane_document_id"),
             JsValue::from(document_id as f64),
-            true,
             context,
         )?;
-        global.set(
+        bindings.value(
             js_string!("__omoikane_location_href"),
             JsValue::from(js_string!(document_url.as_str())),
-            true,
             context,
         )?;
-        global.set(
+        bindings.value(
             js_string!("__omoikane_frame_element_id"),
             JsValue::null(),
-            true,
             context,
         )?;
-        global.set(
+        bindings.value(
             js_string!("__omoikane_auxiliary_context_id"),
             JsValue::from(auxiliary_id as f64),
-            true,
             context,
         )?;
-        let complete = |promise: JsPromise| match promise.state() {
-            PromiseState::Fulfilled(_) => Ok(()),
-            PromiseState::Rejected(error) => Err(JsError::from_opaque(error)),
-            PromiseState::Pending => Err(JsNativeError::error()
-                .with_message("popup bootstrap did not complete synchronously")
-                .into()),
-        };
-        let bootstrap = Module::parse(Source::from_bytes(DOM_BOOTSTRAP), None, context)?;
-        complete(bootstrap.load(context))?;
-        bootstrap.link(context)?;
-        complete(bootstrap.evaluate(context))?;
+        evaluate_dom_bootstrap(context, host_state, &bindings)?;
         let opener = if same_origin {
             opener
         } else {
@@ -10131,49 +10360,104 @@ fn ensure_auxiliary_realm(
     Ok(realm)
 }
 
+fn register_private_callable(
+    context: &mut Context,
+    bindings: &mut BootstrapBindings,
+    name: JsString,
+    length: usize,
+    function: NativeFunction,
+) -> JsResult<()> {
+    bindings.callable(name, length, function, true, context)
+}
+
+fn register_private_builtin_callable(
+    context: &mut Context,
+    bindings: &mut BootstrapBindings,
+    name: JsString,
+    length: usize,
+    function: NativeFunction,
+) -> JsResult<()> {
+    bindings.callable(name, length, function, false, context)
+}
+
+fn register_private_property(
+    context: &mut Context,
+    bindings: &mut BootstrapBindings,
+    name: JsString,
+    value: impl Into<JsValue>,
+    _attributes: boa_engine::property::Attribute,
+) -> JsResult<()> {
+    bindings.value(name, value, context)
+}
+
 fn register_host_bindings(
     context: &mut Context,
     host_state: &Rc<RefCell<HostState>>,
-) -> JsResult<()> {
-    font_loading::register(context, host_state)?;
-    pointer_lock::register(context)?;
-    input_bridge::register(context)?;
-    form_state::register(context)?;
-    iframe_navigation::register(context)?;
-    form_validation::register(context)?;
-    form_submission::register(context)?;
+) -> JsResult<BootstrapBindings> {
+    let mut bindings = BootstrapBindings::new();
+    let document_id = context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .expect("document realm has an identity")
+        .0;
+    host_state
+        .borrow_mut()
+        .bootstrap_bindings
+        .insert(document_id, bindings.object.clone());
+    font_loading::register(context, host_state, &mut bindings)?;
+    pointer_lock::register(context, &mut bindings)?;
+    input_bridge::register(context, &mut bindings)?;
+    form_state::register(context, &mut bindings)?;
+    iframe_navigation::register(context, &mut bindings)?;
+    form_validation::register(context, &mut bindings)?;
+    form_submission::register(context, &mut bindings)?;
     let state = host_state.borrow();
-    context.register_global_property(
+    register_private_property(
+        context,
+        &mut bindings,
         js_string!("__omoikane_document_id"),
         state.document.identity() as f64,
         boa_engine::property::Attribute::all(),
     )?;
-    context.register_global_property(
+    register_private_property(
+        context,
+        &mut bindings,
         js_string!("__omoikane_location_href"),
         js_string!(state.location_href.as_str()),
         boa_engine::property::Attribute::all(),
     )?;
-    context.register_global_property(
+    register_private_property(
+        context,
+        &mut bindings,
         js_string!("__omoikane_navigator_user_agent"),
         js_string!(state.navigator_user_agent.as_str()),
         boa_engine::property::Attribute::all(),
     )?;
-    context.register_global_callable(
+    register_private_callable(
+        context,
+        &mut bindings,
         js_string!("__omoikane_retain_node"),
         2,
         NativeFunction::from_copy_closure(node_lifetime::retain_node_native),
     )?;
-    context.register_global_callable(
+    register_private_callable(
+        context,
+        &mut bindings,
         js_string!("__omoikane_set_node_owner"),
         2,
         NativeFunction::from_copy_closure(node_lifetime::set_owner_native),
     )?;
-    context.register_global_callable(
+    register_private_callable(
+        context,
+        &mut bindings,
         js_string!("__omoikane_collected_nodes"),
         1,
         NativeFunction::from_copy_closure(node_lifetime::collected_nodes_native),
     )?;
-    context.register_global_property(
+    register_private_property(
+        context,
+        &mut bindings,
         js_string!("__omoikane_performance_time_origin"),
         state.performance_time_origin,
         boa_engine::property::Attribute::READONLY
@@ -11281,10 +11565,14 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(submit_form_native),
         ),
     ] {
-        context.register_global_builtin_callable(name, length, function)?;
+        if name.to_std_string_escaped().starts_with("__omoikane_") {
+            register_private_builtin_callable(context, &mut bindings, name, length, function)?;
+        } else {
+            context.register_global_builtin_callable(name, length, function)?;
+        }
     }
 
-    Ok(())
+    Ok(bindings)
 }
 
 fn default_document() -> NodeHandle {
@@ -11365,6 +11653,116 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
         })?;
         f(&state)
     })
+}
+
+fn cross_origin_access_error(context: &mut Context) -> JsResult<JsError> {
+    let constructor = context
+        .global_object()
+        .get(js_string!("DOMException"), context)?;
+    let constructor = constructor.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("DOMException constructor is unavailable")
+    })?;
+    let error = constructor.construct(
+        &[
+            JsValue::from(js_string!("Cross-origin access is denied")),
+            JsValue::from(js_string!("SecurityError")),
+        ],
+        None,
+        context,
+    )?;
+    Ok(JsError::from_opaque(error.into()))
+}
+
+fn caller_document_id(context: &Context) -> Option<usize> {
+    // An explicit caller without a document identity must fail closed.
+    if let Some(realm) = context.caller_realm() {
+        return realm
+            .host_defined()
+            .get::<ModuleDocumentId>()
+            .map(|id| id.0);
+    }
+    if let Some(realm) = context.active_script_or_module_realm() {
+        return realm
+            .host_defined()
+            .get::<ModuleDocumentId>()
+            .map(|id| id.0);
+    }
+    context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|id| id.0)
+}
+
+fn caller_document_origin(context: &Context, document_id: usize) -> Option<DocumentSecurityOrigin> {
+    let from_realm = |realm: &Realm| {
+        (realm.host_defined().get::<ModuleDocumentId>()?.0 == document_id)
+            .then(|| {
+                realm
+                    .host_defined()
+                    .get::<ModuleDocumentOrigin>()
+                    .map(|origin| origin.0.clone())
+            })
+            .flatten()
+    };
+    if let Some(realm) = context.caller_realm() {
+        return from_realm(&realm);
+    }
+    if let Some(realm) = context.active_script_or_module_realm() {
+        return from_realm(&realm);
+    }
+    from_realm(&context.realm())
+}
+
+fn ensure_same_origin_document(context: &mut Context, target_document_id: usize) -> JsResult<()> {
+    let caller = caller_document_id(context);
+    let saved_caller_origin = caller.and_then(|id| caller_document_origin(context, id));
+    let allowed = with_host_state(|host| {
+        let state = host.borrow();
+        Ok(caller.is_some_and(|caller| {
+            let source_origin = state.document_security_origins.get(&caller).or_else(|| {
+                (!state.document_is_active(caller))
+                    .then_some(())
+                    .and(saved_caller_origin.as_ref())
+            });
+            match (
+                source_origin,
+                state
+                    .document_security_origins
+                    .get(&target_document_id)
+                    .or_else(|| {
+                        state
+                            .retired_document_security_origins
+                            .get(&target_document_id)
+                    }),
+            ) {
+                (Some(source), Some(target)) => source == target,
+                _ => false,
+            }
+        }))
+    })?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(cross_origin_access_error(context)?)
+    }
+}
+
+fn ensure_same_origin_node(context: &mut Context, node_id: usize) -> JsResult<()> {
+    let target_document_id = with_host_state(|host| {
+        let state = host.borrow();
+        let Some(node) = state.get_node(node_id) else {
+            return Ok(None);
+        };
+        Ok(document_root_for_node(&node)
+            .or_else(|| state.node_lifetime_owner(node_id))
+            .map(|document| document.identity()))
+    })?;
+    if let Some(document_id) = target_document_id {
+        ensure_same_origin_document(context, document_id)
+    } else {
+        Err(cross_origin_access_error(context)?)
+    }
 }
 
 fn register_canonical_node_identity_native(
@@ -11910,6 +12308,7 @@ fn storage_arguments(
         .to_std_string_escaped()
         == "local";
     let document_id = parse_node_id(args.get(1), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let origin = state
@@ -11934,6 +12333,7 @@ fn document_cookie_get_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let visible = state
@@ -11971,6 +12371,7 @@ fn document_cookie_set_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     let value = args
         .get(1)
         .cloned()
@@ -12011,6 +12412,7 @@ fn storage_origin_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -12029,6 +12431,7 @@ fn document_visibility_state_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let visible = state.document_urls.contains_key(&document_id) && !state.page_hidden;
@@ -12138,6 +12541,7 @@ fn storage_manager_native(
 ) -> JsResult<JsValue> {
     let operation = string_argument(args.first(), "", context)?;
     let document_id = parse_node_id(args.get(1), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|host| {
         let state = host.borrow();
         let secure = document_is_secure_context(&state, document_id);
@@ -13186,6 +13590,7 @@ fn computed_style_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     form_validation::flush(node_id, context)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
@@ -13257,6 +13662,7 @@ fn optional_node_argument(
         return Ok(None);
     }
     let node_id = parse_node_id(Some(value), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| Ok(state.borrow().get_node(node_id)))
 }
 
@@ -13297,6 +13703,7 @@ fn content_visibility_skips_inner_text_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let skipped = node.is_some_and(|node| {
@@ -13319,6 +13726,7 @@ fn is_rendered_for_focus_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let Some(node) = node else {
@@ -13394,6 +13802,7 @@ fn parser_form_owner_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let owner = state
             .borrow()
@@ -13409,6 +13818,7 @@ fn set_form_associated_custom_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let associated = args.get(1).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
         let node = state
@@ -13429,6 +13839,7 @@ fn is_actually_disabled_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let disabled = state
             .borrow()
@@ -13463,6 +13874,7 @@ fn hit_test_point_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, document_id)?;
     let x = args
         .get(1)
         .cloned()
@@ -13644,7 +14056,10 @@ fn layout_metrics_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    #[cfg(test)]
+    TEST_LAYOUT_METRICS_CALLS.with(|count| count.set(count.get() + 1));
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     form_validation::flush(node_id, context)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
@@ -13748,6 +14163,7 @@ fn element_scroll_offset_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let (x, y) = match node {
@@ -13770,6 +14186,7 @@ fn set_element_scroll_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let coordinate = |value: Option<&JsValue>, context: &mut Context| -> JsResult<f32> {
         let value = value.cloned().unwrap_or_default().to_number(context)? as f32;
         Ok(if value.is_finite() { value } else { 0.0 })
@@ -14078,6 +14495,7 @@ fn get_element_by_id_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let expected = args
         .get(1)
         .cloned()
@@ -14110,6 +14528,7 @@ fn get_element_by_id_native(
 
 fn node_index_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let index = state.borrow().get_node(node_id).and_then(|node| {
             node.parent_node()?
@@ -14127,6 +14546,7 @@ fn node_is_connected_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let connected = state
             .borrow()
@@ -14142,6 +14562,7 @@ fn get_popover_open_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let open = state
             .borrow()
@@ -14157,6 +14578,7 @@ fn set_popover_open_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let open = args.get(1).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id).ok_or_else(|| {
@@ -14174,6 +14596,7 @@ fn set_modal_dialog_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let modal = args.get(1).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id).ok_or_else(|| {
@@ -14191,6 +14614,7 @@ fn fullscreen_element_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -14208,6 +14632,7 @@ fn fullscreen_enabled_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         Ok(JsValue::from(
             state.borrow().fullscreen_allowed_for_document(document_id),
@@ -14221,6 +14646,7 @@ fn request_fullscreen_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id).ok_or_else(|| {
             JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
@@ -14235,6 +14661,7 @@ fn exit_fullscreen_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     let require_host_approval = args.get(1).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
         let mut state = state.borrow_mut();
@@ -14253,6 +14680,7 @@ fn fullscreen_subtree_removed_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id).ok_or_else(|| {
             JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
@@ -14269,7 +14697,9 @@ fn node_is_inclusive_descendant_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let ancestor_id = parse_node_id(args.get(1), context)?;
+    ensure_same_origin_node(context, ancestor_id)?;
     with_host_state(|state| {
         let mut current = state.borrow().get_node(node_id);
         while let Some(node) = current {
@@ -14290,6 +14720,7 @@ fn node_has_slot_ancestor_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let mut current = state.borrow().get_node(node_id);
         while let Some(node) = current {
@@ -14313,6 +14744,7 @@ fn query_selector_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let selector = args
         .get(1)
         .cloned()
@@ -14342,10 +14774,13 @@ fn create_element_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let creator = caller_document_id(context);
     with_host_state(|state| {
         let node = NodeHandle::element(tag_name);
         let id = node.identity();
-        state.borrow_mut().register_tree(&node);
+        state
+            .borrow_mut()
+            .register_tree_for_document(&node, creator);
         Ok(JsValue::from(id as f64))
     })
 }
@@ -14368,6 +14803,7 @@ fn create_element_ns_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let creator = caller_document_id(context);
     with_host_state(|state| {
         let node = if namespace.as_deref() == Some(HTML_NAMESPACE) {
             NodeHandle::html_element_ns(qualified_name, HTML_NAMESPACE)
@@ -14375,7 +14811,9 @@ fn create_element_ns_native(
             NodeHandle::xml_element(qualified_name, namespace)
         };
         let id = node.identity();
-        state.borrow_mut().register_tree(&node);
+        state
+            .borrow_mut()
+            .register_tree_for_document(&node, creator);
         Ok(JsValue::from(id as f64))
     })
 }
@@ -14433,7 +14871,9 @@ fn is_valid_xml_name_native(
 
 fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let parent_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, parent_id)?;
     let child_id = parse_node_id(args.get(1), context)?;
+    ensure_same_origin_node(context, child_id)?;
     with_host_state(|state| {
         let (parent, child) = {
             let borrowed = state.borrow();
@@ -14482,6 +14922,7 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
 
 fn parent_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         Ok(node_to_js_value(node.and_then(|node| node.parent_node())))
@@ -14497,6 +14938,7 @@ fn owner_document_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let s = state.borrow();
         let Some(node) = s.get_node(node_id) else {
@@ -14513,8 +14955,9 @@ fn owner_document_native(
 
 /// `__omoikane_document_owner_iframe(documentId)` — returns the node id of the
 /// `<iframe>` element that owns the sub-browsing-context document `documentId`,
-/// or `null` when it is the top-level (main) document, a reloaded/stale document
-/// no longer tracked, or any unknown id.
+/// or `null` when it is the top-level (main) document or a reloaded/stale
+/// document whose retained origin still matches the caller. Unknown IDs fail
+/// the origin check with `SecurityError`.
 ///
 /// Backs `Document.defaultView`: a sub-document routes to its owning iframe's
 /// `contentWindow`, while an unknown/stale document must NOT be treated as the
@@ -14530,6 +14973,7 @@ fn document_owner_iframe_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         let s = state.borrow();
         // The main document is not owned by any iframe.
@@ -14541,7 +14985,7 @@ fn document_owner_iframe_native(
                 return Ok(JsValue::from(*iframe_id as f64));
             }
         }
-        // Unknown or reloaded (stale) sub-document: no live owning iframe.
+        // A retained but reloaded sub-document has no live owning iframe.
         Ok(JsValue::null())
     })
 }
@@ -14551,6 +14995,7 @@ fn document_owner_iframe_native(
 /// top-level Location.
 fn document_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -14570,6 +15015,7 @@ fn document_base_url_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -14582,6 +15028,7 @@ fn document_base_url_native(
 
 fn node_name_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -14597,6 +15044,7 @@ fn node_local_name_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -14613,6 +15061,7 @@ fn node_namespace_uri_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -14625,6 +15074,7 @@ fn node_namespace_uri_native(
 
 fn node_prefix_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -14641,6 +15091,7 @@ fn doctype_public_id_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -14657,6 +15108,7 @@ fn doctype_system_id_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -14673,6 +15125,7 @@ fn attribute_names_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
         let names: Vec<JsValue> = node
@@ -14696,6 +15149,7 @@ fn attribute_records_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let records = with_host_state(|state| {
         Ok(state
             .borrow()
@@ -14727,6 +15181,7 @@ fn attribute_record_count_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let count = state
             .borrow()
@@ -14743,6 +15198,7 @@ fn attribute_record_at_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let Some(index) = args
         .get(1)
         .and_then(JsValue::as_number)
@@ -14777,6 +15233,7 @@ fn attribute_value_ns_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let namespace = args
         .get(1)
         .filter(|value| !value.is_null_or_undefined())
@@ -14956,6 +15413,7 @@ fn array_buffer_view_info_native(
 
 fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let name = args
         .get(1)
         .cloned()
@@ -15041,6 +15499,7 @@ fn imported_stylesheet_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let href = args
         .get(1)
         .cloned()
@@ -15264,6 +15723,8 @@ fn normalize_style_value_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    #[cfg(test)]
+    TEST_STYLE_NORMALIZATION_CALLS.with(|count| count.set(count.get() + 1));
     let property = args
         .first()
         .cloned()
@@ -15577,6 +16038,7 @@ fn match_media_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
 fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let name = args
         .get(1)
         .cloned()
@@ -15642,6 +16104,7 @@ fn set_attribute_ns_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let namespace = match args.get(1) {
         Some(value) if !value.is_null() && !value.is_undefined() => {
             Some(value.to_string(context)?.to_std_string_escaped())
@@ -15716,6 +16179,7 @@ fn set_attribute_ns_native(
 
 fn get_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let checked = state
             .borrow()
@@ -15727,6 +16191,7 @@ fn get_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
 fn set_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let checked = args.get(1).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
         let node = state
@@ -15745,6 +16210,7 @@ fn get_option_selected_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id).ok_or_else(|| {
             JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
@@ -15764,6 +16230,7 @@ fn set_option_selected_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let selected = args.get(1).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id).ok_or_else(|| {
@@ -15786,6 +16253,7 @@ fn set_text_control_state_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     let value = string_argument(args.get(1), "", context)?;
     let selection_start = args
         .get(2)
@@ -16007,6 +16475,7 @@ fn set_adopted_stylesheets_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let root_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, root_id)?;
     let encoded = string_argument(args.get(1), "[]", context)?;
     let stylesheets: Vec<String> = serde_json::from_str(&encoded).map_err(|_| {
         JsError::from(JsNativeError::typ().with_message("invalid adoptedStyleSheets payload"))
@@ -16394,10 +16863,15 @@ fn auxiliary_window_state_native(
             return Ok(JsValue::from(js_string!("closed")));
         };
         let caller = caller_document_id.unwrap_or_else(|| state.document.identity());
-        let same_origin = state.document_security_origins.get(&caller)
-            == state
+        let same_origin = match (
+            state.document_security_origins.get(&caller),
+            state
                 .document_security_origins
-                .get(&entry.document.identity());
+                .get(&entry.document.identity()),
+        ) {
+            (Some(caller), Some(target)) => caller == target,
+            _ => false,
+        };
         Ok(JsValue::from(js_string!(if same_origin {
             "same"
         } else {
@@ -17575,6 +18049,7 @@ fn canvas_commit_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     let width = args
         .get(1)
         .cloned()
@@ -17606,6 +18081,7 @@ fn canvas_data_url_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     Ok(js_string!(crate::canvas::png_data_url(id).unwrap_or_else(|| "data:,".into())).into())
 }
 
@@ -17656,6 +18132,7 @@ fn canvas_image_source_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let Some(node) = state.borrow().get_node(id) else {
             return Ok(JsValue::null());
@@ -17915,6 +18392,20 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    #[cfg(test)]
+    if let Some(response) = TEST_FETCH_RESPONSE_OVERRIDE.with(|override_response| {
+        let mut override_response = override_response.borrow_mut();
+        if override_response
+            .as_ref()
+            .is_some_and(|(target, _)| target == &url)
+        {
+            override_response.take().map(|(_, response)| response)
+        } else {
+            None
+        }
+    }) {
+        return Ok(js_string!(response.as_str()).into());
+    }
     let method_name = args
         .get(1)
         .cloned()
@@ -18138,6 +18629,7 @@ fn csp_violations_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         let violations = state
             .borrow()
@@ -18199,6 +18691,7 @@ fn get_text_content_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let node = state
@@ -18253,12 +18746,14 @@ fn set_text_content_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     let text = args
         .get(1)
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let creator = caller_document_id(context);
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -18294,7 +18789,10 @@ fn set_text_content_native(
             // Add single text node
             if !text.is_empty() {
                 let text_node = NodeHandle::text(&text);
-                node.append_child(text_node);
+                node.append_child(text_node.clone());
+                state
+                    .borrow_mut()
+                    .register_tree_for_document(&text_node, creator);
             }
         }
         // Element textContent replaces an entire subtree and may add/remove a
@@ -18319,6 +18817,7 @@ fn get_inner_html_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let node = state
@@ -18434,6 +18933,7 @@ fn set_inner_html_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     let html = args
         .get(1)
         .cloned()
@@ -18476,6 +18976,7 @@ fn parse_contextual_fragment_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let context_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, context_id)?;
     let source = args
         .get(1)
         .cloned()
@@ -18496,9 +18997,10 @@ fn parse_contextual_fragment_native(
         crate::html::TreeBuilder::parse_fragment(&source, &context_node).fragment()
     };
     let id = fragment.identity();
+    let creator = caller_document_id(context);
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        state.register_tree(&fragment);
+        state.register_tree_for_document(&fragment, creator);
         if !xml {
             mark_inserted_scripts_in_tree(&mut state, &fragment);
         }
@@ -18516,6 +19018,7 @@ fn mark_inserted_script_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         if state
@@ -18555,6 +19058,7 @@ fn collect_inserted_scripts_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let root_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, root_id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let mut ids = Vec::new();
@@ -18587,6 +19091,7 @@ fn prepare_inserted_inline_script_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         if !state.runnable_inserted_scripts.contains(&id)
@@ -18627,6 +19132,7 @@ fn record_inserted_script_error_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     let message = args
         .get(1)
         .cloned()
@@ -18656,6 +19162,7 @@ fn child_node_ids_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let (node, children) = {
             let s = state.borrow();
@@ -18682,6 +19189,7 @@ fn next_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let node = state
@@ -18715,6 +19223,7 @@ fn previous_sibling_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let node = state
@@ -18744,11 +19253,13 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, parent_id)?;
     let child_id = args
         .get(1)
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, child_id)?;
     with_host_state(|state| {
         let (parent, child) = {
             let state = state.borrow();
@@ -18785,19 +19296,23 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, parent_id)?;
     let new_id = args
         .get(1)
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, new_id)?;
     let ref_value = args.get(2).cloned().unwrap_or_default();
+    let ref_id = if ref_value.is_null_or_undefined() {
+        None
+    } else {
+        let id = ref_value.to_number(context)? as usize;
+        ensure_same_origin_node(context, id)?;
+        Some(id)
+    };
     with_host_state(|state| {
-        let ref_node = if ref_value.is_null() || ref_value.is_undefined() {
-            None
-        } else {
-            let ref_id = ref_value.to_number(context)? as usize;
-            state.borrow().get_node(ref_id)
-        };
+        let ref_node = ref_id.and_then(|id| state.borrow().get_node(id));
         let (parent, new_node) = {
             let state = state.borrow();
             let parent = state.get_node(parent_id).ok_or_else(|| {
@@ -18856,6 +19371,7 @@ fn query_selector_all_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, parent_id)?;
     let selector = args
         .get(1)
         .cloned()
@@ -18907,6 +19423,9 @@ fn set_user_action_target_native(
         .filter(|value| !value.is_null_or_undefined())
         .map(|value| parse_node_id(Some(value), context))
         .transpose()?;
+    if let Some(target_id) = target_id {
+        ensure_same_origin_node(context, target_id)?;
+    }
     let visible = args.get(2).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
         state
@@ -18926,6 +19445,7 @@ fn matches_selector_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, node_id)?;
     let selector = args
         .get(1)
         .cloned()
@@ -19016,6 +19536,7 @@ fn node_type_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let node = state
@@ -19041,6 +19562,7 @@ fn node_is_html_element_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let node = state
@@ -19111,7 +19633,9 @@ fn clone_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     let deep = args.get(1).cloned().unwrap_or_default().to_boolean();
+    let creator = caller_document_id(context);
     with_host_state(|state| {
         let (node, clone) = {
             let s = state.borrow();
@@ -19123,7 +19647,17 @@ fn clone_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         };
         let clone_id = clone.identity() as f64;
         let mut state = state.borrow_mut();
-        state.register_tree(&clone);
+        if node.node_type() == NodeType::Document
+            && let Some(origin) = state
+                .document_security_origins
+                .get(&node.identity())
+                .cloned()
+        {
+            state
+                .document_security_origins
+                .insert(clone.identity(), origin);
+        }
+        state.register_tree_for_document(&clone, creator);
         copy_inserted_script_state(&mut state, &node, &clone, deep);
         Ok(JsValue::from(clone_id))
     })
@@ -19164,6 +19698,7 @@ fn remove_attribute_native(
         .cloned()
         .unwrap_or_default()
         .to_number(context)? as usize;
+    ensure_same_origin_node(context, id)?;
     let name = args
         .get(1)
         .cloned()
@@ -19220,6 +19755,7 @@ fn remove_attribute_ns_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     let namespace = match args.get(1) {
         Some(value) if !value.is_null() && !value.is_undefined() => {
             Some(value.to_string(context)?.to_std_string_escaped())
@@ -19294,8 +19830,11 @@ fn create_text_node_native(
         .to_std_string_escaped();
     let node = NodeHandle::text(&text);
     let id = node.identity() as f64;
+    let creator = caller_document_id(context);
     with_host_state(|state| {
-        state.borrow_mut().nodes.insert(node.identity(), node);
+        state
+            .borrow_mut()
+            .register_tree_for_document(&node, creator);
         Ok(JsValue::from(id))
     })
 }
@@ -19313,8 +19852,11 @@ fn create_cdata_section_native(
         .to_std_string_escaped();
     let node = NodeHandle::cdata_section(text);
     let id = node.identity() as f64;
+    let creator = caller_document_id(context);
     with_host_state(|state| {
-        state.borrow_mut().nodes.insert(node.identity(), node);
+        state
+            .borrow_mut()
+            .register_tree_for_document(&node, creator);
         Ok(JsValue::from(id))
     })
 }
@@ -19322,12 +19864,15 @@ fn create_cdata_section_native(
 fn create_document_fragment_native(
     _: &JsValue,
     _args: &[JsValue],
-    _context: &mut Context,
+    context: &mut Context,
 ) -> JsResult<JsValue> {
     let node = NodeHandle::document_fragment();
     let id = node.identity() as f64;
+    let creator = caller_document_id(context);
     with_host_state(|state| {
-        state.borrow_mut().nodes.insert(node.identity(), node);
+        state
+            .borrow_mut()
+            .register_tree_for_document(&node, creator);
         Ok(JsValue::from(id))
     })
 }
@@ -19338,6 +19883,7 @@ fn template_content_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let content = state
             .borrow()
@@ -19354,11 +19900,13 @@ fn template_content_native(
 
 fn attach_shadow_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     let mode = if args.get(1).is_some_and(JsValue::to_boolean) {
         ShadowRootMode::Closed
     } else {
         ShadowRootMode::Open
     };
+    let creator = caller_document_id(context);
     with_host_state(|state| {
         let host = state
             .borrow()
@@ -19368,13 +19916,16 @@ fn attach_shadow_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             return Ok(JsValue::null());
         };
         let root_id = root.identity();
-        state.borrow_mut().register_tree(&root);
+        state
+            .borrow_mut()
+            .register_tree_for_document(&root, creator);
         Ok(JsValue::from(root_id as f64))
     })
 }
 
 fn shadow_root_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let root = state
             .borrow()
@@ -19386,6 +19937,7 @@ fn shadow_root_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
 fn shadow_host_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let host = state
             .borrow()
@@ -19397,6 +19949,7 @@ fn shadow_host_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
 fn shadow_mode_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let mode = state
             .borrow()
@@ -19412,6 +19965,7 @@ fn shadow_mode_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
 fn assigned_slot_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let slot = state
             .borrow()
@@ -19436,6 +19990,7 @@ fn internal_assigned_slot_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let slot = state
             .borrow()
@@ -19451,6 +20006,7 @@ fn assigned_nodes_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     let flatten = args.get(1).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
         let nodes = state
@@ -19472,13 +20028,17 @@ fn assigned_nodes_native(
 fn create_document_native(
     _: &JsValue,
     _args: &[JsValue],
-    _context: &mut Context,
+    context: &mut Context,
 ) -> JsResult<JsValue> {
     let document = NodeHandle::document();
     let id = document.identity();
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        state.nodes.insert(id, document);
+        let creator = context_document_id(context, &state);
+        if let Some(origin) = state.document_security_origins.get(&creator).cloned() {
+            state.document_security_origins.insert(id, origin);
+        }
+        state.register_tree(&document);
         state.document_styles.insert(
             id,
             DocumentStyleEntry {
@@ -19510,6 +20070,10 @@ fn parse_xml_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let id = document.identity();
     with_host_state(|state| {
         let mut state = state.borrow_mut();
+        let creator = context_document_id(context, &state);
+        if let Some(origin) = state.document_security_origins.get(&creator).cloned() {
+            state.document_security_origins.insert(id, origin);
+        }
         state.register_tree(&document);
         state.document_styles.insert(
             id,
@@ -19529,6 +20093,7 @@ fn parse_xml_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
 /// accessors on the node or any of its descendants.
 fn serialize_xml_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -19566,8 +20131,11 @@ fn create_document_type_native(
         .to_std_string_escaped();
     let node = NodeHandle::document_type(&name, &public_id, &system_id);
     let id = node.identity();
+    let creator = caller_document_id(context);
     with_host_state(|state| {
-        state.borrow_mut().nodes.insert(id, node);
+        state
+            .borrow_mut()
+            .register_tree_for_document(&node, creator);
         Ok(JsValue::from(id as f64))
     })
 }
@@ -19591,8 +20159,11 @@ fn create_processing_instruction_native(
         .to_std_string_escaped();
     let node = NodeHandle::processing_instruction(target, data);
     let id = node.identity() as f64;
+    let creator = caller_document_id(context);
     with_host_state(|state| {
-        state.borrow_mut().nodes.insert(node.identity(), node);
+        state
+            .borrow_mut()
+            .register_tree_for_document(&node, creator);
         Ok(JsValue::from(id))
     })
 }
@@ -19610,8 +20181,11 @@ fn create_comment_native(
         .to_std_string_escaped();
     let node = NodeHandle::comment(&data);
     let id = node.identity() as f64;
+    let creator = caller_document_id(context);
     with_host_state(|state| {
-        state.borrow_mut().nodes.insert(node.identity(), node);
+        state
+            .borrow_mut()
+            .register_tree_for_document(&node, creator);
         Ok(JsValue::from(id))
     })
 }
@@ -19705,6 +20279,7 @@ fn document_reset_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
         let (node, is_main_document) = {
             let s = state.borrow();
@@ -19948,20 +20523,46 @@ fn submit_form_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     };
     let target = string_arg(4, context)?;
     let form_id = parse_node_id(args.get(5), context)?;
+    ensure_same_origin_node(context, form_id)?;
     let request = form_submission::Submission {
         url,
         method,
         body,
         content_type,
     };
-    with_host_state(|state| {
+    let frame = with_host_state(|state| {
         let mut state = state.borrow_mut();
         if let Some(form) = state.get_node(form_id) {
-            let frame = state.queue_form_submission(&form, &target, request)?;
-            return Ok(frame.map_or_else(JsValue::null, |id| JsValue::from(id as f64)));
+            return state.queue_form_submission(&form, &target, request);
         }
-        Ok(JsValue::null())
-    })
+        Ok(None)
+    })?;
+    if let Some(frame_id) = frame {
+        let callback = with_host_state(|state| {
+            let state = state.borrow();
+            let owner = state
+                .get_node(frame_id)
+                .as_ref()
+                .and_then(owner_document_for_node)
+                .map(|document| document.identity());
+            Ok(owner.and_then(|id| state.iframe_navigation.owner(id)))
+        })?;
+        if let Some(callback) = callback {
+            callback
+                .as_callable()
+                .expect("registered navigation handler")
+                .call(
+                    &JsValue::undefined(),
+                    &[
+                        JsValue::from(frame_id as f64),
+                        JsValue::null(),
+                        js_string!("prepare").into(),
+                    ],
+                    context,
+                )?;
+        }
+    }
+    Ok(frame.map_or_else(JsValue::null, |id| JsValue::from(id as f64)))
 }
 
 /// Incrementally parses written input, executing each completed classic
@@ -19972,6 +20573,7 @@ fn document_write_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let target_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, target_id)?;
     let text = args
         .get(1)
         .cloned()
@@ -19987,6 +20589,7 @@ fn document_close_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let target_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, target_id)?;
     with_host_state(|state| document_write::write(state, target_id, "", true, context))
 }
 
@@ -20000,6 +20603,7 @@ fn iframe_content_document_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
         let iframe = state.borrow().get_node(node_id);
         match iframe {
@@ -20071,6 +20675,7 @@ fn dispatch_iframe_departure_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let iframe_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, iframe_id)?;
     with_host_state(|state| {
         let realm = {
             let state = state.borrow();
@@ -20098,6 +20703,7 @@ fn existing_iframe_document_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let iframe_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, iframe_id)?;
     with_host_state(|state| {
         Ok(state
             .borrow()
@@ -20117,6 +20723,7 @@ fn iframe_context_state_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let iframe_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, iframe_id)?;
     let expected_context = args
         .get(1)
         .filter(|value| !value.is_null_or_undefined())
@@ -20174,6 +20781,7 @@ fn iframe_force_navigation_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let iframe_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, iframe_id)?;
     with_host_state(|state| {
         let iframe = state.borrow().get_node(iframe_id);
         let Some(iframe) = iframe else {
@@ -22171,14 +22779,14 @@ mod tests {
     }
 
     #[test]
-    fn posted_message_host_binding_reports_two_arguments() {
+    fn posted_message_host_binding_is_private_and_public_api_keeps_its_arity() {
         let mut runtime = JsRuntime::new().unwrap();
         assert_eq!(
-            runtime
-                .eval("__omoikane_enqueue_posted_message.length")
-                .unwrap()
-                .as_number(),
-            Some(2.0)
+            eval_str(
+                &mut runtime,
+                "typeof globalThis.__omoikane_enqueue_posted_message + '|' + postMessage.length"
+            ),
+            "undefined|1"
         );
     }
 
@@ -28740,27 +29348,25 @@ b</textarea></form>"#,
     #[test]
     fn style_normalization_host_call_is_limited_to_grammar_sensitive_properties() {
         let mut runtime = JsRuntime::new().unwrap();
+        TEST_STYLE_NORMALIZATION_CALLS.with(|count| count.set(0));
         assert_eq!(
             runtime
                 .eval(
                     r#"(() => {
-                      const original = __omoikane_normalize_style_value;
-                      let calls = 0;
-                      globalThis.__omoikane_normalize_style_value = (...args) => {
-                        calls++;
-                        return original(...args);
-                      };
                       const target = document.createElement("div");
                       target.style.width = "10px";
                       target.style.opacity = "0.5";
                       target.style.transition = "opacity 1s linear";
-                      return calls;
+                      return target.style.width === "10px" &&
+                        target.style.opacity === "0.5" &&
+                        target.style.transition !== "";
                     })()"#,
                 )
                 .unwrap()
-                .as_number(),
-            Some(2.0)
+                .as_boolean(),
+            Some(true)
         );
+        assert_eq!(TEST_STYLE_NORMALIZATION_CALLS.with(Cell::get), 2);
     }
 
     #[test]
@@ -35411,29 +36017,32 @@ b</textarea></form>"#,
     #[test]
     fn performance_resource_timing_fetch_completion_is_idempotent() {
         let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+        TEST_FETCH_RESPONSE_OVERRIDE.with(|response| {
+            *response.borrow_mut() = Some((
+                "https://example.test/broken-response".to_string(),
+                serde_json::json!({
+                    "status": 200,
+                    "statusText": "OK",
+                    "url": "https://example.test/broken-response",
+                    "redirected": false,
+                    "type": "basic",
+                    "headers": [null],
+                    "bodyText": "",
+                    "bodyBase64": null,
+                })
+                .to_string(),
+            ));
+        });
         runtime
             .eval(
                 r#"(() => {
                   performance.clearResourceTimings();
-                  const originalFetch = globalThis.__omoikane_fetch;
-                  globalThis.__omoikane_fetch = () => Promise.resolve(JSON.stringify({
-                    status: 200,
-                    statusText: "OK",
-                    url: "https://example.test/broken-response",
-                    redirected: false,
-                    type: "basic",
-                    headers: [null],
-                    bodyText: "",
-                    bodyBase64: null,
-                  }));
-                  const restoreFetch = () => {
-                    globalThis.__omoikane_fetch = originalFetch;
-                  };
-                  fetch("https://example.test/broken-response").then(restoreFetch, restoreFetch);
+                  fetch("https://example.test/broken-response").catch(() => {});
                 })()"#,
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
+        assert!(TEST_FETCH_RESPONSE_OVERRIDE.with(|response| response.borrow().is_none()));
         assert!(runtime
             .eval(
                 r#"(() => {
@@ -44927,6 +45536,266 @@ b</textarea></form>"#,
     }
 
     #[test]
+    fn page_scripts_cannot_reach_host_bindings_or_change_the_private_document_id() {
+        let mut runtime = JsRuntime::with_document_and_url(
+            default_document(),
+            "https://private-bindings.example.test/page",
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "['__omoikane_get_inner_html', '__omoikane_get_text_content', \
+                 '__omoikane_document_cookie_get', '__omoikane_document_cookie_set', \
+                 '__omoikane_storage_get', '__omoikane_storage_set', \
+                 '__omoikane_document_id', '__omoikane_font_maps'] \
+                 .map(name => typeof globalThis[name]).join('|')",
+            ),
+            "undefined|undefined|undefined|undefined|undefined|undefined|undefined|undefined"
+        );
+        runtime
+            .eval(
+                "globalThis.__omoikane_document_id = 999999; \
+                 document.body.innerHTML = '<p id=private-test>safe</p>'; \
+                 document.cookie = 'private_test=ok; path=/'; \
+                 localStorage.setItem('private-test', 'stored')",
+            )
+            .unwrap();
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "document.getElementById('private-test').textContent + '|' + \
+                 document.cookie.includes('private_test=ok') + '|' + \
+                 localStorage.getItem('private-test')",
+            ),
+            "safe|true|stored"
+        );
+
+        let page_module = Module::parse(
+            Source::from_bytes(
+                "globalThis.pageImportMetaPrivate = typeof import.meta.__omoikane_private_bindings",
+            ),
+            None,
+            &mut runtime.context,
+        )
+        .unwrap();
+        assert!(matches!(
+            page_module.load(&mut runtime.context).state(),
+            PromiseState::Fulfilled(_)
+        ));
+        page_module.link(&mut runtime.context).unwrap();
+        assert!(matches!(
+            page_module.evaluate(&mut runtime.context).state(),
+            PromiseState::Fulfilled(_)
+        ));
+        assert_eq!(eval_str(&mut runtime, "pageImportMetaPrivate"), "undefined");
+    }
+
+    #[test]
+    fn cross_origin_iframe_scripts_cannot_reach_host_bindings() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "text/html",
+            r#"<html><body><script>
+              const names = ['__omoikane_get_inner_html', '__omoikane_document_cookie_get',
+                '__omoikane_storage_get', '__omoikane_document_id'];
+              document.documentElement.setAttribute('data-host-bindings',
+                names.map(name => typeof globalThis[name]).join('|'));
+              localStorage.setItem('child-private', 'ok');
+              document.documentElement.setAttribute('data-own-storage',
+                String(localStorage.getItem('child-private') === 'ok'));
+            </script></body></html>"#,
+        );
+        let document = TreeBuilder::parse(&format!(
+            "<html><body><iframe id='child' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+        ))
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "http://other-origin.test/page").unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        pump_zero_delay_tasks(&mut runtime);
+        let child_document = {
+            let state = runtime.host_state.borrow();
+            let iframe_id = state.document.query_selector("#child").unwrap().identity();
+            state.iframe_documents[&iframe_id].document.clone()
+        };
+        let root = child_document.query_selector("html").unwrap();
+        assert_eq!(
+            root.get_attribute("data-host-bindings").as_deref(),
+            Some("undefined|undefined|undefined|undefined")
+        );
+        assert_eq!(
+            root.get_attribute("data-own-storage").as_deref(),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn forged_dom_receivers_cannot_access_cross_origin_node_ids() {
+        use crate::html::TreeBuilder;
+        let port = spawn_static_http_server(
+            "text/html",
+            "<html><body><p id='secret'>victim content</p><script>localStorage.setItem('private-key', 'victim storage'); try { const orphan = document.createElement('p'); orphan.textContent = 'detached secret'; document.documentElement.setAttribute('data-detached-own-text', orphan.textContent); document.documentElement.setAttribute('data-detached-id', String(orphan.__id)); globalThis.orphan = orphan; } catch (error) { document.documentElement.setAttribute('data-detached-error', error.name + ':' + error.message); }</script></body></html>",
+        );
+        let document = TreeBuilder::parse(&format!(
+            "<html><body><iframe id='child' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+        ))
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "http://other-origin.test/page").unwrap();
+        pump_zero_delay_tasks(&mut runtime);
+        pump_zero_delay_tasks(&mut runtime);
+        let (secret_id, child_document_id, detached_id) = {
+            let state = runtime.host_state.borrow();
+            let iframe_id = state.document.query_selector("#child").unwrap().identity();
+            let child = &state.iframe_documents[&iframe_id].document;
+            assert_eq!(
+                child
+                    .query_selector("html")
+                    .unwrap()
+                    .get_attribute("data-detached-own-text")
+                    .as_deref(),
+                Some("detached secret")
+            );
+            (
+                child.query_selector("#secret").unwrap().identity(),
+                child.identity(),
+                child
+                    .query_selector("html")
+                    .unwrap()
+                    .get_attribute("data-detached-id")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "child detached-node setup failed: {:?}",
+                            child
+                                .query_selector("html")
+                                .unwrap()
+                                .get_attribute("data-detached-error")
+                        )
+                    })
+                    .parse::<usize>()
+                    .unwrap(),
+            )
+        };
+        let html_probe = format!(
+            "(()=>{{try{{return Reflect.get(document.body,'innerHTML',{{__id:{secret_id}}})}}catch(error){{return 'blocked:'+error.name}}}})()"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, &html_probe),
+            "blocked:SecurityError",
+            "a forged receiver must not read another origin's DOM"
+        );
+        let detached_probe = format!(
+            "(()=>{{try{{return Reflect.get(document.body,'textContent',{{__id:{detached_id}}})}}catch(error){{return 'blocked:'+error.name}}}})()"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, &detached_probe),
+            "blocked:SecurityError",
+            "a detached node must retain its creator's origin"
+        );
+        let parent_probe = format!(
+            "(()=>{{try{{return Reflect.get(document.body,'parentNode',{{__id:{secret_id}}}).nodeName}}catch(error){{return 'blocked:'+error.name}}}})()"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, &parent_probe),
+            "blocked:SecurityError",
+            "a forged receiver must not traverse another origin's DOM"
+        );
+        let storage_probe = format!(
+            "(()=>{{try{{return new Storage('local', {{__id:{child_document_id}}}, globalThis).getItem('private-key')}}catch(error){{return 'blocked:'+error.name}}}})()"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, &storage_probe),
+            "blocked:SecurityError",
+            "a forged storage area must not read another origin's data"
+        );
+        let url_probe = format!(
+            "(()=>{{try{{return Reflect.get(document,'URL',{{__id:{child_document_id}}})}}catch(error){{return 'blocked:'+error.name}}}})()"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, &url_probe),
+            "blocked:SecurityError",
+            "a forged document must not read another origin's URL"
+        );
+        let cookie_probe = format!(
+            "(()=>{{try{{return Reflect.get(document,'cookie',{{__id:{child_document_id}}})}}catch(error){{return 'blocked:'+error.name}}}})()"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, &cookie_probe),
+            "blocked:SecurityError",
+            "a forged document must not read another origin's cookies"
+        );
+        let cookie_write_probe = format!(
+            "(()=>{{try{{Reflect.set(document,'cookie','forged=1',{{__id:{child_document_id}}});return 'written'}}catch(error){{return 'blocked:'+error.name}}}})()"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, &cookie_write_probe),
+            "blocked:SecurityError",
+            "a forged document must not write another origin's cookies"
+        );
+        let write_probe = format!(
+            "(()=>{{try{{Document.prototype.write.call({{__id:{child_document_id}}},'<p id=forged-write>');return 'written'}}catch(error){{return 'blocked:'+error.name}}}})()"
+        );
+        assert_eq!(
+            eval_str(&mut runtime, &write_probe),
+            "blocked:SecurityError",
+            "a forged document must not write into another origin's parser"
+        );
+        let parent_body_id = runtime
+            .host_state
+            .borrow()
+            .document
+            .query_selector("body")
+            .unwrap()
+            .identity();
+        let _active = activate_host_state(runtime.host_state.clone());
+        for (operation, result) in [
+            (
+                "retain foreign node",
+                node_lifetime::retain_node_native(
+                    &JsValue::undefined(),
+                    &[JsValue::from(secret_id as f64)],
+                    &mut runtime.context,
+                ),
+            ),
+            (
+                "change foreign node owner",
+                node_lifetime::set_owner_native(
+                    &JsValue::undefined(),
+                    &[
+                        JsValue::from(secret_id as f64),
+                        JsValue::from(parent_body_id as f64),
+                    ],
+                    &mut runtime.context,
+                ),
+            ),
+            (
+                "assign foreign owner document",
+                node_lifetime::set_owner_native(
+                    &JsValue::undefined(),
+                    &[
+                        JsValue::from(parent_body_id as f64),
+                        JsValue::from(child_document_id as f64),
+                    ],
+                    &mut runtime.context,
+                ),
+            ),
+        ] {
+            let error = result.unwrap_err().to_opaque(&mut runtime.context);
+            let name = error
+                .as_object()
+                .unwrap()
+                .get(js_string!("name"), &mut runtime.context)
+                .unwrap();
+            assert_eq!(
+                name.as_string().unwrap().to_std_string_escaped(),
+                "SecurityError",
+                "{operation} must reject a foreign node or document"
+            );
+        }
+    }
+
+    #[test]
     fn iframe_window_proxy_enforces_cross_origin_boundary_and_restores_access() {
         use crate::html::TreeBuilder;
         let same_origin_port = spawn_static_http_server(
@@ -45558,10 +46427,10 @@ b</textarea></form>"#,
         assert_eq!(
             eval_string_value(
                 &mut runtime,
-                "(()=>{ let name='none'; try { childWindow.document; } catch (error) { name=error.name; } return [frame.contentDocument === null, name].join('|'); })()"
+                "(()=>{ let names=[]; for (const read of [()=>frame.contentDocument, ()=>childWindow.document]) { try { read(); names.push('none'); } catch (error) { names.push(error.name); } } return names.join('|'); })()"
             )
             .as_deref(),
-            Some("true|SecurityError")
+            Some("SecurityError|SecurityError")
         );
 
         runtime
@@ -45570,12 +46439,45 @@ b</textarea></form>"#,
             .document_security_origins
             .remove(&child_id);
         assert_eq!(
-            runtime
-                .eval("frame.contentDocument === null")
-                .unwrap()
-                .as_boolean(),
-            Some(true),
+            eval_string_value(
+                &mut runtime,
+                "(()=>{ try { return frame.contentDocument === null ? 'null' : 'exposed'; } catch (error) { return error.name; } })()"
+            ).as_deref(),
+            Some("SecurityError"),
             "missing/missing metadata must remain cross-origin"
+        );
+    }
+
+    #[test]
+    fn missing_popup_origin_metadata_never_exposes_its_document() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval("globalThis.popup = window.open('', 'origin-gap')")
+            .unwrap();
+        let (main_id, popup_id) = {
+            let state = runtime.host_state.borrow();
+            (
+                state.document.identity(),
+                state
+                    .auxiliary_contexts
+                    .values()
+                    .next()
+                    .unwrap()
+                    .document
+                    .identity(),
+            )
+        };
+        {
+            let mut state = runtime.host_state.borrow_mut();
+            state.document_security_origins.remove(&main_id);
+            state.document_security_origins.remove(&popup_id);
+        }
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(()=>{try{return popup.document ? 'exposed' : 'null'}catch(error){return error.name}})()"
+            ),
+            "SecurityError"
         );
     }
 
@@ -45939,7 +46841,7 @@ b</textarea></form>"#,
         );
     }
 
-    /// The `__omoikane_document_owner_iframe` binding backing `defaultView`
+    /// The private document-owner binding backing `defaultView`
     /// maps the main document and unknown/stale ids to null, and a live
     /// sub-document to its owning iframe's node id.
     #[test]
@@ -45948,37 +46850,57 @@ b</textarea></form>"#,
         let doc =
             TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
         let mut runtime = JsRuntime::with_document(doc).unwrap();
+        runtime
+            .eval("document.getElementById('f').contentDocument")
+            .unwrap();
+        let (main_id, iframe_id, child_id) = {
+            let state = runtime.host_state.borrow();
+            let iframe_id = state.document.query_selector("#f").unwrap().identity();
+            (
+                state.document.identity(),
+                iframe_id,
+                state.iframe_documents[&iframe_id].document.identity(),
+            )
+        };
+        let _host = activate_host_state(Rc::clone(&runtime.host_state));
+        let owner = |id, context: &mut Context| {
+            document_owner_iframe_native(
+                &JsValue::undefined(),
+                &[JsValue::from(id as f64)],
+                context,
+            )
+            .unwrap()
+        };
 
         // The main document is owned by no iframe.
         assert!(
-            runtime
-                .eval("__omoikane_document_owner_iframe(document.__id)")
-                .unwrap()
-                .is_null(),
+            owner(main_id, &mut runtime.context).is_null(),
             "the main document must map to null (its window is globalThis)"
         );
 
         // A live sub-document maps to its owning iframe's node id.
         assert_eq!(
-            runtime
-                .eval(
-                    "var f = document.getElementById('f'); \
-                     __omoikane_document_owner_iframe(f.contentDocument.__id) === f.__id"
-                )
-                .unwrap()
-                .as_boolean(),
-            Some(true),
+            owner(child_id, &mut runtime.context).as_number(),
+            Some(iframe_id as f64),
             "a sub-document must map to its owning iframe's node id"
         );
 
-        // An id that is neither the main document nor any tracked sub-document
-        // (unknown or reloaded/stale) maps to null.
-        assert!(
-            runtime
-                .eval("__omoikane_document_owner_iframe(999999999)")
-                .unwrap()
-                .is_null(),
-            "an unknown/stale document id must map to null, not an iframe"
+        // A forged unknown id has no origin metadata and must fail closed.
+        let error = document_owner_iframe_native(
+            &JsValue::undefined(),
+            &[JsValue::from(999999999.0)],
+            &mut runtime.context,
+        )
+        .unwrap_err()
+        .to_opaque(&mut runtime.context);
+        let name = error
+            .as_object()
+            .unwrap()
+            .get(js_string!("name"), &mut runtime.context)
+            .unwrap();
+        assert_eq!(
+            name.as_string().unwrap().to_std_string_escaped(),
+            "SecurityError"
         );
     }
 
@@ -49912,11 +50834,20 @@ b</textarea></form>"#,
                globalThis.receiverChannel = new BroadcastChannel('decode');
                receiverChannel.onmessage = () => messages++;
                receiverChannel.onmessageerror = () => errors++;
-               // The native hook accepts a clone wire; an invalid wire models
-               // a target-side deserialization failure without bypassing the
-               // posted-message task source.
-               __omoikane_broadcast_channel_post(senderChannel._id, '{}'); })()"#,
+               })()"#,
         );
+        // Inject an invalid clone wire through the private host callback from
+        // Rust, without making the callback callable by page scripts.
+        let channel_id = runtime.eval("senderChannel._id").unwrap();
+        {
+            let _host = activate_host_state(Rc::clone(&runtime.host_state));
+            broadcast_channel_post_native(
+                &JsValue::undefined(),
+                &[channel_id, JsValue::from(js_string!("{}"))],
+                &mut runtime.context,
+            )
+            .unwrap();
+        }
         runtime.run_until_idle().unwrap();
         assert_eq!(eval_str(&mut runtime, "messages + ':' + errors"), "0:1");
     }

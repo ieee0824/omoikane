@@ -198,7 +198,11 @@ fn error(message: impl ToString) -> JsError {
         .into()
 }
 
-pub(super) fn register(context: &mut Context, host: &Rc<RefCell<HostState>>) -> JsResult<()> {
+pub(super) fn register(
+    context: &mut Context,
+    host: &Rc<RefCell<HostState>>,
+    bindings: &mut BootstrapBindings,
+) -> JsResult<()> {
     let existing = host.borrow().font_loading.maps.clone();
     let maps = if let Some(maps) = existing {
         maps
@@ -209,7 +213,9 @@ pub(super) fn register(context: &mut Context, host: &Rc<RefCell<HostState>>) -> 
         host.borrow_mut().font_loading.maps = Some(maps.clone());
         maps
     };
-    context.register_global_property(
+    register_private_property(
+        context,
+        bindings,
         js_string!("__omoikane_font_maps"),
         maps,
         boa_engine::property::Attribute::all(),

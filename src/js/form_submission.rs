@@ -231,12 +231,15 @@ pub(super) fn plain_text_document(bytes: &[u8]) -> NodeHandle {
 
 /// Private history transport: serialized requests live only in the facade's
 /// closure, so truncating history releases request bodies without retaining DOMs.
-pub(super) fn register(context: &mut Context) -> JsResult<()> {
-    context.register_global_builtin_callable(
+pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_resolve_form_action"),
         2,
         NativeFunction::from_copy_closure(|_, args, context| {
             let form_id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, form_id)?;
             let reference = args
                 .get(1)
                 .unwrap_or(&JsValue::undefined())
@@ -258,11 +261,14 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_window_name"),
         1,
         NativeFunction::from_copy_closure(|_, args, context| {
             let document = parse_node_id(args.first(), context)?;
+            ensure_same_origin_document(context, document)?;
             let next = if args.len() > 1 {
                 Some(args[1].to_string(context)?.to_std_string_escaped())
             } else {
@@ -287,11 +293,14 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_iframe_submission_snapshot"),
         1,
         NativeFunction::from_copy_closure(|_, args, context| {
             let id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, id)?;
             with_host_state(|host| {
                 let state = host.borrow();
                 let Some(request) = state
@@ -307,11 +316,14 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_iframe_replay_submission"),
         3,
         NativeFunction::from_copy_closure(|_, args, context| {
             let id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, id)?;
             let json = args
                 .get(1)
                 .unwrap_or(&JsValue::undefined())

@@ -1,14 +1,18 @@
-use super::JsRuntime;
+use super::{JsRuntime, TEST_LAYOUT_METRICS_CALLS};
 use crate::html::TreeBuilder;
 
 fn runtime(html: &str) -> JsRuntime {
-    let mut runtime = JsRuntime::with_document_and_url(
+    let runtime = JsRuntime::with_document_and_url(
         TreeBuilder::parse(html).document(),
         "https://example.test/index.html",
     )
     .unwrap();
-    runtime.eval("const nativeMetrics = __omoikane_layout_metrics; globalThis.metricCalls = 0; globalThis.__omoikane_layout_metrics = id => { metricCalls++; return nativeMetrics(id); };").unwrap();
+    TEST_LAYOUT_METRICS_CALLS.with(|count| count.set(0));
     runtime
+}
+
+fn metric_calls() -> usize {
+    TEST_LAYOUT_METRICS_CALLS.with(std::cell::Cell::get)
 }
 
 fn number(runtime: &mut JsRuntime, source: &str) -> f64 {
@@ -178,9 +182,9 @@ fn layout_metrics_cache_shares_geometry_for_one_element_and_keeps_rects_independ
         "<html><body><div id='target' style='width:100px;height:20px'></div><div id='other' style='width:60px'></div></body></html>",
     );
     runtime.eval("globalThis.target = document.getElementById('target'); globalThis.other = document.getElementById('other'); for (let i=0;i<100;i++) { target.offsetWidth; target.offsetHeight; target.clientWidth; target.scrollHeight; target.getBoundingClientRect(); target.getClientRects(); }").unwrap();
-    assert_eq!(number(&mut runtime, "metricCalls"), 1.0);
+    assert_eq!(metric_calls(), 1);
     assert_eq!(number(&mut runtime, "other.offsetWidth"), 60.0);
-    assert_eq!(number(&mut runtime, "metricCalls"), 2.0);
+    assert_eq!(metric_calls(), 2);
     runtime.eval("target.getBoundingClientRect().width = -1; const rects = target.getClientRects(); rects[0].width = -1; rects.push({width:-1});").unwrap();
     assert_eq!(
         number(&mut runtime, "target.getClientRects()[0].width"),
@@ -188,7 +192,7 @@ fn layout_metrics_cache_shares_geometry_for_one_element_and_keeps_rects_independ
     );
     assert_eq!(number(&mut runtime, "target.getClientRects().length"), 1.0);
     assert_eq!(number(&mut runtime, "target.offsetWidth"), 100.0);
-    assert_eq!(number(&mut runtime, "metricCalls"), 2.0);
+    assert_eq!(metric_calls(), 2);
 }
 
 #[test]
@@ -208,7 +212,7 @@ fn layout_metrics_cache_invalidates_for_inline_style_cssom_and_tree_changes() {
         number(&mut runtime, "target.getBoundingClientRect().width"),
         180.0
     );
-    assert_eq!(number(&mut runtime, "metricCalls"), 3.0);
+    assert_eq!(metric_calls(), 3);
     runtime
         .eval("target.remove(); target.style.width='220px';")
         .unwrap();
@@ -216,7 +220,7 @@ fn layout_metrics_cache_invalidates_for_inline_style_cssom_and_tree_changes() {
     runtime.eval("document.body.appendChild(target);").unwrap();
     assert_eq!(number(&mut runtime, "target.offsetWidth"), 220.0);
     assert_eq!(number(&mut runtime, "target.clientWidth"), 220.0);
-    assert_eq!(number(&mut runtime, "metricCalls"), 5.0);
+    assert_eq!(metric_calls(), 5);
 }
 
 #[test]

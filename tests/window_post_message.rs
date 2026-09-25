@@ -199,13 +199,16 @@ fn opaque_iframe_default_target_origin_reaches_itself() {
         .eval("globalThis.replies = []; addEventListener('message', event => replies.push(event.data));")
         .unwrap();
     runtime.run_until_idle().unwrap();
+    let replies = runtime.eval("JSON.stringify(replies)").unwrap();
     assert!(
         runtime
             .eval(
                 "replies.length === 1 && replies[0].data === 'self' && replies[0].origin === 'null'"
             )
             .unwrap()
-            .to_boolean()
+            .to_boolean(),
+        "replies: {replies:?}; errors: {:?}",
+        runtime.take_task_errors()
     );
 }
 

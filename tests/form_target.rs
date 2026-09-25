@@ -824,7 +824,8 @@ fn iframe_form_action_uses_the_child_document_base_url() {
         assert_eq!(second.body, b"answer=child+value");
         assert_eq!(second.content_type, "application/x-www-form-urlencoded");
         assert!(runtime.take_navigation_requests().is_empty());
-        assert!(runtime.take_task_errors().is_empty());
+        let task_errors = runtime.take_task_errors();
+        assert!(task_errors.is_empty(), "{task_errors:?}");
     }
 }
 

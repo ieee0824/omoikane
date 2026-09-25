@@ -122,12 +122,15 @@ pub(super) fn flush(node_id: usize, context: &mut Context) -> JsResult<()> {
     })
 }
 
-pub(super) fn register(context: &mut Context) -> JsResult<()> {
-    context.register_global_builtin_callable(
+pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_register_validation"),
         2,
         NativeFunction::from_copy_closure(|_, args, context| {
             let document = parse_node_id(args.first(), context)?;
+            ensure_same_origin_document(context, document)?;
             let callback = args
                 .get(1)
                 .filter(|value| value.is_callable())
@@ -143,19 +146,26 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_flush_validation"),
         1,
         NativeFunction::from_copy_closure(|_, args, context| {
-            flush(parse_node_id(args.first(), context)?, context)?;
+            let id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, id)?;
+            flush(id, context)?;
             Ok(JsValue::undefined())
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_invalidate_validation"),
         1,
         NativeFunction::from_copy_closure(|_, args, context| {
             let id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, id)?;
             with_host_state(|state| {
                 let mut state = state.borrow_mut();
                 if let Some(node) = state.get_node(id) {

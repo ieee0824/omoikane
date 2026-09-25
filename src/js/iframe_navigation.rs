@@ -8,6 +8,10 @@ pub(super) struct State {
 }
 
 impl State {
+    pub(super) fn owner(&self, document: usize) -> Option<JsValue> {
+        self.owners.get(&document).cloned()
+    }
+
     pub(super) unsafe fn trace(&self, tracer: &mut Tracer) {
         for callback in self.owners.values() {
             unsafe { callback.trace(tracer) };
@@ -19,12 +23,15 @@ impl State {
     }
 }
 
-pub(super) fn register(context: &mut Context) -> JsResult<()> {
-    context.register_global_builtin_callable(
+pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_register_iframe_navigation"),
         2,
         NativeFunction::from_copy_closure(|_, args, context| {
             let document = parse_node_id(args.first(), context)?;
+            ensure_same_origin_document(context, document)?;
             let callback = args
                 .get(1)
                 .filter(|value| value.is_callable())
@@ -41,13 +48,15 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_child_navigation"),
         4,
         NativeFunction::from_copy_closure(|_, args, context| {
             let document = parse_node_id(args.first(), context)?;
             with_host_state(|host| {
-                let (frame, callback) = {
+                let (frame, callback, document_url, event_state) = {
                     let mut state = host.borrow_mut();
                     let frame = state
                         .iframe_documents
@@ -86,11 +95,18 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
                         .ok_or_else(|| {
                             JsNativeError::typ().with_message("iframe owner is no longer active")
                         })?;
-                    (frame, callback)
+                    let document_url =
+                        state.document_urls.get(&document).cloned().ok_or_else(|| {
+                            JsNativeError::typ().with_message("Document URL is no longer active")
+                        })?;
+                    let event_state = state.shared_event_state_for_node(document);
+                    (frame, callback, document_url, event_state)
                 };
                 let mut forwarded =
                     vec![JsValue::from(frame as f64), JsValue::from(document as f64)];
                 forwarded.extend_from_slice(&args[1..]);
+                forwarded.push(JsValue::from(js_string!(document_url.as_str())));
+                forwarded.push(event_state.map_or_else(JsValue::null, JsValue::from));
                 callback
                     .as_callable()
                     .expect("registered navigation handler")
@@ -98,11 +114,14 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_iframe_document_url"),
         1,
         NativeFunction::from_copy_closure(|_, args, context| {
             let frame = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, frame)?;
             with_host_state(|host| {
                 Ok(host
                     .borrow()

@@ -100,6 +100,15 @@ unsafe impl Trace for NodeLifetimes {
 }
 
 impl HostState {
+    /// Shared event state for a retained node without exposing its DOM wrapper.
+    pub(super) fn shared_event_state_for_node(&self, node_id: usize) -> Option<JsObject> {
+        self.node_lifetimes
+            .event_states
+            .get(&node_id)
+            .and_then(Weak::upgrade)
+            .map(|state| state.as_ref().clone())
+    }
+
     /// Registered owner shared by all wrappers, including after detachment.
     pub(super) fn node_lifetime_owner(&self, node_id: usize) -> Option<NodeHandle> {
         self.node_lifetimes
@@ -253,14 +262,20 @@ impl HostState {
         let owner = connected_owner
             .or_else(|| self.node_lifetimes.owners.get(&node.identity()).copied())
             .or(inherited_owner);
-        if let Some(owner) = owner
-            && let Some(document) = self
+        if let Some(owner) = owner {
+            if let Some(document) = self
                 .node_lifetimes
                 .documents
                 .get(&owner)
                 .and_then(Weak::upgrade)
-        {
-            self.enroll_node(node, owner, &document);
+            {
+                self.enroll_node(node, owner, &document);
+            } else if connected_owner.is_none() {
+                // A newly created detached node can be wrapped before its
+                // Document has a live wrapper group. Its owner still needs to
+                // survive that gap for the first native access check.
+                self.node_lifetimes.owners.insert(node.identity(), owner);
+            }
         }
         if let Some(content) = node.template_content() {
             // Template contents have no parent edge to their template and may
@@ -378,9 +393,20 @@ impl HostState {
             .and_then(WeakNodeHandle::upgrade)
     }
 
+    pub(super) fn forget_unretained_node(&mut self, id: usize) {
+        self.node_lifetimes.owners.remove(&id);
+        self.node_lifetimes.nodes.remove(&id);
+    }
+
     /// Style resolvers can own native DOM handles. A document record's death,
     /// not the DOM Rc count, determines cache reclamation after JS collection.
     pub(super) fn sweep_node_lifetimes(&mut self) {
+        self.retired_document_security_origins.retain(|id, _| {
+            self.node_lifetimes
+                .documents
+                .get(id)
+                .is_some_and(|document| document.strong_count() != 0)
+        });
         self.node_lifetimes
             .event_states
             .retain(|_, state| state.strong_count() != 0);
@@ -396,6 +422,13 @@ impl HostState {
         if dead.is_empty() {
             return;
         }
+        let dead_inactive: HashSet<_> = dead
+            .iter()
+            .copied()
+            .filter(|id| !self.document_is_active(*id))
+            .collect();
+        self.document_security_origins
+            .retain(|id, _| !dead_inactive.contains(id));
         self.node_lifetimes
             .documents
             .retain(|id, _| !dead.contains(id));
@@ -424,6 +457,7 @@ pub(super) fn retain_node_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     let wrapper = args
         .get(1)
         .and_then(JsValue::as_object)
@@ -456,6 +490,8 @@ pub(super) fn set_owner_native(
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
     let owner_id = parse_node_id(args.get(1), context)?;
+    ensure_same_origin_node(context, id)?;
+    ensure_same_origin_document(context, owner_id)?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         let node = state
@@ -475,6 +511,8 @@ pub(super) fn collected_nodes_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    // Bootstrap-only cache maintenance must accept IDs whose documents have
+    // already been collected and therefore have no origin record to check.
     let candidates = args
         .first()
         .and_then(JsValue::as_object)
