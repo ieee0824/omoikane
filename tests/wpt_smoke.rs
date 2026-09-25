@@ -2,7 +2,6 @@
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -11,108 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    tests: Vec<WptCase>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WptCase {
-    path: String,
-    #[serde(default)]
-    known_failure: Option<KnownFailure>,
-}
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct KnownFailure {
-    status: ActualStatus,
-    reason: String,
-    issue: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires: Option<String>,
-    /// If present, only these FAIL subtests may account for the known failure.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    failed_subtests: Option<Vec<String>>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "UPPERCASE")]
-enum ActualStatus {
-    Pass,
-    Fail,
-    Timeout,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum Classification {
-    Pass,
-    KnownFailure,
-    Regression,
-    Improvement,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct WptReport {
-    revision: String,
-    summary: WptSummary,
-    results: Vec<WptResult>,
-}
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-struct WptSummary {
-    total: usize,
-    pass: usize,
-    known_failure: usize,
-    regression: usize,
-    improvement: usize,
-    by_area: BTreeMap<String, AreaSummary>,
-}
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-struct AreaSummary {
-    total: usize,
-    pass: usize,
-    known_failure: usize,
-    regression: usize,
-    improvement: usize,
-}
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct WptResult {
-    path: String,
-    area: String,
-    actual: ActualStatus,
-    classification: Classification,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    known_failure: Option<KnownFailure>,
-    script_errors: Vec<String>,
-    subtests: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
-struct WptAreaReport {
-    revision: String,
-    area: String,
-    summary: AreaSummary,
-    results: Vec<WptResult>,
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-struct WptRevisionDiff {
-    previous_revision: String,
-    current_revision: String,
-    known_failure_delta: i64,
-    regression_delta: i64,
-    improvement_delta: i64,
-    changed: Vec<WptResultChange>,
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-struct WptResultChange {
-    path: String,
-    previous: Option<Classification>,
-    current: Option<Classification>,
-}
+#[path = "wpt_smoke/model.rs"]
+mod model;
+use model::{
+    ActualStatus, Classification, KnownFailure, Manifest, WptAreaReport, WptReport, WptResult,
+    WptResultChange, WptRevisionDiff, WptSummary,
+};
 
 struct StaticServer {
     base_url: String,
