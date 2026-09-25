@@ -6,6 +6,9 @@ use std::path::PathBuf;
 mod case_runner;
 #[path = "wpt_smoke/classification.rs"]
 mod classification;
+#[cfg(test)]
+#[path = "wpt_smoke/failure_modes.rs"]
+mod failure_modes;
 #[path = "wpt_smoke/manifest.rs"]
 mod manifest;
 #[path = "wpt_smoke/model.rs"]
@@ -24,14 +27,24 @@ use report::{junit_xml, read_revision_report, write_revision_reports};
 use server::StaticServer;
 use summary::{area_for_path, diff_revision_reports, summarize};
 
-fn known_failure(status: ActualStatus) -> KnownFailure {
-    KnownFailure {
-        status,
-        reason: "not implemented <yet>".to_string(),
-        issue: "#123&tracking".to_string(),
-        expires: None,
-        failed_subtests: None,
-    }
+fn mismatch_message(
+    path: &str,
+    actual: ActualStatus,
+    classification: Classification,
+    known: Option<&KnownFailure>,
+    errors: &[String],
+    details: &str,
+) -> Option<String> {
+    let kind = match classification {
+        Classification::Regression => "regression",
+        Classification::Improvement => "unexpected pass",
+        Classification::Pass | Classification::KnownFailure => return None,
+    };
+    let expected = known.map(|known| known.status.as_str()).unwrap_or("PASS");
+    Some(format!(
+        "WPT {path} {kind}: expected={expected} actual={}; script errors={errors:?}; results={details}",
+        actual.as_str()
+    ))
 }
 
 #[test]
@@ -64,7 +77,7 @@ fn selected_wpt_testharness_cases_match_expectations() {
         .to_string();
     let server = StaticServer::start(root);
     let mut results = Vec::new();
-    let mut regressions = Vec::new();
+    let mut mismatches = Vec::new();
     for case in manifest.tests {
         let CaseExecution {
             actual,
@@ -78,16 +91,15 @@ fn selected_wpt_testharness_cases_match_expectations() {
             case.path,
             actual.as_str()
         );
-        if classification == Classification::Regression {
-            let expected = case
-                .known_failure
-                .as_ref()
-                .map(|known| known.status.as_str())
-                .unwrap_or("PASS");
-            regressions.push(format!(
-                "WPT {} regression: expected={} actual={}; script errors={errors:?}; results={details}",
-                case.path, expected, actual.as_str()
-            ));
+        if let Some(message) = mismatch_message(
+            &case.path,
+            actual,
+            classification,
+            case.known_failure.as_ref(),
+            &errors,
+            &details,
+        ) {
+            mismatches.push(message);
         }
         results.push(WptResult {
             area: area_for_path(&case.path),
@@ -153,5 +165,5 @@ fn selected_wpt_testharness_cases_match_expectations() {
         }
         fs::write(&path, junit_xml(&report)).expect("write WPT JUnit report");
     }
-    assert!(regressions.is_empty(), "{}", regressions.join("\n"));
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }

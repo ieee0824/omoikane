@@ -103,3 +103,14 @@ pub(super) struct WptResultChange {
     pub(super) previous: Option<Classification>,
     pub(super) current: Option<Classification>,
 }
+
+#[cfg(test)]
+pub(super) fn known_failure(status: ActualStatus) -> KnownFailure {
+    KnownFailure {
+        status,
+        reason: "not implemented <yet>".to_string(),
+        issue: "#123&tracking".to_string(),
+        expires: None,
+        failed_subtests: None,
+    }
+}

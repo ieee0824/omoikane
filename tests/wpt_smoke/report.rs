@@ -134,8 +134,7 @@ pub(super) fn read_revision_report(root: &Path, revision: &str) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::known_failure;
-    use crate::model::{ActualStatus, WptResult};
+    use crate::model::{ActualStatus, WptResult, known_failure};
     use crate::summary::summarize;
 
     #[test]

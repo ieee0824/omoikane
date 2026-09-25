@@ -62,7 +62,7 @@ pub(super) fn classify_with_subtests(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::known_failure;
+    use crate::model::known_failure;
 
     #[test]
     fn classifications_distinguish_known_failures_regressions_and_improvements() {
