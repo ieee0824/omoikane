@@ -2,7 +2,6 @@
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,13 +13,15 @@ mod manifest;
 mod model;
 #[path = "wpt_smoke/server.rs"]
 mod server;
+#[path = "wpt_smoke/summary.rs"]
+mod summary;
 use classification::classify_with_subtests;
 use manifest::validate_manifest;
 use model::{
     ActualStatus, Classification, KnownFailure, Manifest, WptAreaReport, WptReport, WptResult,
-    WptResultChange, WptRevisionDiff, WptSummary,
 };
 use server::StaticServer;
+use summary::{area_for_path, diff_revision_reports, summarize};
 
 fn script_dependencies(source: &[u8], test_path: &str) -> Vec<String> {
     let parent = Path::new(test_path)
@@ -79,40 +80,6 @@ fn drive_visibility_state_testdriver(runtime: &mut JsRuntime, errors: &mut Vec<S
             break;
         }
     }
-}
-
-fn area_for_path(path: &str) -> String {
-    path.split('/').next().unwrap_or("unknown").to_string()
-}
-
-fn summarize(results: &[WptResult]) -> WptSummary {
-    let mut summary = WptSummary {
-        total: results.len(),
-        ..WptSummary::default()
-    };
-    for result in results {
-        let area = summary.by_area.entry(result.area.clone()).or_default();
-        area.total += 1;
-        match result.classification {
-            Classification::Pass => {
-                summary.pass += 1;
-                area.pass += 1;
-            }
-            Classification::KnownFailure => {
-                summary.known_failure += 1;
-                area.known_failure += 1;
-            }
-            Classification::Regression => {
-                summary.regression += 1;
-                area.regression += 1;
-            }
-            Classification::Improvement => {
-                summary.improvement += 1;
-                area.improvement += 1;
-            }
-        }
-    }
-    summary
 }
 
 fn escape_xml(value: &str) -> String {
@@ -243,47 +210,6 @@ fn read_revision_report(root: &Path, revision: &str) -> std::io::Result<WptRepor
     serde_json::from_slice(&bytes).map_err(std::io::Error::other)
 }
 
-fn diff_revision_reports(previous: &WptReport, current: &WptReport) -> WptRevisionDiff {
-    let previous_results = previous
-        .results
-        .iter()
-        .map(|result| (result.path.as_str(), result.classification))
-        .collect::<BTreeMap<_, _>>();
-    let current_results = current
-        .results
-        .iter()
-        .map(|result| (result.path.as_str(), result.classification))
-        .collect::<BTreeMap<_, _>>();
-    let mut paths = previous_results
-        .keys()
-        .chain(current_results.keys())
-        .copied()
-        .collect::<Vec<_>>();
-    paths.sort_unstable();
-    paths.dedup();
-    let changed = paths
-        .into_iter()
-        .filter_map(|path| {
-            let previous = previous_results.get(path).copied();
-            let current = current_results.get(path).copied();
-            (previous != current).then(|| WptResultChange {
-                path: path.to_string(),
-                previous,
-                current,
-            })
-        })
-        .collect();
-    WptRevisionDiff {
-        previous_revision: previous.revision.clone(),
-        current_revision: current.revision.clone(),
-        known_failure_delta: current.summary.known_failure as i64
-            - previous.summary.known_failure as i64,
-        regression_delta: current.summary.regression as i64 - previous.summary.regression as i64,
-        improvement_delta: current.summary.improvement as i64 - previous.summary.improvement as i64,
-        changed,
-    }
-}
-
 #[test]
 fn revision_reports_round_trip_and_split_by_area() {
     let unique = std::time::SystemTime::now()
@@ -328,38 +254,6 @@ fn revision_reports_round_trip_and_split_by_area() {
     assert_eq!(area.summary.known_failure, 1);
     assert_eq!(area.results.len(), 1);
     fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn revision_diff_reports_known_failure_changes() {
-    let result = |classification| WptResult {
-        path: "dom/a.html".to_string(),
-        area: "dom".to_string(),
-        actual: ActualStatus::Pass,
-        classification,
-        known_failure: None,
-        script_errors: vec![],
-        subtests: serde_json::json!([]),
-    };
-    let previous_results = vec![result(Classification::KnownFailure)];
-    let current_results = vec![result(Classification::Pass)];
-    let previous = WptReport {
-        revision: "old".to_string(),
-        summary: summarize(&previous_results),
-        results: previous_results,
-    };
-    let current = WptReport {
-        revision: "new".to_string(),
-        summary: summarize(&current_results),
-        results: current_results,
-    };
-
-    let diff = diff_revision_reports(&previous, &current);
-    assert_eq!(diff.known_failure_delta, -1);
-    assert_eq!(diff.regression_delta, 0);
-    assert_eq!(diff.changed.len(), 1);
-    assert_eq!(diff.changed[0].previous, Some(Classification::KnownFailure));
-    assert_eq!(diff.changed[0].current, Some(Classification::Pass));
 }
 
 #[test]
