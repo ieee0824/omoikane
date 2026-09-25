@@ -45741,6 +45741,58 @@ b</textarea></form>"#,
             "blocked:SecurityError",
             "a forged document must not write into another origin's parser"
         );
+        let parent_body_id = runtime
+            .host_state
+            .borrow()
+            .document
+            .query_selector("body")
+            .unwrap()
+            .identity();
+        let _active = activate_host_state(runtime.host_state.clone());
+        for (operation, result) in [
+            (
+                "retain foreign node",
+                node_lifetime::retain_node_native(
+                    &JsValue::undefined(),
+                    &[JsValue::from(secret_id as f64)],
+                    &mut runtime.context,
+                ),
+            ),
+            (
+                "change foreign node owner",
+                node_lifetime::set_owner_native(
+                    &JsValue::undefined(),
+                    &[
+                        JsValue::from(secret_id as f64),
+                        JsValue::from(parent_body_id as f64),
+                    ],
+                    &mut runtime.context,
+                ),
+            ),
+            (
+                "assign foreign owner document",
+                node_lifetime::set_owner_native(
+                    &JsValue::undefined(),
+                    &[
+                        JsValue::from(parent_body_id as f64),
+                        JsValue::from(child_document_id as f64),
+                    ],
+                    &mut runtime.context,
+                ),
+            ),
+        ] {
+            let error = result.unwrap_err().to_opaque(&mut runtime.context);
+            let name = error
+                .as_object()
+                .unwrap()
+                .get(js_string!("name"), &mut runtime.context)
+                .unwrap();
+            assert_eq!(
+                name.as_string().unwrap().to_std_string_escaped(),
+                "SecurityError",
+                "{operation} must reject a foreign node or document"
+            );
+        }
     }
 
     #[test]

@@ -457,6 +457,7 @@ pub(super) fn retain_node_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
     let wrapper = args
         .get(1)
         .and_then(JsValue::as_object)
@@ -489,6 +490,8 @@ pub(super) fn set_owner_native(
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
     let owner_id = parse_node_id(args.get(1), context)?;
+    ensure_same_origin_node(context, id)?;
+    ensure_same_origin_document(context, owner_id)?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         let node = state
@@ -508,6 +511,8 @@ pub(super) fn collected_nodes_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    // Bootstrap-only cache maintenance must accept IDs whose documents have
+    // already been collected and therefore have no origin record to check.
     let candidates = args
         .first()
         .and_then(JsValue::as_object)
