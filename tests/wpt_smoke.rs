@@ -11,15 +11,16 @@ mod classification;
 mod manifest;
 #[path = "wpt_smoke/model.rs"]
 mod model;
+#[path = "wpt_smoke/report.rs"]
+mod report;
 #[path = "wpt_smoke/server.rs"]
 mod server;
 #[path = "wpt_smoke/summary.rs"]
 mod summary;
 use classification::classify_with_subtests;
 use manifest::validate_manifest;
-use model::{
-    ActualStatus, Classification, KnownFailure, Manifest, WptAreaReport, WptReport, WptResult,
-};
+use model::{ActualStatus, Classification, KnownFailure, Manifest, WptReport, WptResult};
+use report::{junit_xml, read_revision_report, write_revision_reports};
 use server::StaticServer;
 use summary::{area_for_path, diff_revision_reports, summarize};
 
@@ -82,202 +83,6 @@ fn drive_visibility_state_testdriver(runtime: &mut JsRuntime, errors: &mut Vec<S
     }
 }
 
-fn escape_xml(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&apos;"),
-            _ => escaped.push(character),
-        }
-    }
-    escaped
-}
-
-fn junit_xml(report: &WptReport) -> String {
-    let mut xml = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuite name=\"wpt-smoke\" tests=\"{}\" failures=\"{}\">\n",
-        report.results.len(),
-        report.summary.regression
-    );
-    for result in &report.results {
-        let details = serde_json::to_string(&result.subtests).expect("serialize WPT subtests");
-        let escaped_details = escape_xml(&details);
-        let status = match result.classification {
-            Classification::KnownFailure => " known-failure=\"true\"",
-            Classification::Improvement => " improvement=\"true\"",
-            _ => "",
-        };
-        xml.push_str(&format!(
-            "  <testcase classname=\"wpt.{}\" name=\"{}\"{}>\n",
-            escape_xml(&result.area),
-            escape_xml(&result.path),
-            status
-        ));
-        match result.classification {
-            Classification::Regression => {
-                let expected = result
-                    .known_failure
-                    .as_ref()
-                    .map(|known| known.status.as_str())
-                    .unwrap_or("PASS");
-                xml.push_str(&format!(
-                    "    <failure message=\"expected {}, got {}\">{}</failure>\n",
-                    escape_xml(expected),
-                    result.actual.as_str(),
-                    escaped_details
-                ));
-            }
-            Classification::KnownFailure => {
-                let known = result
-                    .known_failure
-                    .as_ref()
-                    .expect("known failure metadata");
-                xml.push_str(&format!(
-                    "    <system-out>KNOWN FAILURE [{}] {}: {}\n{}</system-out>\n",
-                    result.actual.as_str(),
-                    escape_xml(&known.issue),
-                    escape_xml(&known.reason),
-                    escaped_details
-                ));
-            }
-            Classification::Improvement => {
-                let known = result.known_failure.as_ref().expect("improvement metadata");
-                xml.push_str(&format!(
-                    "    <system-out>IMPROVEMENT: passed despite known {} failure ({})\n{}</system-out>\n",
-                    known.status.as_str(), escape_xml(&known.issue), escaped_details
-                ));
-            }
-            Classification::Pass => {}
-        }
-        if matches!(
-            result.classification,
-            Classification::Pass | Classification::Regression
-        ) {
-            xml.push_str(&format!(
-                "    <system-out>{}</system-out>\n",
-                escaped_details
-            ));
-        }
-        xml.push_str("  </testcase>\n");
-    }
-    xml.push_str("</testsuite>\n");
-    xml
-}
-
-fn write_revision_reports(root: &Path, report: &WptReport) -> std::io::Result<()> {
-    let revision_dir = root.join(&report.revision);
-    fs::create_dir_all(&revision_dir)?;
-    fs::write(
-        revision_dir.join("report.json"),
-        serde_json::to_vec_pretty(report).map_err(std::io::Error::other)?,
-    )?;
-    for (area, summary) in &report.summary.by_area {
-        let area_report = WptAreaReport {
-            revision: report.revision.clone(),
-            area: area.clone(),
-            summary: summary.clone(),
-            results: report
-                .results
-                .iter()
-                .filter(|result| result.area == *area)
-                .cloned()
-                .collect(),
-        };
-        let filename = area
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                    character
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        fs::write(
-            revision_dir.join(format!("{filename}.json")),
-            serde_json::to_vec_pretty(&area_report).map_err(std::io::Error::other)?,
-        )?;
-    }
-    Ok(())
-}
-
-fn read_revision_report(root: &Path, revision: &str) -> std::io::Result<WptReport> {
-    let bytes = fs::read(root.join(revision).join("report.json"))?;
-    serde_json::from_slice(&bytes).map_err(std::io::Error::other)
-}
-
-#[test]
-fn revision_reports_round_trip_and_split_by_area() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock must be after Unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "omoikane-wpt-results-{}-{unique}",
-        std::process::id(),
-    ));
-    let results = vec![
-        WptResult {
-            path: "dom/a.html".to_string(),
-            area: "dom".to_string(),
-            actual: ActualStatus::Pass,
-            classification: Classification::Pass,
-            known_failure: None,
-            script_errors: vec![],
-            subtests: serde_json::json!([]),
-        },
-        WptResult {
-            path: "css/b.html".to_string(),
-            area: "css".to_string(),
-            actual: ActualStatus::Timeout,
-            classification: Classification::KnownFailure,
-            known_failure: Some(known_failure(ActualStatus::Timeout)),
-            script_errors: vec![],
-            subtests: serde_json::json!([]),
-        },
-    ];
-    let report = WptReport {
-        revision: "abc123".to_string(),
-        summary: summarize(&results),
-        results,
-    };
-
-    write_revision_reports(&root, &report).unwrap();
-    assert_eq!(read_revision_report(&root, "abc123").unwrap(), report);
-    let area: WptAreaReport =
-        serde_json::from_slice(&fs::read(root.join("abc123/css.json")).unwrap()).unwrap();
-    assert_eq!(area.area, "css");
-    assert_eq!(area.summary.known_failure, 1);
-    assert_eq!(area.results.len(), 1);
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn junit_report_escapes_xml_and_reports_mismatches() {
-    let results = vec![WptResult {
-        path: "a<&\"'".to_string(),
-        area: "dom".to_string(),
-        actual: ActualStatus::Fail,
-        classification: Classification::Regression,
-        known_failure: None,
-        script_errors: vec![],
-        subtests: serde_json::json!({"message": "boom <x>"}),
-    }];
-    let report = WptReport {
-        revision: "test".to_string(),
-        summary: summarize(&results),
-        results,
-    };
-    let xml = junit_xml(&report);
-    assert!(xml.contains("tests=\"1\" failures=\"1\""));
-    assert!(xml.contains("name=\"a&lt;&amp;&quot;&apos;\""));
-    assert!(xml.contains("boom &lt;x&gt;"));
-}
-
 fn known_failure(status: ActualStatus) -> KnownFailure {
     KnownFailure {
         status,
@@ -286,42 +91,6 @@ fn known_failure(status: ActualStatus) -> KnownFailure {
         expires: None,
         failed_subtests: None,
     }
-}
-
-#[test]
-fn junit_marks_known_failures_without_skipping_and_reports_improvements() {
-    let results = vec![
-        WptResult {
-            path: "dom/known.html".to_string(),
-            area: "dom".to_string(),
-            actual: ActualStatus::Timeout,
-            classification: Classification::KnownFailure,
-            known_failure: Some(known_failure(ActualStatus::Timeout)),
-            script_errors: vec![],
-            subtests: serde_json::json!([]),
-        },
-        WptResult {
-            path: "css/improved.html".to_string(),
-            area: "css".to_string(),
-            actual: ActualStatus::Pass,
-            classification: Classification::Improvement,
-            known_failure: Some(known_failure(ActualStatus::Fail)),
-            script_errors: vec![],
-            subtests: serde_json::json!([]),
-        },
-    ];
-    let report = WptReport {
-        revision: "test".to_string(),
-        summary: summarize(&results),
-        results,
-    };
-    let xml = junit_xml(&report);
-    assert!(xml.contains("failures=\"0\""));
-    assert!(xml.contains("known-failure=\"true\""));
-    assert!(xml.contains("KNOWN FAILURE [TIMEOUT] #123&amp;tracking: not implemented &lt;yet&gt;"));
-    assert!(xml.contains("improvement=\"true\""));
-    assert!(xml.contains("IMPROVEMENT: passed despite known FAIL failure"));
-    assert!(!xml.contains("<skipped"));
 }
 
 #[test]
