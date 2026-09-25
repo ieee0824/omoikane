@@ -2,22 +2,26 @@
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "wpt_smoke/classification.rs"]
+mod classification;
 #[path = "wpt_smoke/manifest.rs"]
 mod manifest;
 #[path = "wpt_smoke/model.rs"]
 mod model;
 #[path = "wpt_smoke/server.rs"]
 mod server;
+#[path = "wpt_smoke/summary.rs"]
+mod summary;
+use classification::classify_with_subtests;
 use manifest::validate_manifest;
 use model::{
     ActualStatus, Classification, KnownFailure, Manifest, WptAreaReport, WptReport, WptResult,
-    WptResultChange, WptRevisionDiff, WptSummary,
 };
 use server::StaticServer;
+use summary::{area_for_path, diff_revision_reports, summarize};
 
 fn script_dependencies(source: &[u8], test_path: &str) -> Vec<String> {
     let parent = Path::new(test_path)
@@ -76,98 +80,6 @@ fn drive_visibility_state_testdriver(runtime: &mut JsRuntime, errors: &mut Vec<S
             break;
         }
     }
-}
-
-impl ActualStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Pass => "PASS",
-            Self::Fail => "FAIL",
-            Self::Timeout => "TIMEOUT",
-            Self::Error => "ERROR",
-        }
-    }
-}
-
-fn classify(actual: ActualStatus, known: Option<&KnownFailure>) -> Classification {
-    match (actual, known) {
-        (ActualStatus::Pass, Some(_)) => Classification::Improvement,
-        (ActualStatus::Pass, None) => Classification::Pass,
-        (status, Some(known)) if status == known.status => Classification::KnownFailure,
-        _ => Classification::Regression,
-    }
-}
-
-fn classify_with_subtests(
-    actual: ActualStatus,
-    known: Option<&KnownFailure>,
-    subtests: &serde_json::Value,
-) -> Classification {
-    let classification = classify(actual, known);
-    let Some(expected) = known.and_then(|known| known.failed_subtests.as_ref()) else {
-        return classification;
-    };
-    if classification != Classification::KnownFailure {
-        return classification;
-    }
-    let Some(subtests) = subtests.as_array() else {
-        return Classification::Regression;
-    };
-    let mut failures = Vec::new();
-    for subtest in subtests {
-        match subtest["status"].as_u64() {
-            Some(0) => {}
-            Some(1) => {
-                let Some(name) = subtest["name"].as_str() else {
-                    return Classification::Regression;
-                };
-                failures.push(name);
-            }
-            _ => return Classification::Regression,
-        }
-    }
-    failures.sort_unstable();
-    let mut expected: Vec<_> = expected.iter().map(String::as_str).collect();
-    expected.sort_unstable();
-    if failures == expected {
-        classification
-    } else {
-        Classification::Regression
-    }
-}
-
-fn area_for_path(path: &str) -> String {
-    path.split('/').next().unwrap_or("unknown").to_string()
-}
-
-fn summarize(results: &[WptResult]) -> WptSummary {
-    let mut summary = WptSummary {
-        total: results.len(),
-        ..WptSummary::default()
-    };
-    for result in results {
-        let area = summary.by_area.entry(result.area.clone()).or_default();
-        area.total += 1;
-        match result.classification {
-            Classification::Pass => {
-                summary.pass += 1;
-                area.pass += 1;
-            }
-            Classification::KnownFailure => {
-                summary.known_failure += 1;
-                area.known_failure += 1;
-            }
-            Classification::Regression => {
-                summary.regression += 1;
-                area.regression += 1;
-            }
-            Classification::Improvement => {
-                summary.improvement += 1;
-                area.improvement += 1;
-            }
-        }
-    }
-    summary
 }
 
 fn escape_xml(value: &str) -> String {
@@ -298,47 +210,6 @@ fn read_revision_report(root: &Path, revision: &str) -> std::io::Result<WptRepor
     serde_json::from_slice(&bytes).map_err(std::io::Error::other)
 }
 
-fn diff_revision_reports(previous: &WptReport, current: &WptReport) -> WptRevisionDiff {
-    let previous_results = previous
-        .results
-        .iter()
-        .map(|result| (result.path.as_str(), result.classification))
-        .collect::<BTreeMap<_, _>>();
-    let current_results = current
-        .results
-        .iter()
-        .map(|result| (result.path.as_str(), result.classification))
-        .collect::<BTreeMap<_, _>>();
-    let mut paths = previous_results
-        .keys()
-        .chain(current_results.keys())
-        .copied()
-        .collect::<Vec<_>>();
-    paths.sort_unstable();
-    paths.dedup();
-    let changed = paths
-        .into_iter()
-        .filter_map(|path| {
-            let previous = previous_results.get(path).copied();
-            let current = current_results.get(path).copied();
-            (previous != current).then(|| WptResultChange {
-                path: path.to_string(),
-                previous,
-                current,
-            })
-        })
-        .collect();
-    WptRevisionDiff {
-        previous_revision: previous.revision.clone(),
-        current_revision: current.revision.clone(),
-        known_failure_delta: current.summary.known_failure as i64
-            - previous.summary.known_failure as i64,
-        regression_delta: current.summary.regression as i64 - previous.summary.regression as i64,
-        improvement_delta: current.summary.improvement as i64 - previous.summary.improvement as i64,
-        changed,
-    }
-}
-
 #[test]
 fn revision_reports_round_trip_and_split_by_area() {
     let unique = std::time::SystemTime::now()
@@ -386,38 +257,6 @@ fn revision_reports_round_trip_and_split_by_area() {
 }
 
 #[test]
-fn revision_diff_reports_known_failure_changes() {
-    let result = |classification| WptResult {
-        path: "dom/a.html".to_string(),
-        area: "dom".to_string(),
-        actual: ActualStatus::Pass,
-        classification,
-        known_failure: None,
-        script_errors: vec![],
-        subtests: serde_json::json!([]),
-    };
-    let previous_results = vec![result(Classification::KnownFailure)];
-    let current_results = vec![result(Classification::Pass)];
-    let previous = WptReport {
-        revision: "old".to_string(),
-        summary: summarize(&previous_results),
-        results: previous_results,
-    };
-    let current = WptReport {
-        revision: "new".to_string(),
-        summary: summarize(&current_results),
-        results: current_results,
-    };
-
-    let diff = diff_revision_reports(&previous, &current);
-    assert_eq!(diff.known_failure_delta, -1);
-    assert_eq!(diff.regression_delta, 0);
-    assert_eq!(diff.changed.len(), 1);
-    assert_eq!(diff.changed[0].previous, Some(Classification::KnownFailure));
-    assert_eq!(diff.changed[0].current, Some(Classification::Pass));
-}
-
-#[test]
 fn junit_report_escapes_xml_and_reports_mismatches() {
     let results = vec![WptResult {
         path: "a<&\"'".to_string(),
@@ -447,37 +286,6 @@ fn known_failure(status: ActualStatus) -> KnownFailure {
         expires: None,
         failed_subtests: None,
     }
-}
-
-#[test]
-fn classifications_distinguish_known_failures_regressions_and_improvements() {
-    assert_eq!(
-        classify(ActualStatus::Fail, Some(&known_failure(ActualStatus::Fail))),
-        Classification::KnownFailure
-    );
-    assert_eq!(
-        classify(
-            ActualStatus::Timeout,
-            Some(&known_failure(ActualStatus::Timeout))
-        ),
-        Classification::KnownFailure
-    );
-    assert_eq!(
-        classify(
-            ActualStatus::Error,
-            Some(&known_failure(ActualStatus::Timeout))
-        ),
-        Classification::Regression
-    );
-    assert_eq!(
-        classify(ActualStatus::Fail, None),
-        Classification::Regression
-    );
-    assert_eq!(
-        classify(ActualStatus::Pass, Some(&known_failure(ActualStatus::Fail))),
-        Classification::Improvement
-    );
-    assert_eq!(classify(ActualStatus::Pass, None), Classification::Pass);
 }
 
 #[test]
@@ -514,31 +322,6 @@ fn junit_marks_known_failures_without_skipping_and_reports_improvements() {
     assert!(xml.contains("improvement=\"true\""));
     assert!(xml.contains("IMPROVEMENT: passed despite known FAIL failure"));
     assert!(!xml.contains("<skipped"));
-}
-
-#[test]
-fn exact_subtest_failures_do_not_hide_new_regressions() {
-    use serde_json::json;
-    let mut known = known_failure(ActualStatus::Fail);
-    known.failed_subtests = Some(vec!["transfer".to_string()]);
-    let classify = |results| classify_with_subtests(ActualStatus::Fail, Some(&known), &results);
-    assert_eq!(
-        classify(json!([{"name":"decode","status":0}, {"name":"transfer","status":1}])),
-        Classification::KnownFailure
-    );
-    for results in [
-        json!([{"name":"decode","status":1}, {"name":"transfer","status":1}]),
-        json!([{"name":"transfer","status":2}]),
-        json!([{"name":"transfer","status":0}]),
-        json!([]),
-        json!(null),
-    ] {
-        assert_eq!(classify(results), Classification::Regression);
-    }
-    assert_eq!(
-        classify_with_subtests(ActualStatus::Pass, Some(&known), &json!([])),
-        Classification::Improvement
-    );
 }
 
 #[test]
