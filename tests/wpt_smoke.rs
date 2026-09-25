@@ -2,7 +2,7 @@
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
 use omoikane::js::JsRuntime;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -10,8 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 
+#[path = "wpt_smoke/manifest.rs"]
+mod manifest;
 #[path = "wpt_smoke/model.rs"]
 mod model;
+use manifest::validate_manifest;
 use model::{
     ActualStatus, Classification, KnownFailure, Manifest, WptAreaReport, WptReport, WptResult,
     WptResultChange, WptRevisionDiff, WptSummary,
@@ -259,66 +262,6 @@ impl ActualStatus {
             Self::Timeout => "TIMEOUT",
             Self::Error => "ERROR",
         }
-    }
-}
-
-fn validate_manifest(manifest: &Manifest) -> Result<(), Vec<String>> {
-    let mut errors = Vec::new();
-    let mut paths = HashSet::new();
-    for case in &manifest.tests {
-        if case.path.trim().is_empty() {
-            errors.push("test path must not be empty".to_string());
-        } else if !paths.insert(case.path.as_str()) {
-            errors.push(format!("duplicate test path: {}", case.path));
-        }
-        if let Some(known) = &case.known_failure {
-            if let Some(names) = &known.failed_subtests {
-                let unique: HashSet<_> = names.iter().collect();
-                if known.status != ActualStatus::Fail
-                    || names.is_empty()
-                    || names.iter().any(|name| name.trim().is_empty())
-                    || unique.len() != names.len()
-                {
-                    errors.push(format!(
-                        "{}: failed_subtests requires FAIL and nonempty unique names",
-                        case.path
-                    ));
-                }
-            }
-            if known.status == ActualStatus::Pass {
-                errors.push(format!(
-                    "{}: known failure status must not be PASS",
-                    case.path
-                ));
-            }
-            if known.reason.trim().is_empty() {
-                errors.push(format!(
-                    "{}: known failure reason must not be empty",
-                    case.path
-                ));
-            }
-            if known.issue.trim().is_empty() {
-                errors.push(format!(
-                    "{}: known failure issue must not be empty",
-                    case.path
-                ));
-            }
-            if known
-                .expires
-                .as_ref()
-                .is_some_and(|value| value.trim().is_empty())
-            {
-                errors.push(format!(
-                    "{}: known failure expires must not be empty",
-                    case.path
-                ));
-            }
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors)
     }
 }
 
@@ -750,31 +693,6 @@ fn junit_marks_known_failures_without_skipping_and_reports_improvements() {
 }
 
 #[test]
-fn manifest_validation_rejects_duplicates_and_invalid_known_failures() {
-    let manifest: Manifest = serde_json::from_value(serde_json::json!({"tests": [
-        {"path": "dom/a.html"},
-        {"path": "dom/a.html"},
-        {"path": "dom/b.html", "known_failure": {
-            "status": "PASS", "reason": "", "issue": "", "expires": ""
-        }}
-    ]}))
-    .unwrap();
-    let errors = validate_manifest(&manifest).unwrap_err().join("\n");
-    assert!(errors.contains("duplicate test path"));
-    assert!(errors.contains("status must not be PASS"));
-    assert!(errors.contains("reason must not be empty"));
-    assert!(errors.contains("issue must not be empty"));
-    assert!(errors.contains("expires must not be empty"));
-    assert!(
-        serde_json::from_value::<Manifest>(serde_json::json!({
-            "tests": [{"path": "dom/a.html", "expected": "PASS"}]
-        }))
-        .is_err(),
-        "legacy expected metadata must be rejected"
-    );
-}
-
-#[test]
 fn exact_subtest_failures_do_not_hide_new_regressions() {
     use serde_json::json;
     let mut known = known_failure(ActualStatus::Fail);
@@ -797,20 +715,6 @@ fn exact_subtest_failures_do_not_hide_new_regressions() {
         classify_with_subtests(ActualStatus::Pass, Some(&known), &json!([])),
         Classification::Improvement
     );
-    for (status, names) in [
-        ("FAIL", json!([])),
-        ("FAIL", json!([""])),
-        ("FAIL", json!(["a", "a"])),
-        ("TIMEOUT", json!(["a"])),
-    ] {
-        let manifest: Manifest = serde_json::from_value(json!({"tests":[{
-            "path":"encoding/a.any.js", "known_failure": {
-                "status":status, "reason":"reason", "issue":"#763", "failed_subtests": names
-            }
-        }]}))
-        .unwrap();
-        assert!(validate_manifest(&manifest).is_err());
-    }
 }
 
 #[test]
