@@ -301,9 +301,10 @@ fn template_owner_documents_and_uninserted_contents_follow_their_creator() {
 fn nested_iframe_realms_and_detached_nodes_have_bounded_lifetimes() {
     let mut runtime = runtime();
     // This finite reachability stress bootstraps 24 child realms in one eval.
-    // Give it an explicit budget now that synchronous eval enforces wall time;
+    // Give it an explicit budget now that synchronous eval enforces wall time.
+    // The x86_64 release gate exceeded 30 seconds twice while bootstrapping;
     // preserve the iteration count and all document/node lifetime assertions.
-    runtime.sandbox.timeout = Duration::from_secs(30);
+    runtime.sandbox.timeout = Duration::from_secs(60);
     runtime.eval(r#"
         var frame = document.getElementById('f');
         for (var i = 0; i < 12; i++) {
