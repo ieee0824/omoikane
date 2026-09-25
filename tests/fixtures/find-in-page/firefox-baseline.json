@@ -1,0 +1,106 @@
+{
+  "browser": "firefox",
+  "version": "155.0.1",
+  "cases": {
+    "ordinarytoken": {
+      "found": true,
+      "count": 2,
+      "frameSelection": "",
+      "scrollY": 0,
+      "selection": "ordinarytoken"
+    },
+    "autotoken": {
+      "found": true,
+      "count": 1,
+      "frameSelection": "",
+      "scrollY": 1242,
+      "selection": "autotoken"
+    },
+    "hiddentoken": {
+      "found": false,
+      "count": 0,
+      "frameSelection": "",
+      "scrollY": 0,
+      "selection": ""
+    },
+    "nonetoken": {
+      "found": false,
+      "count": 0,
+      "frameSelection": "",
+      "scrollY": 0,
+      "selection": ""
+    },
+    "shadowtoken": {
+      "found": true,
+      "count": 1,
+      "frameSelection": "",
+      "scrollY": 0,
+      "selection": "shadowtoken"
+    },
+    "frametoken": {
+      "found": true,
+      "count": null,
+      "frameSelection": "frametoken",
+      "scrollY": 0,
+      "selection": ""
+    }
+  },
+  "boundaries": {
+    "inline": {
+      "found": true,
+      "selection": "helloworld"
+    },
+    "block": {
+      "found": false,
+      "selection": ""
+    }
+  },
+  "mutations": {
+    "before": false,
+    "after_add": true,
+    "after_remove": false,
+    "after_clear": ""
+  },
+  "slot_order": [
+    {
+      "found": true,
+      "id": "first"
+    },
+    {
+      "found": true,
+      "id": "second"
+    },
+    {
+      "found": false,
+      "id": "second"
+    }
+  ],
+  "navigation": [
+    {
+      "found": true,
+      "start": 0
+    },
+    {
+      "found": true,
+      "start": 14
+    },
+    {
+      "found": false,
+      "start": 14
+    }
+  ],
+  "navigation_reverse": [
+    {
+      "found": true,
+      "start": 0
+    },
+    {
+      "found": false,
+      "start": 0
+    },
+    {
+      "found": false,
+      "start": 0
+    }
+  ]
+}

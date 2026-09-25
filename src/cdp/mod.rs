@@ -24,10 +24,10 @@ use crate::http::{Client, HttpRequest, Method};
 #[cfg(test)]
 use crate::js::PageTaskSource;
 use crate::js::{
-    CompletedPageTask, FormStateRestoreMode, FormStateSnapshot, FullscreenTransition,
-    JavaScriptDialog, JavaScriptDialogController, JavaScriptDialogError, JavaScriptDialogKind,
-    JsRuntime, NavigationRequest, OwnedPageTask, PageTaskError, PointerLockTransition,
-    StorageManager,
+    CompletedPageTask, FindInPageAction, FormStateRestoreMode, FormStateSnapshot,
+    FullscreenTransition, JavaScriptDialog, JavaScriptDialogController, JavaScriptDialogError,
+    JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask, PageTaskError,
+    PointerLockTransition, StorageManager,
 };
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -872,6 +872,7 @@ impl CdpSession {
             "Runtime.evaluate" => self.runtime_evaluate(&params),
             "Runtime.callFunctionOn" => self.runtime_call_function_on(&params),
             "Runtime.releaseObject" => self.runtime_release_object(&params),
+            "Omoikane.findInPage" => self.omoikane_find_in_page(&params),
             "Target.createBrowserContext" => Ok(self.target_create_browser_context()),
             "Target.getBrowserContexts" => Ok(self.target_get_browser_contexts()),
             "Target.disposeBrowserContext" => self.target_dispose_browser_context(&params),
@@ -895,6 +896,33 @@ impl CdpSession {
     /// Returns the current document.
     pub fn document(&self) -> NodeHandle {
         self.runtime.document()
+    }
+
+    fn omoikane_find_in_page(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
+        let action = match require_string(params, "action")?.as_str() {
+            "start" => FindInPageAction::Start,
+            "next" => FindInPageAction::Next,
+            "previous" => FindInPageAction::Previous,
+            "status" => FindInPageAction::Status,
+            "stop" => FindInPageAction::Stop,
+            _ => return Err(invalid_params("Invalid find-in-page action".to_string())),
+        };
+        let query = if action == FindInPageAction::Start {
+            require_string(params, "query")?
+        } else {
+            String::new()
+        };
+        let result = self
+            .runtime
+            .find_in_page(action, &query)
+            .map_err(|message| JsonRpcError {
+                code: -32000,
+                message,
+            })?;
+        serde_json::to_value(result).map_err(|error| JsonRpcError {
+            code: -32000,
+            message: error.to_string(),
+        })
     }
 
     /// Returns the URL of the currently loaded document.

@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Find in page visibility fixture</title>
+<style>
+  #spacer { height: 1600px; }
+  #automatic { content-visibility: auto; contain-intrinsic-size: 80px; }
+  #hidden { content-visibility: hidden; }
+  #none { display: none; }
+</style>
+<p id="ordinary">ordinarytoken ordinarytoken</p>
+<p id="hidden">hiddentoken</p>
+<p id="none">nonetoken</p>
+<div id="shadow-host"></div>
+<iframe id="child" srcdoc="<p id='frame-text'>frametoken</p>"></iframe>
+<div id="spacer"></div>
+<p id="automatic">autotoken</p>
+<script>
+  const root = document.getElementById('shadow-host').attachShadow({ mode: 'open' });
+  root.innerHTML = '<p id="shadow-text">shadowtoken</p>';
+</script>

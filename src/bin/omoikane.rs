@@ -1,11 +1,13 @@
+use std::collections::HashSet;
 use std::error::Error;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use omoikane::cdp::CdpSession;
+use omoikane::dom::NodeHandle;
 use omoikane::frame::{PlatformFrameScheduler, render_browser_frame};
-use omoikane::js::{FullscreenTransition, PointerLockTransition};
+use omoikane::js::{FindInPageResult, FullscreenTransition, PointerLockTransition};
 use omoikane::platform_input::{
     InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
     PlatformTouchPhase,
@@ -32,6 +34,12 @@ mod keyboard_tests;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
 
+struct FindUi {
+    query: String,
+    result: FindInPageResult,
+    document: NodeHandle,
+}
+
 struct BrowserApp {
     session: CdpSession,
     window: Option<Arc<Window>>,
@@ -40,6 +48,9 @@ struct BrowserApp {
     frame_scheduler: PlatformFrameScheduler,
     input: PlatformInput,
     window_title: String,
+    modifiers: InputModifiers,
+    find_ui: Option<FindUi>,
+    find_key_releases: HashSet<String>,
     window_occluded: bool,
     window_minimized: bool,
     native_fullscreen: bool,
@@ -64,6 +75,9 @@ impl BrowserApp {
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
             input: PlatformInput::new(),
             window_title: DEFAULT_WINDOW_TITLE.to_string(),
+            modifiers: InputModifiers::default(),
+            find_ui: None,
+            find_key_releases: HashSet::new(),
             window_occluded: false,
             window_minimized: false,
             native_fullscreen: false,
@@ -154,7 +168,7 @@ impl BrowserApp {
     }
 
     fn draw(&mut self, elapsed_ms: u64) -> Result<(), Box<dyn Error>> {
-        let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
+        let Some(window) = self.window.clone() else {
             return Ok(());
         };
         let size = window.inner_size();
@@ -164,13 +178,18 @@ impl BrowserApp {
             return Ok(());
         };
         let frame = render_browser_frame(&mut self.session, size.width, size.height, elapsed_ms)?;
-        if let Some(title) = changed_window_title(
-            &mut self.window_title,
+        self.sync_find_document();
+        let title = find_window_title(
             document_window_title(&mut self.session)?,
-        ) {
+            self.find_ui.as_ref(),
+        );
+        if let Some(title) = changed_window_title(&mut self.window_title, title) {
             window.set_title(&title);
         }
 
+        let Some(surface) = &mut self.surface else {
+            return Ok(());
+        };
         surface.resize(width, height)?;
         let mut target = surface.buffer_mut()?;
         for (destination, source) in target.iter_mut().zip(frame.pixels().chunks_exact(4)) {
@@ -219,6 +238,104 @@ impl BrowserApp {
         self.input.key_event(&mut self.session, event)
     }
 
+    fn find_action(&mut self, action: &str) -> Result<(), omoikane::cdp::JsonRpcError> {
+        let query = self.find_ui.as_ref().map_or("", |ui| ui.query.as_str());
+        let result = self.session.dispatch(
+            "Omoikane.findInPage",
+            json!({ "action": action, "query": query }),
+        )?;
+        if action == "stop" {
+            self.find_ui = None;
+        } else if self.find_ui.is_some() {
+            let result: FindInPageResult =
+                serde_json::from_value(result).map_err(|error| omoikane::cdp::JsonRpcError {
+                    code: -32000,
+                    message: error.to_string(),
+                })?;
+            if action == "status"
+                && self
+                    .find_ui
+                    .as_ref()
+                    .is_some_and(|ui| ui.query != result.query)
+            {
+                self.find_ui = None;
+            } else if let Some(ui) = &mut self.find_ui {
+                ui.result = result;
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_find_document(&mut self) {
+        if self
+            .find_ui
+            .as_ref()
+            .is_some_and(|ui| ui.document != self.session.document())
+        {
+            self.find_ui = None;
+        }
+    }
+
+    fn handle_find_key(&mut self, key: &str, text: Option<&str>, pressed: bool) -> bool {
+        if !pressed && self.find_key_releases.remove(key) {
+            return true;
+        }
+        if (self.modifiers.control || self.modifiers.meta)
+            && !self.modifiers.alt
+            && key.eq_ignore_ascii_case("f")
+        {
+            if pressed {
+                self.find_key_releases.insert(key.to_string());
+            }
+            if pressed && self.find_ui.is_none() {
+                self.find_ui = Some(FindUi {
+                    query: String::new(),
+                    result: FindInPageResult {
+                        query: String::new(),
+                        match_count: 0,
+                        active_match_ordinal: 0,
+                    },
+                    document: self.session.document(),
+                });
+            }
+            return true;
+        }
+        if self.find_ui.is_none() {
+            return false;
+        }
+        if !pressed {
+            return true;
+        }
+        self.find_key_releases.insert(key.to_string());
+        let action = match key {
+            "Escape" => Some("stop"),
+            "Enter" => Some(if self.modifiers.shift {
+                "previous"
+            } else {
+                "next"
+            }),
+            "Backspace" => {
+                self.find_ui.as_mut().unwrap().query.pop();
+                Some("start")
+            }
+            _ if !self.modifiers.control && !self.modifiers.meta && !self.modifiers.alt => {
+                if let Some(text) = text.filter(|value| !value.chars().any(char::is_control)) {
+                    self.find_ui.as_mut().unwrap().query.push_str(text);
+                    Some("start")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(action) = action {
+            if let Err(error) = self.find_action(action) {
+                eprintln!("find-in-page failed: {error}");
+            }
+        }
+        true
+    }
+
     fn dispatch_input(&mut self, event: WindowEvent) -> bool {
         self.trace_input_event(&event);
         let scale_factor = self
@@ -234,7 +351,12 @@ impl BrowserApp {
                 self.input.cursor_left(&mut self.session);
                 Ok(())
             }
-            WindowEvent::Focused(focused) => self.input.focus_changed(&mut self.session, focused),
+            WindowEvent::Focused(focused) => {
+                if !focused {
+                    self.find_key_releases.clear();
+                }
+                self.input.focus_changed(&mut self.session, focused)
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 if self.native_pointer_lock_raw_buttons {
                     return false;
@@ -264,12 +386,13 @@ impl BrowserApp {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();
-                self.input.set_modifiers(InputModifiers {
+                self.modifiers = InputModifiers {
                     alt: state.alt_key(),
                     control: state.control_key(),
                     meta: state.super_key(),
                     shift: state.shift_key(),
-                });
+                };
+                self.input.set_modifiers(self.modifiers);
                 return true;
             }
             WindowEvent::KeyboardInput {
@@ -277,6 +400,15 @@ impl BrowserApp {
                 is_synthetic,
                 ..
             } => {
+                if !is_synthetic
+                    && self.handle_find_key(
+                        &logical_key_name(&event.logical_key),
+                        event.text.as_deref(),
+                        event.state == ElementState::Pressed,
+                    )
+                {
+                    return true;
+                }
                 let text = event
                     .text
                     .as_deref()
@@ -292,6 +424,14 @@ impl BrowserApp {
                     },
                     is_synthetic,
                 )
+            }
+            WindowEvent::Ime(Ime::Commit(text)) if self.find_ui.is_some() => {
+                self.find_ui.as_mut().unwrap().query.push_str(&text);
+                self.find_action("start")
+            }
+            WindowEvent::Ime(event) if self.find_ui.is_some() => {
+                let _ = event;
+                Ok(())
             }
             WindowEvent::Ime(event) => self
                 .input
@@ -357,6 +497,16 @@ fn changed_window_title(current: &mut String, next: String) -> Option<String> {
     }
     *current = next.clone();
     Some(next)
+}
+
+fn find_window_title(page_title: String, find_ui: Option<&FindUi>) -> String {
+    match find_ui {
+        Some(ui) => format!(
+            "Find: {} ({}/{}) — {}",
+            ui.query, ui.result.active_match_ordinal, ui.result.match_count, page_title
+        ),
+        None => page_title,
+    }
 }
 
 fn logical_key_name(key: &Key) -> String {
@@ -690,6 +840,48 @@ mod tests {
             document_window_title(&mut session).unwrap(),
             DEFAULT_WINDOW_TITLE
         );
+    }
+
+    #[test]
+    fn find_shortcut_edits_query_navigates_and_releases_page_keys() {
+        let mut app = BrowserApp::new("data:text/html,<p>needle needle</p>").unwrap();
+        app.modifiers.control = true;
+        assert!(app.handle_find_key("f", Some("f"), true));
+        app.modifiers.control = false;
+        for character in "needle".chars() {
+            assert!(app.handle_find_key(
+                &character.to_string(),
+                Some(&character.to_string()),
+                true
+            ));
+        }
+        let ui = app.find_ui.as_ref().unwrap();
+        assert_eq!(
+            (ui.result.match_count, ui.result.active_match_ordinal),
+            (2, 1)
+        );
+        assert!(find_window_title("Page".into(), app.find_ui.as_ref()).contains("needle (1/2)"));
+        assert!(app.handle_find_key("Enter", None, true));
+        assert_eq!(app.find_ui.as_ref().unwrap().result.active_match_ordinal, 2);
+        app.modifiers.shift = true;
+        assert!(app.handle_find_key("Enter", None, true));
+        assert_eq!(app.find_ui.as_ref().unwrap().result.active_match_ordinal, 1);
+        assert!(app.handle_find_key("Escape", None, true));
+        assert!(app.find_ui.is_none());
+        assert!(app.handle_find_key("Escape", None, false));
+        assert!(!app.handle_find_key("a", Some("a"), true));
+        app.modifiers.control = true;
+        assert!(app.handle_find_key("f", Some("f"), true));
+        app.modifiers.control = false;
+        assert!(app.handle_find_key("n", Some("n"), true));
+        app.session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<p>new</p>" }),
+            )
+            .unwrap();
+        app.sync_find_document();
+        assert!(app.find_ui.is_none());
     }
 }
 

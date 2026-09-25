@@ -58,6 +58,17 @@ bool omoikane_set_insecure(struct OmoikaneBrowser *browser, bool insecure);
 char *omoikane_evaluate(struct OmoikaneBrowser *browser, const char *expression);
 
 /**
+ * Operates the active page search and returns its JSON result.
+ *
+ * `action` is `start`, `next`, `previous`, `status`, or `stop`. `query` must be
+ * valid UTF-8 for `start`; it may be null for the other actions. Free the
+ * returned string with `omoikane_string_free()`. A null browser handle,
+ * invalid action, or missing required query returns null. A non-null handle
+ * must be valid. Retrieve errors from it using `omoikane_last_error()`.
+ */
+char *omoikane_find_in_page(struct OmoikaneBrowser *browser, const char *action, const char *query);
+
+/**
  * Returns the current document serialized as HTML.
  */
 char *omoikane_get_content(struct OmoikaneBrowser *browser);

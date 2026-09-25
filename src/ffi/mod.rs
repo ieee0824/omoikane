@@ -178,6 +178,59 @@ pub unsafe extern "C" fn omoikane_evaluate(
     }
 }
 
+/// Operates the active page search and returns its JSON result.
+///
+/// `action` is `start`, `next`, `previous`, `status`, or `stop`. `query` must be
+/// valid UTF-8 for `start`; it may be null for the other actions. Free the
+/// returned string with `omoikane_string_free()`. A null browser handle,
+/// invalid action, or missing required query returns null. A non-null handle
+/// must be valid. Retrieve errors from it using `omoikane_last_error()`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn omoikane_find_in_page(
+    browser: *mut OmoikaneBrowser,
+    action: *const c_char,
+    query: *const c_char,
+) -> *mut c_char {
+    let Some(browser) = browser_from_ptr(browser) else {
+        return std::ptr::null_mut();
+    };
+    let Some(action) = string_from_ptr(action) else {
+        browser.set_error("action must be a valid UTF-8 string");
+        return std::ptr::null_mut();
+    };
+    let query = if action == "start" {
+        let Some(query) = string_from_ptr(query) else {
+            browser.set_error("query must be a valid UTF-8 string for start");
+            return std::ptr::null_mut();
+        };
+        query
+    } else {
+        String::new()
+    };
+    match browser
+        .session
+        .borrow_mut()
+        .dispatch(
+            "Omoikane.findInPage",
+            json!({ "action": action, "query": query }),
+        )
+        .and_then(|value| {
+            serde_json::to_string(&value).map_err(|error| crate::cdp::JsonRpcError {
+                code: -32000,
+                message: error.to_string(),
+            })
+        }) {
+        Ok(payload) => {
+            browser.clear_error();
+            into_c_string(payload)
+        }
+        Err(error) => {
+            browser.set_error(error.message);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Returns the current document serialized as HTML.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_get_content(browser: *mut OmoikaneBrowser) -> *mut c_char {
@@ -393,6 +446,44 @@ mod tests {
     }
 
     #[test]
+    fn ffi_find_in_page_reports_navigation_and_rejects_invalid_input() {
+        let browser = unsafe { omoikane_init() };
+        let url = to_c_string("data:text/html,<p>needle needle</p>");
+        assert!(unsafe { omoikane_navigate(browser, url.as_ptr()) });
+        let start = to_c_string("start");
+        let next = to_c_string("next");
+        let query = to_c_string("needle");
+        let result = unsafe { omoikane_find_in_page(browser, start.as_ptr(), query.as_ptr()) };
+        let value: serde_json::Value =
+            serde_json::from_str(&unsafe { take_string(result) }).unwrap();
+        assert_eq!(value["matchCount"], 2);
+        assert_eq!(value["activeMatchOrdinal"], 1);
+        let result = unsafe { omoikane_find_in_page(browser, next.as_ptr(), std::ptr::null()) };
+        let value: serde_json::Value =
+            serde_json::from_str(&unsafe { take_string(result) }).unwrap();
+        assert_eq!(value["activeMatchOrdinal"], 2);
+        let missing = to_c_string("missing");
+        let result = unsafe { omoikane_find_in_page(browser, start.as_ptr(), missing.as_ptr()) };
+        let value: serde_json::Value =
+            serde_json::from_str(&unsafe { take_string(result) }).unwrap();
+        assert_eq!(value["matchCount"], 0);
+        let stop = to_c_string("stop");
+        let result = unsafe { omoikane_find_in_page(browser, stop.as_ptr(), std::ptr::null()) };
+        let value: serde_json::Value =
+            serde_json::from_str(&unsafe { take_string(result) }).unwrap();
+        assert_eq!(value["query"], "");
+        assert!(
+            unsafe { omoikane_find_in_page(browser, start.as_ptr(), std::ptr::null()) }.is_null()
+        );
+        assert!(unsafe { take_string(omoikane_last_error(browser)) }.contains("query must"));
+        assert!(
+            unsafe { omoikane_find_in_page(std::ptr::null_mut(), start.as_ptr(), query.as_ptr()) }
+                .is_null()
+        );
+        unsafe { omoikane_free(browser) };
+    }
+
+    #[test]
     fn ffi_can_override_user_agent_for_navigation() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -561,6 +652,7 @@ mod tests {
         assert!(header.contains("omoikane_init"));
         assert!(header.contains("omoikane_navigate"));
         assert!(header.contains("omoikane_evaluate"));
+        assert!(header.contains("omoikane_find_in_page"));
         assert!(header.contains("omoikane_screenshot_png_with_viewport"));
         assert!(header.contains("omoikane_string_free"));
     }
