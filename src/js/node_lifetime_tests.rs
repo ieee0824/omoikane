@@ -215,11 +215,16 @@ fn inert_and_cloned_document_style_caches_follow_javascript_lifetime() {
             state.node_lifetimes.document_count()
         );
         assert!(state.document_styles.len() <= 2);
+        assert!(state.document_security_origins.len() <= 2);
         assert!(state.write_parsers.len() <= 1);
     }
     runtime.eval("keep = null").unwrap();
     collect(&mut runtime);
     assert_eq!(runtime.host_state.borrow().document_styles.len(), 1);
+    assert_eq!(
+        runtime.host_state.borrow().document_security_origins.len(),
+        1
+    );
 }
 
 #[test]

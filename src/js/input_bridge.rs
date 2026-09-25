@@ -23,8 +23,10 @@ impl State {
     }
 }
 
-pub(super) fn register(context: &mut Context) -> JsResult<()> {
-    context.register_global_builtin_callable(
+pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_input_state"),
         0,
         NativeFunction::from_copy_closure(|_, _, _| {
@@ -39,7 +41,9 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_register_input_dispatcher"),
         1,
         NativeFunction::from_copy_closure(|_, args, context| {
@@ -65,7 +69,9 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_forward_input"),
         3,
         NativeFunction::from_copy_closure(|_, args, context| {

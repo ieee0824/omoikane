@@ -40,12 +40,15 @@ impl State {
     }
 }
 
-pub(super) fn register(context: &mut Context) -> JsResult<()> {
-    context.register_global_builtin_callable(
+pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_register_form_state"),
         3,
         NativeFunction::from_copy_closure(|_, args, context| {
             let document = parse_node_id(args.first(), context)?;
+            ensure_same_origin_document(context, document)?;
             let capture = args.get(1).filter(|value| value.is_callable()).cloned();
             let restore = args.get(2).filter(|value| value.is_callable()).cloned();
             let (Some(capture), Some(restore)) = (capture, restore) else {
@@ -66,11 +69,14 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_capture_iframe_form_state"),
         1,
         NativeFunction::from_copy_closure(|_, args, context| {
             let id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, id)?;
             with_host_state(|host| {
                 let Some((document, url, name)) = ({
                     let state = host.borrow();
@@ -100,11 +106,14 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_restore_iframe_form_state"),
         4,
         NativeFunction::from_copy_closure(|_, args, context| {
             let id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, id)?;
             let json = args
                 .get(1)
                 .cloned()

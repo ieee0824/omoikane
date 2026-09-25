@@ -336,8 +336,10 @@ impl JsRuntime {
     }
 }
 
-pub(super) fn register(context: &mut Context) -> JsResult<()> {
-    context.register_global_builtin_callable(
+pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_pointer_lock_target"),
         1,
         NativeFunction::from_copy_closure(|_, args, context| {
@@ -347,6 +349,9 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
                 .map(|v| v.to_number(context))
                 .transpose()?
                 .map(|v| v as usize);
+            if let Some(doc) = doc {
+                ensure_same_origin_document(context, doc)?;
+            }
             with_host_state(|state| {
                 Ok(state
                     .borrow()
@@ -360,7 +365,9 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_pointer_lock_activation"),
         2,
         NativeFunction::from_copy_closure(|_, args, context| {
@@ -385,12 +392,16 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_request_pointer_lock"),
         4,
         NativeFunction::from_copy_closure(|_, args, context| {
             let id = parse_node_id(args.first(), context)?;
             let doc = parse_node_id(args.get(1), context)?;
+            ensure_same_origin_node(context, id)?;
+            ensure_same_origin_document(context, doc)?;
             let unadjusted = args.get(2).is_some_and(JsValue::to_boolean);
             let callback = args
                 .get(3)
@@ -447,7 +458,9 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_exit_pointer_lock"),
         2,
         NativeFunction::from_copy_closure(|_, args, context| {
@@ -457,6 +470,9 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
                 .map(|v| v.to_number(context))
                 .transpose()?
                 .map(|v| v as usize);
+            if let Some(doc) = doc {
+                ensure_same_origin_document(context, doc)?;
+            }
             let explicit = args.get(1).is_some_and(JsValue::to_boolean);
             with_host_state(|state| {
                 let mut state = state.borrow_mut();
@@ -477,11 +493,14 @@ pub(super) fn register(context: &mut Context) -> JsResult<()> {
             })
         }),
     )?;
-    context.register_global_builtin_callable(
+    register_private_builtin_callable(
+        context,
+        bindings,
         js_string!("__omoikane_pointer_lock_removing"),
         1,
         NativeFunction::from_copy_closure(|_, args, context| {
             let id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, id)?;
             with_host_state(|state| {
                 let mut state = state.borrow_mut();
                 if let Some(root) = state.get_node(id) {
