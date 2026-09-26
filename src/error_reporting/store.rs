@@ -12,7 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::SafeEvent;
 
@@ -279,27 +279,25 @@ impl EventStore {
                         submission_status, issue_url
                  FROM error_reports WHERE fingerprint = ?1",
                 [fingerprint],
-                |row| {
-                    Ok(StoredReport {
-                        fingerprint: row.get(0)?,
-                        category: row.get(1)?,
-                        severity: row.get(2)?,
-                        error_code: row.get(3)?,
-                        message: row.get(4)?,
-                        context_json: row.get(5)?,
-                        first_seen_ms: row.get(6)?,
-                        last_seen_ms: row.get(7)?,
-                        occurrences: row.get(8)?,
-                        version: row.get(9)?,
-                        commit: row.get(10)?,
-                        platform: row.get(11)?,
-                        surface: row.get(12)?,
-                        submission_status: row.get(13)?,
-                        issue_url: row.get(14)?,
-                    })
-                },
+                stored_report_from_row,
             )
             .optional()
+            .map_err(Into::into)
+    }
+
+    /// Lists at most 100 unsent reports, newest first, for explicit preview.
+    pub fn list_pending(&self, limit: usize) -> Result<Vec<StoredReport>, StoreError> {
+        let limit = i64::try_from(limit.min(100)).unwrap_or(100);
+        let mut statement = self.connection.prepare(
+            "SELECT fingerprint, category, severity, error_code, message, context_json,
+                    first_seen_ms, last_seen_ms, occurrences, version, build_commit, platform, surface,
+                    submission_status, issue_url
+             FROM error_reports WHERE submission_status = 'pending'
+             ORDER BY last_seen_ms DESC, fingerprint ASC LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit], stored_report_from_row)?
+            .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
@@ -364,7 +362,7 @@ impl EventStore {
         Ok(())
     }
 
-    #[cfg(test)]
+    /// Marks an event as submitted after a backend returns a canonical Issue URL.
     pub(super) fn mark_submitted(
         &self,
         fingerprint: &str,
@@ -377,6 +375,26 @@ impl EventStore {
         )?;
         Ok(())
     }
+}
+
+fn stored_report_from_row(row: &Row<'_>) -> rusqlite::Result<StoredReport> {
+    Ok(StoredReport {
+        fingerprint: row.get(0)?,
+        category: row.get(1)?,
+        severity: row.get(2)?,
+        error_code: row.get(3)?,
+        message: row.get(4)?,
+        context_json: row.get(5)?,
+        first_seen_ms: row.get(6)?,
+        last_seen_ms: row.get(7)?,
+        occurrences: row.get(8)?,
+        version: row.get(9)?,
+        commit: row.get(10)?,
+        platform: row.get(11)?,
+        surface: row.get(12)?,
+        submission_status: row.get(13)?,
+        issue_url: row.get(14)?,
+    })
 }
 
 fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
