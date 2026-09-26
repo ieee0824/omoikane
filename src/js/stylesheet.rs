@@ -2,6 +2,9 @@
 
 use super::csp::{CspPolicy, ResourceType};
 use crate::dom::NodeHandle;
+use crate::error_reporting::{
+    ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
+};
 use crate::http::{Client, CookieJar, HttpRequest, Url};
 use crate::paint::{DataUri, image::parse_data_uri, stylesheet as css};
 use std::collections::{HashMap, HashSet};
@@ -23,6 +26,7 @@ pub(super) struct StylesheetLoader {
     resources: HashMap<String, Option<Resource>>,
     client: Client,
     site_for_cookies: Option<Url>,
+    reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
 }
 
 impl std::fmt::Debug for StylesheetLoader {
@@ -34,6 +38,30 @@ impl std::fmt::Debug for StylesheetLoader {
 }
 
 impl StylesheetLoader {
+    pub(super) fn set_error_reporter(
+        &mut self,
+        reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
+    ) {
+        self.reporter = reporter;
+    }
+
+    fn report_fetch_failure(&self) {
+        let Some((reporter, surface)) = &self.reporter else {
+            return;
+        };
+        reporter.report(
+            RawEvent::new(
+                ErrorCategory::Css,
+                ErrorSeverity::Error,
+                ErrorCode::new("CSS_STYLESHEET_FETCH_FAILED").expect("static code"),
+                *surface,
+                "Resource load failed",
+                &[("operation", "fetch"), ("resource", "stylesheet")],
+            )
+            .sanitize(),
+        );
+    }
+
     pub(super) fn cached_import(
         &self,
         href: &str,
@@ -130,11 +158,13 @@ impl StylesheetLoader {
         let url = if href.starts_with("data:") {
             None
         } else {
-            Some(css::resolve_relative_stylesheet_url(
-                base?,
-                href,
-                document_base,
-            )?)
+            let Some(url) = base
+                .and_then(|base| css::resolve_relative_stylesheet_url(base, href, document_base))
+            else {
+                self.report_fetch_failure();
+                return None;
+            };
+            Some(url)
         };
         let key = url
             .as_ref()
@@ -158,6 +188,7 @@ impl StylesheetLoader {
             }
             return cached.clone();
         }
+        let blocked_before = blocked.len();
         let resource = if let Some(url) = url {
             let same_origin = document_base.is_some_and(|base| {
                 base.scheme() == url.scheme()
@@ -217,6 +248,9 @@ impl StylesheetLoader {
         } else {
             None
         };
+        if resource.is_none() && blocked.len() == blocked_before {
+            self.report_fetch_failure();
+        }
         self.resources.insert(key, resource.clone());
         resource
     }
