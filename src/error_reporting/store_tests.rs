@@ -221,6 +221,44 @@ fn repeated_submitted_fingerprint_keeps_issue_reference() {
 }
 
 #[test]
+fn pending_preview_is_bounded_and_sorted_without_submitted_rows() {
+    let temporary = TemporaryDatabase::new();
+    let mut store = EventStore::open(temporary.path(), RetentionPolicy::default()).unwrap();
+    let older = event("PREVIEW_OLDER", "details");
+    let newer = event("PREVIEW_NEWER", "details");
+    let submitted = event("PREVIEW_SUBMITTED", "details");
+    store.record_at(&older, 1_000).unwrap();
+    store.record_at(&newer, 2_000).unwrap();
+    store.record_at(&submitted, 3_000).unwrap();
+    store
+        .mark_submitted(
+            submitted.fingerprint(),
+            "https://github.com/example/repo/issues/7",
+        )
+        .unwrap();
+
+    assert!(store.list_pending(0).unwrap().is_empty());
+    assert_eq!(
+        store
+            .list_pending(1)
+            .unwrap()
+            .iter()
+            .map(|report| report.fingerprint.as_str())
+            .collect::<Vec<_>>(),
+        vec![newer.fingerprint()]
+    );
+    assert_eq!(
+        store
+            .list_pending(101)
+            .unwrap()
+            .iter()
+            .map(|report| report.fingerprint.as_str())
+            .collect::<Vec<_>>(),
+        vec![newer.fingerprint(), older.fingerprint()]
+    );
+}
+
+#[test]
 fn byte_limit_includes_wal_and_shm() {
     let temporary = TemporaryDatabase::new();
     let policy = RetentionPolicy {
