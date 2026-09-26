@@ -40222,6 +40222,30 @@ b</textarea></form>"#,
     }
 
     #[test]
+    fn computed_display_matches_firefox_ua_defaults_and_author_overrides() {
+        let mut runtime = runtime_from_html(
+            "<html><body><span id='inline'>text</span><p id='block'>text</p>\
+             <h1 id='heading'>text</h1><div id='division'>text</div>\
+             <custom-thing id='custom'>text</custom-thing>\
+             <span id='hidden' style='display:none'>text</span>\
+             <p id='atomic' style='display:inline-block'>text</p>\
+             <p id='contents' style='display:contents'>text</p>\
+             <p id='initial' style='display:initial'>text</p>\
+             <p id='revert' style='display:revert'>text</p></body></html>",
+        );
+        // Connected-element results recorded from Firefox 155.0.1.
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "JSON.stringify(['inline','block','heading','division','custom',\
+                 'hidden','atomic','contents','initial','revert'].map(id =>\
+                 getComputedStyle(document.getElementById(id)).display))"
+            ),
+            r#"["inline","block","block","block","inline","none","inline-block","contents","inline","block"]"#
+        );
+    }
+
+    #[test]
     fn get_computed_style_returns_cascade_white_space() {
         let html = r#"<html><head><style>
             #target { white-space: pre-wrap; }
@@ -48083,6 +48107,14 @@ b</textarea></form>"#,
             eval_str(&mut runtime, "getComputedStyle(t, '').height"),
             "0px",
             "25vh of the iframe's zero-height viewport must resolve to 0px"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "getComputedStyle(document.getElementById('f')).display"
+            ),
+            "inline",
+            "the iframe keeps its Firefox UA display while providing a child viewport"
         );
     }
 

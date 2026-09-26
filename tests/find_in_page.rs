@@ -365,6 +365,22 @@ fn matches_across_inline_text_nodes_but_not_block_boundaries() {
 }
 
 #[test]
+fn computed_display_controls_find_text_boundaries() {
+    let mut session = session_for(
+        "<span>hello</span><span style='display:contents'>world</span><br>\
+         <p style='display:inline'>there</p><span>friend</span><br>\
+         <p>alpha</p><span>beta</span><br>\
+         <span style='display:inline-block'>gamma</span><span>delta</span><br>\
+         <span style='display:none'>ghost</span><span>visible</span>",
+    );
+    assert_eq!(find(&mut session, "start", "helloworld")["matchCount"], 1);
+    assert_eq!(find(&mut session, "start", "therefriend")["matchCount"], 1);
+    assert_eq!(find(&mut session, "start", "alphabeta")["matchCount"], 0);
+    assert_eq!(find(&mut session, "start", "gammadelta")["matchCount"], 0);
+    assert_eq!(find(&mut session, "start", "ghost")["matchCount"], 0);
+}
+
+#[test]
 fn offscreen_auto_match_is_painted_after_find() {
     let mut session = session_for(
         "<style>body{margin:0}#auto{content-visibility:auto;contain-intrinsic-size:80px;color:#c00000;font:32px sans-serif}</style><div style='height:1400px'></div><p id='auto'>redword</p>",

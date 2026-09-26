@@ -923,16 +923,21 @@ fn collect_element_inline_segments(
         return;
     }
 
+    let inline_frame = node.tag_name().as_deref() == Some("iframe")
+        && matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("inline"));
     if context.allow_atomic_boxes
-        && matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("inline-block"))
+        && (inline_frame
+            || matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("inline-block")))
     {
         let available_width = context.available_width.max(0.0);
-        let containing_width = if super::resolved_length(&style, "width", available_width).is_some()
-        {
-            available_width
-        } else {
-            super::shrink_to_fit_layout_width(node, resolver, available_width)
-        };
+        // An inline iframe still needs a layout box for its child viewport.
+        // Keep its existing stretch width until #926 supplies intrinsic sizing.
+        let containing_width =
+            if inline_frame || super::resolved_length(&style, "width", available_width).is_some() {
+                available_width
+            } else {
+                super::shrink_to_fit_layout_width(node, resolver, available_width)
+            };
         let containing = Rect {
             x: context.start_x,
             y: context.start_y,

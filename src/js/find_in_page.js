@@ -8,16 +8,6 @@
   const originalSelections = new Map();
   let searchedDocument = null;
   let searchGeneration = null;
-  // getComputedStyle currently leaves UA-default display empty. These tags
-  // establish text boundaries even without an author display declaration.
-  const defaultBlockTags = new Set([
-    "html", "body", "address", "article", "aside", "blockquote", "dd", "details",
-    "dialog", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer",
-    "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr",
-    "legend", "li", "main", "menu", "nav", "ol", "p", "pre", "section",
-    "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"
-  ]);
-
   function clearHighlight(restoreOriginal) {
     if (highlightedDocument) {
       const selection = highlightedDocument.getSelection();
@@ -79,9 +69,7 @@
         visible = style.visibility !== "hidden" && style.visibility !== "collapse";
         if (!visible && tag === "iframe") continue;
         boundary = tag === "iframe" || tag === "br" ||
-          (style.display
-            ? style.display !== "inline" && style.display !== "contents"
-            : defaultBlockTags.has(tag));
+          (style.display !== "inline" && style.display !== "contents");
       } else if (node.nodeType === 3 && node.data) {
         if (visible) result.push(node);
         continue;

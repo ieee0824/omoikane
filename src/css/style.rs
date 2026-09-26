@@ -2261,6 +2261,13 @@ impl StyleResolver {
         apply_inheritance(&mut properties, parent_style);
         resolve_initial_css_wide_keywords(&mut properties);
         apply_initial_values(&mut properties);
+        if pseudo.is_none() && node.node_type() == NodeType::Element {
+            // The initial display value applies to elements without a more
+            // specific UA or author declaration, including custom elements.
+            properties
+                .entry("display".to_string())
+                .or_insert_with(|| ComputedValue::Keyword("inline".to_string()));
+        }
         resolve_column_rule_current_color(&mut properties);
         normalize_background_layer_lists(&mut properties);
         properties.insert(
@@ -8653,6 +8660,25 @@ fn apply_ua_defaults(
         Some(tag) => tag.to_ascii_lowercase(),
         None => return,
     };
+    // These UA display values must be visible to CSSOM as well as layout.
+    // Explicit author display values have already won the cascade above.
+    let default_display = match tag.as_str() {
+        "address" | "article" | "aside" | "blockquote" | "body" | "dd" | "details" | "div"
+        | "dl" | "dt" | "fieldset" | "figcaption" | "figure" | "footer" | "form" | "h1" | "h2"
+        | "h3" | "h4" | "h5" | "h6" | "header" | "hgroup" | "hr" | "html" | "legend" | "main"
+        | "menu" | "nav" | "ol" | "p" | "pre" | "section" | "ul" => Some("block"),
+        "area" | "base" | "head" | "link" | "meta" | "noscript" | "param" | "script" | "style"
+        | "template" | "title" | "track" => Some("none"),
+        "caption" => Some("table-caption"),
+        "col" => Some("table-column"),
+        "colgroup" => Some("table-column-group"),
+        _ => None,
+    };
+    if let Some(display) = default_display {
+        properties
+            .entry("display".to_string())
+            .or_insert_with(|| ComputedValue::Keyword(display.to_string()));
+    }
     let parent_font_size = inherited_font_size(parent_style, properties);
     if tag == "br" {
         properties

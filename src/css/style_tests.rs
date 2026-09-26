@@ -4950,6 +4950,53 @@ fn ua_defaults_set_display_list_item_for_li() {
 }
 
 #[test]
+fn ua_display_defaults_match_firefox_for_connected_elements() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    for (tag, expected) in [
+        ("html", "block"),
+        ("body", "block"),
+        ("span", "inline"),
+        ("p", "block"),
+        ("h1", "block"),
+        ("div", "block"),
+        ("fieldset", "block"),
+        ("legend", "block"),
+        ("custom-thing", "inline"),
+        ("script", "none"),
+        ("template", "none"),
+        ("iframe", "inline"),
+        ("li", "list-item"),
+        ("table", "table"),
+        ("caption", "table-caption"),
+        ("colgroup", "table-column-group"),
+        ("col", "table-column"),
+        ("tr", "table-row"),
+        ("td", "table-cell"),
+    ] {
+        let node = match tag {
+            "html" => html.clone(),
+            "body" => body.clone(),
+            _ => {
+                let node = NodeHandle::element(tag);
+                body.append_child(node.clone());
+                node
+            }
+        };
+        assert_eq!(
+            resolver.computed_style(&node).get("display"),
+            Some(&ComputedValue::Keyword(expected.to_string())),
+            "Firefox 155.0.1 computes <{tag}> as {expected}"
+        );
+    }
+}
+
+#[test]
 fn list_style_type_inherits_from_parent() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
