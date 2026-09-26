@@ -16,11 +16,14 @@ mod store;
 
 pub use config::{ConfigError, ReporterConfig, ReportingMode, Repository};
 pub use github::{GitHubApi, GitHubFailure, GitHubIssueBackend, GitHubRestApi, RemoteIssue};
-pub use manual::{ManualSubmission, ManualSubmissionError, SubmissionApproval, SubmissionBackend};
+pub use manual::{
+    ManualSubmission, ManualSubmissionError, SubmissionApproval, SubmissionBackend,
+    SubmissionFailure, SubmissionPolicy,
+};
 pub use panic_hook::install_panic_reporter;
 pub use privacy::{RawEvent, SafeContext, SafeEvent};
 pub use reporter::{ErrorReporter, ReporterError, ReporterStats};
-pub use store::{EventStore, RetentionPolicy, StoreError, StoredReport};
+pub use store::{EventStore, RetentionPolicy, StoreError, StoredReport, SubmissionState};
 
 use serde::Serialize;
 

@@ -57,7 +57,7 @@ fn schema_upsert_and_reopen_preserve_safe_fields() {
     let safe = event("SCRIPT_FAILURE", raw);
     {
         let mut store = EventStore::open(temporary.path(), RetentionPolicy::default()).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
+        assert_eq!(store.schema_version().unwrap(), 2);
         store.record_at(&safe, 1_000).unwrap();
         store.record_at(&safe, 2_000).unwrap();
         assert_eq!(store.len().unwrap(), 1);
@@ -125,6 +125,64 @@ fn rejects_unknown_schema_without_mutating_it() {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(version, 99);
+}
+
+#[test]
+fn version_one_database_migrates_delivery_state_and_remains_usable() {
+    let temporary = TemporaryDatabase::new();
+    let connection = rusqlite::Connection::open(temporary.path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE error_reports (
+                fingerprint TEXT PRIMARY KEY NOT NULL,
+                category TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                error_code TEXT NOT NULL,
+                message TEXT NOT NULL,
+                context_json TEXT NOT NULL,
+                first_seen_ms INTEGER NOT NULL,
+                last_seen_ms INTEGER NOT NULL,
+                occurrences INTEGER NOT NULL,
+                version TEXT NOT NULL,
+                build_commit TEXT,
+                platform TEXT NOT NULL,
+                surface TEXT NOT NULL,
+                submission_status TEXT NOT NULL DEFAULT 'pending',
+                issue_url TEXT
+            );
+            INSERT INTO error_reports (
+                fingerprint, category, severity, error_code, message, context_json,
+                first_seen_ms, last_seen_ms, occurrences, version, build_commit, platform,
+                surface, submission_status, issue_url
+            ) VALUES (
+                'legacy-row', 'javascript', 'error', 'OLD_FAILURE', 'Error details withheld',
+                '{}', 1000, 1000, 1, '0.4.0', NULL, 'linux/aarch64', 'headless', 'pending', NULL
+            );",
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "application_id", 0x4f4d_4f45_i64)
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let mut store = EventStore::open(temporary.path(), RetentionPolicy::default()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(store.len().unwrap(), 1);
+    assert_eq!(
+        store.submission_state("legacy-row").unwrap().unwrap(),
+        super::SubmissionState::default()
+    );
+    let safe = event("MIGRATION_TEST", "details");
+    store.record_at(&safe, 1_000).unwrap();
+    assert_eq!(
+        store.submission_state(safe.fingerprint()).unwrap().unwrap(),
+        super::SubmissionState::default()
+    );
+    drop(store);
+    let reopened = EventStore::open(temporary.path(), RetentionPolicy::default()).unwrap();
+    assert_eq!(reopened.schema_version().unwrap(), 2);
+    assert_eq!(reopened.len().unwrap(), 2);
 }
 
 #[test]
@@ -227,12 +285,21 @@ fn submission_does_not_hide_an_occurrence_added_during_delivery() {
     let safe = event("DELIVERY_RACE", "details");
     store.record_at(&safe, 1_000).unwrap();
     let snapshot = store.get(safe.fingerprint()).unwrap().unwrap();
+    assert!(store.claim_submission(&snapshot, 1_500, 1_801_500).unwrap());
     store.record_at(&safe, 2_000).unwrap();
     assert!(
         !store
-            .mark_submitted_snapshot(&snapshot, "https://github.com/owner/repo/issues/42")
+            .mark_submitted_snapshot(
+                &snapshot,
+                "https://github.com/owner/repo/issues/42",
+                2_500,
+                1_801_500
+            )
             .unwrap()
     );
+    store
+        .release_submission_lease(safe.fingerprint(), 1_801_500)
+        .unwrap();
     assert_eq!(
         store
             .get(safe.fingerprint())
@@ -242,9 +309,15 @@ fn submission_does_not_hide_an_occurrence_added_during_delivery() {
         "pending"
     );
     let current = store.get(safe.fingerprint()).unwrap().unwrap();
+    assert!(store.claim_submission(&current, 2_500, 1_802_500).unwrap());
     assert!(
         store
-            .mark_submitted_snapshot(&current, "https://github.com/owner/repo/issues/42")
+            .mark_submitted_snapshot(
+                &current,
+                "https://github.com/owner/repo/issues/42",
+                2_500,
+                1_802_500
+            )
             .unwrap()
     );
     assert_eq!(
@@ -255,6 +328,27 @@ fn submission_does_not_hide_an_occurrence_added_during_delivery() {
             .submission_status,
         "submitted"
     );
+}
+
+#[test]
+fn sqlite_lease_prevents_parallel_delivery_across_connections() {
+    let temporary = TemporaryDatabase::new();
+    let mut first = EventStore::open(temporary.path(), RetentionPolicy::default()).unwrap();
+    let safe = event("LEASE_TEST", "details");
+    first.record_at(&safe, 1_000).unwrap();
+    let second = EventStore::open(temporary.path(), RetentionPolicy::default()).unwrap();
+    let row = first.get(safe.fingerprint()).unwrap().unwrap();
+    assert!(first.claim_submission(&row, 2_000, 102_000).unwrap());
+    assert!(!second.claim_submission(&row, 2_000, 102_000).unwrap());
+    first
+        .release_submission_lease(safe.fingerprint(), 102_000)
+        .unwrap();
+    assert!(second.claim_submission(&row, 2_000, 102_000).unwrap());
+    second
+        .record_submission_failure(&row, 62_000, 102_000)
+        .unwrap();
+    assert!(!first.claim_submission(&row, 61_999, 162_000).unwrap());
+    assert!(first.claim_submission(&row, 62_000, 162_000).unwrap());
 }
 
 #[test]
