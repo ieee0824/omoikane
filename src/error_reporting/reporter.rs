@@ -10,9 +10,13 @@ use std::{
         mpsc::{self, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
-use super::{EventStore, ReporterConfig, RetentionPolicy, SafeEvent, StoreError};
+use super::{
+    AutoSubmission, EventStore, GitHubIssueBackend, GitHubRestApi, ReporterConfig, RetentionPolicy,
+    SafeEvent, StoreError,
+};
 
 const DEFAULT_QUEUE_CAPACITY: usize = 256;
 
@@ -69,10 +73,16 @@ struct Worker {
     handle: JoinHandle<()>,
 }
 
+struct AutoWorker {
+    stop: mpsc::Sender<()>,
+    handle: JoinHandle<()>,
+}
+
 /// Optional background reporter. `report` never performs database I/O or
 /// changes the result of the browser operation that observed an error.
 pub struct ErrorReporter {
     worker: Option<Worker>,
+    auto_worker: Option<AutoWorker>,
     counters: Arc<Counters>,
 }
 
@@ -89,13 +99,20 @@ impl ErrorReporter {
         if !config.records_locally() {
             return Ok(Self {
                 worker: None,
+                auto_worker: None,
                 counters: Arc::default(),
             });
         }
-        Self::with_sink(DEFAULT_QUEUE_CAPACITY, move || {
+        let auto_path = database_path.clone();
+        let auto_config = config.clone();
+        let mut reporter = Self::with_sink(DEFAULT_QUEUE_CAPACITY, move || {
             let mut store = EventStore::open(database_path, retention)?;
             Ok(move |event: &SafeEvent| store.record(event))
-        })
+        })?;
+        if auto_config.auto_submit_enabled() {
+            reporter.auto_worker = start_auto_worker(auto_config, auto_path, retention);
+        }
+        Ok(reporter)
     }
 
     fn with_sink<S, F>(capacity: usize, create_sink: F) -> Result<Self, ReporterError>
@@ -139,6 +156,7 @@ impl ErrorReporter {
             .map_err(|_| ReporterError::WorkerStart)?;
         Ok(Self {
             worker: Some(Worker { sender, handle }),
+            auto_worker: None,
             counters,
         })
     }
@@ -200,7 +218,79 @@ impl Drop for ErrorReporter {
             drop(worker.sender);
             let _ = worker.handle.join();
         }
+        if let Some(auto) = self.auto_worker.take() {
+            let _ = auto.stop.send(());
+            if auto.handle.is_finished() {
+                let _ = auto.handle.join();
+            }
+            // An in-flight network call is detached rather than blocking shutdown.
+        }
     }
+}
+
+fn start_auto_worker(
+    config: ReporterConfig,
+    database_path: PathBuf,
+    retention: RetentionPolicy,
+) -> Option<AutoWorker> {
+    let token = match std::env::var("OMOIKANE_ERROR_REPORT_GITHUB_TOKEN") {
+        Ok(token) => token,
+        Err(_) => {
+            write_diagnostic("Omoikane error reporter: automatic submission token unavailable");
+            return None;
+        }
+    };
+    let api = match GitHubRestApi::new(token) {
+        Ok(api) => api,
+        Err(_) => {
+            write_diagnostic("Omoikane error reporter: automatic submission token unavailable");
+            return None;
+        }
+    };
+    let (stop, receiver) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .name("omoikane-error-submitter".into())
+        .spawn(move || {
+            let mut store = None;
+            for attempt in 0..5 {
+                match EventStore::open(&database_path, retention) {
+                    Ok(opened) => {
+                        store = Some(opened);
+                        break;
+                    }
+                    Err(_) if attempt < 4 => {
+                        if receiver.recv_timeout(Duration::from_millis(100)).is_ok() {
+                            return;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let Some(store) = store else {
+                write_diagnostic("Omoikane error reporter: automatic submission store unavailable");
+                return;
+            };
+            let Ok(sender) = AutoSubmission::new(&config, &store) else {
+                return;
+            };
+            let mut backend = GitHubIssueBackend::new(api);
+            let mut warned = false;
+            loop {
+                if sender.run_once(&mut backend).is_err() && !warned {
+                    write_diagnostic("Omoikane error reporter: automatic submission unavailable");
+                    warned = true;
+                }
+                match receiver.recv_timeout(Duration::from_secs(60)) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .map_err(|_| {
+            write_diagnostic("Omoikane error reporter: automatic submission worker unavailable");
+        })
+        .ok()?;
+    Some(AutoWorker { stop, handle })
 }
 
 fn warn_storage_once(counters: &Counters) {

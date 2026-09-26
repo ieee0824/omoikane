@@ -5,6 +5,7 @@
 //! Unsupported CSS/HTML observation logs remain separate; their existing
 //! environment variables and tables are not changed by the general-error reporter.
 
+mod auto;
 mod config;
 mod fingerprint;
 mod github;
@@ -14,6 +15,7 @@ mod privacy;
 mod reporter;
 mod store;
 
+pub use auto::{AutoSubmission, AutoSubmissionStats};
 pub use config::{ConfigError, ReporterConfig, ReportingMode, Repository};
 pub use github::{GitHubApi, GitHubFailure, GitHubIssueBackend, GitHubRestApi, RemoteIssue};
 pub use manual::{
