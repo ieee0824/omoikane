@@ -74,6 +74,7 @@ impl Repository {
 pub struct ReporterConfig {
     mode: ReportingMode,
     repository: Option<Repository>,
+    auto_submit: bool,
 }
 
 impl ReporterConfig {
@@ -82,6 +83,15 @@ impl ReporterConfig {
     /// `submit` requires an explicit repository slug. A repository never turns
     /// on submission by itself.
     pub fn from_values(mode: Option<&str>, repository: Option<&str>) -> Result<Self, ConfigError> {
+        Self::from_values_with_auto_submit(mode, repository, false)
+    }
+
+    /// Parses values with an explicit unattended-submission opt-in.
+    pub fn from_values_with_auto_submit(
+        mode: Option<&str>,
+        repository: Option<&str>,
+        auto_submit: bool,
+    ) -> Result<Self, ConfigError> {
         let mode = mode
             .map(ReportingMode::parse)
             .transpose()?
@@ -90,10 +100,17 @@ impl ReporterConfig {
         if mode == ReportingMode::Submit && repository.is_none() {
             return Err(ConfigError::MissingRepository);
         }
-        Ok(Self { mode, repository })
+        if auto_submit && mode != ReportingMode::Submit {
+            return Err(ConfigError::AutoSubmitRequiresSubmit);
+        }
+        Ok(Self {
+            mode,
+            repository,
+            auto_submit,
+        })
     }
 
-    /// Reads `OMOIKANE_ERROR_REPORT_MODE` and `OMOIKANE_ERROR_REPORT_REPOSITORY`.
+    /// Reads mode, repository, and `OMOIKANE_ERROR_REPORT_AUTO_SUBMIT=1`.
     ///
     /// Invalid or non-Unicode values fail closed. No database is opened and no
     /// network request is sent while reading these settings.
@@ -107,7 +124,12 @@ impl ReporterConfig {
         }
         let mode = read("OMOIKANE_ERROR_REPORT_MODE")?;
         let repository = read("OMOIKANE_ERROR_REPORT_REPOSITORY")?;
-        Self::from_values(mode.as_deref(), repository.as_deref())
+        let auto_submit = match read("OMOIKANE_ERROR_REPORT_AUTO_SUBMIT")?.as_deref() {
+            None | Some("0") => false,
+            Some("1") => true,
+            Some(_) => return Err(ConfigError::InvalidAutoSubmit),
+        };
+        Self::from_values_with_auto_submit(mode.as_deref(), repository.as_deref(), auto_submit)
     }
 
     /// Returns the selected mode.
@@ -124,6 +146,11 @@ impl ReporterConfig {
     /// A later submission policy still controls confirmation and rate limits.
     pub const fn permits_submission(&self) -> bool {
         matches!(self.mode, ReportingMode::Submit) && self.repository.is_some()
+    }
+
+    /// Whether the dedicated unattended opt-in is enabled in submit mode.
+    pub const fn auto_submit_enabled(&self) -> bool {
+        self.auto_submit && self.permits_submission()
     }
 
     /// Returns the explicit repository, if one was configured.
@@ -143,6 +170,10 @@ pub enum ConfigError {
     MissingRepository,
     /// An environment setting was not valid Unicode.
     NonUnicode,
+    /// Automatic submission must be explicitly set to `0` or `1`.
+    InvalidAutoSubmit,
+    /// Automatic submission is only available in explicit submit mode.
+    AutoSubmitRequiresSubmit,
 }
 
 impl fmt::Display for ConfigError {
@@ -152,6 +183,8 @@ impl fmt::Display for ConfigError {
             Self::InvalidRepository => "invalid error-reporting repository",
             Self::MissingRepository => "submit mode requires an explicit repository",
             Self::NonUnicode => "error-reporting setting is not Unicode",
+            Self::InvalidAutoSubmit => "invalid automatic error-reporting setting",
+            Self::AutoSubmitRequiresSubmit => "automatic submission requires submit mode",
         };
         formatter.write_str(message)
     }
