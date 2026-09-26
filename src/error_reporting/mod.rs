@@ -8,9 +8,13 @@
 mod config;
 mod fingerprint;
 mod privacy;
+mod reporter;
+mod store;
 
 pub use config::{ConfigError, ReporterConfig, ReportingMode, Repository};
 pub use privacy::{RawEvent, SafeContext, SafeEvent};
+pub use reporter::{ErrorReporter, ReporterError, ReporterStats};
+pub use store::{EventStore, RetentionPolicy, StoreError, StoredReport};
 
 use serde::Serialize;
 
@@ -66,6 +70,16 @@ pub enum ErrorSeverity {
     Critical,
 }
 
+impl ErrorSeverity {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Critical => "critical",
+        }
+    }
+}
+
 /// The execution surface on which an error was observed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -80,6 +94,18 @@ pub enum ExecutionSurface {
     Ffi,
     /// A background worker or asynchronous task.
     Background,
+}
+
+impl ExecutionSurface {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::Gui => "gui",
+            Self::Cdp => "cdp",
+            Self::Ffi => "ffi",
+            Self::Background => "background",
+        }
+    }
 }
 
 /// A stable, source-defined error code, never a page-supplied message.
@@ -123,5 +149,7 @@ impl std::fmt::Display for InvalidErrorCode {
 
 impl std::error::Error for InvalidErrorCode {}
 
+#[cfg(test)]
+mod store_tests;
 #[cfg(test)]
 mod tests;

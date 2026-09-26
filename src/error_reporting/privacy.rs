@@ -52,6 +52,7 @@ impl<'a> RawEvent<'a> {
             context,
             fingerprint,
             version: env!("CARGO_PKG_VERSION"),
+            commit: build_commit(),
             platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
         }
     }
@@ -93,6 +94,7 @@ pub struct SafeEvent {
     context: SafeContext,
     fingerprint: String,
     version: &'static str,
+    commit: Option<&'static str>,
     platform: String,
 }
 
@@ -137,10 +139,21 @@ impl SafeEvent {
         self.version
     }
 
+    /// Returns a validated build commit when supplied by the build environment.
+    pub const fn commit(&self) -> Option<&'static str> {
+        self.commit
+    }
+
     /// Returns the build-target OS and architecture.
     pub fn platform(&self) -> &str {
         &self.platform
     }
+}
+
+fn build_commit() -> Option<&'static str> {
+    option_env!("OMOIKANE_BUILD_COMMIT")
+        .or(option_env!("GITHUB_SHA"))
+        .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn safe_message(raw: &str) -> &'static str {
