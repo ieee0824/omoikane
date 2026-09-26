@@ -39,6 +39,9 @@ use crate::css::{
 };
 use crate::css::{SelectorMatchCache, matches_selector_cached};
 use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disabled};
+use crate::error_reporting::{
+    ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
+};
 use crate::http::cors::{
     CredentialsMode, Origin as CorsOrigin, PreflightCache, RedirectMode, RequestMode, ResponseType,
     exposed_response_headers,
@@ -1376,6 +1379,8 @@ struct HostState {
     /// (see [`JsRuntime::take_task_errors`]); leaving them unreported is how the
     /// navigation-aborting bug in issue #303 stayed invisible.
     task_errors: Vec<String>,
+    /// Optional shared sink for already sanitized browser error events.
+    error_reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
     /// How many task errors were dropped once `task_errors` hit its cap.
     suppressed_task_errors: usize,
     location_href: String,
@@ -2107,6 +2112,7 @@ impl HostState {
             remote_objects: HashMap::new(),
             console_logs: Vec::new(),
             task_errors: Vec::new(),
+            error_reporter: None,
             suppressed_task_errors: 0,
             base_url,
             secure_context_override: None,
@@ -4907,6 +4913,12 @@ impl JsRuntime {
         self.sandbox.timeout
     }
 
+    /// Attaches a best-effort reporter for errors observed by this runtime.
+    /// The embedder retains ownership of the reporter and may flush it on exit.
+    pub fn set_error_reporter(&mut self, reporter: Arc<ErrorReporter>, surface: ExecutionSurface) {
+        self.host_state.borrow_mut().error_reporter = Some((reporter, surface));
+    }
+
     fn with_document_sandbox_and_url(
         document: NodeHandle,
         sandbox: SandboxConfig,
@@ -6252,8 +6264,15 @@ impl JsRuntime {
         if let Some(base) = &base_url {
             self.host_state.borrow_mut().set_main_base_url(base.clone());
         }
-        let _ = self.eval("__omoikane_install_window_named_properties()");
-        let _ = self.eval("document.__readyState = 'loading'");
+        if self
+            .eval("__omoikane_install_window_named_properties()")
+            .is_err()
+        {
+            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
+        }
+        if self.eval("document.__readyState = 'loading'").is_err() {
+            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
+        }
         let _ = self.wire_inline_event_handlers();
         let scripts = collect_script_elements(&self.document());
         let mut immediate = Vec::new();
@@ -6417,11 +6436,13 @@ impl JsRuntime {
                     && (module_url.is_some() || node.get_attribute("defer").is_some())
                 {
                     if let Err(error) = self.run_written_scripts_before(&node) {
+                        self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
                         errors.push(format!("[written scripts] {error}"));
                     }
                 }
                 if label == "DOMContentLoaded" && script_node_id.is_none() {
                     if let Err(error) = self.run_written_scripts(true) {
+                        self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
                         errors.push(format!("[written scripts] {error}"));
                     }
                 }
@@ -6459,6 +6480,11 @@ impl JsRuntime {
                         .complete_page_task_with_error(generation, PageTaskError::Cancelled);
                 };
                 if let Err(error) = evaluation_result {
+                    self.record_document_script_failure(if module_url.is_some() {
+                        "DOCUMENT_MODULE_EVALUATION_FAILED"
+                    } else {
+                        "DOCUMENT_SCRIPT_EVALUATION_FAILED"
+                    });
                     if is_wall_clock_timeout(&error) {
                         return self
                             .complete_page_task_with_error(generation, PageTaskError::TimedOut);
@@ -6466,6 +6492,7 @@ impl JsRuntime {
                     errors.push(format!("[script: {label}] {error}"));
                 }
                 if let Err(error) = self.run_jobs() {
+                    self.record_document_script_failure("DOCUMENT_SCRIPT_JOBS_FAILED");
                     errors.push(format!("[script jobs: {label}] {error}"));
                 }
             }
@@ -9208,6 +9235,26 @@ impl JsRuntime {
         self.run_jobs()
     }
 
+    fn record_document_script_failure(&self, code: &'static str) {
+        let Some((reporter, surface)) = self.host_state.borrow().error_reporter.clone() else {
+            return;
+        };
+        let Ok(code) = ErrorCode::new(code) else {
+            return;
+        };
+        reporter.report(
+            RawEvent::new(
+                ErrorCategory::JavaScript,
+                ErrorSeverity::Error,
+                code,
+                surface,
+                "JavaScript execution failed",
+                &[("operation", "execute"), ("resource", "script")],
+            )
+            .sanitize(),
+        );
+    }
+
     /// Collects and executes all `<script>` elements in the document.
     ///
     /// - Inline scripts: text content is executed directly.
@@ -9226,8 +9273,15 @@ impl JsRuntime {
         if let Some(base) = base_url {
             self.host_state.borrow_mut().set_main_base_url(base.clone());
         }
-        let _ = self.eval("__omoikane_install_window_named_properties()");
-        let _ = self.eval("document.__readyState = 'loading'");
+        if self
+            .eval("__omoikane_install_window_named_properties()")
+            .is_err()
+        {
+            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
+        }
+        if self.eval("document.__readyState = 'loading'").is_err() {
+            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
+        }
 
         let document = self.document();
         let scripts = collect_script_elements(&document);
@@ -9379,12 +9433,14 @@ impl JsRuntime {
             let (eval_result, parse_elapsed, compile_elapsed, execute_elapsed) =
                 self.eval_safe_timed(&source_code);
             if let Err(err) = eval_result {
+                self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
                 errors.push(format!("[script: {script_label}; {script_context}] {err}"));
             }
             let jobs_start = std::time::Instant::now();
             let jobs_result = self.run_jobs();
             let jobs_elapsed = jobs_start.elapsed();
             if let Err(err) = jobs_result {
+                self.record_document_script_failure("DOCUMENT_SCRIPT_JOBS_FAILED");
                 errors.push(format!("[script jobs: {script_label}] {err}"));
             }
             if log_scripts {
@@ -9408,6 +9464,7 @@ impl JsRuntime {
         // inline path applies above.
         for (source_code, script, script_label, module_url) in deferred {
             if let Err(error) = self.run_written_scripts_before(&script) {
+                self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
                 errors.push(format!("[written scripts] {error}"));
             }
             if log_scripts {
@@ -9435,12 +9492,14 @@ impl JsRuntime {
                     self.eval_safe_timed(&source_code)
                 };
             if let Err(err) = result {
+                self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
                 errors.push(format!("[script: {script_label}; {script_context}] {err}"));
             }
             let jobs_start = std::time::Instant::now();
             let jobs_result = self.run_jobs();
             let jobs_elapsed = jobs_start.elapsed();
             if let Err(err) = jobs_result {
+                self.record_document_script_failure("DOCUMENT_SCRIPT_JOBS_FAILED");
                 errors.push(format!("[script jobs: {script_label}] {err}"));
             }
             if log_scripts {
@@ -9460,6 +9519,7 @@ impl JsRuntime {
 
         // Fire DOMContentLoaded
         if let Err(err) = self.fire_dom_content_loaded() {
+            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
             errors.push(format!("{err}"));
         }
 
