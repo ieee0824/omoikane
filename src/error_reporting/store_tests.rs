@@ -199,7 +199,7 @@ fn retention_removes_expired_and_prefers_submitted_rows() {
 }
 
 #[test]
-fn repeated_submitted_fingerprint_keeps_issue_reference() {
+fn repeated_submitted_fingerprint_becomes_pending_with_issue_reference() {
     let temporary = TemporaryDatabase::new();
     let mut store = EventStore::open(temporary.path(), RetentionPolicy::default()).unwrap();
     let safe = event("REPEAT_FAILURE", "details");
@@ -213,10 +213,47 @@ fn repeated_submitted_fingerprint_keeps_issue_reference() {
     store.record_at(&safe, 2_000).unwrap();
     let row = store.get(safe.fingerprint()).unwrap().unwrap();
     assert_eq!(row.occurrences, 2);
-    assert_eq!(row.submission_status, "submitted");
+    assert_eq!(row.submission_status, "pending");
     assert_eq!(
         row.issue_url.as_deref(),
         Some("https://github.com/example/repo/issues/1")
+    );
+}
+
+#[test]
+fn submission_does_not_hide_an_occurrence_added_during_delivery() {
+    let temporary = TemporaryDatabase::new();
+    let mut store = EventStore::open(temporary.path(), RetentionPolicy::default()).unwrap();
+    let safe = event("DELIVERY_RACE", "details");
+    store.record_at(&safe, 1_000).unwrap();
+    let snapshot = store.get(safe.fingerprint()).unwrap().unwrap();
+    store.record_at(&safe, 2_000).unwrap();
+    assert!(
+        !store
+            .mark_submitted_snapshot(&snapshot, "https://github.com/owner/repo/issues/42")
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .get(safe.fingerprint())
+            .unwrap()
+            .unwrap()
+            .submission_status,
+        "pending"
+    );
+    let current = store.get(safe.fingerprint()).unwrap().unwrap();
+    assert!(
+        store
+            .mark_submitted_snapshot(&current, "https://github.com/owner/repo/issues/42")
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .get(safe.fingerprint())
+            .unwrap()
+            .unwrap()
+            .submission_status,
+        "submitted"
     );
 }
 

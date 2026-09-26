@@ -230,7 +230,8 @@ impl EventStore {
                 version = excluded.version,
                 build_commit = excluded.build_commit,
                 platform = excluded.platform,
-                surface = excluded.surface",
+                surface = excluded.surface,
+                submission_status = 'pending'",
             params![
                 event.fingerprint(),
                 event.category().as_str(),
@@ -363,6 +364,7 @@ impl EventStore {
     }
 
     /// Marks an event as submitted after a backend returns a canonical Issue URL.
+    #[cfg(test)]
     pub(super) fn mark_submitted(
         &self,
         fingerprint: &str,
@@ -374,6 +376,27 @@ impl EventStore {
             params![fingerprint, issue_url],
         )?;
         Ok(())
+    }
+
+    /// Records delivery only if the submitted snapshot is still current.
+    /// A concurrent new occurrence remains pending for a later update.
+    pub(super) fn mark_submitted_snapshot(
+        &self,
+        report: &StoredReport,
+        issue_url: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE error_reports SET submission_status = 'submitted', issue_url = ?2
+             WHERE fingerprint = ?1 AND submission_status = 'pending'
+               AND occurrences = ?3 AND last_seen_ms = ?4",
+            params![
+                report.fingerprint,
+                issue_url,
+                report.occurrences,
+                report.last_seen_ms
+            ],
+        )?;
+        Ok(changed == 1)
     }
 }
 
