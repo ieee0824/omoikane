@@ -19,7 +19,9 @@ use crate::accessibility::{
     AccessibilityNode, AccessibilityProperty, AccessibilityTree, AccessibilityValue,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
-use crate::error_reporting::{ErrorReporter, ExecutionSurface};
+use crate::error_reporting::{
+    ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
+};
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::{Client, HttpRequest, Method};
 #[cfg(test)]
@@ -753,6 +755,13 @@ pub(crate) struct PendingDocumentCommit {
     status: u16,
 }
 
+#[derive(Clone, Copy)]
+enum CdpFailure {
+    Request,
+    Navigation,
+    PageTask,
+}
+
 pub(crate) enum PreparedPageNavigation {
     Complete(Value),
     Pending {
@@ -845,7 +854,7 @@ impl CdpSession {
 
     /// Dispatches a CDP domain method and returns the result payload.
     pub fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, JsonRpcError> {
-        match method {
+        let result = match method {
             "Page.navigate" => self.page_navigate(&params),
             "Page.reload" => self.page_reload(),
             "Page.getFrameTree" => Ok(self.page_get_frame_tree()),
@@ -886,7 +895,15 @@ impl CdpSession {
                 code: -32601,
                 message: format!("Method not found: {method}"),
             }),
+        };
+        if result.is_err() {
+            self.report_cdp_failure(if matches!(method, "Page.navigate" | "Page.reload") {
+                CdpFailure::Navigation
+            } else {
+                CdpFailure::Request
+            });
         }
+        result
     }
 
     /// Returns and clears queued protocol events.
@@ -943,6 +960,28 @@ impl CdpSession {
         self.runtime
             .set_error_reporter(Arc::clone(&reporter), surface);
         self.http_client.set_error_reporter(reporter, surface);
+    }
+
+    fn report_cdp_failure(&self, failure: CdpFailure) {
+        let Some((reporter, surface)) = self.runtime.error_reporter_destination() else {
+            return;
+        };
+        let (code, operation) = match failure {
+            CdpFailure::Request => ("CDP_REQUEST_FAILED", "execute"),
+            CdpFailure::Navigation => ("CDP_NAVIGATION_FAILED", "navigate"),
+            CdpFailure::PageTask => ("CDP_PAGE_TASK_FAILED", "execute"),
+        };
+        reporter.report(
+            RawEvent::new(
+                ErrorCategory::Cdp,
+                ErrorSeverity::Error,
+                ErrorCode::new(code).expect("static CDP error code"),
+                surface,
+                "CDP operation failed",
+                &[("operation", operation)],
+            )
+            .sanitize(),
+        );
     }
 
     pub(crate) fn report_paint_failure(&self, code: &'static str) {
@@ -2754,6 +2793,9 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(|error| error.to_string())?;
+        if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
+            runtime.set_error_reporter(reporter, surface);
+        }
         runtime.set_shared_cookie_store(Arc::clone(&self.cookie_store));
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         runtime.set_user_agent(self.http_client.user_agent().to_string());
@@ -2833,6 +2875,9 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(|error| error.to_string())?;
+        if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
+            runtime.set_error_reporter(reporter, surface);
+        }
         runtime.set_shared_cookie_store(Arc::clone(&self.cookie_store));
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         runtime.set_user_agent(self.http_client.user_agent().to_string());
@@ -2883,13 +2928,16 @@ impl CdpSession {
         if completed.generation != pending.generation
             || pending.generation != self.document_generation.saturating_add(1)
         {
+            self.report_cdp_failure(CdpFailure::PageTask);
             return Err("stale page startup task completion".to_string());
         }
         match &completed.result {
             Err(PageTaskError::Cancelled) => {
+                self.report_cdp_failure(CdpFailure::PageTask);
                 return Err("page startup task was cancelled".to_string());
             }
             Err(PageTaskError::TimedOut) => {
+                self.report_cdp_failure(CdpFailure::PageTask);
                 return Err("page startup task exceeded its wall-clock timeout".to_string());
             }
             Ok(_) => {}
@@ -3325,10 +3373,14 @@ impl BrowserSessionState {
         })?;
         let timeout_deadline = deadline_after(session.runtime_timeout());
         let prepared = if method == "Page.reload" {
-            session.prepare_page_reload()?
+            session.prepare_page_reload()
         } else {
-            session.prepare_page_navigate(params)?
+            session.prepare_page_navigate(params)
         };
+        if prepared.is_err() {
+            session.report_cdp_failure(CdpFailure::Navigation);
+        }
+        let prepared = prepared?;
         let (task, commit, response) = match prepared {
             PreparedPageNavigation::Complete(response) => {
                 return Ok(CdpMethodResult::Complete(response));
@@ -3412,6 +3464,9 @@ impl BrowserSessionState {
         let mut context = TaskContext::from_waker(waker);
         match pending.future.as_mut().poll(&mut context) {
             Poll::Ready((session, result)) => {
+                if result.is_err() {
+                    session.report_cdp_failure(CdpFailure::Request);
+                }
                 self.session = Some(session);
                 if pending.opened.take().is_some() {
                     self.actions.push(BrowserSessionAction::Notify(
@@ -3916,11 +3971,66 @@ fn js_error_message(error: boa_engine::JsError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error_reporting::{EventStore, ReporterConfig, RetentionPolicy};
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::rc::Rc;
     use std::thread;
+
+    #[test]
+    fn timed_out_page_task_records_safe_failure_without_committing_document() {
+        let directory =
+            std::env::temp_dir().join(format!("omoikane-cdp-page-task-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("events.sqlite");
+        let config = ReporterConfig::from_values(Some("record-only"), None).unwrap();
+        let reporter = Arc::new(
+            ErrorReporter::new(&config, database.clone(), RetentionPolicy::default()).unwrap(),
+        );
+        let mut session = CdpSession::new().unwrap();
+        session.set_error_reporter(Arc::clone(&reporter), ExecutionSurface::Cdp);
+        let previous_url = session.current_url().to_string();
+        let generation = session.document_generation + 1;
+        let completed = CompletedPageTask {
+            runtime: JsRuntime::new().unwrap(),
+            generation,
+            result: Err(PageTaskError::TimedOut),
+        };
+        let pending = PendingDocumentCommit {
+            url: "http://localhost/?token=QUERY_SECRET_942".into(),
+            html: "BODY_SECRET_942".into(),
+            generation,
+            history_commit: NavigationCommit::Replace,
+            loader_id: "1".into(),
+            status: 200,
+        };
+        assert_eq!(
+            session.commit_document_page_task(completed, pending),
+            Err("page startup task exceeded its wall-clock timeout".into())
+        );
+        assert_eq!(session.current_url(), previous_url);
+        reporter.flush().unwrap();
+        let expected = RawEvent::new(
+            ErrorCategory::Cdp,
+            ErrorSeverity::Error,
+            ErrorCode::new("CDP_PAGE_TASK_FAILED").unwrap(),
+            ExecutionSurface::Cdp,
+            "CDP operation failed",
+            &[("operation", "execute")],
+        )
+        .sanitize();
+        let store = EventStore::open(&database, RetentionPolicy::default()).unwrap();
+        assert!(store.get(expected.fingerprint()).unwrap().is_some());
+        drop(store);
+        drop(session);
+        drop(reporter);
+        let bytes = std::fs::read(&database).unwrap();
+        for secret in [b"QUERY_SECRET_942".as_slice(), b"BODY_SECRET_942"] {
+            assert!(!bytes.windows(secret.len()).any(|part| part == secret));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn ax_node_by_name<'a>(nodes: &'a [Value], name: &str) -> &'a Value {
         nodes
