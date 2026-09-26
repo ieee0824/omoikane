@@ -169,6 +169,7 @@ fn safe_message(raw: &str) -> &'static str {
         "Layout failed" => "Layout failed",
         "Paint failed" => "Paint failed",
         "CDP operation failed" => "CDP operation failed",
+        "Unexpected panic" => "Unexpected panic",
         "Operation timed out" => "Operation timed out",
         _ => "Error details withheld",
     }
@@ -224,6 +225,18 @@ fn allowlisted_context(key: &str, value: &str) -> Option<(&'static str, &'static
             "5xx" => "5xx",
             _ => return None,
         },
+        "panic_origin" => match value {
+            "src" => "src",
+            "tests" => "tests",
+            "engine" => "engine",
+            "other" => "other",
+            _ => return None,
+        },
+        "panic_kind" => match value {
+            "string" => "string",
+            "other" => "other",
+            _ => return None,
+        },
         _ => return None,
     };
     Some((key_name(key), value))
@@ -236,6 +249,8 @@ fn key_name(key: &str) -> &'static str {
         "task_kind" => "task_kind",
         "failure_kind" => "failure_kind",
         "http_status_class" => "http_status_class",
+        "panic_origin" => "panic_origin",
+        "panic_kind" => "panic_kind",
         _ => unreachable!("only allowlisted keys reach key_name"),
     }
 }
