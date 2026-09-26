@@ -186,6 +186,11 @@ impl ErrorReporter {
             storage_failures: self.counters.storage_failures.load(Ordering::Relaxed),
         }
     }
+
+    /// Whether this reporter has a local recording worker.
+    pub fn records_locally(&self) -> bool {
+        self.worker.is_some()
+    }
 }
 
 impl Drop for ErrorReporter {
