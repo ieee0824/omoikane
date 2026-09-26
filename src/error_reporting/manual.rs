@@ -154,6 +154,10 @@ pub struct ManualSubmission<'a> {
 }
 
 impl<'a> ManualSubmission<'a> {
+    pub(crate) fn attempted_count(&self) -> usize {
+        self.attempted.get()
+    }
+
     /// Binds an explicit configuration to an already-open local store.
     pub fn new(config: &'a ReporterConfig, store: &'a EventStore) -> Self {
         Self {

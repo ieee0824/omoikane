@@ -20,6 +20,7 @@ fn configuration_defaults_to_off_and_requires_explicit_submit_target() {
     assert_eq!(ReporterConfig::default().mode(), ReportingMode::Off);
     assert!(!ReporterConfig::default().records_locally());
     assert!(!ReporterConfig::default().permits_submission());
+    assert!(!ReporterConfig::default().auto_submit_enabled());
     assert_eq!(
         ReporterConfig::from_values(None, None).unwrap().mode(),
         ReportingMode::Off
@@ -42,6 +43,7 @@ fn configuration_defaults_to_off_and_requires_explicit_submit_target() {
     assert_eq!(config.mode(), ReportingMode::Submit);
     assert!(config.records_locally());
     assert!(config.permits_submission());
+    assert!(!config.auto_submit_enabled());
     assert_eq!(config.repository().unwrap().owner(), "ieee0824");
     assert_eq!(config.repository().unwrap().name(), "omoikane");
     assert_eq!(
@@ -55,6 +57,24 @@ fn configuration_defaults_to_off_and_requires_explicit_submit_target() {
         !ReporterConfig::from_values(None, Some("ieee0824/omoikane"))
             .unwrap()
             .permits_submission()
+    );
+}
+
+#[test]
+fn automatic_submission_needs_a_dedicated_opt_in_and_submit_mode() {
+    let config =
+        ReporterConfig::from_values_with_auto_submit(Some("submit"), Some("owner/repo"), true)
+            .unwrap();
+    assert!(config.auto_submit_enabled());
+    for mode in [None, Some("off"), Some("record-only")] {
+        assert_eq!(
+            ReporterConfig::from_values_with_auto_submit(mode, Some("owner/repo"), true),
+            Err(ConfigError::AutoSubmitRequiresSubmit)
+        );
+    }
+    assert_eq!(
+        ReporterConfig::from_values_with_auto_submit(Some("submit"), None, true),
+        Err(ConfigError::MissingRepository)
     );
 }
 
@@ -92,7 +112,7 @@ fn configuration_env_subprocess_probe() {
 
 #[test]
 fn environment_configuration_is_off_by_default_and_fails_closed() {
-    fn probe(mode: Option<&str>, repository: Option<&str>) -> String {
+    fn probe(mode: Option<&str>, repository: Option<&str>, auto_submit: Option<&str>) -> String {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -102,12 +122,16 @@ fn environment_configuration_is_off_by_default_and_fails_closed() {
             ])
             .env("OMOIKANE_CONFIG_PROBE", "1")
             .env_remove("OMOIKANE_ERROR_REPORT_MODE")
-            .env_remove("OMOIKANE_ERROR_REPORT_REPOSITORY");
+            .env_remove("OMOIKANE_ERROR_REPORT_REPOSITORY")
+            .env_remove("OMOIKANE_ERROR_REPORT_AUTO_SUBMIT");
         if let Some(mode) = mode {
             command.env("OMOIKANE_ERROR_REPORT_MODE", mode);
         }
         if let Some(repository) = repository {
             command.env("OMOIKANE_ERROR_REPORT_REPOSITORY", repository);
+        }
+        if let Some(auto_submit) = auto_submit {
+            command.env("OMOIKANE_ERROR_REPORT_AUTO_SUBMIT", auto_submit);
         }
         let output = command
             .output()
@@ -116,13 +140,24 @@ fn environment_configuration_is_off_by_default_and_fails_closed() {
         String::from_utf8(output.stdout).unwrap()
     }
 
-    assert!(probe(None, None).contains("CONFIG_RESULT=Ok(Off)"));
-    assert!(probe(Some("record-only"), None).contains("CONFIG_RESULT=Ok(RecordOnly)"));
-    assert!(probe(Some("submit"), None).contains("CONFIG_RESULT=Err(MissingRepository)"));
-    let invalid = probe(Some("submit"), Some("owner/repo?token=SECRET"));
+    assert!(probe(None, None, None).contains("CONFIG_RESULT=Ok(Off)"));
+    assert!(probe(Some("record-only"), None, None).contains("CONFIG_RESULT=Ok(RecordOnly)"));
+    assert!(probe(Some("submit"), None, None).contains("CONFIG_RESULT=Err(MissingRepository)"));
+    let invalid = probe(Some("submit"), Some("owner/repo?token=SECRET"), None);
     assert!(invalid.contains("CONFIG_RESULT=Err(InvalidRepository)"));
     assert!(!invalid.contains("SECRET"));
-    assert!(probe(Some("submit"), Some("owner/repo")).contains("CONFIG_RESULT=Ok(Submit)"));
+    assert!(probe(Some("submit"), Some("owner/repo"), None).contains("CONFIG_RESULT=Ok(Submit)"));
+    assert!(
+        probe(Some("submit"), Some("owner/repo"), Some("1")).contains("CONFIG_RESULT=Ok(Submit)")
+    );
+    assert!(
+        probe(Some("record-only"), Some("owner/repo"), Some("1"))
+            .contains("CONFIG_RESULT=Err(AutoSubmitRequiresSubmit)")
+    );
+    assert!(
+        probe(Some("submit"), Some("owner/repo"), Some("yes"))
+            .contains("CONFIG_RESULT=Err(InvalidAutoSubmit)")
+    );
 }
 
 #[test]
