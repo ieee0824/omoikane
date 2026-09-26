@@ -124,7 +124,7 @@ impl<'a> ManualSubmission<'a> {
             repository.owner(),
             repository.name()
         );
-        self.store.mark_submitted(fingerprint, &issue_url)?;
+        self.store.mark_submitted_snapshot(&report, &issue_url)?;
         Ok(issue_url)
     }
 }

@@ -7,6 +7,7 @@
 
 mod config;
 mod fingerprint;
+mod github;
 mod manual;
 mod panic_hook;
 mod privacy;
@@ -14,6 +15,7 @@ mod reporter;
 mod store;
 
 pub use config::{ConfigError, ReporterConfig, ReportingMode, Repository};
+pub use github::{GitHubApi, GitHubFailure, GitHubIssueBackend, GitHubRestApi, RemoteIssue};
 pub use manual::{ManualSubmission, ManualSubmissionError, SubmissionApproval, SubmissionBackend};
 pub use panic_hook::install_panic_reporter;
 pub use privacy::{RawEvent, SafeContext, SafeEvent};
