@@ -796,8 +796,13 @@ pub(crate) fn fetch_stylesheet_by_url(
 }
 
 pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Stylesheet {
+    parse_stylesheet_forgiving_with_status(input).0
+}
+
+/// Returns the recovered rules and whether strict parsing first failed.
+pub(crate) fn parse_stylesheet_forgiving_with_status(input: &str) -> (Stylesheet, bool) {
     if let Ok(stylesheet) = parse_stylesheet(input) {
-        return stylesheet;
+        return (stylesheet, false);
     }
 
     let mut rules = Vec::new();
@@ -837,7 +842,7 @@ pub(crate) fn parse_stylesheet_forgiving(input: &str) -> Stylesheet {
         }
     }
 
-    Stylesheet { rules }
+    (Stylesheet { rules }, true)
 }
 
 fn salvage_nested_at_rule(input: &str) -> Option<crate::css::Rule> {

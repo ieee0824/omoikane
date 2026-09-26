@@ -169,6 +169,25 @@ fn report_safe_worker_or_module_failure(
     );
 }
 
+fn report_safe_stylesheet_parse_failure(
+    destination: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
+) {
+    let Some((reporter, surface)) = destination else {
+        return;
+    };
+    reporter.report(
+        RawEvent::new(
+            ErrorCategory::Css,
+            ErrorSeverity::Error,
+            ErrorCode::new("CSS_STYLESHEET_PARSE_FAILED").expect("static code"),
+            surface,
+            "Stylesheet parse failed",
+            &[("operation", "parse"), ("resource", "stylesheet")],
+        )
+        .sanitize(),
+    );
+}
+
 fn report_active_js_task_failure(code: &'static str, kind: &'static str) {
     let _ = with_host_state(|host| {
         let destination = host
@@ -3932,6 +3951,7 @@ impl HostState {
             .get_mut(&document_id)
             .map(|entry| std::mem::take(&mut entry.resources))
             .unwrap_or_default();
+        resources.set_error_reporter(self.error_reporter.clone());
         let mut web_fonts = crate::font::WebFontRegistry::new();
         let site_for_cookies = self.location_href.parse::<crate::http::Url>().ok();
         let (stylesheet_nodes, font_scope_parents) = collect_stylesheet_nodes(document);
@@ -3946,7 +3966,11 @@ impl HostState {
             for blocked_uri in blocked {
                 self.record_csp_violation(document, ResourceType::Style, blocked_uri);
             }
-            let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+            let (sheet, parse_failed) =
+                crate::paint::stylesheet::parse_stylesheet_forgiving_with_status(&css);
+            if parse_failed {
+                report_safe_stylesheet_parse_failure(self.error_reporter.clone());
+            }
             if let Some((scope, order)) = scope {
                 resolver.add_scoped_stylesheet_in_order_with_implicit_scope_root(
                     Origin::Author,
@@ -3972,7 +3996,11 @@ impl HostState {
             self.record_csp_violation(document, ResourceType::Style, "adopted-stylesheets");
         } else {
             for (scope, css) in adopted_stylesheets {
-                let sheet = crate::paint::stylesheet::parse_stylesheet_forgiving(&css);
+                let (sheet, parse_failed) =
+                    crate::paint::stylesheet::parse_stylesheet_forgiving_with_status(&css);
+                if parse_failed {
+                    report_safe_stylesheet_parse_failure(self.error_reporter.clone());
+                }
                 if let Some((scope_root, order)) = scope {
                     resolver.add_scoped_stylesheet_in_order(
                         Origin::Author,
