@@ -194,6 +194,12 @@ fn allowlisted_context(key: &str, value: &str) -> Option<(&'static str, &'static
             "other" => "other",
             _ => return None,
         },
+        "task_kind" => match value {
+            "timer" => "timer",
+            "event-listener" => "event-listener",
+            "animation-frame" => "animation-frame",
+            _ => return None,
+        },
         "failure_kind" => match value {
             "timeout" => "timeout",
             "parse" => "parse",
@@ -222,6 +228,7 @@ fn key_name(key: &str) -> &'static str {
     match key {
         "operation" => "operation",
         "resource" => "resource",
+        "task_kind" => "task_kind",
         "failure_kind" => "failure_kind",
         "http_status_class" => "http_status_class",
         _ => unreachable!("only allowlisted keys reach key_name"),
