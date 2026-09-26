@@ -9425,6 +9425,24 @@ impl JsRuntime {
         );
     }
 
+    pub(crate) fn report_paint_failure(&self, code: &'static str) {
+        let destination = self.host_state.borrow().error_reporter.clone();
+        let Some((reporter, surface)) = destination else {
+            return;
+        };
+        reporter.report(
+            RawEvent::new(
+                ErrorCategory::Paint,
+                ErrorSeverity::Error,
+                ErrorCode::new(code).expect("static code"),
+                surface,
+                "Paint failed",
+                &[("operation", "render"), ("resource", "other")],
+            )
+            .sanitize(),
+        );
+    }
+
     fn record_js_task_failure(&self, code: &'static str, kind: &'static str) {
         report_safe_javascript_failure(
             self.host_state.borrow().error_reporter.clone(),

@@ -19,6 +19,7 @@ use crate::accessibility::{
     AccessibilityNode, AccessibilityProperty, AccessibilityTree, AccessibilityValue,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::error_reporting::{ErrorReporter, ExecutionSurface};
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::{Client, HttpRequest, Method};
 #[cfg(test)]
@@ -935,6 +936,17 @@ impl CdpSession {
         &mut self,
     ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
         self.runtime.paint_current_document()
+    }
+
+    /// Attaches the optional error reporter to this session's runtime and HTTP client.
+    pub fn set_error_reporter(&mut self, reporter: Arc<ErrorReporter>, surface: ExecutionSurface) {
+        self.runtime
+            .set_error_reporter(Arc::clone(&reporter), surface);
+        self.http_client.set_error_reporter(reporter, surface);
+    }
+
+    pub(crate) fn report_paint_failure(&self, code: &'static str) {
+        self.runtime.report_paint_failure(code);
     }
 
     /// Updates the active page's layout and script-visible viewport dimensions.
