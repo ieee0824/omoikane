@@ -13,6 +13,9 @@ use crate::css::{
     TransformReferenceBox, parse_perspective_with_origin, parse_transform_with_origin,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::error_reporting::{
+    ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
+};
 use crate::font::{
     Font, FontFamilyKey, FontStyle, FontVariantKey, FontWeight, LayoutFontMetrics, WebFontRegistry,
 };
@@ -69,6 +72,49 @@ thread_local! {
     static IMAGE_CACHE_OWNER: RefCell<Option<(Arc<Mutex<CookieJar>>, usize)>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
     static CONTENT_VISIBILITY_LAYOUT: RefCell<Option<ContentVisibilityLayoutSession>> = const { RefCell::new(None) };
+    static LAYOUT_ERROR_REPORTER: RefCell<Option<(Arc<ErrorReporter>, ExecutionSurface)>> = const { RefCell::new(None) };
+}
+
+/// Runs layout with an optional destination for recoverable layout failures.
+pub(crate) fn with_error_reporter<T>(
+    destination: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct ReporterGuard(Option<(Arc<ErrorReporter>, ExecutionSurface)>);
+
+    impl Drop for ReporterGuard {
+        fn drop(&mut self) {
+            LAYOUT_ERROR_REPORTER.with(|cell| {
+                cell.replace(self.0.take());
+            });
+        }
+    }
+
+    LAYOUT_ERROR_REPORTER.with(|cell| {
+        let previous = cell.replace(destination);
+        let _guard = ReporterGuard(previous);
+        f()
+    })
+}
+
+fn report_inline_image_decode_failure() {
+    LAYOUT_ERROR_REPORTER.with(|cell| {
+        let destination = cell.borrow();
+        let Some((reporter, surface)) = destination.as_ref() else {
+            return;
+        };
+        reporter.report(
+            RawEvent::new(
+                ErrorCategory::Layout,
+                ErrorSeverity::Warning,
+                ErrorCode::new("LAYOUT_INLINE_IMAGE_DECODE_FAILED").expect("static code"),
+                *surface,
+                "Layout failed",
+                &[("operation", "decode"), ("resource", "image")],
+            )
+            .sanitize(),
+        );
+    });
 }
 
 #[derive(Clone)]
