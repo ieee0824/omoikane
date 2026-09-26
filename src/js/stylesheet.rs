@@ -42,6 +42,10 @@ impl StylesheetLoader {
         &mut self,
         reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
     ) {
+        if let Some((instance, surface)) = &reporter {
+            self.client
+                .set_error_reporter(Arc::clone(instance), *surface);
+        }
         self.reporter = reporter;
     }
 

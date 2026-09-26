@@ -5048,7 +5048,11 @@ impl JsRuntime {
     /// Attaches a best-effort reporter for errors observed by this runtime.
     /// The embedder retains ownership of the reporter and may flush it on exit.
     pub fn set_error_reporter(&mut self, reporter: Arc<ErrorReporter>, surface: ExecutionSurface) {
-        self.host_state.borrow_mut().error_reporter = Some((reporter, surface));
+        let mut state = self.host_state.borrow_mut();
+        state
+            .http_client
+            .set_error_reporter(Arc::clone(&reporter), surface);
+        state.error_reporter = Some((reporter, surface));
     }
 
     fn with_document_sandbox_and_url(
@@ -10225,17 +10229,21 @@ fn fetch_script_resource_with_client(
             // executed. This differs deliberately from iframe loading, which
             // adopts even an error response's body as the sub-document.
             if response.status_code() != 200 {
+                client.report_resource_failure();
                 return None;
             }
             let effective_url = response
                 .effective_url()
                 .map(ToString::to_string)
                 .unwrap_or(url);
-            Some((
-                effective_url,
-                std::str::from_utf8(response.body()).ok()?.to_string(),
-                response.redirect_count(),
-            ))
+            let source = match std::str::from_utf8(response.body()) {
+                Ok(source) => source.to_string(),
+                Err(_) => {
+                    client.report_resource_failure();
+                    return None;
+                }
+            };
+            Some((effective_url, source, response.redirect_count()))
         }
     }
 }

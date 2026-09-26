@@ -5,6 +5,10 @@ use super::cookie::CookieJar;
 use super::request::{HttpRequest, Method, copy_header_on_redirect, default_user_agent};
 use super::response::{HttpParseError, HttpResponse};
 use super::url::{Url, resolve_url};
+use crate::error_reporting::{
+    ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
+};
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,7 +27,6 @@ const DEFAULT_MAX_REDIRECTS: u32 = 10;
 /// let resp = client.get("http://example.com/").unwrap();
 /// println!("Status: {}", resp.status_code());
 /// ```
-#[derive(Debug)]
 pub struct Client {
     cookie_jar: CookieJar,
     shared_cookie_store: Option<Arc<Mutex<CookieJar>>>,
@@ -31,6 +34,20 @@ pub struct Client {
     user_agent: String,
     insecure: bool,
     connections: connection::ConnectionPool,
+    error_reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Client")
+            .field("cookie_jar", &self.cookie_jar)
+            .field("max_redirects", &self.max_redirects)
+            .field("user_agent", &self.user_agent)
+            .field("insecure", &self.insecure)
+            .field("connections", &self.connections)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Client {
@@ -43,7 +60,49 @@ impl Client {
             user_agent: default_user_agent(),
             insecure: false,
             connections: connection::ConnectionPool::default(),
+            error_reporter: None,
         }
+    }
+
+    /// Sends sanitized transport and redirect failures to the optional reporter.
+    pub fn set_error_reporter(&mut self, reporter: Arc<ErrorReporter>, surface: ExecutionSurface) {
+        self.error_reporter = Some((reporter, surface));
+    }
+
+    fn report_failure(&self, error: &HttpParseError) {
+        let code = match error {
+            HttpParseError::TooManyRedirects | HttpParseError::MissingLocation => {
+                "HTTP_REDIRECT_FAILED"
+            }
+            HttpParseError::Io(io) if io_contains_tls_error(io) => "HTTP_TLS_FAILED",
+            HttpParseError::Io(io) if io.kind() == std::io::ErrorKind::InvalidInput => {
+                "HTTP_REQUEST_FAILED"
+            }
+            HttpParseError::Io(_) => "HTTP_TRANSPORT_FAILED",
+            _ => "HTTP_RESPONSE_FAILED",
+        };
+        self.report_code(code);
+    }
+
+    pub(crate) fn report_resource_failure(&self) {
+        self.report_code("HTTP_RESOURCE_LOAD_FAILED");
+    }
+
+    fn report_code(&self, code: &'static str) {
+        let Some((reporter, surface)) = &self.error_reporter else {
+            return;
+        };
+        reporter.report(
+            RawEvent::new(
+                ErrorCategory::Http,
+                ErrorSeverity::Error,
+                ErrorCode::new(code).expect("static code"),
+                *surface,
+                "Resource load failed",
+                &[("operation", "fetch"), ("resource", "other")],
+            )
+            .sanitize(),
+        );
     }
 
     /// Sets the maximum number of redirects to follow.
@@ -95,15 +154,17 @@ impl Client {
     pub fn get(&mut self, url: &str) -> Result<HttpResponse, HttpParseError> {
         let request = HttpRequest::get(url).map_err(|e| {
             HttpParseError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-        })?;
+        });
+        let request = request.inspect_err(|error| self.report_failure(error))?;
         self.send(request)
     }
 
     /// Sends a GET request while refusing connections to non-public IP addresses.
     pub(crate) fn get_public(&mut self, url: &str) -> Result<HttpResponse, HttpParseError> {
-        let mut request = HttpRequest::get(url).map_err(|e| {
+        let request = HttpRequest::get(url).map_err(|e| {
             HttpParseError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-        })?;
+        });
+        let mut request = request.inspect_err(|error| self.report_failure(error))?;
         request.require_public_ip();
         self.send(request)
     }
@@ -116,7 +177,11 @@ impl Client {
     /// [`Client::set_max_redirects`].
     pub fn send(&mut self, request: HttpRequest) -> Result<HttpResponse, HttpParseError> {
         let shared = self.shared_cookie_store.clone();
-        self.send_with_cookie_store(request, shared.as_deref())
+        let result = self.send_with_cookie_store(request, shared.as_deref());
+        if let Err(error) = &result {
+            self.report_failure(error);
+        }
+        result
     }
 
     /// Shares cookies between parallel clients while each client retains its
@@ -126,7 +191,11 @@ impl Client {
         request: HttpRequest,
         cookies: &Mutex<CookieJar>,
     ) -> Result<HttpResponse, HttpParseError> {
-        self.send_with_cookie_store(request, Some(cookies))
+        let result = self.send_with_cookie_store(request, Some(cookies));
+        if let Err(error) = &result {
+            self.report_failure(error);
+        }
+        result
     }
 
     fn send_with_cookie_store(
@@ -285,7 +354,8 @@ impl Client {
 
         let response = self
             .connections
-            .send_with_timeout(&request, self.insecure, timeout)?;
+            .send_with_timeout(&request, self.insecure, timeout)
+            .inspect_err(|error| self.report_failure(error))?;
         if credentials {
             let origin = request.url().clone();
             let mut shared_jar = shared.as_ref().map(|store| store.lock().unwrap());
@@ -309,6 +379,19 @@ impl Default for Client {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn io_contains_tls_error(error: &std::io::Error) -> bool {
+    let mut source = error
+        .get_ref()
+        .map(|source| source as &(dyn std::error::Error + 'static));
+    while let Some(cause) = source {
+        if cause.is::<rustls::Error>() {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// Returns `true` if the status code indicates a redirect.
@@ -341,6 +424,17 @@ pub(crate) fn resolve_redirect_url(base: &Url, location: &str) -> Result<Url, Ht
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_failure_is_classified_from_its_typed_source() {
+        let error = std::io::Error::other(rustls::Error::General(
+            "certificate details must not be persisted".to_string(),
+        ));
+        assert!(io_contains_tls_error(&error));
+        assert!(!io_contains_tls_error(&std::io::Error::other(
+            "plain transport error"
+        )));
+    }
 
     // --- redirect_method tests ---
 
