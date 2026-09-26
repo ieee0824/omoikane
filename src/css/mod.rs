@@ -256,6 +256,52 @@ pub enum Rule {
     FontFace(FontFaceRule),
 }
 
+/// One of the 16 page-margin boxes named by an at-rule inside `@page`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PageMarginBox {
+    TopLeftCorner,
+    TopLeft,
+    TopCenter,
+    TopRight,
+    TopRightCorner,
+    RightTop,
+    RightMiddle,
+    RightBottom,
+    BottomRightCorner,
+    BottomRight,
+    BottomCenter,
+    BottomLeft,
+    BottomLeftCorner,
+    LeftBottom,
+    LeftMiddle,
+    LeftTop,
+}
+
+impl PageMarginBox {
+    /// Recognizes a page-margin at-rule name without its leading `@`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "top-left-corner" => Some(Self::TopLeftCorner),
+            "top-left" => Some(Self::TopLeft),
+            "top-center" => Some(Self::TopCenter),
+            "top-right" => Some(Self::TopRight),
+            "top-right-corner" => Some(Self::TopRightCorner),
+            "right-top" => Some(Self::RightTop),
+            "right-middle" => Some(Self::RightMiddle),
+            "right-bottom" => Some(Self::RightBottom),
+            "bottom-right-corner" => Some(Self::BottomRightCorner),
+            "bottom-right" => Some(Self::BottomRight),
+            "bottom-center" => Some(Self::BottomCenter),
+            "bottom-left" => Some(Self::BottomLeft),
+            "bottom-left-corner" => Some(Self::BottomLeftCorner),
+            "left-bottom" => Some(Self::LeftBottom),
+            "left-middle" => Some(Self::LeftMiddle),
+            "left-top" => Some(Self::LeftTop),
+            _ => None,
+        }
+    }
+}
+
 /// A parsed `@font-face` rule.
 ///
 /// Holds the descriptors needed to register and select a web font.
@@ -288,6 +334,8 @@ pub struct StyleRule {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AtRule {
     pub name: String,
+    /// The recognized box type when this is a block-form margin rule inside `@page`.
+    pub page_margin_box: Option<PageMarginBox>,
     pub prelude: String,
     pub block: Option<Vec<Rule>>,
     pub declarations: Vec<Declaration>,
