@@ -34,7 +34,10 @@ pub(crate) fn capture_session_screenshot_png(
         session.http_client_mut(),
     ) {
         Ok(Some(png)) => Ok(png),
-        Ok(None) | Err(_) => {
+        fallback => {
+            if fallback.is_err() {
+                session.report_paint_failure("SCREENSHOT_FRAMESET_FALLBACK");
+            }
             let (render_document, render_base_url) =
                 resolve_frameset_render_document(&document, base_url.as_ref())
                     .unwrap_or((document.clone(), base_url.clone()));
@@ -43,7 +46,10 @@ pub(crate) fn capture_session_screenshot_png(
             } else {
                 render_document_with_url(&render_document, viewport, render_base_url.as_ref())
             }
-            .map_err(|error| format!("{error:?}"))?;
+            .map_err(|error| {
+                session.report_paint_failure("SCREENSHOT_PAINT_FAILED");
+                format!("{error:?}")
+            })?;
             Ok(encode_screenshot_canvas(canvas))
         }
     }
@@ -392,10 +398,80 @@ fn find_first_frame_with_src(node: &NodeHandle) -> Option<NodeHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error_reporting::{
+        ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, EventStore, ExecutionSurface,
+        RawEvent, ReporterConfig, RetentionPolicy,
+    };
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    #[test]
+    fn frameset_screenshot_fallback_records_safe_error_and_preserves_png() {
+        let directory =
+            std::env::temp_dir().join(format!("omoikane-screenshot-report-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("events.sqlite");
+        let config = ReporterConfig::from_values(Some("record-only"), None).unwrap();
+        let reporter = Arc::new(
+            ErrorReporter::new(&config, database.clone(), RetentionPolicy::default()).unwrap(),
+        );
+        let page = "data:text/html,<html><frameset cols='100'><frame src='http://127.0.0.1:0/?token=QUERY_SECRET_940'></frameset><!-- BODY_SECRET_940 PATH_SECRET_940 --></html>";
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 32.0,
+            height: 32.0,
+        };
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", serde_json::json!({ "url": page }))
+            .unwrap();
+        assert!(session.document().query_selector("frameset").is_some());
+        assert!(session.document().query_selector("frame").is_some());
+        session.set_error_reporter(Arc::clone(&reporter), ExecutionSurface::Headless);
+        let png = capture_session_screenshot_png(&mut session, viewport).unwrap();
+        let image = Image::decode_png(&png).unwrap();
+        assert_eq!((image.width(), image.height()), (32, 32));
+
+        let mut control = CdpSession::new().unwrap();
+        control
+            .dispatch("Page.navigate", serde_json::json!({ "url": page }))
+            .unwrap();
+        let expected_png = capture_session_screenshot_png(&mut control, viewport).unwrap();
+        assert_eq!(png, expected_png);
+        reporter.flush().unwrap();
+        let event = RawEvent::new(
+            ErrorCategory::Paint,
+            ErrorSeverity::Error,
+            ErrorCode::new("SCREENSHOT_FRAMESET_FALLBACK").unwrap(),
+            ExecutionSurface::Headless,
+            "Paint failed",
+            &[("operation", "render"), ("resource", "other")],
+        )
+        .sanitize();
+        let store = EventStore::open(&database, RetentionPolicy::default()).unwrap();
+        assert!(store.len().unwrap() >= 1);
+        assert!(store.get(event.fingerprint()).unwrap().is_some());
+        drop(store);
+        drop(session);
+        drop(reporter);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = database.as_os_str().to_os_string();
+            path.push(suffix);
+            if let Ok(bytes) = std::fs::read(std::path::PathBuf::from(path)) {
+                for secret in ["QUERY_SECRET_940", "BODY_SECRET_940", "PATH_SECRET_940"] {
+                    assert!(
+                        !bytes
+                            .windows(secret.len())
+                            .any(|part| part == secret.as_bytes())
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn parses_frameset_columns_as_percentage_when_sum_is_100() {
