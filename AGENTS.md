@@ -85,3 +85,12 @@ WPT_REQUIRED=1 cargo test --locked --test wpt_smoke -- --nocapture
 2. 問題があれば修正・検証・再コミットし、再度レビューする。
 3. レビュー後にpushし、PRを作成・更新する。タイトルと本文は最終差分に合わせ、問題、変更後の振る舞い、検証結果、未解決事項を書く。
 4. 必要なCI結果と関連する不具合を確認する。マージはユーザーから依頼されている場合に行う。
+
+## Shared Context
+
+このリポジトリでは [ctx-sync](https://github.com/ieee0824/ctx-sync) で開発コンテキストを共有する。
+
+- Gist IDを含むローカルの `.ctx-sync.toml` はGitに追加しない。未設定ならリポジトリ外で共有されたIDを使って `ctx-sync attach` する。CLIの導入方法はリンク先のREADMEを参照する。
+- 作業前に `ctx-sync agent start` を実行し、構成・決定・稼働中の作業者・注意事項を読む。作業範囲が決まったら `ctx-sync claim` で宣言する。
+- 作業の区切りには `ctx-sync agent finish` で変更、影響、未解決事項を引き継ぐ。
+- 思考過程、一時的なデバッグ記録、認証情報などの秘密は共有しない。タスクと未解決の不具合は引き続きGitHub Issueで管理する。
