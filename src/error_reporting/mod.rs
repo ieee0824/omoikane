@@ -7,11 +7,13 @@
 
 mod config;
 mod fingerprint;
+mod panic_hook;
 mod privacy;
 mod reporter;
 mod store;
 
 pub use config::{ConfigError, ReporterConfig, ReportingMode, Repository};
+pub use panic_hook::install_panic_reporter;
 pub use privacy::{RawEvent, SafeContext, SafeEvent};
 pub use reporter::{ErrorReporter, ReporterError, ReporterStats};
 pub use store::{EventStore, RetentionPolicy, StoreError, StoredReport};

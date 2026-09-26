@@ -9,7 +9,7 @@ use omoikane::cdp::CdpSession;
 use omoikane::dom::NodeHandle;
 use omoikane::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
-    ReporterConfig, RetentionPolicy,
+    ReporterConfig, RetentionPolicy, install_panic_reporter,
 };
 use omoikane::frame::{PlatformFrameScheduler, render_browser_frame};
 use omoikane::js::{FindInPageResult, FullscreenTransition, PointerLockTransition};
@@ -1035,9 +1035,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let url = std::env::args().nth(1).unwrap_or_else(|| {
         "data:text/html,<title>Omoikane</title><style>body{font:32px sans-serif;padding:2rem}</style><h1>Omoikane</h1><p>Pass a URL as the first argument.</p>".to_string()
     });
+    let reporter = configured_error_reporter()?;
+    if let Some(reporter) = reporter.as_ref() {
+        install_panic_reporter(reporter, ExecutionSurface::Gui);
+    }
     let event_loop = EventLoop::new()?;
     let mut app = BrowserApp::new(&url)?;
-    if let Some(reporter) = configured_error_reporter()? {
+    if let Some(reporter) = reporter {
         app.set_error_reporter(reporter);
     }
     event_loop.run_app(&mut app)?;
