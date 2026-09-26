@@ -1,0 +1,59 @@
+name: Issue 972 macOS Acid3 comparison
+
+on:
+  push:
+    branches: [ci/issue972-macos-acid3-compare]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Acid3 (${{ matrix.label }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: main-before-935
+            revision: 849d6cbe3b8462bbe7910c9fc6a1a16cd076b2a5
+          - label: issue-935
+            revision: af1d8e9ef36f9a396afcac5a56891f706325677a
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.revision }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: issue972-${{ matrix.label }}
+      - name: Repeat the unchanged Acid3 contract three times
+        shell: bash
+        run: |
+          mkdir -p issue972-logs
+          set +e
+          for pass in 1 2 3; do
+            cargo test --locked --test acid3_harness runner_scores_100_in_both_drive_modes -- --exact --nocapture > "issue972-logs/pass-${pass}.log" 2>&1
+            status=$?
+            python3 - "$pass" "$status" "issue972-logs/pass-${pass}.log" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          run, status, path = sys.argv[1:]
+          text = Path(path).read_text(errors="replace")
+          match = re.search(r'test26_step_wall_ms[^0-9]*([0-9.]+)', text)
+          test26_ms = match.group(1) if match else "missing"
+          print(f"pass={run} exit={status} test26_ms={test26_ms}")
+          PY
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue972-${{ matrix.label }}
+          path: issue972-logs/
+          if-no-files-found: error
