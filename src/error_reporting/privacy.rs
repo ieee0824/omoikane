@@ -162,6 +162,8 @@ fn safe_message(raw: &str) -> &'static str {
     // fixed placeholder; the stable code and typed context retain the cause.
     match raw {
         "JavaScript execution failed" => "JavaScript execution failed",
+        "Worker execution failed" => "Worker execution failed",
+        "Module loading failed" => "Module loading failed",
         "Resource load failed" => "Resource load failed",
         "Stylesheet parse failed" => "Stylesheet parse failed",
         "Layout failed" => "Layout failed",
@@ -188,6 +190,8 @@ fn allowlisted_context(key: &str, value: &str) -> Option<(&'static str, &'static
         "resource" => match value {
             "document" => "document",
             "script" => "script",
+            "worker" => "worker",
+            "module" => "module",
             "stylesheet" => "stylesheet",
             "image" => "image",
             "font" => "font",
