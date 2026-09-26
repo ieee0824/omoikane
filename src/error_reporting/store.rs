@@ -16,7 +16,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::SafeEvent;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x4f4d_4f45;
 
 /// Hard limits for the general-error database, including its WAL and SHM files.
@@ -86,6 +86,19 @@ pub struct StoredReport {
     pub issue_url: Option<String>,
 }
 
+/// Persistent scheduling state for one fingerprint.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SubmissionState {
+    /// Consecutive delivery failures.
+    pub failures: u32,
+    /// Earliest next attempt, milliseconds since the Unix epoch.
+    pub next_retry_ms: i64,
+    /// Last successful delivery, milliseconds since the Unix epoch.
+    pub last_submitted_ms: Option<i64>,
+    /// Expiration of the current in-flight delivery lease.
+    pub lease_until_ms: i64,
+}
+
 /// A sanitized storage error; never contains a path, SQL text, or event input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -148,10 +161,7 @@ impl EventStore {
         let application_id: i64 =
             connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !matches!(
-            (application_id, version),
-            (0, 0) | (APPLICATION_ID, SCHEMA_VERSION)
-        ) {
+        if !matches!((application_id, version), (0, 0) | (APPLICATION_ID, 1 | 2)) {
             return Err(StoreError::Schema);
         }
         if version == 0 {
@@ -185,13 +195,30 @@ impl EventStore {
                 surface TEXT NOT NULL,
                 submission_status TEXT NOT NULL DEFAULT 'pending'
                     CHECK (submission_status IN ('pending', 'submitted')),
-                issue_url TEXT
+                issue_url TEXT,
+                delivery_failures INTEGER NOT NULL DEFAULT 0,
+                next_retry_ms INTEGER NOT NULL DEFAULT 0,
+                last_submitted_ms INTEGER,
+                delivery_lease_until_ms INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS error_reports_retention_idx
                 ON error_reports (submission_status, last_seen_ms, fingerprint);",
         )?;
+        if version == 1 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE error_reports ADD COLUMN delivery_failures INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE error_reports ADD COLUMN next_retry_ms INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE error_reports ADD COLUMN last_submitted_ms INTEGER;
+                 ALTER TABLE error_reports ADD COLUMN delivery_lease_until_ms INTEGER NOT NULL DEFAULT 0;
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+        }
         if version == 0 {
             connection.pragma_update(None, "application_id", APPLICATION_ID)?;
+        }
+        if version == 0 {
             connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Self {
@@ -284,6 +311,77 @@ impl EventStore {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Returns persistent delivery scheduling state for a fingerprint.
+    pub fn submission_state(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<SubmissionState>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT delivery_failures, next_retry_ms, last_submitted_ms, delivery_lease_until_ms
+                 FROM error_reports WHERE fingerprint = ?1",
+                [fingerprint],
+                |row| {
+                    let failures: i64 = row.get(0)?;
+                    Ok(SubmissionState {
+                        failures: u32::try_from(failures).unwrap_or(u32::MAX),
+                        next_retry_ms: row.get(1)?,
+                        last_submitted_ms: row.get(2)?,
+                        lease_until_ms: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Clears a pending row's retry block after an operator fixes credentials or service state.
+    pub fn reset_submission_retry(&self, fingerprint: &str) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE error_reports SET delivery_failures = 0, next_retry_ms = 0
+             WHERE fingerprint = ?1 AND submission_status = 'pending'",
+            [fingerprint],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Atomically leases a pending snapshot before any backend request.
+    pub(super) fn claim_submission(
+        &self,
+        report: &StoredReport,
+        now_ms: i64,
+        lease_until_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE error_reports SET delivery_lease_until_ms = ?2
+             WHERE fingerprint = ?1 AND submission_status = 'pending'
+               AND occurrences = ?3 AND last_seen_ms = ?4
+               AND delivery_lease_until_ms <= ?5 AND next_retry_ms <= ?5",
+            params![
+                report.fingerprint,
+                lease_until_ms,
+                report.occurrences,
+                report.last_seen_ms,
+                now_ms,
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Releases only the lease acquired by the caller.
+    pub(super) fn release_submission_lease(
+        &self,
+        fingerprint: &str,
+        lease_until_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE error_reports SET delivery_lease_until_ms = 0
+             WHERE fingerprint = ?1 AND delivery_lease_until_ms = ?2",
+            params![fingerprint, lease_until_ms],
+        )?;
+        Ok(())
     }
 
     /// Lists at most 100 unsent reports, newest first, for explicit preview.
@@ -384,19 +482,45 @@ impl EventStore {
         &self,
         report: &StoredReport,
         issue_url: &str,
+        now_ms: i64,
+        lease_until_ms: i64,
     ) -> Result<bool, StoreError> {
         let changed = self.connection.execute(
-            "UPDATE error_reports SET submission_status = 'submitted', issue_url = ?2
+            "UPDATE error_reports SET submission_status = 'submitted', issue_url = ?2,
+                delivery_failures = 0, next_retry_ms = 0, last_submitted_ms = ?5,
+                delivery_lease_until_ms = 0
              WHERE fingerprint = ?1 AND submission_status = 'pending'
-               AND occurrences = ?3 AND last_seen_ms = ?4",
+               AND occurrences = ?3 AND last_seen_ms = ?4
+               AND delivery_lease_until_ms = ?6",
             params![
                 report.fingerprint,
                 issue_url,
                 report.occurrences,
-                report.last_seen_ms
+                report.last_seen_ms,
+                now_ms,
+                lease_until_ms,
             ],
         )?;
         Ok(changed == 1)
+    }
+
+    /// Persists a bounded retry time even if another occurrence arrived mid-send.
+    pub(super) fn record_submission_failure(
+        &self,
+        report: &StoredReport,
+        next_retry_ms: i64,
+        lease_until_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE error_reports SET
+                delivery_failures = MIN(delivery_failures + 1, 31),
+                next_retry_ms = MAX(next_retry_ms, ?2),
+                delivery_lease_until_ms = 0
+             WHERE fingerprint = ?1 AND submission_status = 'pending'
+               AND delivery_lease_until_ms = ?3",
+            params![report.fingerprint, next_retry_ms, lease_until_ms],
+        )?;
+        Ok(())
     }
 }
 

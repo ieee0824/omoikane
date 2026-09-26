@@ -1,9 +1,10 @@
 //! GitHub Issue backend for sanitized, explicitly approved reports.
 
-use crate::http::{Client, HttpRequest, Method};
+use crate::http::{Client, HttpRequest, HttpResponse, Method};
 use serde_json::{Value, json};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{Repository, StoredReport, SubmissionBackend};
+use super::{Repository, StoredReport, SubmissionBackend, SubmissionFailure};
 
 const MAX_ISSUE_PAGES: usize = 20;
 const PAGE_SIZE: usize = 100;
@@ -19,7 +20,7 @@ pub enum GitHubFailure {
     /// GitHub rejected the supplied credentials or permissions.
     Denied,
     /// GitHub rejected the request due to a rate limit.
-    RateLimited,
+    RateLimited { retry_at_ms: Option<i64> },
     /// GitHub returned an unexpected status or malformed response.
     InvalidResponse,
     /// The bounded search could not cover all open Issues safely.
@@ -32,7 +33,7 @@ impl std::fmt::Display for GitHubFailure {
             Self::MissingToken => "GitHub token is missing",
             Self::Transport => "GitHub transport failed",
             Self::Denied => "GitHub access denied",
-            Self::RateLimited => "GitHub rate limit reached",
+            Self::RateLimited { .. } => "GitHub rate limit reached",
             Self::InvalidResponse => "GitHub response was invalid",
             Self::SearchIncomplete => "GitHub open-Issue search was incomplete",
         };
@@ -132,8 +133,21 @@ impl<A: GitHubApi> GitHubIssueBackend<A> {
 }
 
 impl<A: GitHubApi> SubmissionBackend for GitHubIssueBackend<A> {
-    fn submit(&mut self, repository: &Repository, report: &StoredReport) -> Result<u64, ()> {
-        self.submit_report(repository, report).map_err(|_| ())
+    fn submit(
+        &mut self,
+        repository: &Repository,
+        report: &StoredReport,
+    ) -> Result<u64, SubmissionFailure> {
+        self.submit_report(repository, report)
+            .map_err(|failure| match failure {
+                GitHubFailure::MissingToken | GitHubFailure::Denied => SubmissionFailure::Denied,
+                GitHubFailure::Transport => SubmissionFailure::Transport,
+                GitHubFailure::RateLimited { retry_at_ms } => {
+                    SubmissionFailure::RateLimited { retry_at_ms }
+                }
+                GitHubFailure::InvalidResponse => SubmissionFailure::InvalidResponse,
+                GitHubFailure::SearchIncomplete => SubmissionFailure::SearchIncomplete,
+            })
     }
 }
 
@@ -244,7 +258,9 @@ impl GitHubRestApi {
                     || response.header("x-ratelimit-remaining") == Some("0")
                     || response.status_code() == 429 =>
             {
-                return Err(GitHubFailure::RateLimited);
+                return Err(GitHubFailure::RateLimited {
+                    retry_at_ms: rate_limit_retry_at(&response, current_ms()),
+                });
             }
             403 => return Err(GitHubFailure::Denied),
             _ => return Err(GitHubFailure::InvalidResponse),
@@ -254,6 +270,29 @@ impl GitHubRestApi {
         }
         serde_json::from_slice(response.body()).map_err(|_| GitHubFailure::InvalidResponse)
     }
+}
+
+fn current_ms() -> i64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+}
+
+fn rate_limit_retry_at(response: &HttpResponse, now_ms: i64) -> Option<i64> {
+    let retry_after = response
+        .header("retry-after")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| {
+            now_ms.saturating_add(
+                i64::try_from(u128::from(seconds).saturating_mul(1_000)).unwrap_or(i64::MAX),
+            )
+        });
+    let reset = response
+        .header("x-ratelimit-reset")
+        .and_then(|value| value.parse::<i64>().ok())
+        .map(|seconds| seconds.saturating_mul(1_000));
+    retry_after.into_iter().chain(reset).max()
 }
 
 impl GitHubApi for GitHubRestApi {
@@ -503,6 +542,20 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_headers_choose_the_later_retry_time() {
+        let response = HttpResponse::new(
+            429,
+            "Too Many Requests",
+            vec![
+                ("Retry-After".to_owned(), "7200".to_owned()),
+                ("X-RateLimit-Reset".to_owned(), "4000".to_owned()),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(rate_limit_retry_at(&response, 1_000), Some(7_201_000));
+    }
+
+    #[test]
     fn manual_submission_saves_issue_url_and_reuses_it_after_new_occurrence() {
         let path = std::env::temp_dir().join(format!(
             "omoikane-github-backend-{}-{}",
@@ -529,10 +582,11 @@ mod tests {
         let mut backend = GitHubIssueBackend::new(MockApi::default());
         let manual = ManualSubmission::new(&config, &store);
         let url = manual
-            .submit_selected(
+            .submit_selected_at(
                 safe.fingerprint(),
                 SubmissionApproval::Confirmed,
                 &mut backend,
+                1_000,
             )
             .unwrap();
         assert_eq!(url, "https://github.com/owner/repo/issues/42");
@@ -552,10 +606,11 @@ mod tests {
         let manual = ManualSubmission::new(&config, &store);
         assert_eq!(
             manual
-                .submit_selected(
+                .submit_selected_at(
                     safe.fingerprint(),
                     SubmissionApproval::Confirmed,
                     &mut backend,
+                    3_601_000,
                 )
                 .unwrap(),
             url
