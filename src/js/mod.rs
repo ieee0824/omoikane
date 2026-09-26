@@ -5055,6 +5055,12 @@ impl JsRuntime {
         state.error_reporter = Some((reporter, surface));
     }
 
+    pub(crate) fn error_reporter_destination(
+        &self,
+    ) -> Option<(Arc<ErrorReporter>, ExecutionSurface)> {
+        self.host_state.borrow().error_reporter.clone()
+    }
+
     fn with_document_sandbox_and_url(
         document: NodeHandle,
         sandbox: SandboxConfig,

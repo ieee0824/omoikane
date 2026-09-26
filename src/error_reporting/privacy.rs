@@ -168,6 +168,7 @@ fn safe_message(raw: &str) -> &'static str {
         "Stylesheet parse failed" => "Stylesheet parse failed",
         "Layout failed" => "Layout failed",
         "Paint failed" => "Paint failed",
+        "CDP operation failed" => "CDP operation failed",
         "Operation timed out" => "Operation timed out",
         _ => "Error details withheld",
     }
