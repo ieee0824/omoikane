@@ -1,18 +1,20 @@
 //! Privacy-preserving event types for the optional general-error reporter.
 //!
-//! This module prepares events for the persistence and submission stages. It
-//! performs no database or network I/O. Unsupported CSS/HTML observation logs
-//! remain separate; their existing environment variables and tables are not
-//! changed by the general-error reporter.
+//! Raw events are sanitized before local persistence or submission. The manual
+//! submission entry point requires explicit approval before calling a backend.
+//! Unsupported CSS/HTML observation logs remain separate; their existing
+//! environment variables and tables are not changed by the general-error reporter.
 
 mod config;
 mod fingerprint;
+mod manual;
 mod panic_hook;
 mod privacy;
 mod reporter;
 mod store;
 
 pub use config::{ConfigError, ReporterConfig, ReportingMode, Repository};
+pub use manual::{ManualSubmission, ManualSubmissionError, SubmissionApproval, SubmissionBackend};
 pub use panic_hook::install_panic_reporter;
 pub use privacy::{RawEvent, SafeContext, SafeEvent};
 pub use reporter::{ErrorReporter, ReporterError, ReporterStats};
