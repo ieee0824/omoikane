@@ -864,6 +864,7 @@ fn salvage_nested_at_rule(input: &str) -> Option<crate::css::Rule> {
 
     Some(crate::css::Rule::At(crate::css::AtRule {
         name: name.to_ascii_lowercase(),
+        page_margin_box: None,
         prelude: prelude.trim().to_string(),
         block: Some(nested.rules),
         declarations: Vec::new(),

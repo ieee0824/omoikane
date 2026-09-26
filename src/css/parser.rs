@@ -4,7 +4,8 @@ use super::shorthand::expand_shorthand;
 use super::tokenizer::{render_tokens, tokenize};
 use super::{
     AtRule, AttributeOperator, Combinator, CssParseError, CssToken, Declaration, FontFaceRule,
-    RelativeSelector, Rule, Selector, SelectorPart, SimpleSelector, StyleRule, Stylesheet, Value,
+    PageMarginBox, RelativeSelector, Rule, Selector, SelectorPart, SimpleSelector, StyleRule,
+    Stylesheet, Value,
 };
 
 /// Extract all `@font-face` rules from a stylesheet.
@@ -251,6 +252,7 @@ impl Parser {
                     }
                     return Ok(Rule::At(AtRule {
                         name,
+                        page_margin_box: None,
                         prelude,
                         block: None,
                         declarations: Vec::new(),
@@ -298,6 +300,7 @@ impl Parser {
                             };
                         return Ok(Rule::At(AtRule {
                             name,
+                            page_margin_box: None,
                             prelude,
                             block: Some(block),
                             declarations: Vec::new(),
@@ -314,6 +317,7 @@ impl Parser {
                         let raw_block = self.consume_raw_block()?;
                         return Ok(Rule::At(AtRule {
                             name,
+                            page_margin_box: None,
                             prelude: render_tokens(&prelude_tokens).trim().to_string(),
                             block: None,
                             // Store raw block text in a single declaration for later parsing.
@@ -330,6 +334,7 @@ impl Parser {
                         let (declarations, margin_rules) = self.parse_page_block()?;
                         return Ok(Rule::At(AtRule {
                             name,
+                            page_margin_box: None,
                             prelude: render_tokens(&prelude_tokens).trim().to_string(),
                             block: Some(margin_rules),
                             declarations,
@@ -348,6 +353,7 @@ impl Parser {
 
                     return Ok(Rule::At(AtRule {
                         name,
+                        page_margin_box: None,
                         prelude: render_tokens(&prelude_tokens).trim().to_string(),
                         block: None,
                         declarations,
@@ -372,6 +378,7 @@ impl Parser {
 
         Ok(Rule::At(AtRule {
             name,
+            page_margin_box: None,
             prelude: render_tokens(&prelude_tokens).trim().to_string(),
             block: None,
             declarations: Vec::new(),
@@ -431,7 +438,20 @@ impl Parser {
                     self.next();
                     break;
                 }
-                Some(CssToken::AtKeyword(_)) => margin_rules.push(self.parse_at_rule()?),
+                Some(CssToken::AtKeyword(name)) => {
+                    let margin_box = PageMarginBox::from_name(name);
+                    let block_without_prelude = matches!(
+                        self.tokens[self.index + 1..]
+                            .iter()
+                            .find(|token| !matches!(token, CssToken::Whitespace)),
+                        Some(CssToken::CurlyOpen)
+                    );
+                    let mut rule = self.parse_at_rule()?;
+                    if block_without_prelude && let Rule::At(at_rule) = &mut rule {
+                        at_rule.page_margin_box = margin_box;
+                    }
+                    margin_rules.push(rule);
+                }
                 Some(CssToken::Semicolon) => {
                     self.next();
                 }
@@ -1850,5 +1870,129 @@ mod selector_list_tests {
             }
         );
         assert!(parse_stylesheet("> p { color: red; }").is_err());
+    }
+
+    #[test]
+    fn page_margin_rules_keep_all_box_kinds_declarations_and_order() {
+        use crate::css::PageMarginBox;
+
+        let boxes = [
+            ("top-left-corner", PageMarginBox::TopLeftCorner),
+            ("top-left", PageMarginBox::TopLeft),
+            ("top-center", PageMarginBox::TopCenter),
+            ("top-right", PageMarginBox::TopRight),
+            ("top-right-corner", PageMarginBox::TopRightCorner),
+            ("right-top", PageMarginBox::RightTop),
+            ("right-middle", PageMarginBox::RightMiddle),
+            ("right-bottom", PageMarginBox::RightBottom),
+            ("bottom-right-corner", PageMarginBox::BottomRightCorner),
+            ("bottom-right", PageMarginBox::BottomRight),
+            ("bottom-center", PageMarginBox::BottomCenter),
+            ("bottom-left", PageMarginBox::BottomLeft),
+            ("bottom-left-corner", PageMarginBox::BottomLeftCorner),
+            ("left-bottom", PageMarginBox::LeftBottom),
+            ("left-middle", PageMarginBox::LeftMiddle),
+            ("left-top", PageMarginBox::LeftTop),
+        ];
+        let mut css = String::from("@page { size: 100px 200px; margin: 1px;");
+        for (index, (name, _)) in boxes.iter().enumerate() {
+            css.push_str(&format!(
+                "@{name} {{ content: 'box-{index}'; color: red; }}"
+            ));
+        }
+        css.push_str("size: 200px 300px; margin: 10px; }");
+
+        let stylesheet = parse_stylesheet(&css).unwrap();
+        let Rule::At(page) = &stylesheet.rules[0] else {
+            panic!("expected @page rule");
+        };
+        assert_eq!(
+            page.declarations
+                .iter()
+                .map(|declaration| declaration.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "size",
+                "margin-top",
+                "margin-right",
+                "margin-bottom",
+                "margin-left",
+                "size",
+                "margin-top",
+                "margin-right",
+                "margin-bottom",
+                "margin-left",
+            ]
+        );
+        assert_eq!(page.declarations[1].value, Value::Length(1.0, "px".into()));
+        assert_eq!(page.declarations[6].value, Value::Length(10.0, "px".into()));
+        let rules = page.block.as_ref().unwrap();
+        assert_eq!(rules.len(), boxes.len());
+        for (index, (name, kind)) in boxes.into_iter().enumerate() {
+            let Rule::At(rule) = &rules[index] else {
+                panic!("expected page margin rule at {index}");
+            };
+            assert_eq!(rule.name, name);
+            assert_eq!(rule.page_margin_box, Some(kind));
+            assert_eq!(rule.declarations.len(), 2);
+            assert_eq!(rule.declarations[0].name, "content");
+            assert_eq!(
+                rule.declarations[0].value,
+                Value::String(format!("box-{index}"))
+            );
+            assert_eq!(rule.declarations[1].name, "color");
+        }
+    }
+
+    #[test]
+    fn page_margin_duplicates_and_unknown_rules_keep_their_identity() {
+        use crate::css::PageMarginBox;
+
+        let stylesheet = parse_stylesheet(
+            "@top-center { content: 'outside' } \
+             @page { @top-center { content: 'first' } \
+                     @unknown { content: 'ignored' } \
+                     @TOP-CENTER { content: 'second' } \
+                     @top-center; \
+                     @top-center extra { content: 'invalid' } \
+                     margin-left: 2px }",
+        )
+        .unwrap();
+        let Rule::At(top_level) = &stylesheet.rules[0] else {
+            panic!("expected top-level at-rule");
+        };
+        assert_eq!(top_level.page_margin_box, None);
+        let Rule::At(page) = &stylesheet.rules[1] else {
+            panic!("expected @page rule");
+        };
+        let rules = page.block.as_ref().unwrap();
+        assert_eq!(rules.len(), 5);
+        assert_eq!(
+            rules
+                .iter()
+                .map(|rule| match rule {
+                    Rule::At(rule) => rule.page_margin_box,
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                Some(PageMarginBox::TopCenter),
+                None,
+                Some(PageMarginBox::TopCenter),
+                None,
+                None,
+            ]
+        );
+        for (index, text) in [(0, "first"), (2, "second")] {
+            let Rule::At(rule) = &rules[index] else {
+                panic!("expected page margin rule");
+            };
+            assert_eq!(rule.declarations[0].value, Value::String(text.into()));
+        }
+        assert!(
+            page.declarations
+                .iter()
+                .any(|declaration| declaration.name == "margin-left")
+        );
     }
 }
