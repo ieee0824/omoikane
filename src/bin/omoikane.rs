@@ -1,11 +1,16 @@
 use std::collections::HashSet;
 use std::error::Error;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use omoikane::cdp::CdpSession;
 use omoikane::dom::NodeHandle;
+use omoikane::error_reporting::{
+    ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
+    ReporterConfig, RetentionPolicy,
+};
 use omoikane::frame::{PlatformFrameScheduler, render_browser_frame};
 use omoikane::js::{FindInPageResult, FullscreenTransition, PointerLockTransition};
 use omoikane::platform_input::{
@@ -34,6 +39,93 @@ mod keyboard_tests;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
 
+#[derive(Clone, Copy)]
+enum GuiFailure {
+    Window,
+    DisplayContext,
+    SurfaceCreate,
+    SurfaceOperation,
+    Input,
+    Frame,
+}
+
+impl GuiFailure {
+    fn event(self) -> omoikane::error_reporting::SafeEvent {
+        let (code, severity, operation) = match self {
+            Self::Window => (
+                "GUI_WINDOW_CREATE_FAILED",
+                ErrorSeverity::Critical,
+                "connect",
+            ),
+            Self::DisplayContext => (
+                "GUI_DISPLAY_CONTEXT_FAILED",
+                ErrorSeverity::Critical,
+                "connect",
+            ),
+            Self::SurfaceCreate => (
+                "GUI_SURFACE_CREATE_FAILED",
+                ErrorSeverity::Critical,
+                "connect",
+            ),
+            Self::SurfaceOperation => ("GUI_SURFACE_IO_FAILED", ErrorSeverity::Error, "render"),
+            Self::Input => ("GUI_INPUT_FAILED", ErrorSeverity::Error, "execute"),
+            Self::Frame => ("GUI_FRAME_FAILED", ErrorSeverity::Error, "render"),
+        };
+        RawEvent::new(
+            ErrorCategory::Gui,
+            severity,
+            ErrorCode::new(code).expect("static GUI error code"),
+            ExecutionSurface::Gui,
+            "GUI operation failed",
+            &[("operation", operation)],
+        )
+        .sanitize()
+    }
+}
+
+fn report_gui_failure(
+    reporter: Option<&ErrorReporter>,
+    failure: GuiFailure,
+    _details: &dyn std::fmt::Display,
+) {
+    if let Some(reporter) = reporter {
+        reporter.report(failure.event());
+    }
+}
+
+fn configured_error_reporter() -> Result<Option<Arc<ErrorReporter>>, Box<dyn Error>> {
+    let config = ReporterConfig::from_env()?;
+    if !config.records_locally() {
+        return Ok(None);
+    }
+    let path = if let Some(path) = std::env::var_os("OMOIKANE_ERROR_REPORT_DB") {
+        PathBuf::from(path)
+    } else {
+        let home = std::env::var_os("HOME").ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "HOME is required for error-report storage",
+            )
+        })?;
+        let state = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let home = PathBuf::from(home);
+                if cfg!(target_os = "macos") {
+                    home.join("Library/Application Support")
+                } else {
+                    home.join(".local/state")
+                }
+            });
+        state.join("omoikane/error-reports.sqlite")
+    };
+    Ok(Some(Arc::new(ErrorReporter::new(
+        &config,
+        path,
+        RetentionPolicy::default(),
+    )?)))
+}
+
 struct FindUi {
     query: String,
     result: FindInPageResult,
@@ -42,6 +134,7 @@ struct FindUi {
 
 struct BrowserApp {
     session: CdpSession,
+    error_reporter: Option<Arc<ErrorReporter>>,
     window: Option<Arc<Window>>,
     context: Option<Context<Arc<Window>>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
@@ -69,6 +162,7 @@ impl BrowserApp {
         let started_at = Instant::now();
         Ok(Self {
             session,
+            error_reporter: None,
             window: None,
             context: None,
             surface: None,
@@ -87,6 +181,12 @@ impl BrowserApp {
             trace_input: std::env::var_os("OMOIKANE_TRACE_INPUT").is_some(),
             input_trace_sequence: 0,
         })
+    }
+
+    fn set_error_reporter(&mut self, reporter: Arc<ErrorReporter>) {
+        self.session
+            .set_error_reporter(Arc::clone(&reporter), ExecutionSurface::Gui);
+        self.error_reporter = Some(reporter);
     }
 
     fn sync_fullscreen(&mut self) {
@@ -177,10 +277,17 @@ impl BrowserApp {
         else {
             return Ok(());
         };
-        let frame = render_browser_frame(&mut self.session, size.width, size.height, elapsed_ms)?;
+        let frame = render_browser_frame(&mut self.session, size.width, size.height, elapsed_ms)
+            .map_err(|error| {
+                report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
+                error
+            })?;
         self.sync_find_document();
         let title = find_window_title(
-            document_window_title(&mut self.session)?,
+            document_window_title(&mut self.session).map_err(|error| {
+                report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
+                error
+            })?,
             self.find_ui.as_ref(),
         );
         if let Some(title) = changed_window_title(&mut self.window_title, title) {
@@ -190,13 +297,34 @@ impl BrowserApp {
         let Some(surface) = &mut self.surface else {
             return Ok(());
         };
-        surface.resize(width, height)?;
-        let mut target = surface.buffer_mut()?;
+        surface.resize(width, height).map_err(|error| {
+            report_gui_failure(
+                self.error_reporter.as_deref(),
+                GuiFailure::SurfaceOperation,
+                &error,
+            );
+            error
+        })?;
+        let mut target = surface.buffer_mut().map_err(|error| {
+            report_gui_failure(
+                self.error_reporter.as_deref(),
+                GuiFailure::SurfaceOperation,
+                &error,
+            );
+            error
+        })?;
         for (destination, source) in target.iter_mut().zip(frame.pixels().chunks_exact(4)) {
             *destination =
                 u32::from(source[0]) << 16 | u32::from(source[1]) << 8 | u32::from(source[2]);
         }
-        target.present()?;
+        target.present().map_err(|error| {
+            report_gui_failure(
+                self.error_reporter.as_deref(),
+                GuiFailure::SurfaceOperation,
+                &error,
+            );
+            error
+        })?;
         Ok(())
     }
 
@@ -439,6 +567,7 @@ impl BrowserApp {
             _ => return false,
         };
         if let Err(error) = result {
+            report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Input, &error);
             eprintln!("input event failed: {error}");
         }
         self.sync_fullscreen();
@@ -558,6 +687,7 @@ impl ApplicationHandler for BrowserApp {
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
+                report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Window, &error);
                 eprintln!("failed to create window: {error}");
                 event_loop.exit();
                 return;
@@ -567,6 +697,11 @@ impl ApplicationHandler for BrowserApp {
         let context = match Context::new(window.clone()) {
             Ok(context) => context,
             Err(error) => {
+                report_gui_failure(
+                    self.error_reporter.as_deref(),
+                    GuiFailure::DisplayContext,
+                    &error,
+                );
                 eprintln!("failed to create display context: {error}");
                 event_loop.exit();
                 return;
@@ -575,6 +710,11 @@ impl ApplicationHandler for BrowserApp {
         let surface = match Surface::new(&context, window.clone()) {
             Ok(surface) => surface,
             Err(error) => {
+                report_gui_failure(
+                    self.error_reporter.as_deref(),
+                    GuiFailure::SurfaceCreate,
+                    &error,
+                );
                 eprintln!("failed to create window surface: {error}");
                 event_loop.exit();
                 return;
@@ -675,6 +815,11 @@ impl ApplicationHandler for BrowserApp {
                             _ => (40.0, 0.0),
                         };
                         if let Err(error) = self.input.wheel(&mut self.session, dx, dy) {
+                            report_gui_failure(
+                                self.error_reporter.as_deref(),
+                                GuiFailure::Input,
+                                &error,
+                            );
                             eprintln!("relative wheel input failed: {error}");
                         }
                         self.sync_pointer_lock();
@@ -697,6 +842,7 @@ impl ApplicationHandler for BrowserApp {
             _ => return,
         };
         if let Err(error) = result {
+            report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Input, &error);
             eprintln!("relative input failed: {error}");
         }
         self.sync_pointer_lock();
@@ -891,6 +1037,63 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     let event_loop = EventLoop::new()?;
     let mut app = BrowserApp::new(&url)?;
+    if let Some(reporter) = configured_error_reporter()? {
+        app.set_error_reporter(reporter);
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod gui_error_reporting_tests {
+    use super::*;
+    use omoikane::error_reporting::EventStore;
+
+    #[test]
+    fn gui_failure_boundaries_record_only_fixed_safe_events() {
+        let directory =
+            std::env::temp_dir().join(format!("omoikane-gui-errors-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("events.sqlite");
+        let config = ReporterConfig::from_values(Some("record-only"), None).unwrap();
+        let reporter =
+            ErrorReporter::new(&config, database.clone(), RetentionPolicy::default()).unwrap();
+        let failures = [
+            GuiFailure::Window,
+            GuiFailure::DisplayContext,
+            GuiFailure::SurfaceCreate,
+            GuiFailure::SurfaceOperation,
+            GuiFailure::Input,
+            GuiFailure::Frame,
+        ];
+        for failure in failures {
+            report_gui_failure(
+                Some(&reporter),
+                failure,
+                &"SECRET_GUI /home/private/page?token=SECRET_GUI",
+            );
+        }
+        reporter.flush().unwrap();
+        let store = EventStore::open(&database, RetentionPolicy::default()).unwrap();
+        assert_eq!(store.len().unwrap(), failures.len());
+        for failure in failures {
+            let event = failure.event();
+            let stored = store.get(event.fingerprint()).unwrap().unwrap();
+            assert_eq!(stored.error_code, event.code().as_str());
+            assert_eq!(stored.category, "gui");
+            assert_eq!(stored.surface, "gui");
+        }
+        drop(store);
+        drop(reporter);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = database.as_os_str().to_os_string();
+            path.push(suffix);
+            if let Ok(contents) = std::fs::read(PathBuf::from(path)) {
+                for secret in [b"SECRET_GUI".as_slice(), b"/home/private", b"token="] {
+                    assert!(!contents.windows(secret.len()).any(|bytes| bytes == secret));
+                }
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
