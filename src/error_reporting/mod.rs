@@ -24,6 +24,10 @@ use serde::Serialize;
 pub enum ErrorCategory {
     /// JavaScript parsing, execution, or asynchronous tasks.
     JavaScript,
+    /// Background worker startup or execution.
+    Worker,
+    /// JavaScript module graph loading or evaluation.
+    Module,
     /// CSS loading, parsing, or style resolution.
     Css,
     /// HTTP, TLS, redirects, or resource loading.
@@ -46,6 +50,8 @@ impl ErrorCategory {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::JavaScript => "javascript",
+            Self::Worker => "worker",
+            Self::Module => "module",
             Self::Css => "css",
             Self::Http => "http",
             Self::Html => "html",

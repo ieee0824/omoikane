@@ -139,6 +139,36 @@ fn report_safe_javascript_failure(
     );
 }
 
+fn report_safe_worker_or_module_failure(
+    destination: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
+    category: ErrorCategory,
+    code: &'static str,
+    operation: &'static str,
+) {
+    let Some((reporter, surface)) = destination else {
+        return;
+    };
+    let Ok(code) = ErrorCode::new(code) else {
+        return;
+    };
+    let (resource, message) = match category {
+        ErrorCategory::Worker => ("worker", "Worker execution failed"),
+        ErrorCategory::Module => ("module", "Module loading failed"),
+        _ => return,
+    };
+    reporter.report(
+        RawEvent::new(
+            category,
+            ErrorSeverity::Error,
+            code,
+            surface,
+            message,
+            &[("operation", operation), ("resource", resource)],
+        )
+        .sanitize(),
+    );
+}
+
 fn report_active_js_task_failure(code: &'static str, kind: &'static str) {
     let _ = with_host_state(|host| {
         let destination = host
@@ -702,7 +732,8 @@ impl ModuleLoader for HttpModuleLoader {
                 .map(|document| document.0)
                 .or_else(active_document_id)
                 .unwrap_or(0);
-            self.ensure_document_is_live(module_document_id)?;
+            self.ensure_document_is_live(module_document_id)
+                .inspect_err(|_| self.report_import_load_failure())?;
             // Classic-script/eval imports can have no registered module root.
             // Their Realm still identifies the Document whose base and CSP
             // govern the request; absence of a graph entry must not bypass CSP.
@@ -723,13 +754,16 @@ impl ModuleLoader for HttpModuleLoader {
             {
                 specifier
                     .parse::<crate::http::Url>()
+                    .inspect_err(|_| self.report_import_load_failure())
                     .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
             } else {
                 let base = referrer_url.as_ref().ok_or_else(|| {
+                    self.report_import_load_failure();
                     JsNativeError::typ()
                         .with_message(format!("cannot resolve module specifier: {specifier}"))
                 })?;
                 crate::http::url::resolve_url(base, &specifier)
+                    .inspect_err(|_| self.report_import_load_failure())
                     .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
             };
             let resolved_string = resolved.to_string();
@@ -759,6 +793,7 @@ impl ModuleLoader for HttpModuleLoader {
                 && !policy.allows_url(ResourceType::Script, &resolved)
             {
                 self.record_csp_violation(*document_id, resolved_string.clone());
+                self.report_import_load_failure();
                 return Err(JsNativeError::error()
                     .with_message(format!("CSP blocked module import: {resolved_string}"))
                     .into());
@@ -794,12 +829,14 @@ impl ModuleLoader for HttpModuleLoader {
                             .owner
                             .upgrade()
                             .ok_or_else(|| {
+                                self.report_import_load_failure();
                                 JsNativeError::error().with_message("module owner was discarded")
                             })?
                             .borrow()
                             .cookie_store
                             .clone();
                         *pool = Some(ModuleFetchPool::new(cookies).map_err(|error| {
+                            self.report_import_load_failure();
                             JsNativeError::typ().with_message(error.to_string())
                         })?);
                     }
@@ -829,11 +866,14 @@ impl ModuleLoader for HttpModuleLoader {
                 pending.remove(&key);
             }
             drop(pending);
-            self.ensure_document_is_live(module_document_id)?;
-            let fetched =
-                result.map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+            self.ensure_document_is_live(module_document_id)
+                .inspect_err(|_| self.report_import_load_failure())?;
+            let fetched = result
+                .inspect_err(|_| self.report_import_load_failure())
+                .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
             let response = &fetched.response;
             if response.status_code() != 200 {
+                self.report_import_load_failure();
                 return Err(JsNativeError::typ()
                     .with_message(format!(
                         "module request returned HTTP {}",
@@ -851,6 +891,7 @@ impl ModuleLoader for HttpModuleLoader {
             {
                 let blocked_uri = effective_url.to_string();
                 self.record_csp_violation(*document_id, blocked_uri.clone());
+                self.report_import_load_failure();
                 return Err(JsNativeError::error()
                     .with_message(format!("CSP blocked module redirect: {blocked_uri}"))
                     .into());
@@ -868,7 +909,8 @@ impl ModuleLoader for HttpModuleLoader {
                 Source::from_reader(source.as_bytes(), Some(Path::new(&resolved_string))),
                 Some(realm),
                 &mut context.borrow_mut(),
-            )?;
+            )
+            .inspect_err(|_| self.report_import_load_failure())?;
             let parse_elapsed = parse_start.elapsed();
             if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
                 eprintln!(
@@ -916,6 +958,21 @@ impl ModuleLoader for HttpModuleLoader {
 }
 
 impl HttpModuleLoader {
+    fn report_import_load_failure(&self) {
+        let destination = self.owner.upgrade().and_then(|owner| {
+            owner
+                .try_borrow()
+                .ok()
+                .and_then(|state| state.error_reporter.clone())
+        });
+        report_safe_worker_or_module_failure(
+            destination,
+            ErrorCategory::Module,
+            "MODULE_IMPORT_LOAD_FAILED",
+            "fetch",
+        );
+    }
+
     fn ensure_document_is_live(&self, document_id: usize) -> JsResult<()> {
         let live = self.owner.upgrade().is_some_and(|owner| {
             let state = owner.borrow();
@@ -5595,6 +5652,12 @@ impl JsRuntime {
             // records callback failures in the worker runtime, while a rejected
             // microtask can be returned directly by `run_until_idle`.
             if let Err(error) = result {
+                report_safe_worker_or_module_failure(
+                    owner_state.borrow().error_reporter.clone(),
+                    ErrorCategory::Worker,
+                    "WORKER_RUNTIME_FAILED",
+                    "execute",
+                );
                 owner_state.borrow_mut().event_loop.enqueue_worker_error(
                     worker_id,
                     None,
@@ -5603,6 +5666,12 @@ impl JsRuntime {
                 );
             }
             for error in errors {
+                report_safe_worker_or_module_failure(
+                    owner_state.borrow().error_reporter.clone(),
+                    ErrorCategory::Worker,
+                    "WORKER_RUNTIME_FAILED",
+                    "execute",
+                );
                 owner_state.borrow_mut().event_loop.enqueue_worker_error(
                     worker_id,
                     None,
@@ -5676,8 +5745,16 @@ impl JsRuntime {
             // Dedicated Worker failures are.  The connection remains usable
             // for subsequent tasks unless the worker explicitly closes.
             let mut runtime = runtime.borrow_mut();
-            let _ = runtime.run_until_idle();
-            let _ = runtime.take_task_errors();
+            let result = runtime.run_until_idle();
+            let errors = runtime.take_task_errors();
+            for _ in 0..usize::from(result.is_err()) + errors.len() {
+                report_safe_worker_or_module_failure(
+                    self.host_state.borrow().error_reporter.clone(),
+                    ErrorCategory::Worker,
+                    "SHARED_WORKER_RUNTIME_FAILED",
+                    "execute",
+                );
+            }
         }
         SHARED_WORKER_REGISTRY
             .with(|registry| prune_shared_worker_registry(&mut registry.borrow_mut()));
@@ -6527,11 +6604,11 @@ impl JsRuntime {
                         .complete_page_task_with_error(generation, PageTaskError::Cancelled);
                 };
                 if let Err(error) = evaluation_result {
-                    self.record_document_script_failure(if module_url.is_some() {
-                        "DOCUMENT_MODULE_EVALUATION_FAILED"
+                    if module_url.is_some() {
+                        self.record_module_failure("DOCUMENT_MODULE_EVALUATION_FAILED", "execute");
                     } else {
-                        "DOCUMENT_SCRIPT_EVALUATION_FAILED"
-                    });
+                        self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
+                    }
                     if is_wall_clock_timeout(&error) {
                         return self
                             .complete_page_task_with_error(generation, PageTaskError::TimedOut);
@@ -9307,6 +9384,15 @@ impl JsRuntime {
         report_safe_javascript_failure(self.host_state.borrow().error_reporter.clone(), code, None);
     }
 
+    fn record_module_failure(&self, code: &'static str, operation: &'static str) {
+        report_safe_worker_or_module_failure(
+            self.host_state.borrow().error_reporter.clone(),
+            ErrorCategory::Module,
+            code,
+            operation,
+        );
+    }
+
     fn record_js_task_failure(&self, code: &'static str, kind: &'static str) {
         report_safe_javascript_failure(
             self.host_state.borrow().error_reporter.clone(),
@@ -9536,6 +9622,7 @@ impl JsRuntime {
                 script.identity()
             ));
             let script_context = script_source_context(&source_code);
+            let is_module = module_url.is_some();
             let (result, parse_elapsed, compile_elapsed, execute_elapsed) =
                 if let Some(module_url) = module_url {
                     let module_document =
@@ -9552,7 +9639,11 @@ impl JsRuntime {
                     self.eval_safe_timed(&source_code)
                 };
             if let Err(err) = result {
-                self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
+                if is_module {
+                    self.record_module_failure("DOCUMENT_MODULE_EVALUATION_FAILED", "execute");
+                } else {
+                    self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
+                }
                 errors.push(format!("[script: {script_label}; {script_context}] {err}"));
             }
             let jobs_start = std::time::Instant::now();
@@ -17751,6 +17842,7 @@ fn create_shared_worker_for_owner_state(
         runtime.eval(&format!(
             "__omoikane_install_shared_worker_global({worker_url:?}, {shared_id:?})"
         ))?;
+        let source_loaded = source.is_some();
         let startup_error = match source {
             Some(source) => runtime.eval(&source).err().map(|error| error.to_string()),
             None => Some(format!(
@@ -17758,6 +17850,16 @@ fn create_shared_worker_for_owner_state(
             )),
         };
         if startup_error.is_some() {
+            report_safe_worker_or_module_failure(
+                owner_state.borrow().error_reporter.clone(),
+                ErrorCategory::Worker,
+                if source_loaded {
+                    "SHARED_WORKER_STARTUP_FAILED"
+                } else {
+                    "SHARED_WORKER_FETCH_FAILED"
+                },
+                if source_loaded { "execute" } else { "fetch" },
+            );
             runtime.host_state.borrow_mut().worker_terminated = true;
         }
         let entry = Rc::new(RefCell::new(SharedWorkerRuntime {
@@ -17919,6 +18021,7 @@ fn create_worker_for_owner_state(
         .borrow_mut()
         .workers
         .insert(worker_id, Rc::clone(&entry));
+    let source_loaded = source.is_some();
     let startup_error = match source {
         Some(source) => {
             // Keep the entry out of the owner map while evaluating worker
@@ -17967,6 +18070,18 @@ fn create_worker_for_owner_state(
             Some(format!("failed to fetch Worker script: {requested_url}"))
         }
     };
+    if startup_error.is_some() {
+        report_safe_worker_or_module_failure(
+            owner_state.borrow().error_reporter.clone(),
+            ErrorCategory::Worker,
+            if source_loaded {
+                "WORKER_STARTUP_FAILED"
+            } else {
+                "WORKER_FETCH_FAILED"
+            },
+            if source_loaded { "execute" } else { "fetch" },
+        );
+    }
     {
         let mut worker = entry.borrow_mut();
         worker.startup_error = startup_error;
