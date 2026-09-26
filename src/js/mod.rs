@@ -103,6 +103,53 @@ use storage::{
 /// [`JsRuntime::record_task_error`].
 const MAX_TASK_ERRORS: usize = 32;
 const MAX_CSP_VIOLATIONS: usize = 1024;
+
+fn report_safe_javascript_failure(
+    destination: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
+    code: &'static str,
+    task_kind: Option<&'static str>,
+) {
+    let Some((reporter, surface)) = destination else {
+        return;
+    };
+    let Ok(code) = ErrorCode::new(code) else {
+        return;
+    };
+    let mut context = [
+        ("operation", "execute"),
+        ("resource", "script"),
+        ("task_kind", ""),
+    ];
+    let context_len = if let Some(kind) = task_kind {
+        context[2].1 = kind;
+        3
+    } else {
+        2
+    };
+    reporter.report(
+        RawEvent::new(
+            ErrorCategory::JavaScript,
+            ErrorSeverity::Error,
+            code,
+            surface,
+            "JavaScript execution failed",
+            &context[..context_len],
+        )
+        .sanitize(),
+    );
+}
+
+fn report_active_js_task_failure(code: &'static str, kind: &'static str) {
+    let _ = with_host_state(|host| {
+        let destination = host
+            .try_borrow()
+            .ok()
+            .and_then(|state| state.error_reporter.clone());
+        report_safe_javascript_failure(destination, code, Some(kind));
+        Ok(())
+    });
+}
+
 const DOM_CONTENT_LOADED_SCRIPT: &str = concat!(
     "document.__readyState = 'interactive'; ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
@@ -7652,6 +7699,9 @@ impl JsRuntime {
     /// Records `result`'s error, if any, against `label`.
     fn record_error_from<T>(&mut self, label: &str, result: JsResult<T>) {
         if let Err(error) = result {
+            if matches!(label, "timer" | "timer callback") {
+                self.record_js_task_failure("JS_TIMER_CALLBACK_FAILED", "timer");
+            }
             self.record_task_error(format!("[{label}] {error}"));
         }
     }
@@ -7782,18 +7832,24 @@ impl JsRuntime {
                 self.context.enter_realm(old_realm);
             }
             callbacks_run += 1;
-            if let Err(error) = result
-                && first_error.is_none()
-            {
+            if let Err(error) = result {
+                self.record_js_task_failure(
+                    "JS_ANIMATION_FRAME_CALLBACK_FAILED",
+                    "animation-frame",
+                );
                 // Browser callback exceptions are reported without preventing
                 // the remaining callbacks in the same frame from running.
-                first_error = Some(error);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
             if document_id.is_some()
                 && let Err(error) = self.run_jobs()
-                && first_jobs_error.is_none()
             {
-                first_jobs_error = Some(error);
+                self.record_js_task_failure("JS_ANIMATION_FRAME_JOB_FAILED", "animation-frame");
+                if first_jobs_error.is_none() {
+                    first_jobs_error = Some(error);
+                }
             }
         }
 
@@ -7801,6 +7857,9 @@ impl JsRuntime {
         // the microtask checkpoint completes that work before the embedder
         // proceeds to style/layout/paint.
         let jobs_result = self.run_jobs();
+        if callbacks_run > 0 && jobs_result.is_err() {
+            self.record_js_task_failure("JS_ANIMATION_FRAME_JOB_FAILED", "animation-frame");
+        }
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -7902,19 +7961,28 @@ impl JsRuntime {
                 self.context.enter_realm(old_realm);
             }
             callbacks_run += 1;
-            if let Err(error) = result
-                && first_error.is_none()
-            {
-                first_error = Some(error);
+            if let Err(error) = result {
+                self.record_js_task_failure(
+                    "JS_ANIMATION_FRAME_CALLBACK_FAILED",
+                    "animation-frame",
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
             if document_id.is_some()
                 && let Err(error) = self.run_jobs_for_document(document_id)
-                && first_jobs_error.is_none()
             {
-                first_jobs_error = Some(error);
+                self.record_js_task_failure("JS_ANIMATION_FRAME_JOB_FAILED", "animation-frame");
+                if first_jobs_error.is_none() {
+                    first_jobs_error = Some(error);
+                }
             }
         }
         let jobs_result = self.run_jobs();
+        if callbacks_run > 0 && jobs_result.is_err() {
+            self.record_js_task_failure("JS_ANIMATION_FRAME_JOB_FAILED", "animation-frame");
+        }
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -9236,22 +9304,14 @@ impl JsRuntime {
     }
 
     fn record_document_script_failure(&self, code: &'static str) {
-        let Some((reporter, surface)) = self.host_state.borrow().error_reporter.clone() else {
-            return;
-        };
-        let Ok(code) = ErrorCode::new(code) else {
-            return;
-        };
-        reporter.report(
-            RawEvent::new(
-                ErrorCategory::JavaScript,
-                ErrorSeverity::Error,
-                code,
-                surface,
-                "JavaScript execution failed",
-                &[("operation", "execute"), ("resource", "script")],
-            )
-            .sanitize(),
+        report_safe_javascript_failure(self.host_state.borrow().error_reporter.clone(), code, None);
+    }
+
+    fn record_js_task_failure(&self, code: &'static str, kind: &'static str) {
+        report_safe_javascript_failure(
+            self.host_state.borrow().error_reporter.clone(),
+            code,
+            Some(kind),
         );
     }
 
@@ -14357,8 +14417,14 @@ fn call_event_listener_native(
         let Some(listener) = listener.as_object() else {
             return Ok(JsValue::undefined());
         };
-        let handle_event = listener.get(js_string!("handleEvent"), context)?;
+        let handle_event = listener
+            .get(js_string!("handleEvent"), context)
+            .map_err(|error| {
+                report_active_js_task_failure("JS_EVENT_LISTENER_FAILED", "event-listener");
+                error
+            })?;
         let Some(callback) = handle_event.as_callable() else {
+            report_active_js_task_failure("JS_EVENT_LISTENER_FAILED", "event-listener");
             return Err(JsNativeError::typ()
                 .with_message("event listener handleEvent is not callable")
                 .into());
@@ -14369,7 +14435,15 @@ fn call_event_listener_native(
         &callback,
         &this,
         &[event],
-        NativeCallContinuation::from_copy_closure_with_captures(|result, (), _| result, ()),
+        NativeCallContinuation::from_copy_closure_with_captures(
+            |result, (), _| {
+                if result.is_err() {
+                    report_active_js_task_failure("JS_EVENT_LISTENER_FAILED", "event-listener");
+                }
+                result
+            },
+            (),
+        ),
     )
 }
 
