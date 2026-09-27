@@ -53,6 +53,15 @@ pub struct ResolvedPageStyle {
     margin_boxes: BTreeMap<PageMarginBox, BTreeMap<String, Value>>,
 }
 
+/// Content that causes a page-margin box to be generated.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageMarginContent {
+    /// Static text after concatenating adjacent CSS strings.
+    Text(String),
+    /// A generated-content expression awaiting counter, image, or other evaluation.
+    Expression(Value),
+}
+
 /// Used paper dimensions and page margins in CSS pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageBoxGeometry {
@@ -92,6 +101,33 @@ impl ResolvedPageStyle {
     /// Returns the winning specified value in one page-margin box.
     pub fn margin_box_property(&self, margin_box: PageMarginBox, name: &str) -> Option<&Value> {
         self.margin_box_properties(margin_box)?.get(name)
+    }
+
+    /// Returns generated content for a margin box, or `None` if no box is generated.
+    ///
+    /// `normal` and `none` suppress box generation. An empty string still generates
+    /// a box, while expressions are preserved for later counter or image evaluation.
+    pub fn margin_box_content(&self, margin_box: PageMarginBox) -> Option<PageMarginContent> {
+        let content = self.margin_box_property(margin_box, "content")?;
+        match content {
+            Value::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("normal")
+                    || keyword.eq_ignore_ascii_case("none") =>
+            {
+                None
+            }
+            Value::String(text) => Some(PageMarginContent::Text(text.clone())),
+            Value::List(parts) if parts.iter().all(|part| matches!(part, Value::String(_))) => {
+                let text = parts.iter().fold(String::new(), |mut text, part| {
+                    if let Value::String(part) = part {
+                        text.push_str(part);
+                    }
+                    text
+                });
+                Some(PageMarginContent::Text(text))
+            }
+            value => Some(PageMarginContent::Expression(value.clone())),
+        }
     }
 
     /// Resolves `size` and physical margins against the supplied print defaults.
@@ -745,5 +781,62 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn margin_box_content_distinguishes_suppression_empty_text_and_expressions() {
+        let page = style(
+            "@page { \
+               @top-left { content: normal; border: 1px solid black } \
+               @top-center { content: none } \
+               @top-right { content: '' } \
+               @bottom-left { content: 'A' 'B' } \
+               @bottom-center { content: 'Page ' counter(page) } \
+             }",
+            &PageSelectorContext::new(0, None),
+        );
+        assert_eq!(page.margin_box_content(PageMarginBox::TopLeft), None);
+        assert_eq!(page.margin_box_content(PageMarginBox::TopCenter), None);
+        assert_eq!(
+            page.margin_box_content(PageMarginBox::TopRight),
+            Some(PageMarginContent::Text(String::new()))
+        );
+        assert_eq!(
+            page.margin_box_content(PageMarginBox::BottomLeft),
+            Some(PageMarginContent::Text("AB".into()))
+        );
+        assert!(matches!(
+            page.margin_box_content(PageMarginBox::BottomCenter),
+            Some(PageMarginContent::Expression(Value::List(_)))
+        ));
+        assert_eq!(page.margin_box_content(PageMarginBox::LeftTop), None);
+    }
+
+    #[test]
+    fn page_margin_content_changes_with_the_matching_page_selector() {
+        let css = "@page :first { @top-center { content: 'first' } } \
+                   @page :left { @top-center { content: 'left' } } \
+                   @page :right { @top-center { content: 'right' } } \
+                   @page report:left { @top-center { content: none } }";
+        let content = |index, name: Option<&str>| {
+            style(
+                css,
+                &PageSelectorContext::new(index, name.map(str::to_owned)),
+            )
+            .margin_box_content(PageMarginBox::TopCenter)
+        };
+        assert_eq!(
+            content(0, None),
+            Some(PageMarginContent::Text("first".into()))
+        );
+        assert_eq!(
+            content(1, None),
+            Some(PageMarginContent::Text("left".into()))
+        );
+        assert_eq!(
+            content(2, None),
+            Some(PageMarginContent::Text("right".into()))
+        );
+        assert_eq!(content(1, Some("report")), None);
     }
 }
