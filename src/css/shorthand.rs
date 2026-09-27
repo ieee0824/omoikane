@@ -2527,8 +2527,8 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
             if *v == 0.0 && width.is_none() {
                 width = Some(item.clone());
             }
-        } else if let Value::Function { .. } = item {
-            // Color functions like rgb(), hsl()
+        } else if matches!(item, Value::Color(_) | Value::Function { .. }) {
+            // Hex colors and color functions like rgb(), hsl().
             if color.is_none() {
                 color = Some(item.clone());
             }
