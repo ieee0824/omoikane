@@ -4229,6 +4229,7 @@ impl HostState {
         let image_site = self.location_href.parse::<crate::http::Url>().ok();
         let image_cookies = Arc::clone(&self.cookie_store);
         let animation_time = self.event_loop.rendering_time_ms() as u64;
+        let layout_reporter = self.error_reporter.clone();
         let relevant_nodes = self
             .content_visibility_focus_nodes
             .union(&self.content_visibility_selection_nodes)
@@ -4264,12 +4265,14 @@ impl HostState {
                             || {
                                 crate::layout::with_image_base_url(base, || {
                                     crate::layout::with_image_animation_time(animation_time, || {
-                                        crate::layout::layout_tree_with_content_visibility(
-                                            &document,
-                                            resolver,
-                                            viewport,
-                                            content_visibility_input,
-                                        )
+                                        crate::layout::with_error_reporter(layout_reporter, || {
+                                            crate::layout::layout_tree_with_content_visibility(
+                                                &document,
+                                                resolver,
+                                                viewport,
+                                                content_visibility_input,
+                                            )
+                                        })
                                     })
                                 })
                             },

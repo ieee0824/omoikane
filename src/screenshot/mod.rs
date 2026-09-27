@@ -408,6 +408,60 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn screenshot_records_recoverable_layout_image_decode_failure() {
+        let directory = std::env::temp_dir().join(format!(
+            "omoikane-layout-screenshot-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("events.sqlite");
+        let config = ReporterConfig::from_values(Some("record-only"), None).unwrap();
+        let reporter = Arc::new(
+            ErrorReporter::new(&config, database.clone(), RetentionPolicy::default()).unwrap(),
+        );
+        let mut session = CdpSession::new().unwrap();
+        session.set_error_reporter(Arc::clone(&reporter), ExecutionSurface::Headless);
+        session
+            .dispatch(
+                "Page.navigate",
+                serde_json::json!({"url": "data:text/html,<html><body><img src='data:image/png;base64,PRIVATE_IMAGE_939' alt='PRIVATE_ALT_939'></body></html>"}),
+            )
+            .unwrap();
+        let png = capture_session_screenshot_png(
+            &mut session,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 32.0,
+                height: 32.0,
+            },
+        )
+        .unwrap();
+        let image = Image::decode_png(&png).unwrap();
+        assert_eq!((image.width(), image.height()), (32, 32));
+        reporter.flush().unwrap();
+        let expected = RawEvent::new(
+            ErrorCategory::Layout,
+            ErrorSeverity::Warning,
+            ErrorCode::new("LAYOUT_INLINE_IMAGE_DECODE_FAILED").unwrap(),
+            ExecutionSurface::Headless,
+            "Layout failed",
+            &[("operation", "decode"), ("resource", "image")],
+        )
+        .sanitize();
+        let store = EventStore::open(&database, RetentionPolicy::default()).unwrap();
+        assert!(store.get(expected.fingerprint()).unwrap().is_some());
+        drop(store);
+        drop(session);
+        drop(reporter);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn frameset_screenshot_fallback_records_safe_error_and_preserves_png() {
         let directory =
             std::env::temp_dir().join(format!("omoikane-screenshot-report-{}", std::process::id()));

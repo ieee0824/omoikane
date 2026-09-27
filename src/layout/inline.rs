@@ -1940,7 +1940,11 @@ fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
         .get(..5)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
     {
-        return decode_data_uri_image(url_like);
+        let image = decode_data_uri_image(url_like);
+        if image.is_none() {
+            super::report_inline_image_decode_failure();
+        }
+        return image;
     }
     // `get` rather than a range index: a source such as "日本語です" would make
     // byte 5 land inside a character and panic.

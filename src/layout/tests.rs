@@ -4,6 +4,99 @@ use crate::css::{ComputedValue, Origin, parse_stylesheet};
 use crate::dom::ShadowRootMode;
 use crate::layout::*;
 
+#[test]
+fn failed_inline_image_decode_records_only_safe_layout_event() {
+    use crate::error_reporting::{
+        ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, EventStore, ExecutionSurface,
+        RawEvent, ReporterConfig, RetentionPolicy,
+    };
+
+    let directory = std::env::temp_dir().join(format!(
+        "omoikane-layout-report-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let database = directory.join("events.sqlite");
+    let config = ReporterConfig::from_values(Some("record-only"), None).unwrap();
+    let reporter = Arc::new(
+        ErrorReporter::new(&config, database.clone(), RetentionPolicy::default()).unwrap(),
+    );
+    let body = NodeHandle::element("body");
+    let image = NodeHandle::element("img");
+    image.set_attribute("src", "data:image/png;base64,PRIVATE_IMAGE_939");
+    image.set_attribute("alt", "PRIVATE_ALT_939");
+    body.append_child(image);
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 200.0,
+    };
+    let mut resolver = resolver_without_body_ua_margin();
+    let baseline = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let with_reporter = with_error_reporter(
+        Some((Arc::clone(&reporter), ExecutionSurface::Headless)),
+        || layout_tree(&body, &mut resolver, viewport),
+    )
+    .unwrap();
+    assert_eq!(
+        baseline.dimensions.content,
+        with_reporter.dimensions.content
+    );
+    assert_eq!(baseline.lines.len(), with_reporter.lines.len());
+    reporter.flush().unwrap();
+
+    let expected = RawEvent::new(
+        ErrorCategory::Layout,
+        ErrorSeverity::Warning,
+        ErrorCode::new("LAYOUT_INLINE_IMAGE_DECODE_FAILED").unwrap(),
+        ExecutionSurface::Headless,
+        "Layout failed",
+        &[("operation", "decode"), ("resource", "image")],
+    )
+    .sanitize();
+    let store = EventStore::open(&database, RetentionPolicy::default()).unwrap();
+    assert!(store.get(expected.fingerprint()).unwrap().is_some());
+    drop(store);
+    drop(reporter);
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = database.as_os_str().to_os_string();
+        path.push(suffix);
+        if let Ok(bytes) = std::fs::read(std::path::PathBuf::from(path)) {
+            for secret in ["PRIVATE_IMAGE_939", "PRIVATE_ALT_939"] {
+                assert!(
+                    !bytes
+                        .windows(secret.len())
+                        .any(|part| part == secret.as_bytes())
+                );
+            }
+        }
+    }
+
+    let off_database = directory.join("off.sqlite");
+    let off_config = ReporterConfig::from_values(None, None).unwrap();
+    let off_reporter = Arc::new(
+        ErrorReporter::new(
+            &off_config,
+            off_database.clone(),
+            RetentionPolicy::default(),
+        )
+        .unwrap(),
+    );
+    assert!(
+        with_error_reporter(Some((off_reporter, ExecutionSurface::Headless)), || {
+            layout_tree(&body, &mut resolver, viewport)
+        })
+        .is_some()
+    );
+    assert!(!off_database.exists());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn resolver_without_body_ua_margin() -> StyleResolver {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
