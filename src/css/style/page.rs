@@ -481,7 +481,16 @@ fn collect_page_candidates(
                     .max()
             });
             for declaration in &at_rule.declarations {
-                if let Some(specificity) = specificity {
+                let valid_orientation = declaration.name != "page-orientation"
+                    || matches!(
+                        &declaration.value,
+                        Value::Keyword(value)
+                            if matches!(
+                                value.to_ascii_lowercase().as_str(),
+                                "upright" | "rotate-left" | "rotate-right" | "initial" | "unset" | "inherit"
+                            )
+                    );
+                if let Some(specificity) = specificity.filter(|_| valid_orientation) {
                     candidates.push(PageCandidate {
                         margin_box: None,
                         declaration: declaration.clone(),
@@ -727,6 +736,28 @@ mod tests {
         assert!((geometry.margin_right - 2.0 * 96.0 / 2.54).abs() < 0.01);
         assert!((geometry.margin_bottom - 3.0 * 96.0 / 2.54).abs() < 0.01);
         assert!((geometry.margin_left - 4.0 * 96.0 / 2.54).abs() < 0.01);
+    }
+
+    #[test]
+    fn invalid_page_orientation_does_not_override_valid_declaration() {
+        let page = style(
+            "@page { page-orientation: rotate-left; page-orientation: upside-down } \
+             @page turned { page-orientation: rotate-right }",
+            &PageSelectorContext::new(0, None),
+        );
+        assert_eq!(
+            page.get("page-orientation"),
+            Some(&Value::Keyword("rotate-left".into()))
+        );
+        let turned = style(
+            "@page { page-orientation: rotate-left; page-orientation: upside-down } \
+             @page turned { page-orientation: rotate-right }",
+            &PageSelectorContext::new(1, Some("turned".into())),
+        );
+        assert_eq!(
+            turned.get("page-orientation"),
+            Some(&Value::Keyword("rotate-right".into()))
+        );
     }
 
     #[test]
