@@ -100,6 +100,7 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 
 ### 開発者向け
 - 未対応 CSS プロパティの観測ログ（stderr / SQLite 永続化）
+- [一般エラーのローカル記録と明示的なGitHub送信](docs/error-reporting.md)
 
 ## アーキテクチャ
 
