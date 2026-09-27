@@ -2,7 +2,7 @@
 use super::model::ActualStatus;
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
-use omoikane::js::JsRuntime;
+use omoikane::js::{JsRuntime, NavigationRequest};
 use std::path::{Path, PathBuf};
 
 pub(super) struct CaseExecution {
@@ -43,6 +43,156 @@ fn js_bool(runtime: &mut JsRuntime, source: &str) -> bool {
         .ok()
         .and_then(|value| value.as_boolean())
         .unwrap_or(false)
+}
+
+/// The smoke runner owns one Document, so it only commits requests that keep
+/// that Document alive. This mirrors the fragment/history path of CDP's
+/// navigation driver; cross-Document loads remain outside this runner.
+struct SameDocumentHistory {
+    entries: Vec<String>,
+    index: usize,
+}
+
+impl SameDocumentHistory {
+    fn new(url: String) -> Self {
+        Self {
+            entries: vec![url],
+            index: 0,
+        }
+    }
+
+    fn current(&self) -> &str {
+        &self.entries[self.index]
+    }
+
+    fn commit(&mut self, url: String, replace: bool) {
+        if replace {
+            self.entries[self.index] = url;
+        } else {
+            self.entries.truncate(self.index + 1);
+            self.entries.push(url);
+            self.index += 1;
+        }
+    }
+
+    fn sync_length(&self, runtime: &mut JsRuntime) -> Result<(), String> {
+        runtime
+            .eval(&format!("__omoikane_sync_history({})", self.entries.len()))
+            .map(|_| ())
+            .map_err(|error| format!("sync WPT history: {error}"))
+    }
+
+    fn commit_fragment(
+        &mut self,
+        runtime: &mut JsRuntime,
+        url: String,
+        replace: bool,
+    ) -> Result<(), String> {
+        let previous = self.current().to_owned();
+        self.commit(url.clone(), replace);
+        runtime.commit_same_document_url(&url);
+        self.sync_length(runtime)?;
+        let url = serde_json::to_string(&url).expect("serialize navigation URL");
+        let previous = serde_json::to_string(&previous).expect("serialize previous URL");
+        runtime
+            .eval(&format!(
+                "__omoikane_commit_same_document_navigation({url}, {previous})"
+            ))
+            .map_err(|error| format!("commit WPT fragment navigation: {error}"))?;
+        runtime
+            .run_jobs()
+            .map_err(|error| format!("run WPT fragment jobs: {error}"))
+    }
+
+    fn drive(&mut self, runtime: &mut JsRuntime) -> Result<bool, String> {
+        const MAX_SCRIPT_NAVIGATIONS: usize = 32;
+        let mut committed = false;
+        for _ in 0..MAX_SCRIPT_NAVIGATIONS {
+            runtime
+                .run_until_idle()
+                .map_err(|error| format!("run WPT navigation tasks: {error}"))?;
+            // CDP accepts one request per checkpoint. A later script may
+            // enqueue another request while the first commit dispatches events.
+            let Some(request) = runtime.take_navigation_requests().into_iter().next() else {
+                return Ok(committed);
+            };
+            match request {
+                NavigationRequest::Navigate { url, replace }
+                    if is_fragment_only_navigation(self.current(), &url) =>
+                {
+                    self.commit_fragment(runtime, url, replace)?;
+                    committed = true;
+                }
+                NavigationRequest::UpdateHistory { url, replace, .. } => {
+                    self.commit(url, replace);
+                    self.sync_length(runtime)?;
+                    committed = true;
+                }
+                NavigationRequest::Traverse { delta } => {
+                    let Some(index) = self.index.checked_add_signed(delta as isize) else {
+                        continue;
+                    };
+                    if index >= self.entries.len() || index == self.index {
+                        continue;
+                    }
+                    let previous = self.current().to_owned();
+                    self.index = index;
+                    let url = self.current().to_owned();
+                    runtime.commit_same_document_url(&url);
+                    self.sync_length(runtime)?;
+                    let url = serde_json::to_string(&url).expect("serialize history URL");
+                    let previous =
+                        serde_json::to_string(&previous).expect("serialize previous URL");
+                    runtime
+                        .eval(&format!(
+                            "__omoikane_commit_same_document_navigation({url}, {previous})"
+                        ))
+                        .map_err(|error| format!("traverse WPT history: {error}"))?;
+                    committed = true;
+                }
+                // A WPT case may request a new Document, but this smoke
+                // runner has no browser session to install it. Preserve the
+                // existing behavior for those requests.
+                _ => {}
+            }
+        }
+        Err("WPT same-document navigation limit exceeded".to_string())
+    }
+}
+
+fn is_fragment_only_navigation(current: &str, target: &str) -> bool {
+    let (current_base, current_fragment) = current.split_once('#').unwrap_or((current, ""));
+    let (target_base, target_fragment) = target.split_once('#').unwrap_or((target, ""));
+    current_base == target_base && current_fragment != target_fragment
+}
+
+fn drive_case_tasks(
+    runtime: &mut JsRuntime,
+    history: &mut SameDocumentHistory,
+    errors: &mut Vec<String>,
+) {
+    const STEP_MS: u64 = 10;
+    const MAX_VIRTUAL_MS: u64 = 5_000;
+    for _ in 0..MAX_VIRTUAL_MS / STEP_MS {
+        let committed = match history.drive(runtime) {
+            Ok(committed) => committed,
+            Err(error) => {
+                errors.push(error);
+                return;
+            }
+        };
+        if js_bool(runtime, "globalThis.__wpt_complete === true") {
+            return;
+        }
+        runtime.run_timers(STEP_MS, STEP_MS, 128);
+        if !committed && !runtime.has_pending_timers() {
+            // Give any non-timer tasks run by this tick one more checkpoint.
+            if let Err(error) = history.drive(runtime) {
+                errors.push(error);
+            }
+            return;
+        }
+    }
 }
 
 fn drive_visibility_state_testdriver(runtime: &mut JsRuntime, errors: &mut Vec<String>) {
@@ -121,10 +271,11 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         .wire_inline_event_handlers()
         .expect("wire WPT handlers");
     runtime.fire_load().expect("fire WPT load");
+    let mut history = SameDocumentHistory::new(url);
     if path == "page-visibility/visibility-state-entry.tentative.html" {
         drive_visibility_state_testdriver(&mut runtime, &mut errors);
     } else {
-        runtime.run_timers(5_000, 10, 2_000);
+        drive_case_tasks(&mut runtime, &mut history, &mut errors);
     }
     // WPTs commonly observe rendering steps through nested
     // requestAnimationFrame callbacks. Drive a bounded number of explicit
@@ -133,6 +284,9 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
     // unbounded test run.
     runtime.run_animation_frames(32, 16);
     runtime.run_jobs().expect("drain WPT jobs");
+    if let Err(error) = history.drive(&mut runtime) {
+        errors.push(error);
+    }
     errors.extend(runtime.take_task_errors());
     let complete = js_bool(&mut runtime, "globalThis.__wpt_complete === true");
     let passed = js_bool(
@@ -166,6 +320,46 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fragment_requests_commit_hashchange_target_and_history() {
+        let url = "http://example.test/case";
+        let document = TreeBuilder::parse(
+            "<!doctype html><a href='#second'>go</a><div id='second'>target</div>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(document, url).unwrap();
+        runtime
+            .eval("globalThis.changes=[]; addEventListener('hashchange', e => changes.push([e.oldURL,e.newURL])); document.querySelector('a').click()")
+            .unwrap();
+        let mut history = SameDocumentHistory::new(url.to_owned());
+        assert!(history.drive(&mut runtime).unwrap());
+        assert!(js_bool(
+            &mut runtime,
+            "location.hash === '#second' && document.querySelector('#second').matches(':target') && history.length === 2 && changes.length === 1 && changes[0][0] === 'http://example.test/case' && changes[0][1] === 'http://example.test/case#second'"
+        ));
+
+        runtime.eval("history.back()").unwrap();
+        assert!(history.drive(&mut runtime).unwrap());
+        assert!(js_bool(
+            &mut runtime,
+            "location.hash === '' && !document.querySelector('#second').matches(':target') && history.length === 2 && changes.length === 2"
+        ));
+
+        runtime.eval("history.forward()").unwrap();
+        assert!(history.drive(&mut runtime).unwrap());
+        assert!(js_bool(
+            &mut runtime,
+            "location.hash === '#second' && document.querySelector('#second').matches(':target') && history.length === 2 && changes.length === 3"
+        ));
+
+        runtime.eval("location.assign('#')").unwrap();
+        assert!(history.drive(&mut runtime).unwrap());
+        assert!(js_bool(
+            &mut runtime,
+            "location.href === 'http://example.test/case#' && location.hash === '' && !document.querySelector('#second').matches(':target') && history.length === 3 && changes.length === 4"
+        ));
+    }
 
     #[test]
     fn raw_status_prioritizes_script_errors_then_harness_result() {

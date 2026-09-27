@@ -6321,7 +6321,7 @@ impl JsRuntime {
 
     /// Commits a same-Document URL change and refreshes its fragment target.
     /// The navigation owner calls this only after accepting the URL transition.
-    pub(crate) fn commit_same_document_url(&mut self, url: &str) {
+    pub fn commit_same_document_url(&mut self, url: &str) {
         self.commit_history_api_url(url);
         let mut state = self.host_state.borrow_mut();
         let document = state.document.clone();
