@@ -1321,6 +1321,7 @@ impl CdpSession {
             let previous_url = self.current_url.clone();
             self.commit_history_url(url, commit, None);
             self.current_url = url.to_string();
+            self.runtime.commit_same_document_url(url);
             self.runtime
                 .eval(&format!(
                     "__omoikane_commit_same_document_navigation({url:?}, 'hashchange', {previous_url:?})"
@@ -5670,7 +5671,9 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0u8; 1024];
             let _ = stream.read(&mut buffer).unwrap();
-            let body = "<html><body><main id='persistent'></main></body></html>";
+            let body = r#"<html><head><style>:target { color: rgb(13, 42, 71) }</style></head>
+                <body><main id='persistent'></main><div id='section'></div><div id='next'></div>
+                <iframe id='child' srcdoc="<div id='section'></div>"></iframe></body></html>"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -5695,7 +5698,37 @@ mod tests {
         let state = session
             .dispatch(
                 "Runtime.evaluate",
-                json!({ "expression": "document.querySelector('#persistent') !== null && hashChanges === 1 && location.hash === '#section'" }),
+                json!({ "expression": "document.querySelector('#persistent') !== null && hashChanges === 1 && location.hash === '#section' && document.querySelector(':target')?.id === 'section' && document.getElementById('section').matches(':target') && getComputedStyle(document.getElementById('section')).color === 'rgb(13, 42, 71)' && document.getElementById('child').contentDocument.querySelector(':target') === null" }),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], true);
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "location.hash = '#next'" }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url(), format!("{url}#next"));
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "hashChanges === 2 && document.querySelector(':target')?.id === 'next' && document.querySelectorAll(':target').length === 1 && !document.getElementById('section').matches(':target') && getComputedStyle(document.getElementById('section')).color !== 'rgb(13, 42, 71)' && getComputedStyle(document.getElementById('next')).color === 'rgb(13, 42, 71)' && document.getElementById('child').contentDocument.querySelector(':target') === null" }),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], true);
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "location.hash = ''" }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url(), url);
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "hashChanges === 3 && document.querySelector(':target') === null && !document.getElementById('next').matches(':target') && getComputedStyle(document.getElementById('next')).color !== 'rgb(13, 42, 71)'" }),
             )
             .unwrap();
         assert_eq!(state["result"]["value"], true);
