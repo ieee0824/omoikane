@@ -19,7 +19,7 @@ use super::{
 };
 
 /// Increment whenever the meaning or encoding of a contract field changes.
-pub const BYTECODE_CONTRACT_VERSION: u32 = 1;
+pub const BYTECODE_CONTRACT_VERSION: u32 = 2;
 
 /// A scalar operand copied out of the private instruction representation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -708,70 +708,77 @@ mod tests {
             (
                 "arith",
                 "var s=1; for(var i=0;i<8;i++) s=(s+i*3)%17; s",
-                0xb6ec_e611_8fec_3eb5,
+                0x29ff_67e8_a3dc_404f,
             ),
             (
                 "prop-mono",
                 "var o={a:1,b:2}; for(var i=0;i<8;i++){o.b=o.a+i} o.b",
-                0x0e98_78cc_443b_5bdd,
+                0x55f9_89d9_e729_bb23,
             ),
             (
                 "prop-mega",
                 "var a=[{x:1},{y:0,x:2}]; var s=0; for(var i=0;i<8;i++)s+=a[i&1].x; s",
-                0x0fb3_bfc1_9d53_53b2,
+                0xba65_f4a5_b1d8_b25c,
             ),
             (
                 "call",
                 "function add(a,b){return a+b} var s=0; for(var i=0;i<8;i++)s=add(s,1); s",
-                0xd01c_e0d3_8345_6d4e,
+                0x7df6_a4a2_cbe9_98e6,
             ),
             (
                 "closure-alloc",
                 "var s=0; for(var i=0;i<8;i++){var f=function(x){return x+i};s=f(s)} s",
-                0x6563_5534_faea_09d3,
+                0xca56_8c12_652b_8075,
             ),
             (
                 "object-alloc",
                 "var s=0; for(var i=0;i<8;i++){var o={x:i,y:i+1};s+=o.x+o.y} s",
-                0xd650_c3ea_b635_e953,
+                0x4d52_d5d7_8158_0ec9,
             ),
             (
                 "string-concat",
                 "var s=''; for(var i=0;i<8;i++)s+='ab'; s.length",
-                0xa1dc_85c4_4aa5_a2d4,
+                0x9570_86e9_c451_5e04,
             ),
             (
                 "array",
                 "var a=[]; for(var i=0;i<8;i++)a.push(i); a[3]",
-                0xb73c_68e0_0591_3c25,
+                0x1a5e_712a_ff0c_8efd,
             ),
             (
                 "primitive-string-property",
                 "var s=0; for(var i=0;i<8;i++)s+='abc'.length; s",
-                0x9d47_6119_c095_a937,
+                0x98b5_6c72_29c5_7983,
             ),
             (
                 "primitive-string-method",
                 "var s=0; for(var i=0;i<8;i++)s+='abc'.charCodeAt(i&2); s",
-                0xa66f_4ea2_9d6b_9024,
+                0x27a1_6d90_9cb9_5fac,
             ),
             (
                 "proto-method",
                 "function B(){} B.prototype.at=function(i){return i&3}; var o=new B(); o.at(2)",
-                0x80b0_8f3e_3f3f_0f9a,
+                0x9663_8d0c_eacf_137f,
             ),
         ];
+        let mut mismatches = Vec::new();
         for (name, source, expected_fingerprint) in workloads {
             let first = compile(source).bytecode_contract().dump().unwrap();
             let second = compile(source).bytecode_contract().dump().unwrap();
             assert_eq!(first, second, "non-deterministic dump for {name}");
-            assert_eq!(
-                contract_fingerprint(&first),
-                expected_fingerprint,
-                "bytecode contract changed for {name}; review the change and bump \
-                 BYTECODE_CONTRACT_VERSION when its encoding or meaning changed"
-            );
+            let actual = contract_fingerprint(&first);
+            if actual != expected_fingerprint {
+                mismatches.push(format!(
+                    "{name}: expected {expected_fingerprint:#018x}, actual {actual:#018x}"
+                ));
+            }
         }
+        assert!(
+            mismatches.is_empty(),
+            "bytecode contract changed; review the change and bump \
+             BYTECODE_CONTRACT_VERSION when its encoding or meaning changed:\n{}",
+            mismatches.join("\n")
+        );
 
         let source = "var o={a:1}; for(var i=0;i<8;i++){o.a=o.a+i} o.a";
         let dump = compile(source).bytecode_contract().dump().unwrap();

@@ -2577,6 +2577,64 @@ fn loop_runtime_limit() {
 }
 
 #[test]
+fn loop_runtime_limit_counts_only_body_executions() {
+    for source in [
+        "for (;;) { count++; }",
+        "while (true) { count++; }",
+        "do { count++; } while (true);",
+        "for (const item of [1, 2, 3, 4, 5]) { count++; }",
+        "for (const key in {a: 1, b: 1, c: 1, d: 1, e: 1}) { count++; }",
+    ] {
+        let mut context = Context::default();
+        context.runtime_limits_mut().set_loop_iteration_limit(3);
+        context
+            .eval(Source::from_bytes("globalThis.count = 0"))
+            .expect("counter initialization");
+
+        let error = context
+            .eval(Source::from_bytes(source))
+            .expect_err("the fourth body execution must exceed the limit");
+        assert!(
+            error
+                .as_native()
+                .is_some_and(JsNativeError::is_runtime_limit),
+            "{source}: {error}"
+        );
+
+        let global = context.global_object().clone();
+        assert_eq!(
+            global.get(js_string!("count"), &mut context).unwrap(),
+            JsValue::from(3),
+            "{source}"
+        );
+    }
+
+    for source in [
+        "for (let i = 0; i < 3; i++) { count++; }",
+        "while (count < 3) { count++; }",
+        "do { count++; } while (count < 3);",
+        "for (const item of [1, 2, 3]) { count++; }",
+        "for (const key in {a: 1, b: 1, c: 1}) { count++; }",
+    ] {
+        let mut context = Context::default();
+        context.runtime_limits_mut().set_loop_iteration_limit(3);
+        context
+            .eval(Source::from_bytes("globalThis.count = 0"))
+            .expect("counter initialization");
+        context
+            .eval(Source::from_bytes(source))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+
+        let global = context.global_object().clone();
+        assert_eq!(
+            global.get(js_string!("count"), &mut context).unwrap(),
+            JsValue::from(3),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn loop_runtime_limit_escapes_promise_constructor() {
     let mut context = Context::default();
     context.runtime_limits_mut().set_loop_iteration_limit(10);
