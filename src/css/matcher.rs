@@ -701,6 +701,8 @@ fn matches_pseudo_class(
         "checked" => node.checked(),
         "valid" => pseudo.is_none() && node.css_validity() == Some(true),
         "invalid" => pseudo.is_none() && node.css_validity() == Some(false),
+        "any-link" | "link" => is_html_hyperlink(node),
+        "visited" => false,
         "empty" => node
             .child_nodes()
             .into_iter()
@@ -711,6 +713,12 @@ fn matches_pseudo_class(
             }),
         _ => false,
     }
+}
+
+fn is_html_hyperlink(node: &NodeHandle) -> bool {
+    node.is_html_element()
+        && matches!(node.tag_name().as_deref(), Some("a" | "area"))
+        && node.get_attribute("href").is_some()
 }
 
 fn is_form_control(node: &NodeHandle) -> bool {
