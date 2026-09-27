@@ -2,6 +2,9 @@ use omoikane::css::{matches_selector, parse_selector_list};
 use omoikane::dom::{Node, NodeType};
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
 
 const HTML: &str = r#"<!doctype html><html><head>
 <style>:target { color: rgb(13, 42, 71) }</style></head><body>
@@ -106,5 +109,141 @@ fn reusing_document_does_not_preserve_a_previous_runtime_target() {
             .unwrap()
             .as_boolean(),
         Some(true)
+    );
+}
+
+#[test]
+fn iframe_fragment_navigation_preserves_its_document_and_targets_only_the_child() {
+    let document = TreeBuilder::parse(
+        r#"<!doctype html><html><body><div id="section"></div>
+           <iframe id="child" srcdoc="<style>:target { color: rgb(13, 42, 71) }</style><div id='section'></div><div id='other'></div>"></iframe></body></html>"#,
+    )
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "http://127.0.0.1:1/page").unwrap();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const frame = document.getElementById('child');
+                const child = frame.contentDocument;
+                const changes = [];
+                frame.contentWindow.addEventListener('hashchange', event => changes.push([event.oldURL, event.newURL]));
+                frame.contentWindow.location.hash = '#section';
+                const first = [frame.contentDocument === child,
+                    child.querySelector(':target')?.id,
+                    getComputedStyle(child.getElementById('section')).color,
+                    frame.contentWindow.location.hash];
+                frame.contentWindow.location.hash = '#other';
+                const second = [frame.contentDocument === child,
+                    child.querySelector(':target')?.id,
+                    frame.contentWindow.location.hash];
+                frame.contentWindow.history.back();
+                const back = [frame.contentDocument === child,
+                    child.querySelector(':target')?.id,
+                    frame.contentWindow.location.hash];
+                return JSON.stringify({ first, second, back, changes,
+                    parentTarget: document.querySelector(':target')?.id ?? null });
+            })()"#,
+        )
+        .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&result.as_string().unwrap().to_std_string_escaped()).unwrap();
+    assert_eq!(
+        report["first"],
+        serde_json::json!([true, "section", "rgb(13, 42, 71)", "#section"])
+    );
+    assert_eq!(
+        report["second"],
+        serde_json::json!([true, "other", "#other"])
+    );
+    assert_eq!(
+        report["back"],
+        serde_json::json!([true, "section", "#section"])
+    );
+    assert_eq!(report["changes"].as_array().unwrap().len(), 3);
+    assert!(report["parentTarget"].is_null());
+}
+
+#[test]
+fn cross_origin_iframe_fragment_navigation_keeps_document_inaccessible() {
+    let url = "data:text/html,%3Cdiv%20id%3D%22section%22%3E%3C%2Fdiv%3E";
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='child' src='{url}'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/page").unwrap();
+    let result = runtime
+        .eval(&format!(
+            r#"(() => {{
+                const frame = document.getElementById('child');
+                if (frame.contentDocument !== null) return 'unexpected access';
+                try {{ frame.contentWindow.location.href = '{url}#section'; }}
+                catch (error) {{ return `${{error.name}}: ${{error.message}}`; }}
+                return frame.contentDocument === null ? 'ok' : 'unexpected access';
+            }})()"#
+        ))
+        .unwrap();
+    assert_eq!(
+        result
+            .as_string()
+            .map(|value| value.to_std_string_escaped()),
+        Some("ok".to_string())
+    );
+}
+
+#[test]
+fn iframe_initial_url_fragment_selects_its_own_target() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).unwrap();
+            let body = "<style>:target { color: rgb(13, 42, 71) }</style><div id='section'></div>";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    let child_url = format!("http://{address}/child#section");
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='absolute' src='{child_url}'></iframe><iframe id='relative' src='/relative#section'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("http://{address}/page")).unwrap();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const summarize = id => {
+                    const child = document.getElementById(id).contentDocument;
+                    const target = child.querySelector(':target');
+                    return [child.URL, target?.id ?? null,
+                        target ? getComputedStyle(target).color : null];
+                };
+                return JSON.stringify([summarize('absolute'), summarize('relative'),
+                    document.querySelector(':target')?.id ?? null]);
+            })()"#,
+        )
+        .unwrap();
+    server.join().unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&result.as_string().unwrap().to_std_string_escaped()).unwrap();
+    assert_eq!(
+        report,
+        serde_json::json!([
+            [child_url, "section", "rgb(13, 42, 71)"],
+            [
+                format!("http://{address}/relative#section"),
+                "section",
+                "rgb(13, 42, 71)"
+            ],
+            null
+        ])
     );
 }
