@@ -2021,14 +2021,14 @@ impl Promise {
                 context
                     .job_executor()
                     .enqueue_job(reject_job.into(), context);
-
-                // 12. Set promise.[[PromiseIsHandled]] to true.
-                promise
-                    .downcast_mut::<Self>()
-                    .expect("IsPromise(promise) is false")
-                    .handled = true;
             }
         }
+
+        // 12. Set promise.[[PromiseIsHandled]] to true.
+        promise
+            .downcast_mut::<Self>()
+            .expect("IsPromise(promise) is false")
+            .handled = true;
 
         // 13. If resultCapability is undefined, then
         //   a. Return undefined.
