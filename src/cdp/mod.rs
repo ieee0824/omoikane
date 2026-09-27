@@ -5793,8 +5793,8 @@ mod tests {
             let _ = stream.read(&mut buffer).unwrap();
             let body = r#"<!doctype html><html><head><style>
                 body { margin: 0 }
-                a { display:block; width:40px; height:40px; background-color:#ff0000 }
-                a:visited { background-color:#00ff00 }
+                a { display:block; width:40px; height:40px; color:#aa0000; background-color:#ff0000 }
+                a:visited { display:none; width:400px; color:#00aa00; background-color:#00ff00 }
                 </style></head><body><a id="link" href="/destination"></a></body></html>"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -5813,11 +5813,15 @@ mod tests {
 
         let query = || {
             json!({
-                "expression": "(() => { const a = document.getElementById('link'); return [getComputedStyle(a).backgroundColor, a.matches(':visited'), a.matches(':link')].join('|') })()",
+                "expression": "(() => { const a = document.getElementById('link'); const s = getComputedStyle(a); return [s.color, s.backgroundColor, s.display, s.width, a.offsetWidth, a.getBoundingClientRect().width, a.matches(':visited'), a.matches(':link')].join('|') })()",
                 "returnByValue": true,
             })
         };
         let before = session.dispatch("Runtime.evaluate", query()).unwrap();
+        assert_eq!(
+            before["result"]["value"],
+            "rgb(170, 0, 0)|rgb(255, 0, 0)|block|40px|40|40|false|true"
+        );
         assert_eq!(
             session
                 .runtime
