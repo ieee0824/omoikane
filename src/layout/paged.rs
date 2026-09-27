@@ -52,6 +52,22 @@ impl PagedPage {
     /// Other generated-content expressions remain available from `style` for
     /// later image and counter-style support.
     pub fn margin_box_text(&self, margin_box: PageMarginBox) -> Option<String> {
+        let fragments = self.margin_box_fragments(margin_box)?;
+        let mut text = String::new();
+        for fragment in fragments {
+            match fragment {
+                PageMarginFragment::Text(part) => text.push_str(&part),
+                PageMarginFragment::Image(_) => return None,
+            }
+        }
+        Some(text)
+    }
+
+    /// Resolves the ordered text and image sources in one page-margin box.
+    pub fn margin_box_fragments(
+        &self,
+        margin_box: PageMarginBox,
+    ) -> Option<Vec<PageMarginFragment>> {
         let mut page = self.counters.page;
         if let Some(resets) = self
             .style
@@ -75,37 +91,81 @@ impl PagedPage {
                 }
             }
         }
-        match self.style.margin_box_content(margin_box)? {
-            PageMarginContent::Text(text) => Some(text),
+        let content = self.style.margin_box_content(margin_box)?;
+        let mut fragments = Vec::new();
+        match content {
+            PageMarginContent::Text(text) => fragments.push(PageMarginFragment::Text(text)),
             PageMarginContent::Expression(value) => {
-                page_content_text(&value, page, self.counters.pages)
+                page_content_fragments(&value, page, self.counters.pages, &mut fragments)?;
             }
         }
+        let mut combined = Vec::with_capacity(fragments.len());
+        for fragment in fragments {
+            match fragment {
+                PageMarginFragment::Text(text) => {
+                    if let Some(PageMarginFragment::Text(previous)) = combined.last_mut() {
+                        previous.push_str(&text);
+                    } else {
+                        combined.push(PageMarginFragment::Text(text));
+                    }
+                }
+                image => combined.push(image),
+            }
+        }
+        Some(combined)
     }
 }
 
-fn page_content_text(value: &Value, page: i32, pages: usize) -> Option<String> {
+/// One resolved part of generated page-margin content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageMarginFragment {
+    /// Text after string and counter evaluation.
+    Text(String),
+    /// URL to an image, before base-URL resolution and decoding.
+    Image(String),
+}
+
+fn page_content_fragments(
+    value: &Value,
+    page: i32,
+    pages: usize,
+    fragments: &mut Vec<PageMarginFragment>,
+) -> Option<()> {
     match value {
-        Value::String(text) => Some(text.clone()),
+        Value::String(text) => fragments.push(PageMarginFragment::Text(text.clone())),
         Value::List(parts) => {
-            let mut text = String::new();
             for part in parts {
-                text.push_str(&page_content_text(part, page, pages)?);
+                page_content_fragments(part, page, pages, fragments)?;
             }
-            Some(text)
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("counter") => {
             let [Value::Keyword(counter)] = arguments.as_slice() else {
                 return None;
             };
-            match counter.as_str() {
-                "page" => Some(page.to_string()),
-                "pages" => Some(pages.to_string()),
-                _ => None,
-            }
+            let text = match counter.as_str() {
+                "page" => page.to_string(),
+                "pages" => pages.to_string(),
+                _ => return None,
+            };
+            fragments.push(PageMarginFragment::Text(text));
         }
-        _ => None,
+        Value::Keyword(keyword)
+            if keyword
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("url("))
+                && keyword.ends_with(')') =>
+        {
+            let source = keyword[4..keyword.len() - 1]
+                .trim()
+                .trim_matches(['\'', '"']);
+            if source.is_empty() {
+                return None;
+            }
+            fragments.push(PageMarginFragment::Image(source.to_string()));
+        }
+        _ => return None,
     }
+    Some(())
 }
 
 /// Print layout with page-specific contexts and a reusable document box tree.
@@ -401,20 +461,9 @@ fn edge_margin_box_rects(page: &PagedPage) -> BTreeMap<PageMarginBox, Rect> {
             if page.style.margin_box_content(margin_box).is_none() {
                 return None;
             }
-            let text = page.margin_box_text(margin_box).unwrap_or_default();
             let metrics = FontMetrics::from_font_size(page.style.margin_box_font_size(margin_box));
-            let (min_content, max_content) = if horizontal {
-                let max_content = measure_text_width(&text, metrics);
-                let min_content = super::inline::split_words_preserving_spaces_cjk(&text)
-                    .iter()
-                    .map(|word| measure_text_width(word, metrics))
-                    .fold(0.0f32, f32::max);
-                (min_content, max_content)
-            } else {
-                let lines = text.lines().count().max(1) as f32;
-                let line_height = metrics.ascent + metrics.descent + metrics.line_gap;
-                (line_height, lines * line_height)
-            };
+            let fragments = page.margin_box_fragments(margin_box).unwrap_or_default();
+            let (min_content, max_content) = margin_content_sizes(&fragments, metrics, horizontal);
             let axis_property = if horizontal { "width" } else { "height" };
             let min_property = if horizontal {
                 "min-width"
@@ -483,6 +532,56 @@ fn edge_margin_box_rects(page: &PagedPage) -> BTreeMap<PageMarginBox, Rect> {
         }
     }
     rectangles
+}
+
+fn margin_content_sizes(
+    fragments: &[PageMarginFragment],
+    metrics: FontMetrics,
+    horizontal: bool,
+) -> (f32, f32) {
+    let mut minimum = 0.0f32;
+    let mut maximum = 0.0f32;
+    let mut text_present = false;
+    for fragment in fragments {
+        match fragment {
+            PageMarginFragment::Text(text) => {
+                text_present = true;
+                if horizontal {
+                    maximum += measure_text_width(text, metrics);
+                    minimum = minimum.max(
+                        super::inline::split_words_preserving_spaces_cjk(text)
+                            .iter()
+                            .map(|word| measure_text_width(word, metrics))
+                            .fold(0.0f32, f32::max),
+                    );
+                } else {
+                    let line_height = metrics.ascent + metrics.descent + metrics.line_gap;
+                    minimum = minimum.max(line_height);
+                    maximum = maximum.max(text.lines().count().max(1) as f32 * line_height);
+                }
+            }
+            PageMarginFragment::Image(source) => {
+                if let Some(image) = super::inline::decode_or_fetch_image_asset(source) {
+                    let size = if horizontal {
+                        image.width() as f32
+                    } else {
+                        image.height() as f32
+                    };
+                    minimum = minimum.max(size);
+                    if horizontal {
+                        maximum += size;
+                    } else {
+                        maximum = maximum.max(size);
+                    }
+                }
+            }
+        }
+    }
+    if !horizontal && !text_present && fragments.is_empty() {
+        let line_height = metrics.ascent + metrics.descent + metrics.line_gap;
+        return (line_height, line_height);
+    }
+    (minimum, maximum)
 }
 
 fn fixed_edge_dimension(

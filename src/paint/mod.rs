@@ -139,7 +139,8 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
 use crate::layout::{
-    InlineFragmentContent, LayoutBox, PagedPage, Rect, Visibility, layout_box_style,
+    InlineFragmentContent, LayoutBox, PageMarginFragment, PagedPage, Rect, Visibility,
+    layout_box_style,
 };
 
 // Re-export public types from submodules
@@ -1165,7 +1166,7 @@ pub fn render_document_pages_with_url(
         fonts.clone(),
         web_fonts.map(|_| Arc::clone(&web_font_registry)),
         || {
-            crate::layout::with_image_base_url(effective_base, || {
+            crate::layout::with_image_base_url(effective_base.clone(), || {
                 crate::layout::layout_paged_tree(document, &mut resolver, default_sheet)
             })
         },
@@ -1208,7 +1209,9 @@ pub fn render_document_pages_with_url(
                 &fonts,
                 web_fonts,
             );
-            paint_page_margin_text(&mut canvas, page, &fonts, web_fonts);
+            crate::layout::with_image_base_url(effective_base.clone(), || {
+                paint_page_margin_text(&mut canvas, page, &fonts, web_fonts);
+            });
         });
         canvases.push(canvas);
     }
@@ -1221,11 +1224,16 @@ fn paint_page_margin_text(
     fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
 ) {
+    enum RenderedMarginFragment {
+        Text(String, f32),
+        Image(Image, f32, f32),
+    }
+
     for (&margin_box, &rect) in &page.margin_box_rects {
-        let Some(content) = page.margin_box_text(margin_box) else {
+        let Some(fragments) = page.margin_box_fragments(margin_box) else {
             continue;
         };
-        if content.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
             continue;
         }
         let font_size = page.style.margin_box_font_size(margin_box);
@@ -1261,8 +1269,6 @@ fn paint_page_margin_text(
             candidates.push(selected.as_ref());
         }
         candidates.extend(fonts.iter().map(Arc::as_ref));
-        let text_width =
-            text::measure_form_control_text_width(&content, font_size, &candidates, 0.0);
         let (ascent, line_height) =
             candidates
                 .first()
@@ -1273,6 +1279,44 @@ fn paint_page_margin_text(
                         metrics.ascent + metrics.descent + metrics.line_gap,
                     )
                 });
+        let mut rendered = Vec::with_capacity(fragments.len());
+        let mut row_width = 0.0;
+        let mut row_height = 0.0f32;
+        for fragment in fragments {
+            match fragment {
+                PageMarginFragment::Text(content) if !content.is_empty() => {
+                    let width = text::measure_form_control_text_width(
+                        &content,
+                        font_size,
+                        &candidates,
+                        0.0,
+                    );
+                    row_width += width;
+                    row_height = row_height.max(line_height);
+                    rendered.push(RenderedMarginFragment::Text(content, width));
+                }
+                PageMarginFragment::Image(source) => {
+                    let Some(image) = crate::layout::decode_or_fetch_image_asset(&source) else {
+                        continue;
+                    };
+                    if image.width == 0 || image.height == 0 {
+                        continue;
+                    }
+                    let scale = (rect.width / image.width as f32)
+                        .min(rect.height / image.height as f32)
+                        .min(1.0);
+                    let width = image.width as f32 * scale;
+                    let height = image.height as f32 * scale;
+                    row_width += width;
+                    row_height = row_height.max(height);
+                    rendered.push(RenderedMarginFragment::Image(image, width, height));
+                }
+                PageMarginFragment::Text(_) => {}
+            }
+        }
+        if rendered.is_empty() {
+            continue;
+        }
         let horizontal = page
             .style
             .margin_box_property(margin_box, "text-align")
@@ -1290,47 +1334,65 @@ fn paint_page_margin_text(
             })
             .unwrap_or_else(|| default_page_margin_vertical_align(margin_box));
         let x = match horizontal {
-            "center" => rect.x + (rect.width - text_width) / 2.0,
-            "right" | "end" => rect.x + rect.width - text_width,
+            "center" => rect.x + (rect.width - row_width) / 2.0,
+            "right" | "end" => rect.x + rect.width - row_width,
             _ => rect.x,
         };
         let y = match vertical {
             "top" => rect.y,
-            "bottom" => rect.y + rect.height - line_height,
-            _ => rect.y + (rect.height - line_height) / 2.0,
+            "bottom" => rect.y + rect.height - row_height,
+            _ => rect.y + (rect.height - row_height) / 2.0,
         };
         let color = property("color")
             .as_deref()
             .and_then(color::parse_color)
             .unwrap_or(Color::rgb(0, 0, 0));
-        let text_rect = Rect {
-            x,
-            y,
-            width: text_width,
-            height: line_height,
-        };
-        if candidates.is_empty() {
-            text::paint_text_placeholder(
-                canvas,
-                text_rect,
-                &content,
-                font_size,
-                color,
-                Some(rect),
-                0.0,
-            );
-        } else {
-            text::paint_text_with_font_refs(
-                canvas,
-                text_rect,
-                &content,
-                font_size,
-                ascent,
-                &candidates,
-                color,
-                Some(rect),
-                0.0,
-            );
+        let mut fragment_x = x;
+        for fragment in rendered {
+            match fragment {
+                RenderedMarginFragment::Text(content, width) => {
+                    let text_rect = Rect {
+                        x: fragment_x,
+                        y: y + (row_height - line_height) / 2.0,
+                        width,
+                        height: line_height,
+                    };
+                    if candidates.is_empty() {
+                        text::paint_text_placeholder(
+                            canvas,
+                            text_rect,
+                            &content,
+                            font_size,
+                            color,
+                            Some(rect),
+                            0.0,
+                        );
+                    } else {
+                        text::paint_text_with_font_refs(
+                            canvas,
+                            text_rect,
+                            &content,
+                            font_size,
+                            ascent,
+                            &candidates,
+                            color,
+                            Some(rect),
+                            0.0,
+                        );
+                    }
+                    fragment_x += width;
+                }
+                RenderedMarginFragment::Image(image, width, height) => {
+                    let destination = Rect {
+                        x: fragment_x,
+                        y: y + (row_height - height) / 2.0,
+                        width,
+                        height,
+                    };
+                    canvas.draw_image_scaled_clipped(&image, destination, Some(rect));
+                    fragment_x += width;
+                }
+            }
         }
     }
 }

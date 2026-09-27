@@ -33,7 +33,7 @@ mod paged;
 mod shapes;
 mod table;
 
-pub use paged::{PagedLayout, PagedPage, layout_paged_tree};
+pub use paged::{PageMarginFragment, PagedLayout, PagedPage, layout_paged_tree};
 
 use flex::{is_flex_container, layout_flex_container};
 use grid::{is_grid_container, layout_grid_container};
