@@ -48,20 +48,17 @@ jobs:
       - name: Verify benchmark reference result validation
         run: python3 -m unittest discover -s scripts/tests -p 'test_benchmark_reference.py'
       - name: Run all tests (including ignored)
+        env:
+          OMOIKANE_JS_BENCH_REPORT: .artifacts/js-benchmark/report.json
         run: cargo test --locked -- --include-ignored
       - name: Run Gate 2 differential harness
         run: cargo test --locked --features jit-differential --test jit_differential
 
       # Native JIT contracts run in jit-native.yml on all three distribution targets.
       - run: cargo build --locked
-      # Re-run the JS benchmark with output shown: libtest swallows stdout for
-      # passing tests, so the per-shape table and the drift classification would
-      # otherwise never be visible. The build is already warm from the step
-      # above and the benchmark itself takes about a second.
+      # The full run already executes js_benchmark; display its saved result.
       - name: Report JS execution benchmark
-        env:
-          OMOIKANE_JS_BENCH_REPORT: .artifacts/js-benchmark/report.json
-        run: cargo test --locked --test js_benchmark -- --nocapture
+        run: python3 scripts/report-js-benchmark.py .artifacts/js-benchmark/report.json
       - name: Upload JS benchmark report
         if: always()
         uses: actions/upload-artifact@v4
