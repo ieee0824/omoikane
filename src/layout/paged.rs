@@ -1,8 +1,9 @@
 //! Page contexts and source fragments for print layout.
 
+use crate::css::style::counter_pairs;
 use crate::css::{
-    ComputedValue, MediaType, PageBoxGeometry, PageSelectorContext, PageSide, ResolvedPageStyle,
-    StyleResolver,
+    ComputedValue, MediaType, PageBoxGeometry, PageMarginBox, PageMarginContent,
+    PageSelectorContext, PageSide, ResolvedPageStyle, StyleResolver, Value,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 
@@ -23,6 +24,79 @@ pub struct PagedPage {
     pub content: Rect,
     /// Slice of the continuous source flow placed on this page.
     pub source: Rect,
+    /// Page-scoped counter values after this page is generated.
+    pub counters: PageCounterValues,
+}
+
+/// Built-in counters available to printed page-margin boxes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageCounterValues {
+    /// The current value of the mutable `page` counter.
+    pub page: i32,
+    /// The read-only total number of printed pages.
+    pub pages: usize,
+}
+
+impl PagedPage {
+    /// Resolves static text and `counter(page)` / `counter(pages)` in one margin box.
+    ///
+    /// Other generated-content expressions remain available from `style` for
+    /// later image and counter-style support.
+    pub fn margin_box_text(&self, margin_box: PageMarginBox) -> Option<String> {
+        let mut page = self.counters.page;
+        if let Some(resets) = self
+            .style
+            .margin_box_property(margin_box, "counter-reset")
+            .and_then(|value| counter_pairs(value, 0))
+        {
+            for (name, value) in resets {
+                if name == "page" {
+                    page = value;
+                }
+            }
+        }
+        if let Some(increments) = self
+            .style
+            .margin_box_property(margin_box, "counter-increment")
+            .and_then(|value| counter_pairs(value, 1))
+        {
+            for (name, amount) in increments {
+                if name == "page" {
+                    page = page.saturating_add(amount);
+                }
+            }
+        }
+        match self.style.margin_box_content(margin_box)? {
+            PageMarginContent::Text(text) => Some(text),
+            PageMarginContent::Expression(value) => {
+                page_content_text(&value, page, self.counters.pages)
+            }
+        }
+    }
+}
+
+fn page_content_text(value: &Value, page: i32, pages: usize) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::List(parts) => {
+            let mut text = String::new();
+            for part in parts {
+                text.push_str(&page_content_text(part, page, pages)?);
+            }
+            Some(text)
+        }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("counter") => {
+            let [Value::Keyword(counter)] = arguments.as_slice() else {
+                return None;
+            };
+            match counter.as_str() {
+                "page" => Some(page.to_string()),
+                "pages" => Some(pages.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Print layout with page-specific contexts and a reusable document box tree.
@@ -111,12 +185,48 @@ pub fn layout_paged_tree(
                     width: first_content.width,
                     height: (end - start).max(0.0),
                 },
+                counters: PageCounterValues { page: 0, pages: 0 },
             });
             if end >= section.end {
                 break;
             }
             start = end;
         }
+    }
+    let total_pages = pages.len();
+    let mut page_counter = 0i32;
+    for page in &mut pages {
+        if let Some(resets) = page
+            .style
+            .get("counter-reset")
+            .and_then(|value| counter_pairs(value, 0))
+        {
+            for (name, value) in resets {
+                if name == "page" {
+                    page_counter = value;
+                }
+            }
+        }
+        let mut explicit_page_increment = false;
+        if let Some(increments) = page
+            .style
+            .get("counter-increment")
+            .and_then(|value| counter_pairs(value, 1))
+        {
+            for (name, amount) in increments {
+                if name == "page" {
+                    page_counter = page_counter.saturating_add(amount);
+                    explicit_page_increment = true;
+                }
+            }
+        }
+        if !explicit_page_increment {
+            page_counter = page_counter.saturating_add(1);
+        }
+        page.counters = PageCounterValues {
+            page: page_counter,
+            pages: total_pages,
+        };
     }
     Some(PagedLayout { layout, pages })
 }
@@ -356,5 +466,121 @@ mod tests {
         .unwrap();
         assert_eq!(paged.pages[0].selector.side, PageSide::Left);
         assert_eq!(paged.pages[0].content.x, 11.0);
+    }
+
+    #[test]
+    fn page_margin_counters_use_current_and_final_page_count() {
+        let (document, first, _) = document_with_two_boxes();
+        first.set_attribute("style", "height: 250px");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "body { margin: 0 } @page { margin: 0; \
+                 @top-center { content: 'Page ' counter(page) ' / ' counter(pages) } }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 100.0,
+                height: 100.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert!(paged.pages.len() >= 3);
+        for (index, page) in paged.pages.iter().enumerate() {
+            assert_eq!(page.counters.page, (index + 1) as i32);
+            assert_eq!(page.counters.pages, paged.pages.len());
+            assert_eq!(
+                page.margin_box_text(PageMarginBox::TopCenter),
+                Some(format!("Page {} / {}", index + 1, paged.pages.len()))
+            );
+        }
+    }
+
+    #[test]
+    fn page_counter_reset_and_increment_do_not_change_total_pages() {
+        let (document, first, _) = document_with_two_boxes();
+        first.set_attribute("style", "height: 250px");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "body { margin: 0 } \
+                 @page { margin: 0; counter-reset: pages 99; \
+                         counter-increment: page 2 pages 8; \
+                         @top-center { content: counter(page) '/' counter(pages) } } \
+                 @page :first { counter-reset: page 4 pages 500 }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 100.0,
+                height: 100.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert!(paged.pages.len() >= 3);
+        for (index, page) in paged.pages.iter().enumerate() {
+            assert_eq!(page.counters.page, 6 + index as i32 * 2);
+            assert_eq!(page.counters.pages, paged.pages.len());
+            assert_eq!(
+                page.margin_box_text(PageMarginBox::TopCenter),
+                Some(format!("{}/{}", 6 + index as i32 * 2, paged.pages.len()))
+            );
+        }
+    }
+
+    #[test]
+    fn named_and_left_pages_keep_margin_counter_scope_local() {
+        let (document, first, second) = document_with_two_boxes();
+        first.set_attribute("style", "page: a");
+        second.set_attribute("style", "page: b");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "body { margin: 0 } div { width: 20px; height: 20px } \
+                 @page a:right { @top-center { content: 'A' counter(page) '/' counter(pages) } } \
+                 @page b:left { counter-reset: page 20; \
+                   @top-center { counter-increment: page 2 pages 77; \
+                                 content: 'B' counter(page) '/' counter(pages) } \
+                   @top-left { counter-reset: page 7; content: counter(page) } }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 400.0,
+                height: 400.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.pages.len(), 2);
+        assert_eq!(
+            paged.pages[0].margin_box_text(PageMarginBox::TopCenter),
+            Some("A1/2".into())
+        );
+        assert_eq!(paged.pages[1].counters.page, 21);
+        assert_eq!(
+            paged.pages[1].margin_box_text(PageMarginBox::TopCenter),
+            Some("B23/2".into())
+        );
+        assert_eq!(
+            paged.pages[1].margin_box_text(PageMarginBox::TopLeft),
+            Some("7".into())
+        );
+        assert_eq!(paged.pages[1].counters.page, 21);
     }
 }
