@@ -19,7 +19,7 @@ use super::{
 };
 
 /// Increment whenever the meaning or encoding of a contract field changes.
-pub const BYTECODE_CONTRACT_VERSION: u32 = 2;
+pub const BYTECODE_CONTRACT_VERSION: u32 = 3;
 
 /// A scalar operand copied out of the private instruction representation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -291,16 +291,6 @@ impl BytecodeContract<'_> {
                     });
                 }
                 if operand.name == "binding_index" && value >= binding_count {
-                    return Err(BytecodeContractError::BindingOutOfBounds {
-                        offset,
-                        binding: value,
-                        count: binding_count,
-                    });
-                }
-                if opcode.as_str() == "ThisForObjectEnvironmentName"
-                    && operand.name == "index"
-                    && value >= binding_count
-                {
                     return Err(BytecodeContractError::BindingOutOfBounds {
                         offset,
                         binding: value,
@@ -708,57 +698,57 @@ mod tests {
             (
                 "arith",
                 "var s=1; for(var i=0;i<8;i++) s=(s+i*3)%17; s",
-                0x29ff_67e8_a3dc_404f,
+                0xa3c3_63ec_37d7_696c,
             ),
             (
                 "prop-mono",
                 "var o={a:1,b:2}; for(var i=0;i<8;i++){o.b=o.a+i} o.b",
-                0x55f9_89d9_e729_bb23,
+                0x6f0d_c423_ba81_0d00,
             ),
             (
                 "prop-mega",
                 "var a=[{x:1},{y:0,x:2}]; var s=0; for(var i=0;i<8;i++)s+=a[i&1].x; s",
-                0xba65_f4a5_b1d8_b25c,
+                0x2f8b_e044_f704_2def,
             ),
             (
                 "call",
                 "function add(a,b){return a+b} var s=0; for(var i=0;i<8;i++)s=add(s,1); s",
-                0x7df6_a4a2_cbe9_98e6,
+                0x5ac8_5afc_51e5_955b,
             ),
             (
                 "closure-alloc",
                 "var s=0; for(var i=0;i<8;i++){var f=function(x){return x+i};s=f(s)} s",
-                0xca56_8c12_652b_8075,
+                0x8326_0298_fe1d_fef2,
             ),
             (
                 "object-alloc",
                 "var s=0; for(var i=0;i<8;i++){var o={x:i,y:i+1};s+=o.x+o.y} s",
-                0x4d52_d5d7_8158_0ec9,
+                0x7de7_cf78_dd16_cbba,
             ),
             (
                 "string-concat",
                 "var s=''; for(var i=0;i<8;i++)s+='ab'; s.length",
-                0x9570_86e9_c451_5e04,
+                0x28ad_bbee_18a0_11ef,
             ),
             (
                 "array",
                 "var a=[]; for(var i=0;i<8;i++)a.push(i); a[3]",
-                0x1a5e_712a_ff0c_8efd,
+                0x0b47_8fad_6b7c_be1e,
             ),
             (
                 "primitive-string-property",
                 "var s=0; for(var i=0;i<8;i++)s+='abc'.length; s",
-                0x98b5_6c72_29c5_7983,
+                0x4118_8963_07d1_c536,
             ),
             (
                 "primitive-string-method",
                 "var s=0; for(var i=0;i<8;i++)s+='abc'.charCodeAt(i&2); s",
-                0x27a1_6d90_9cb9_5fac,
+                0x7abf_ad91_2eec_c491,
             ),
             (
                 "proto-method",
                 "function B(){} B.prototype.at=function(i){return i&3}; var o=new B(); o.at(2)",
-                0x9663_8d0c_eacf_137f,
+                0xa5bc_f4f6_aee8_8444,
             ),
         ];
         let mut mismatches = Vec::new();
@@ -882,13 +872,20 @@ mod tests {
         ));
 
         let mut emitter = super::super::opcode::ByteCodeEmitter::new();
-        emitter
-            .emit_this_for_object_environment_name(VaryingOperand::new(0), VaryingOperand::new(0));
+        emitter.emit_get_name_and_locator(VaryingOperand::new(0), VaryingOperand::new(0));
         code.bytecode = emitter.into_bytecode();
         assert!(matches!(
             code.bytecode_contract().verify(),
             Err(BytecodeContractError::BindingOutOfBounds { .. })
         ));
+
+        let mut emitter = super::super::opcode::ByteCodeEmitter::new();
+        emitter.emit_this_for_object_environment_name(VaryingOperand::new(0));
+        code.bytecode = emitter.into_bytecode();
+        let instructions = code.bytecode_contract().verify().unwrap().instructions;
+        assert_eq!(instructions[0].name, "ThisForObjectEnvironmentName");
+        assert_eq!(instructions[0].operands.len(), 1);
+        assert_eq!(instructions[0].operands[0].name, "dst");
     }
 
     #[test]
