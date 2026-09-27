@@ -3512,6 +3512,8 @@ fn resolve_content_height(
     let pb_vertical = padding.vertical() + border.vertical();
     let auto_height = if has_block_size_containment(style) {
         contain_intrinsic_axis_size(node, style, "contain-intrinsic-height", 1)
+    } else if node.tag_name().as_deref() == Some("iframe") {
+        150.0
     } else {
         (cursor_y - y).max(0.0)
     };
@@ -3726,7 +3728,11 @@ fn compute_width(
             margin.right = 0.0;
         }
 
-        (containing_width - pb_horizontal - margin.horizontal()).max(0.0)
+        if node.tag_name().as_deref() == Some("iframe") {
+            300.0
+        } else {
+            (containing_width - pb_horizontal - margin.horizontal()).max(0.0)
+        }
     };
 
     // For border-box, min-width / max-width also refer to the outer (border)
@@ -4418,6 +4424,9 @@ fn minimum_content_width_inner(
                     + border.horizontal()
                     + margin;
             }
+            if node.tag_name().as_deref() == Some("iframe") {
+                return 300.0 + padding.horizontal() + border.horizontal();
+            }
             // For images, use rendered size.
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);
@@ -4486,6 +4495,9 @@ fn intrinsic_width_inner(
                     + padding.horizontal()
                     + border.horizontal()
                     + margin;
+            }
+            if node.tag_name().as_deref() == Some("iframe") {
+                return 300.0 + padding.horizontal() + border.horizontal();
             }
             if let Some((image_node, image)) = element_inline_image(node) {
                 let image_style = resolver.computed_style(&image_node);
