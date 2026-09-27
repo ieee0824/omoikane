@@ -8056,9 +8056,11 @@
   }
   const nativeChildNavigation = globalThis.__omoikane_child_navigation;
   const nativeIframeDocumentURL = globalThis.__omoikane_iframe_document_url;
+  const nativeCommitIframeFragment = globalThis.__omoikane_commit_iframe_fragment;
   const nativeRegisterIframeNavigation = globalThis.__omoikane_register_iframe_navigation;
   delete globalThis.__omoikane_child_navigation;
   delete globalThis.__omoikane_iframe_document_url;
+  delete globalThis.__omoikane_commit_iframe_fragment;
   delete globalThis.__omoikane_register_iframe_navigation;
   const iframeChildNavigators = new WeakMap();
   const iframeWindowProxyRetirers = new WeakMap();
@@ -8392,6 +8394,16 @@
           }
           return activeWindow;
         };
+        const dispatchWindowEvent = event => {
+          if (access === "same") {
+            proxy.dispatchEvent(event);
+          } else {
+            // Cross-origin WindowProxy event APIs are not readable by the parent.
+            // An already-live child Realm can still receive its own event.
+            const global = getActiveWindow(false);
+            if (typeof global.dispatchEvent === "function") global.dispatchEvent(event);
+          }
+        };
         const captureActiveHistory = () => {
           if (pendingHistoryAction !== null) return;
           refresh();
@@ -8417,6 +8429,32 @@
           // top-level realm, so its Document URL is the relevant base. History
           // state URLs deliberately continue to use the target Document below.
           const destination = new URL(String(value), callerBaseURL()).href;
+          const currentDocument = childNavigationDocument ||
+            (access === "same" ? iframe.contentDocument : null);
+          const currentURL = currentDocument ? currentDocument.URL : nativeIframeDocumentURL(iframe.__id);
+          if (currentURL && currentURL.split("#", 1)[0] === destination.split("#", 1)[0]) {
+            if (currentURL === destination) return;
+            captureActiveHistory();
+            nativeCommitIframeFragment(iframe.__id, destination);
+            const entry = { ...historyEntries[historyIndex], href: destination,
+              state: null, generation: activeGeneration };
+            if (disposition === "replace") {
+              historyEntries[historyIndex] = entry;
+            } else {
+              historyEntries.splice(historyIndex + 1);
+              historyEntries.push(entry);
+              historyIndex = historyEntries.length - 1;
+            }
+            if (currentDocument) {
+              safeWeakMapSet(documentHistoryURLs,
+                safeWeakMapGet(nodeEventStates, currentDocument), destination);
+            }
+            const event = new Event("hashchange");
+            event.oldURL = currentURL;
+            event.newURL = destination;
+            dispatchWindowEvent(event);
+            return;
+          }
           captureActiveHistory();
           dispatchIframeNavigationDeparture(iframe);
           pendingHistoryAction = disposition;
@@ -8470,9 +8508,13 @@
           const target = historyIndex + Math.trunc(amount);
           if (target < 0 || target >= historyEntries.length || target === historyIndex) return;
           captureActiveHistory();
+          const previousURL = historyEntries[historyIndex].href;
           const entry = historyEntries[target];
-          historyIndex = target;
           if (entry.generation === activeGeneration) {
+            const fragmentChanged = previousURL.split("#", 1)[0] === entry.href.split("#", 1)[0] &&
+              previousURL !== entry.href;
+            if (fragmentChanged) nativeCommitIframeFragment(iframe.__id, entry.href);
+            historyIndex = target;
             const currentDocument = childNavigationDocument || iframe.contentDocument;
             if (currentDocument) {
               safeWeakMapSet(documentHistoryURLs, safeWeakMapGet(nodeEventStates, currentDocument), entry.href);
@@ -8480,9 +8522,16 @@
             restoreHistoryState(entry, false);
             const event = new Event("popstate");
             event.state = globalThis.structuredClone(entry.state);
-            proxy.dispatchEvent(event);
+            dispatchWindowEvent(event);
+            if (fragmentChanged) {
+              const hashEvent = new Event("hashchange");
+              hashEvent.oldURL = previousURL;
+              hashEvent.newURL = entry.href;
+              dispatchWindowEvent(hashEvent);
+            }
             return;
           }
+          historyIndex = target;
           dispatchIframeNavigationDeparture(iframe);
           pendingHistoryAction = "traverse";
           if (entry.submission !== null) {
