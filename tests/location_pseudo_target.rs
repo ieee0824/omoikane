@@ -247,3 +247,44 @@ fn iframe_initial_url_fragment_selects_its_own_target() {
         ])
     );
 }
+
+#[test]
+fn target_remains_selected_after_id_and_tree_mutations() {
+    let document = TreeBuilder::parse(
+        r#"<html><head><style>:target { color: rgb(13, 42, 71) }</style></head>
+           <body><div id="fragment"></div><a name="fragment"></a></body></html>"#,
+    )
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/page#fragment").unwrap();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const first = document.querySelector('div');
+                const fallback = document.querySelector('a');
+                if (document.querySelector(':target') !== first) return 'initial';
+                first.id = 'renamed';
+                if (document.querySelector(':target') !== first ||
+                    getComputedStyle(first).color !== 'rgb(13, 42, 71)' ||
+                    fallback.matches(':target')) return 'renamed';
+                const replacement = document.createElement('div');
+                replacement.id = 'fragment';
+                document.body.appendChild(replacement);
+                if (document.querySelector(':target') !== first ||
+                    replacement.matches(':target')) return 'inserted';
+                first.remove();
+                if (document.querySelector(':target') !== null ||
+                    !first.matches(':target')) return 'removed';
+                document.body.appendChild(first);
+                if (document.querySelector(':target') !== first) return 'reinserted';
+                return 'ok';
+            })()"#,
+        )
+        .unwrap();
+    assert_eq!(
+        result
+            .as_string()
+            .map(|value| value.to_std_string_escaped()),
+        Some("ok".to_string())
+    );
+}
