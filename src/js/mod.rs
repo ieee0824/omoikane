@@ -2981,6 +2981,7 @@ impl HostState {
                     Some((mime_type, data, Vec::new(), Some(src.to_string())))
                 }
                 Some(ResolvedResource::Url(url)) => {
+                    let requested_fragment = src.split_once('#').map(|(_, fragment)| fragment);
                     let response =
                         crate::http::HttpRequest::get(&url)
                             .ok()
@@ -3000,10 +3001,17 @@ impl HostState {
                             })
                             .map(|(_, value)| value.clone())
                             .collect();
-                        let effective_url = resp
+                        let mut effective_url = resp
                             .effective_url()
                             .map(ToString::to_string)
                             .or_else(|| Some(url.to_string()));
+                        if let (Some(fragment), Some(effective_url)) =
+                            (requested_fragment, effective_url.as_mut())
+                            && !effective_url.contains('#')
+                        {
+                            effective_url.push('#');
+                            effective_url.push_str(fragment);
+                        }
                         (mime, resp.body().to_vec(), csp_headers, effective_url)
                     })
                 }

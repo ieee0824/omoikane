@@ -133,5 +133,45 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
             })
         }),
     )?;
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_commit_iframe_fragment"),
+        2,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            let frame = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, frame)?;
+            let url = args
+                .get(1)
+                .ok_or_else(|| JsNativeError::typ().with_message("iframe URL required"))?
+                .to_string(context)?
+                .to_std_string_escaped();
+            with_host_state(|host| {
+                let mut state = host.borrow_mut();
+                let entry = state.iframe_documents.get(&frame).ok_or_else(|| {
+                    JsNativeError::typ().with_message("iframe is no longer active")
+                })?;
+                let document = entry.document.clone();
+                let previous_url =
+                    state
+                        .document_urls
+                        .get(&document.identity())
+                        .ok_or_else(|| {
+                            JsNativeError::typ().with_message("Document URL is no longer active")
+                        })?;
+                if previous_url.split('#').next() != url.split('#').next() {
+                    return Err(JsNativeError::typ()
+                        .with_message("iframe navigation is not fragment-only")
+                        .into());
+                }
+                state.document_urls.insert(document.identity(), url.clone());
+                if let Some(entry) = state.iframe_documents.get_mut(&frame) {
+                    entry.document_url = url.clone();
+                }
+                state.update_document_target(&document, &url);
+                Ok(JsValue::undefined())
+            })
+        }),
+    )?;
     Ok(())
 }
