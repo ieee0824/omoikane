@@ -39,6 +39,7 @@ OmoikaneはRustで開発するブラウザエンジンです。HTTP、HTML/CSS�
 - ローカルIssueは今後作成・運用しない。`issues/` は過去の記録を参照するためのアーカイブとし、進捗は移行先のGitHub Issueへ記録する。
 - 子IssueはGitHub上で親Issueとの関係を明記し、親からリンクする。親Issueは子Issueがすべて完了してから閉じる。
 - Issueを追加する前にGitHubのopen/closed Issueを検索し、重複を避ける。完了条件を満たし、検証結果を該当Issue・PRへ記録してから閉じる。
+- 本家Boaなど外部リポジトリのIssue・PRを本文やコメントで参照する際は、相手側に逆参照を増やさないよう `https://redirect.github.com/<owner>/<repo>/issues/<番号>` または `https://redirect.github.com/<owner>/<repo>/pull/<番号>` を使う。通常のGitHub URLや `owner/repo#番号` による参照は避ける。Omoikane内のIssue・PR間のリンクはこの対象外とし、既存の逆参照履歴はURLを書き換えても消えない。
 
 ## 作業環境・証跡の管理
 
