@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import re
 from pathlib import Path
 import subprocess
 
@@ -66,8 +67,17 @@ def main() -> int:
         check=True,
     )
 
-    reference_pages = sorted(args.output_dir.glob("firefox-*.png"))
-    actual_pages = sorted(args.actual_dir.glob("page-*.png"))
+    def numbered_pages(directory: Path, prefix: str) -> list[Path]:
+        pattern = re.compile(rf"{re.escape(prefix)}-(\d+)\.png")
+        pages = (
+            (int(match.group(1)), path)
+            for path in directory.glob(f"{prefix}-*.png")
+            if (match := pattern.fullmatch(path.name)) is not None
+        )
+        return [path for _, path in sorted(pages)]
+
+    reference_pages = numbered_pages(args.output_dir, "firefox")
+    actual_pages = numbered_pages(args.actual_dir, "page")
     results = []
     for index, (actual_path, reference_path) in enumerate(
         zip(actual_pages, reference_pages, strict=True), start=1
