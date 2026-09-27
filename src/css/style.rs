@@ -2,7 +2,9 @@
 
 mod page;
 
-pub use page::{PageBoxGeometry, PageSelectorContext, PageSide, ResolvedPageStyle};
+pub use page::{
+    PageBoxGeometry, PageMarginContent, PageSelectorContext, PageSide, ResolvedPageStyle,
+};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
