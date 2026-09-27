@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<style>
+  html, body { margin: 0; padding: 0 }
+  body { font-family: sans-serif }
+  @page {
+    size: 200px 200px;
+    margin: 40px;
+    color: #aa0000;
+    font-size: 12px;
+    @top-left { content: "TOP"; font-size: 18px; color: #ff0000 }
+    @top-center { content: "CENTER"; font-size: 10px; color: #0000ff }
+    @top-right { content: "RIGHT"; font-size: 10px; color: #aa00aa; text-align: left }
+    @left-middle { content: "LEFT"; color: #00aa00 }
+    @right-middle { content: "SIDE"; color: #aa6600; vertical-align: top }
+    @bottom-left { content: "I" }
+    @bottom-center { content: "Page " counter(page); color: #000000 }
+  }
+  main { width: 60px; height: 20px; background: #eeeeee }
+</style>
+</head>
+<body><main></main></body>
+</html>

@@ -132,12 +132,15 @@ fn force_opacity_enabled() -> bool {
 use base64::Engine;
 
 use crate::css::{
-    AffineTransform, ComputedStyle, ComputedValue, MediaType, Origin, PseudoElement, StyleResolver,
+    AffineTransform, ComputedStyle, ComputedValue, MediaType, Origin, PageMarginBox, PseudoElement,
+    StyleResolver, Value,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
-use crate::layout::{InlineFragmentContent, LayoutBox, Rect, Visibility, layout_box_style};
+use crate::layout::{
+    InlineFragmentContent, LayoutBox, PagedPage, Rect, Visibility, layout_box_style,
+};
 
 // Re-export public types from submodules
 pub use color::Color;
@@ -1205,10 +1208,149 @@ pub fn render_document_pages_with_url(
                 &fonts,
                 web_fonts,
             );
+            paint_page_margin_text(&mut canvas, page, &fonts, web_fonts);
         });
         canvases.push(canvas);
     }
     Ok(canvases)
+}
+
+fn paint_page_margin_text(
+    canvas: &mut Canvas,
+    page: &PagedPage,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+) {
+    for (&margin_box, &rect) in &page.margin_box_rects {
+        let Some(content) = page.margin_box_text(margin_box) else {
+            continue;
+        };
+        if content.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            continue;
+        }
+        let font_size = page.style.margin_box_font_size(margin_box);
+        if font_size <= 0.0 {
+            continue;
+        }
+        let property = |name| {
+            page.style
+                .margin_box_property(margin_box, name)
+                .filter(|value| !matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("inherit") || keyword.eq_ignore_ascii_case("unset")))
+                .or_else(|| page.style.get(name))
+                .map(crate::css::serialize_specified_value)
+        };
+        let family = property("font-family").map(|family| crate::font::FontFamilyKey::new(&family));
+        let weight = property("font-weight")
+            .map(|value| crate::font::FontWeight::parse(&value))
+            .unwrap_or_default();
+        let font_style = property("font-style").unwrap_or_else(|| "normal".to_string());
+        let stretch = property("font-stretch")
+            .map(|value| crate::font::FontStretch::parse(&value))
+            .unwrap_or_default();
+        let variant = crate::font::FontVariantKey::from_css(weight, &font_style, stretch);
+        let selected = crate::font::select_text_font(
+            "page margin paint",
+            family,
+            None,
+            variant,
+            web_fonts,
+            fonts,
+        );
+        let mut candidates = Vec::with_capacity(fonts.len() + usize::from(selected.is_some()));
+        if let Some(selected) = selected.as_ref() {
+            candidates.push(selected.as_ref());
+        }
+        candidates.extend(fonts.iter().map(Arc::as_ref));
+        let text_width =
+            text::measure_form_control_text_width(&content, font_size, &candidates, 0.0);
+        let (ascent, line_height) =
+            candidates
+                .first()
+                .map_or((font_size * 0.8, font_size * 1.2), |font| {
+                    let metrics = font.layout_metrics(font_size);
+                    (
+                        metrics.ascent,
+                        metrics.ascent + metrics.descent + metrics.line_gap,
+                    )
+                });
+        let horizontal = page
+            .style
+            .margin_box_property(margin_box, "text-align")
+            .and_then(|value| match value {
+                Value::Keyword(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| default_page_margin_text_align(margin_box));
+        let vertical = page
+            .style
+            .margin_box_property(margin_box, "vertical-align")
+            .and_then(|value| match value {
+                Value::Keyword(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| default_page_margin_vertical_align(margin_box));
+        let x = match horizontal {
+            "center" => rect.x + (rect.width - text_width) / 2.0,
+            "right" | "end" => rect.x + rect.width - text_width,
+            _ => rect.x,
+        };
+        let y = match vertical {
+            "top" => rect.y,
+            "bottom" => rect.y + rect.height - line_height,
+            _ => rect.y + (rect.height - line_height) / 2.0,
+        };
+        let color = property("color")
+            .as_deref()
+            .and_then(color::parse_color)
+            .unwrap_or(Color::rgb(0, 0, 0));
+        let text_rect = Rect {
+            x,
+            y,
+            width: text_width,
+            height: line_height,
+        };
+        if candidates.is_empty() {
+            text::paint_text_placeholder(
+                canvas,
+                text_rect,
+                &content,
+                font_size,
+                color,
+                Some(rect),
+                0.0,
+            );
+        } else {
+            text::paint_text_with_font_refs(
+                canvas,
+                text_rect,
+                &content,
+                font_size,
+                ascent,
+                &candidates,
+                color,
+                Some(rect),
+                0.0,
+            );
+        }
+    }
+}
+
+fn default_page_margin_text_align(margin_box: PageMarginBox) -> &'static str {
+    match margin_box {
+        PageMarginBox::TopLeftCorner | PageMarginBox::BottomLeftCorner => "right",
+        PageMarginBox::TopRightCorner | PageMarginBox::BottomRightCorner => "left",
+        PageMarginBox::TopLeft | PageMarginBox::BottomLeft => "left",
+        PageMarginBox::TopRight | PageMarginBox::BottomRight => "right",
+        _ => "center",
+    }
+}
+
+fn default_page_margin_vertical_align(margin_box: PageMarginBox) -> &'static str {
+    match margin_box {
+        PageMarginBox::LeftTop | PageMarginBox::RightTop => "top",
+        PageMarginBox::LeftBottom | PageMarginBox::RightBottom => "bottom",
+        _ => "middle",
+    }
 }
 
 /// Renders a DOM document into a canvas, fetching external stylesheets relative to `base_url`.
