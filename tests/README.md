@@ -81,6 +81,13 @@ python3 scripts/compare-print-page-firefox.py \
 
 The script saves the Firefox PDF/PNGs and reports page dimensions and changed
 pixels.
+For the page-margin text fixture, set `OMOIKANE_PRINT_ARTIFACTS=<output-dir>`
+and run `cargo test --locked --test print_page_margin_text`. Pass
+`--fixture tests/fixtures/print/page-margin-text.html` and
+`--page-width-css-px 200 --page-height-css-px 200` to the comparison script.
+Firefox 155 currently prints the document body but omits the margin-at-rule content; keep that
+unsupported-reference result separate from Omoikane's text-paint regression
+checks.
 
 For a known `FAIL` that affects only specific subtests, set
 `known_failure.failed_subtests` to their exact names. The runner then rejects any

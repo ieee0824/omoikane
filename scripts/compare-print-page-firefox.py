@@ -15,6 +15,14 @@ def main() -> int:
     parser.add_argument("--geckodriver", required=True, type=Path)
     parser.add_argument("--actual-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "--fixture",
+        type=Path,
+        default=Path(__file__).resolve().parents[1]
+        / "tests/fixtures/print/page-layers.html",
+    )
+    parser.add_argument("--page-width-css-px", type=float, default=120.0)
+    parser.add_argument("--page-height-css-px", type=float, default=120.0)
     args = parser.parse_args()
 
     from PIL import Image, ImageChops
@@ -23,10 +31,7 @@ def main() -> int:
     from selenium.webdriver.firefox.options import Options
     from selenium.webdriver.firefox.service import Service
 
-    fixture = (
-        Path(__file__).resolve().parents[1]
-        / "tests/fixtures/print/page-layers.html"
-    )
+    fixture = args.fixture.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     options = Options()
     options.add_argument("-headless")
@@ -38,8 +43,8 @@ def main() -> int:
     )
     print_options = PrintOptions()
     print_options.background = True
-    print_options.page_width = 3.175  # 120 CSS px at 96 dpi, in cm
-    print_options.page_height = 3.175
+    print_options.page_width = args.page_width_css_px * 2.54 / 96
+    print_options.page_height = args.page_height_css_px * 2.54 / 96
     print_options.margin_top = 0
     print_options.margin_right = 0
     print_options.margin_bottom = 0
