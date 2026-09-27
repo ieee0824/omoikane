@@ -1,0 +1,27 @@
+# HTTP fixture server helper
+
+`http_fixture.rs` is a test-only module shared by integration tests through a
+`#[path = "support/http_fixture.rs"]` import. It owns only loopback binding,
+bounded connection acceptance, bounded request-header reading, and joining a
+server worker during normal completion or client-side unwinding. Each test keeps
+its own HTTP responses, cookie/origin rules, request order, and assertions.
+
+Issue #885 first migrates `document_cookie_bridge.rs` and
+`fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,
+header/body boundary, and worker-join behavior. The following current fixture
+files still use local server logic and have not been migrated:
+
+- `acid3_common/harness.rs`
+- `browser_journeys.rs`
+- `cookie_samesite.rs`
+- `error_reporting_http.rs`
+- `form_target.rs`
+- `module_identity.rs`
+- `page_visibility.rs`
+- `pointer_lock.rs`
+- `subresource_cookie_store.rs`
+- `wpt_smoke/server.rs`
+
+Future migrations should be separate, reviewable changes. In particular,
+`subresource_cookie_store.rs` has a separate macOS timeout investigation in
+Issue #983; changing its synchronization should be reviewed with that issue.

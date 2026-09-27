@@ -1,25 +1,23 @@
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 use omoikane::http::cors::{
     self, CredentialsMode, Origin, PreflightCache, RedirectMode, RequestMode,
 };
 use omoikane::http::{Client, HttpRequest, Method, Url};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::thread;
-use std::time::Duration;
+use std::io::Write;
+use std::net::TcpStream;
 
 const PAGE_ORIGIN: &str = "http://127.0.0.1:1";
 
 fn read_request(stream: &mut TcpStream) -> String {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut bytes = Vec::new();
-    let mut byte = [0];
-    while !bytes.ends_with(b"\r\n\r\n") {
-        stream.read_exact(&mut byte).unwrap();
-        bytes.push(byte[0]);
-    }
-    String::from_utf8(bytes).unwrap().to_ascii_lowercase()
+    read_request_headers(stream, READ_TIMEOUT)
+        .unwrap()
+        .to_ascii_lowercase()
 }
 
 fn respond(stream: &mut TcpStream, status: &str, extra: &str) {
@@ -39,15 +37,15 @@ fn explicit_authorization_is_independent_of_automatic_cookie_credentials() {
         CredentialsMode::SameOrigin,
         CredentialsMode::Include,
     ] {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let url: Url = format!("http://{}/activate", listener.local_addr().unwrap())
             .parse()
             .unwrap();
-        let server = thread::spawn(move || {
-            let (mut preflight, _) = listener.accept().unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let mut preflight = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
             let preflight_request = read_request(&mut preflight);
             respond(&mut preflight, "204 No Content", "");
-            let (mut actual, _) = listener.accept().unwrap();
+            let mut actual = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
             let actual_request = read_request(&mut actual);
             respond(&mut actual, "200 OK", "Set-Cookie: after=1; Path=/\r\n");
             (preflight_request, actual_request)
@@ -68,7 +66,7 @@ fn explicit_authorization_is_independent_of_automatic_cookie_credentials() {
         )
         .unwrap();
         assert_eq!(response.response.status_code(), 200);
-        let (preflight, actual) = server.join().unwrap();
+        let (preflight, actual) = server.join();
         assert!(preflight.starts_with("options "));
         assert!(preflight.contains("access-control-request-headers: authorization\r\n"));
         assert!(!preflight.contains("\r\nauthorization:"));
@@ -92,24 +90,24 @@ fn explicit_authorization_is_independent_of_automatic_cookie_credentials() {
 
 #[test]
 fn a_redirect_to_another_origin_still_removes_explicit_authorization() {
-    let first = TcpListener::bind("127.0.0.1:0").unwrap();
-    let next = TcpListener::bind("127.0.0.1:0").unwrap();
+    let first = bind_loopback().unwrap();
+    let next = bind_loopback().unwrap();
     let first_url: Url = format!("http://{}/start", first.local_addr().unwrap())
         .parse()
         .unwrap();
     let next_url = format!("http://{}/destination", next.local_addr().unwrap());
-    let server = thread::spawn(move || {
-        let (mut preflight, _) = first.accept().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut preflight = accept_with_timeout(&first, ACCEPT_TIMEOUT).unwrap();
         assert!(read_request(&mut preflight).starts_with("options "));
         respond(&mut preflight, "204 No Content", "");
-        let (mut initial, _) = first.accept().unwrap();
+        let mut initial = accept_with_timeout(&first, ACCEPT_TIMEOUT).unwrap();
         let initial_request = read_request(&mut initial);
         respond(
             &mut initial,
             "307 Temporary Redirect",
             &format!("Location: {next_url}\r\n"),
         );
-        let (mut redirected, _) = next.accept().unwrap();
+        let mut redirected = accept_with_timeout(&next, ACCEPT_TIMEOUT).unwrap();
         let redirected_request = read_request(&mut redirected);
         respond(&mut redirected, "200 OK", "");
         (initial_request, redirected_request)
@@ -126,7 +124,7 @@ fn a_redirect_to_another_origin_still_removes_explicit_authorization() {
     )
     .unwrap();
     assert_eq!(response.response.status_code(), 200);
-    let (initial, redirected) = server.join().unwrap();
+    let (initial, redirected) = server.join();
     assert!(initial.contains("\r\nauthorization: bearer synthetic-test-token\r\n"));
     assert!(redirected.starts_with("post /destination "));
     assert!(!redirected.contains("\r\nauthorization:"));
