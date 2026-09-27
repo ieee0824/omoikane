@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client \
         sudo \
         ripgrep \
+        jq \
         vim \
         fonts-dejavu \
         fonts-liberation \
