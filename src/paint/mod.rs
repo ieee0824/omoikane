@@ -1247,9 +1247,36 @@ pub fn render_document_pages_with_url(
                 }
             });
         });
-        canvases.push(canvas);
+        canvases.push(orient_printed_page(
+            canvas,
+            page.style.get("page-orientation"),
+        ));
     }
     Ok(canvases)
+}
+
+fn orient_printed_page(canvas: Canvas, orientation: Option<&Value>) -> Canvas {
+    let direction = match orientation {
+        Some(Value::Keyword(value)) if value.eq_ignore_ascii_case("rotate-left") => -1,
+        Some(Value::Keyword(value)) if value.eq_ignore_ascii_case("rotate-right") => 1,
+        _ => return canvas,
+    };
+    let width = canvas.width as usize;
+    let height = canvas.height as usize;
+    let source = canvas.into_pixels();
+    let mut rotated = Canvas::new(height as u32, width as u32);
+    for (index, pixel) in source.chunks_exact(4).enumerate() {
+        let x = index % width;
+        let y = index / width;
+        let (destination_x, destination_y) = if direction < 0 {
+            (y, width - 1 - x)
+        } else {
+            (height - 1 - y, x)
+        };
+        let destination = (destination_y * height + destination_x) * 4;
+        rotated.pixels[destination..destination + 4].copy_from_slice(pixel);
+    }
+    rotated
 }
 
 const PAGE_MARGIN_PAINT_ORDER: [PageMarginBox; 16] = [

@@ -1,46 +1,23 @@
 use omoikane::html::TreeBuilder;
 use omoikane::layout::Rect;
-use omoikane::paint::{Canvas, Color, render_document_pages, render_document_pages_with_url};
+use omoikane::paint::{Color, render_document_pages_with_url};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 use std::time::{Duration, Instant};
 
-fn colored_bounds(
-    page: &Canvas,
-    area: (u32, u32, u32, u32),
-    predicate: impl Fn(Color) -> bool,
-) -> Option<(u32, u32, u32, u32)> {
-    let (left, top, right, bottom) = area;
-    let mut bounds: Option<(u32, u32, u32, u32)> = None;
-    for y in top..bottom {
-        for x in left..right {
-            if page.pixel(x, y).is_some_and(&predicate) {
-                bounds = Some(match bounds {
-                    Some((min_x, min_y, max_x, max_y)) => {
-                        (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
-                    }
-                    None => (x, y, x, y),
-                });
-            }
-        }
-    }
-    bounds
-}
+#[path = "common/print.rs"]
+mod print_support;
+
+use print_support::color_bounds as colored_bounds;
 
 #[test]
 fn printed_margin_text_uses_page_color_font_and_box_alignment() {
-    let document =
-        TreeBuilder::parse(include_str!("fixtures/print/page-margin-text.html")).document();
-    let pages = render_document_pages(
-        &document,
-        Rect {
-            width: 200.0,
-            height: 200.0,
-            ..Rect::default()
-        },
-    )
-    .unwrap();
+    let pages = print_support::render_pages(
+        include_str!("fixtures/print/page-margin-text.html"),
+        200.0,
+        200.0,
+    );
     assert_eq!(pages.len(), 1);
     let page = &pages[0];
     let top_red = colored_bounds(page, (40, 0, 160, 40), |pixel| {
@@ -79,10 +56,7 @@ fn printed_margin_text_uses_page_color_font_and_box_alignment() {
         .is_some()
     );
     assert_eq!(page.pixel(80, 80), Some(Color::rgb(255, 255, 255)));
-    if let Ok(directory) = std::env::var("OMOIKANE_PRINT_ARTIFACTS") {
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(format!("{directory}/page-1.png"), page.encode_png()).unwrap();
-    }
+    print_support::save_pages(&pages, None);
 }
 
 const MARKER: &[u8] = include_bytes!("fixtures/print/margin-marker.png");
@@ -141,11 +115,7 @@ fn printed_margin_images_keep_mixed_content_order_and_resolve_relative_urls() {
     server.join().unwrap();
     assert_eq!(pages.len(), 1);
     let page = &pages[0];
-    if let Ok(directory) = std::env::var("OMOIKANE_PRINT_ARTIFACTS") {
-        let image_dir = format!("{directory}/images");
-        std::fs::create_dir_all(&image_dir).unwrap();
-        std::fs::write(format!("{image_dir}/page-1.png"), page.encode_png()).unwrap();
-    }
+    print_support::save_pages(&pages, Some("images"));
     assert!(
         (40..80).any(|x| (0..40).any(|y| page.pixel(x, y) == Some(Color::rgb(255, 0, 0)))),
         "image-only min-content box should use the image intrinsic width"
@@ -194,17 +164,11 @@ fn printed_margin_images_keep_mixed_content_order_and_resolve_relative_urls() {
 
 #[test]
 fn printed_page_and_margin_box_backgrounds_and_borders_follow_page_layers() {
-    let document =
-        TreeBuilder::parse(include_str!("fixtures/print/page-margin-paint.html")).document();
-    let pages = render_document_pages(
-        &document,
-        Rect {
-            width: 200.0,
-            height: 200.0,
-            ..Rect::default()
-        },
-    )
-    .unwrap();
+    let pages = print_support::render_pages(
+        include_str!("fixtures/print/page-margin-paint.html"),
+        200.0,
+        200.0,
+    );
     assert_eq!(pages.len(), 1);
     let page = &pages[0];
     assert_eq!(page.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
@@ -214,11 +178,7 @@ fn printed_page_and_margin_box_backgrounds_and_borders_follow_page_layers() {
     assert_eq!(page.pixel(80, 80), Some(Color::rgb(0, 255, 0)));
     assert_eq!(page.pixel(40, 10), Some(Color::rgb(0, 0, 0)));
     assert_eq!(page.pixel(60, 45), Some(Color::rgb(255, 255, 0)));
-    if let Ok(directory) = std::env::var("OMOIKANE_PRINT_ARTIFACTS") {
-        let image_dir = format!("{directory}/paint");
-        std::fs::create_dir_all(&image_dir).unwrap();
-        std::fs::write(format!("{image_dir}/page-1.png"), page.encode_png()).unwrap();
-    }
+    print_support::save_pages(&pages, Some("paint"));
 }
 
 #[test]
@@ -236,17 +196,7 @@ fn printed_margin_boxes_use_clockwise_order_and_z_index_without_splitting_docume
                 }}
             </style></head><body><main>Page body</main></body></html>"#
         );
-        let document = TreeBuilder::parse(&source).document();
-        render_document_pages(
-            &document,
-            Rect {
-                width: 200.0,
-                height: 200.0,
-                ..Rect::default()
-            },
-        )
-        .unwrap()
-        .remove(0)
+        print_support::render_pages(&source, 200.0, 200.0).remove(0)
     };
     let default_order = render(0, 0);
     assert_eq!(default_order.pixel(60, 10), Some(Color::rgb(0, 0, 255)));
@@ -260,8 +210,7 @@ fn printed_margin_boxes_use_clockwise_order_and_z_index_without_splitting_docume
 
 #[test]
 fn printed_margin_box_border_and_padding_surround_content_width() {
-    let document = TreeBuilder::parse(
-        r#"<html><head><style>
+    let source = r#"<html><head><style>
             html, body { margin: 0 }
             @page {
                 size: 200px 200px; margin: 40px;
@@ -272,19 +221,8 @@ fn printed_margin_box_border_and_padding_surround_content_width() {
                     font-size: 20px; text-align: left; vertical-align: top;
                 }
             }
-        </style></head><body></body></html>"#,
-    )
-    .document();
-    let page = render_document_pages(
-        &document,
-        Rect {
-            width: 200.0,
-            height: 200.0,
-            ..Rect::default()
-        },
-    )
-    .unwrap()
-    .remove(0);
+        </style></head><body></body></html>"#;
+    let page = print_support::render_pages(source, 200.0, 200.0).remove(0);
     assert_eq!(page.pixel(41, 20), Some(Color::rgb(255, 0, 0)));
     assert_eq!(page.pixel(97, 20), Some(Color::rgb(255, 0, 0)));
     let glyph = colored_bounds(&page, (40, 0, 100, 40), |pixel| {
@@ -296,27 +234,15 @@ fn printed_margin_box_border_and_padding_surround_content_width() {
 
 #[test]
 fn printed_page_and_margin_borders_default_to_medium_current_color() {
-    let document = TreeBuilder::parse(
-        r#"<html><head><style>
+    let source = r#"<html><head><style>
             html, body { margin: 0 }
             @page {
                 size: 200px 200px; margin: 40px;
                 color: #0000ff; border: solid;
                 @top-left { content: ""; color: #ff0000; border: solid }
             }
-        </style></head><body></body></html>"#,
-    )
-    .document();
-    let page = render_document_pages(
-        &document,
-        Rect {
-            width: 200.0,
-            height: 200.0,
-            ..Rect::default()
-        },
-    )
-    .unwrap()
-    .remove(0);
+        </style></head><body></body></html>"#;
+    let page = print_support::render_pages(source, 200.0, 200.0).remove(0);
     assert_eq!(page.pixel(41, 80), Some(Color::rgb(0, 0, 255)));
     assert_eq!(page.pixel(42, 80), Some(Color::rgb(0, 0, 255)));
     assert_eq!(page.pixel(43, 80), Some(Color::rgb(255, 255, 255)));

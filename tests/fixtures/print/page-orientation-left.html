@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  html, body { margin: 0; padding: 0 }
+  @page { size: 200px 300px; margin: 10px }
+  @page turned {
+    page-orientation: rotate-left;
+    margin: 10px;
+    @top-left-corner { content: ""; background-color: #00ff00 }
+    @bottom-center { content: counter(page); color: #ff00ff; font-size: 12px }
+  }
+  section { width: 70px; height: 35px; font: 16px sans-serif }
+  .first { background-color: #ff0000 }
+  .second { page: turned; break-before: page; background-color: #0000ff }
+</style></head><body>
+<section class="first">FIRST</section><section class="second">SECOND</section>
+</body></html>

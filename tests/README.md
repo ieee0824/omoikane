@@ -101,6 +101,16 @@ is a record of unsupported page and margin-box painting rather than a passing
 pixel reference. Chromium prints the page background, border, and margin-box
 paint; the fixed pixel assertions also cover clockwise and `z-index` ordering.
 
+`page-orientation-left.html` and `page-orientation-right.html` exercise rotation
+after page layout. Run `print_page_layers` with `OMOIKANE_PRINT_ARTIFACTS` to
+write each two-page result under `orientation-left/` or `orientation-right/`.
+For Firefox comparison, pass the matching fixture, artifact subdirectory,
+`--page-width-css-px 200`, and `--page-height-css-px 300` to the script above.
+The test also checks that changing `size` to 300×200 leaves the contents upright.
+Common page rendering, color bounds, and optional PNG export live in
+`tests/common/print.rs`; the fixture-specific pixel assertions remain in their
+respective integration tests.
+
 For a known `FAIL` that affects only specific subtests, set
 `known_failure.failed_subtests` to their exact names. The runner then rejects any
 additional failure, missing expected failure, or timeout instead of accepting all
