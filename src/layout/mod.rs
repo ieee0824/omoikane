@@ -624,6 +624,9 @@ impl Overflow {
 /// text run is split into many pieces (e.g. word-wrapped lines).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FragmentStyle {
+    /// The pseudo-element that supplied generated content, when applicable.
+    /// Paint uses this to resolve private color overlays without altering layout.
+    pub(crate) pseudo: Option<PseudoElement>,
     /// Computed CSS `visibility` for this fragment. Hidden fragments continue
     /// to participate in layout and CSSOM geometry, but paint and hit testing
     /// skip them independently from their containing block.
@@ -695,6 +698,7 @@ impl FragmentStyle {
         });
 
         Self {
+            pseudo: None,
             visibility: visibility(style),
             color: extract_str("color"),
             text_transform: normalize_lower("text-transform"),

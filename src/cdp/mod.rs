@@ -30,7 +30,7 @@ use crate::js::{
     CompletedPageTask, FindInPageAction, FormStateRestoreMode, FormStateSnapshot,
     FullscreenTransition, JavaScriptDialog, JavaScriptDialogController, JavaScriptDialogError,
     JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask, PageTaskError,
-    PointerLockTransition, StorageManager,
+    PointerLockTransition, StorageManager, VisitSource,
 };
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -1424,6 +1424,14 @@ impl CdpSession {
         Ok(json!({}))
     }
 
+    fn record_script_visit(&self, source: Option<VisitSource>, requested_url: &str) {
+        let Some(source) = source else {
+            return;
+        };
+        self.storage_manager
+            .record_page_navigation(requested_url, &self.current_url, source);
+    }
+
     /// Commits navigation requests queued by the active Runtime.
     ///
     /// Startup scripts in a newly installed Document may queue another
@@ -1439,7 +1447,12 @@ impl CdpSession {
             for error in self.runtime.take_task_errors() {
                 eprintln!("[omoikane][js-error] {error}");
             }
-            let Some(request) = self.runtime.take_navigation_requests().into_iter().next() else {
+            let Some((request, source)) = self
+                .runtime
+                .take_navigation_requests_with_source()
+                .into_iter()
+                .next()
+            else {
                 return Ok(());
             };
             match request {
@@ -1456,6 +1469,7 @@ impl CdpSession {
                         self.restore_active_location(&previous_url);
                         return Err(error);
                     }
+                    self.record_script_visit(source, &url);
                 }
                 NavigationRequest::FormSubmit {
                     url,
@@ -1479,6 +1493,7 @@ impl CdpSession {
                         self.restore_active_location(&previous_url);
                         return Err(error);
                     }
+                    self.record_script_visit(source, &url);
                 }
                 NavigationRequest::UpdateHistory {
                     url,
@@ -5664,6 +5679,179 @@ mod tests {
     }
 
     #[test]
+    fn script_navigation_records_only_its_origin_and_top_level_site() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer).unwrap();
+                let body = "<html><body>visited navigation</body></html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let start = format!("{origin}/start");
+        let state_only = format!("{origin}/state-only");
+        let next = format!("{origin}/next");
+        let mut session = CdpSession::new().unwrap();
+        let same_partition =
+            VisitSource::new(crate::js::StorageOrigin::from_url(&start).unwrap(), &start).unwrap();
+        let other_origin = VisitSource::new(
+            crate::js::StorageOrigin::from_url("https://other.test/").unwrap(),
+            &start,
+        )
+        .unwrap();
+        let other_site = VisitSource::new(
+            crate::js::StorageOrigin::from_url(&start).unwrap(),
+            "https://other.test/",
+        )
+        .unwrap();
+
+        session
+            .dispatch("Page.navigate", json!({ "url": start }))
+            .unwrap();
+        assert!(
+            !session
+                .storage_manager
+                .has_visited_url(&start, &same_partition)
+        );
+        assert!(
+            !session
+                .storage_manager
+                .has_visited_url(&next, &same_partition)
+        );
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "history.pushState(null, '', '/state-only')" }),
+            )
+            .unwrap();
+        assert!(
+            !session
+                .storage_manager
+                .has_visited_url(&state_only, &same_partition)
+        );
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "location.assign('/next')" }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url(), next);
+        assert!(
+            session
+                .storage_manager
+                .has_visited_url(&next, &same_partition)
+        );
+        assert!(
+            !session
+                .storage_manager
+                .has_visited_url(&next, &other_origin)
+        );
+        assert!(!session.storage_manager.has_visited_url(&next, &other_site));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cdp_observes_unvisited_style_while_paint_uses_visited_color() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            let body = r#"<!doctype html><html><head><style>
+                body { margin: 0 }
+                a { display:block; width:40px; height:40px; background-color:#ff0000 }
+                a:visited { background-color:#00ff00 }
+                </style></head><body><a id="link" href="/destination"></a></body></html>"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let start = format!("http://127.0.0.1:{}/start", address.port());
+        let destination = format!("http://127.0.0.1:{}/destination", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({ "url": start }))
+            .unwrap();
+        server.join().unwrap();
+
+        let query = || {
+            json!({
+                "expression": "(() => { const a = document.getElementById('link'); return [getComputedStyle(a).backgroundColor, a.matches(':visited'), a.matches(':link')].join('|') })()",
+                "returnByValue": true,
+            })
+        };
+        let before = session.dispatch("Runtime.evaluate", query()).unwrap();
+        assert_eq!(
+            session
+                .runtime
+                .paint_current_document()
+                .unwrap()
+                .pixel(20, 20),
+            Some(crate::paint::Color::rgb(255, 0, 0))
+        );
+        let document = session.dispatch("DOM.getDocument", json!({})).unwrap();
+        let root_id = document["root"]["nodeId"].as_u64().unwrap();
+        let link = session
+            .dispatch(
+                "DOM.querySelector",
+                json!({"nodeId": root_id, "selector": "#link"}),
+            )
+            .unwrap();
+        let link_id = link["nodeId"].as_u64().unwrap();
+        assert!(link_id > 0);
+        let attributes_before = session
+            .dispatch("DOM.getAttributes", json!({"nodeId": link_id}))
+            .unwrap();
+
+        let source =
+            VisitSource::new(crate::js::StorageOrigin::from_url(&start).unwrap(), &start).unwrap();
+        session
+            .storage_manager
+            .record_page_navigation(&destination, &destination, source);
+        assert_eq!(
+            session
+                .runtime
+                .paint_current_document()
+                .unwrap()
+                .pixel(20, 20),
+            Some(crate::paint::Color::rgb(0, 255, 0))
+        );
+        let after = session.dispatch("Runtime.evaluate", query()).unwrap();
+        assert_eq!(before["result"]["value"], after["result"]["value"]);
+        assert_eq!(
+            session
+                .dispatch("DOM.getAttributes", json!({"nodeId": link_id}))
+                .unwrap(),
+            attributes_before
+        );
+        assert_eq!(
+            session
+                .dispatch(
+                    "DOM.querySelector",
+                    json!({"nodeId": root_id, "selector": "#link"}),
+                )
+                .unwrap()["nodeId"],
+            link_id
+        );
+    }
+
+    #[test]
     fn fragment_navigation_keeps_document_and_skips_network_fetch() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -6002,6 +6190,17 @@ mod tests {
         );
         assert!(failed.is_err());
         assert_eq!(session.current_url(), stable_url);
+        let source = VisitSource::new(
+            crate::js::StorageOrigin::from_url(&stable_url).unwrap(),
+            &stable_url,
+        )
+        .unwrap();
+        let unreachable = format!("http://127.0.0.1:{}/unreachable", address.port());
+        assert!(
+            !session
+                .storage_manager
+                .has_visited_url(&unreachable, &source)
+        );
         let preserved = session
             .dispatch(
                 "Runtime.evaluate",

@@ -10,6 +10,12 @@ pub(super) struct Submission {
     pub content_type: Option<String>,
 }
 
+pub(super) enum NamedLinkTarget {
+    NotFound,
+    Blocked,
+    Frame(NodeHandle),
+}
+
 impl HostState {
     pub(super) fn refresh_iframe_context_name(&mut self, frame: &NodeHandle) {
         if self.iframe_context_ids.contains_key(&frame.identity()) {
@@ -61,6 +67,52 @@ impl HostState {
         root.child_nodes()
             .iter()
             .find_map(|child| self.named_form_target(child, name))
+    }
+
+    pub(super) fn resolve_named_link_target(
+        &self,
+        link: &NodeHandle,
+        target: &str,
+    ) -> NamedLinkTarget {
+        if !self.node_is_in_active_document(link)
+            || !matches!(link.tag_name().as_deref(), Some("a" | "area"))
+            || link.get_attribute("href").is_none()
+        {
+            return NamedLinkTarget::Blocked;
+        }
+        let Some(source) = owner_document_for_node(link) else {
+            return NamedLinkTarget::Blocked;
+        };
+        let Some(frame) = self.named_form_target(&self.document, target) else {
+            return NamedLinkTarget::NotFound;
+        };
+        if !self.node_is_in_active_document(&frame) {
+            return NamedLinkTarget::Blocked;
+        }
+        let source_frame = self.frame_for_document(source.identity());
+        let sandbox = self
+            .document_sandbox
+            .get(&source.identity())
+            .copied()
+            .unwrap_or_default();
+        if sandbox.active && source_frame.as_ref() != Some(&frame) {
+            let mut ancestor = owner_document_for_node(&frame);
+            let mut descendant = false;
+            while let Some(document) = ancestor {
+                if document == source {
+                    descendant = true;
+                    break;
+                }
+                ancestor = self
+                    .frame_for_document(document.identity())
+                    .as_ref()
+                    .and_then(owner_document_for_node);
+            }
+            if !descendant {
+                return NamedLinkTarget::Blocked;
+            }
+        }
+        NamedLinkTarget::Frame(frame)
     }
 
     pub(super) fn queue_form_submission(
@@ -145,22 +197,28 @@ impl HostState {
                 .cancel_resource_loads_for_nodes(&HashSet::from([frame.identity()]));
             self.pending_resource_loads.remove(&frame.identity());
             let frame_id = frame.identity();
+            self.pending_iframe_visits.remove(&frame_id);
+            let visit_source = self.visit_source_for_document(source.identity());
             self.event_loop.enqueue_timer_for_document(
                 TimerPayload::FormSubmission {
                     node_id: frame.identity(),
                     request,
+                    visit_source,
                 },
                 Some(source.identity()),
             );
             return Ok(Some(frame_id));
         } else {
-            self.event_loop
-                .enqueue_navigation(NavigationRequest::FormSubmit {
+            let visit_source = self.visit_source_for_document(source.identity());
+            self.event_loop.enqueue_navigation_from_source(
+                NavigationRequest::FormSubmit {
                     url: request.url,
                     method: request.method,
                     body: request.body,
                     content_type: request.content_type,
-                });
+                },
+                visit_source,
+            );
         }
         Ok(None)
     }

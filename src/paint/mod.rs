@@ -140,7 +140,6 @@ use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
 use crate::layout::{
     InlineFragmentContent, LayoutBox, PageMarginFragment, PagedPage, Rect, Visibility,
-    layout_box_style,
 };
 
 // Re-export public types from submodules
@@ -1114,6 +1113,29 @@ pub fn paint_layout_with_web_fonts(
         );
     });
     canvas
+}
+
+/// Paints a layout tree with a private visited-link color snapshot. The
+/// snapshot is discarded before callers can query the resolver again.
+pub(crate) fn paint_layout_with_visited_links(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+) -> Canvas {
+    resolver.begin_visited_paint(visited_link_ids);
+    let canvas = paint_layout_with_web_fonts(layout, resolver, viewport, fonts, web_fonts);
+    resolver.end_visited_paint();
+    canvas
+}
+
+fn paint_box_style(layout: &LayoutBox, resolver: &mut StyleResolver) -> ComputedStyle {
+    layout
+        .pseudo
+        .and_then(|pseudo| resolver.paint_pseudo_style(&layout.node, pseudo))
+        .unwrap_or_else(|| resolver.paint_style(&layout.node))
 }
 
 /// Renders a DOM document into a canvas using inline and linked author stylesheets.
@@ -2413,7 +2435,7 @@ fn hit_test_box(
         query_point = transform.transform_point(local_point.0, local_point.1);
         Some(transformed_rect_bounds(fragment.source, transform))
     };
-    let style = layout_box_style(layout, resolver);
+    let style = paint_box_style(layout, resolver);
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
     let clip_shape = clip_path_shape(&style, border_box);
@@ -2479,7 +2501,7 @@ fn hit_test_box(
     let mut auto_positioned = Vec::new();
     let mut positive = Vec::new();
     for child in &layout.children {
-        let child_style = layout_box_style(child, resolver);
+        let child_style = paint_box_style(child, resolver);
         if is_positioned_for_paint(&child_style) {
             if child.z_index < 0 {
                 negative.push(child);
@@ -2696,7 +2718,7 @@ fn translate_layout_for_scroll(
         ((0.0, 0.0), None)
     };
     layout.paint_scroll = scroll_geometry;
-    let style = layout_box_style(layout, resolver);
+    let style = paint_box_style(layout, resolver);
     let offset = if is_absolute_for_paint(&style) {
         positioned_offset
     } else {
@@ -2917,7 +2939,7 @@ fn paint_box_internal_untransformed(
         return;
     }
 
-    let style = layout_box_style(layout, resolver);
+    let style = paint_box_style(layout, resolver);
     let border_box = offset.rect(border_box_rect(layout));
     let padding_box = offset.rect(padding_box_rect(layout));
     let clip_shape = clip_path_shape(&style, border_box);
@@ -3254,7 +3276,7 @@ fn subtree_paint_bounds_internal(
         );
     }
 
-    let style = layout_box_style(layout, resolver);
+    let style = paint_box_style(layout, resolver);
     let shadow_value = match style.get("box-shadow") {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             Some(value.as_str())
@@ -3822,7 +3844,7 @@ fn paint_box_internal_to(
         }) {
             continue;
         }
-        let child_style = layout_box_style(child, resolver);
+        let child_style = paint_box_style(child, resolver);
         if is_positioned_for_paint(&child_style) {
             if include_phase_descendants {
                 if child.z_index < 0 {
@@ -4039,7 +4061,7 @@ fn collect_phase_descendants<'a>(
         return;
     }
     for child in &layout.children {
-        let child_style = layout_box_style(child, resolver);
+        let child_style = paint_box_style(child, resolver);
         if is_positioned_for_paint(&child_style) {
             if child.z_index < 0 {
                 negative_positioned_children.push(child);

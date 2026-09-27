@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use boa_engine::{JsValue, realm::Realm};
 use boa_gc::{Finalize, Trace, Tracer};
 
-use super::{DocumentSecurityOrigin, NavigationRequest, TimerPayload};
+use super::{DocumentSecurityOrigin, NavigationRequest, TimerPayload, VisitSource};
 
 /// The HTML task source responsible for a queued task.
 #[allow(dead_code)]
@@ -50,10 +50,14 @@ pub(crate) enum Task {
         request_id: u64,
         stolen: bool,
     },
-    Navigation(NavigationRequest),
+    Navigation {
+        request: NavigationRequest,
+        source: Option<VisitSource>,
+    },
     AuxiliaryNavigate {
         id: u64,
         url: String,
+        source: Option<VisitSource>,
     },
     PostedMessage {
         port: JsValue,
@@ -219,7 +223,7 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
         } => unsafe { owner.trace(tracer) },
         Task::Geolocation { .. }
         | Task::WebLock { .. }
-        | Task::Navigation(_)
+        | Task::Navigation { .. }
         | Task::AuxiliaryNavigate { .. }
         | Task::BroadcastChannelMessage { .. }
         | Task::WorkerMessage { .. }
@@ -315,11 +319,27 @@ impl EventLoop {
     }
 
     pub(crate) fn enqueue_navigation(&mut self, request: NavigationRequest) {
-        self.enqueue(TaskSource::Navigation, Task::Navigation(request));
+        self.enqueue_navigation_from_source(request, None);
     }
 
-    pub(crate) fn enqueue_auxiliary_navigation(&mut self, id: u64, url: String) {
-        self.enqueue(TaskSource::Navigation, Task::AuxiliaryNavigate { id, url });
+    pub(crate) fn enqueue_navigation_from_source(
+        &mut self,
+        request: NavigationRequest,
+        source: Option<VisitSource>,
+    ) {
+        self.enqueue(TaskSource::Navigation, Task::Navigation { request, source });
+    }
+
+    pub(crate) fn enqueue_auxiliary_navigation(
+        &mut self,
+        id: u64,
+        url: String,
+        source: Option<VisitSource>,
+    ) {
+        self.enqueue(
+            TaskSource::Navigation,
+            Task::AuxiliaryNavigate { id, url, source },
+        );
     }
 
     /// Queues `payload` on the file reading task source.
@@ -694,7 +714,7 @@ mod tests {
         event_loop.enqueue_timer(TimerPayload::Source("timer".into()));
         assert!(matches!(
             event_loop.pop_task(),
-            Some((TaskSource::Navigation, Task::Navigation(_)))
+            Some((TaskSource::Navigation, Task::Navigation { .. }))
         ));
         assert!(matches!(
             event_loop.pop_task(),
@@ -878,7 +898,7 @@ mod tests {
         ));
         assert!(matches!(
             event_loop.pop_task(),
-            Some((TaskSource::Navigation, Task::Navigation(_)))
+            Some((TaskSource::Navigation, Task::Navigation { .. }))
         ));
     }
 }

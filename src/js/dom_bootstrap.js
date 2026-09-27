@@ -1834,7 +1834,7 @@
     return invokeListeners(entry.node, event, capture, entry.hostTarget ? 2 : phase);
   }
 
-  function dispatchEventOnTarget(target, event) {
+  function dispatchEventOnTarget(target, event, activationInfo = null) {
     if (!(event instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
     if (event.__dispatching || event.type === "") {
       throw new DOMException("The event is already being dispatched or has no type.", "InvalidStateError");
@@ -1845,6 +1845,7 @@
     event.__originalRelatedTarget = event.relatedTarget ?? null;
     const path = buildEventPath(target, event);
     event.__path = path;
+    if (activationInfo) activationInfo.target = clickActivationTarget(path, event);
 
     try {
       if (path.length === 0) return !event.defaultPrevented;
@@ -1885,6 +1886,22 @@
       event.__path = [];
     }
     return !event.defaultPrevented;
+  }
+
+  function clickActivationTarget(path, event) {
+    for (let index = 0; index < path.length; index += 1) {
+      if (index > 0 && !event.bubbles) break;
+      const current = path[index].node;
+      if (current instanceof HTMLElement) {
+        const tag = current.nodeName;
+        if (((tag === "A" || tag === "AREA") && current.hasAttribute("href")) ||
+            tag === "LABEL" || tag === "BUTTON" || tag === "INPUT") {
+          return current;
+        }
+      }
+    }
+    const target = path[0]?.node;
+    return target instanceof HTMLElement ? target : null;
   }
 
   // --- Document focus state -------------------------------------------------
@@ -2592,14 +2609,13 @@
 
     dispatchEvent(event) {
       const dispatchEvent = event instanceof Event ? event : new Event(event);
-      const notCanceled = dispatchEventOnTarget(this, dispatchEvent);
-      // Activation behavior is the default action of a click event: a submit or
-      // reset button whose click was not canceled submits or resets its owning
-      // form. Running it here (rather than only in click()) means a synthetic
-      // click dispatched directly through dispatchEvent behaves like a real one.
-      if (notCanceled && dispatchEvent.type === "click" && this.nodeType === 1 &&
-          typeof this.__runActivationBehavior === "function") {
-        this.__runActivationBehavior();
+      const activationInfo = dispatchEvent.type === "click" ? { target: null } : null;
+      const notCanceled = dispatchEventOnTarget(this, dispatchEvent, activationInfo);
+      // Run the event path's activation target after an uncanceled click. This
+      // also covers a click on a descendant of a link or form control.
+      if (notCanceled && activationInfo?.target &&
+          typeof activationInfo.target.__runActivationBehavior === "function") {
+        activationInfo.target.__runActivationBehavior();
       }
       return notCanceled;
     }
@@ -3994,6 +4010,47 @@
         state.labelActivating = true;
         try { control.focus(); control.click(); }
         finally { state.labelActivating = false; }
+        return;
+      }
+      if (tag === "A" || tag === "AREA") {
+        if (!this.hasAttribute("href") || !this.isConnected) return;
+        const document = this.ownerDocument;
+        // A child Document's own realm can navigate itself without first
+        // reaching through its embedding iframe's WindowProxy.
+        const view = document?.__id === navigationDocumentId
+          ? globalThis : document?.defaultView;
+        if (!view) return;
+        // Same-document history changes can update document.URL without
+        // replacing the Document. about:blank/srcdoc use the creator's base.
+        const documentURL = document.URL;
+        const fallbackBase = documentURL === "about:blank" || documentURL === "about:srcdoc"
+          ? nativeDocumentBaseURL(document.__id) || documentURL
+          : documentURL;
+        let base = fallbackBase;
+        const baseElement = document.querySelector("base[href]");
+        if (baseElement) {
+          try { base = new URL(baseElement.getAttribute("href"), fallbackBase).href; }
+          catch (_error) { /* Ignore an invalid base href. */ }
+        }
+        let destination;
+        try { destination = new URL(this.getAttribute("href"), base).href; }
+        catch (_error) { return; }
+        const target = (this.getAttribute("target") ??
+          document.querySelector("base[target]")?.getAttribute("target") ?? "").trim();
+        if (!target || target.toLowerCase() === "_self") {
+          view.location.assign(destination);
+        } else if (target.toLowerCase() === "_parent") {
+          view.parent.location.href = destination;
+        } else if (target.toLowerCase() === "_top") {
+          view.top.location.href = destination;
+        } else {
+          if (target.toLowerCase() === "_blank" ||
+              __omoikane_navigate_named_link_target(this.__id, destination, target) === null) {
+            // Native target selection can reach a named browsing context in a
+            // cross-origin ancestor without exposing that ancestor's DOM.
+            view.open(destination, target);
+          }
+        }
         return;
       }
       let type = "";
@@ -22477,12 +22534,37 @@
   globalThis.__omoikane_auxiliary_window_proxy = auxiliaryWindowProxy;
   globalThis.open = function(url = "", target = "_blank") {
     const targetName = String(target);
-    const existing = targetName === "_self" ? globalThis.window :
-      targetName === "_parent" ? globalThis.parent :
-      targetName === "_top" ? globalThis.top : null;
+    const keyword = targetName.toLowerCase();
+    const existing = keyword === "_self" ? globalThis.window :
+      keyword === "_parent" ? globalThis.parent :
+      keyword === "_top" ? globalThis.top : null;
     if (existing !== null) {
-      if (String(url) !== "") existing.location.assign(String(url));
+      if (String(url) !== "") existing.location.href = String(url);
       return existing;
+    }
+    if (keyword !== "_blank") {
+      let searchWindow = globalThis;
+      while (searchWindow) {
+        let searchDocument;
+        try { searchDocument = searchWindow.document; }
+        catch (_error) { break; }
+        if (!searchDocument) break;
+        const containingFrame = searchWindow.frameElement;
+        if (containingFrame?.getAttribute("name") === targetName) {
+          if (String(url) !== "") searchWindow.location.href = String(url);
+          return searchWindow;
+        }
+        const frame = Array.from(searchDocument.querySelectorAll("iframe[name]"))
+          .find(candidate => candidate.getAttribute("name") === targetName);
+        const frameWindow = frame?.contentWindow;
+        if (frameWindow) {
+          if (String(url) !== "") frameWindow.location.href = String(url);
+          return frameWindow;
+        }
+        const parentWindow = searchWindow.parent;
+        if (!parentWindow || parentWindow === searchWindow) break;
+        searchWindow = parentWindow;
+      }
     }
     const id = __omoikane_open_auxiliary_window(url, targetName);
     return auxiliaryWindowProxy(id);
