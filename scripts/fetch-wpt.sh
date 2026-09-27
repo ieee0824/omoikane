@@ -55,6 +55,10 @@ git_wpt sparse-checkout add "/encoding/streams/" "/common/sab.js"
 git_wpt sparse-checkout add "/css/selectors/is-where-error-recovery.html"
 git_wpt sparse-checkout add "/css/selectors/has-matches-to-uninserted-elements.html"
 git_wpt sparse-checkout add \
+  "/css/selectors/invalidation/any-link-pseudo.html" \
+  "/css/selectors/invalidation/target-pseudo-in-has.html" \
+  "/html/browsers/browsing-the-web/scroll-to-fragid/target-pseudo-after-reinsertion.html"
+git_wpt sparse-checkout add \
   "/css/selectors/focus-visible-script-focus-001.html" \
   "/css/selectors/focus-within-focus-move.html" \
   "/css/selectors/focus-within-removal.html"

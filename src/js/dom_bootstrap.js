@@ -4869,7 +4869,20 @@
   class HTMLDivElement extends HTMLElement {}
   class HTMLSpanElement extends HTMLElement {}
   class HTMLParagraphElement extends HTMLElement {}
-  class HTMLAnchorElement extends HTMLElement {}
+  class HTMLAnchorElement extends HTMLElement {
+    get href() {
+      const raw = this.getAttribute("href");
+      return raw === null ? "" : __omoikane_resolve_url(raw);
+    }
+    set href(value) { this.setAttribute("href", String(value)); }
+  }
+  class HTMLAreaElement extends HTMLElement {
+    get href() {
+      const raw = this.getAttribute("href");
+      return raw === null ? "" : __omoikane_resolve_url(raw);
+    }
+    set href(value) { this.setAttribute("href", String(value)); }
+  }
   const modalDialogsByDocument = new WeakMap();
 
   function modalDialogStack(doc) {
@@ -13796,6 +13809,7 @@
     span: HTMLSpanElement,
     p: HTMLParagraphElement,
     a: HTMLAnchorElement,
+    area: HTMLAreaElement,
     table: HTMLTableElement,
     thead: HTMLTableSectionElement,
     tbody: HTMLTableSectionElement,
@@ -14351,6 +14365,7 @@
   globalThis.HTMLSpanElement = HTMLSpanElement;
   globalThis.HTMLParagraphElement = HTMLParagraphElement;
   globalThis.HTMLAnchorElement = HTMLAnchorElement;
+  globalThis.HTMLAreaElement = HTMLAreaElement;
   globalThis.HTMLDialogElement = HTMLDialogElement;
   globalThis.HTMLDetailsElement = HTMLDetailsElement;
   globalThis.HTMLStyleElement = HTMLStyleElement;

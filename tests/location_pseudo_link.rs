@@ -94,9 +94,20 @@ fn href_mutations_update_link_selectors_and_computed_style() {
                 if (!linked(link) || !link.matches('[href="/changed"]') || count() !== 4) return false;
                 link.removeAttribute('href');
                 if (linked(link) || count() !== 3 || linkColor() !== originalLinkColor) return false;
+                link.href = '/property-assigned';
+                if (!(link instanceof HTMLAnchorElement) || !linked(link) ||
+                    link.getAttribute('href') !== '/property-assigned' || count() !== 4 ||
+                    linkColor() !== 'rgb(17, 34, 51)') return false;
+                link.removeAttribute('href');
+                if (linked(link) || count() !== 3) return false;
 
                 area.setAttribute('href', '/map/new');
                 if (!linked(area) || count() !== 4 || areaColor() !== 'rgb(34, 51, 68)') return false;
+                area.removeAttribute('href');
+                area.href = '/map/property-assigned';
+                if (!(area instanceof HTMLAreaElement) || !linked(area) ||
+                    area.getAttribute('href') !== '/map/property-assigned' || count() !== 4 ||
+                    areaColor() !== 'rgb(34, 51, 68)') return false;
                 area.removeAttribute('href');
                 return !linked(area) && count() === 3 && areaColor() === originalAreaColor;
             })()"#,
