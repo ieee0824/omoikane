@@ -38,7 +38,9 @@ use crate::css::{
     matches_selector, parse_scope_prelude, parse_selector_list,
 };
 use crate::css::{SelectorMatchCache, matches_selector_cached};
-use crate::dom::{Node, NodeHandle, NodeType, ShadowRootMode, is_actually_disabled};
+use crate::dom::{
+    Node, NodeHandle, NodeType, ShadowRootMode, WeakNodeHandle, is_actually_disabled,
+};
 use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
 };
@@ -1677,6 +1679,9 @@ struct HostState {
     /// Committed URL per live Document. Nested Window/Document access must not
     /// accidentally expose the top-level Location after iframe navigation.
     document_urls: HashMap<usize, String>,
+    /// The fragment-selected element for each live Document. Weak references
+    /// avoid retaining nodes removed from the document tree.
+    document_targets: HashMap<usize, WeakNodeHandle>,
     /// Effective HTTP(S) base URL per live Document. Missing entries are
     /// intentional for documents such as `data:` and must fail closed instead
     /// of falling back to the top-level base.
@@ -2333,6 +2338,7 @@ impl HostState {
             document_origins,
             page_hidden: false,
             document_urls,
+            document_targets: HashMap::new(),
             document_base_urls,
             document_security_origins,
             retired_document_security_origins: HashMap::new(),
@@ -2367,7 +2373,41 @@ impl HostState {
             adopted_stylesheets: HashMap::new(),
         };
         state.register_tree(&document);
+        let initial_url = state.location_href.clone();
+        state.update_document_target(&document, &initial_url);
         state
+    }
+
+    fn update_document_target(&mut self, document: &NodeHandle, url: &str) {
+        let document_id = document.identity();
+        let next = find_fragment_target(document, url);
+        let previous = self
+            .document_targets
+            .get(&document_id)
+            .and_then(WeakNodeHandle::upgrade);
+        if previous == next {
+            return;
+        }
+        if let Some(previous) = previous {
+            previous.set_user_action_state("target", false);
+        }
+        if let Some(next) = next {
+            next.set_user_action_state("target", true);
+            self.document_targets.insert(document_id, next.downgrade());
+        } else {
+            self.document_targets.remove(&document_id);
+        }
+        self.invalidate_document_style_cache(document);
+    }
+
+    fn clear_document_target(&mut self, document_id: usize) {
+        if let Some(target) = self
+            .document_targets
+            .remove(&document_id)
+            .and_then(|target| target.upgrade())
+        {
+            target.set_user_action_state("target", false);
+        }
     }
 
     fn set_main_base_url(&mut self, url: crate::http::Url) {
@@ -2626,12 +2666,12 @@ impl HostState {
         self.register_tree(&document);
         self.document_origins
             .insert(document.identity(), storage_origin);
-        self.document_urls.insert(
-            document.identity(),
-            child_url
-                .clone()
-                .unwrap_or_else(|| "about:blank".to_string()),
-        );
+        let committed_url = child_url
+            .clone()
+            .unwrap_or_else(|| "about:blank".to_string());
+        self.document_urls
+            .insert(document.identity(), committed_url.clone());
+        self.update_document_target(&document, &committed_url);
         if let Some(child_base_url) = child_base_url.clone() {
             self.document_base_urls
                 .insert(document.identity(), child_base_url);
@@ -2858,6 +2898,7 @@ impl HostState {
         };
 
         self.register_tree(&document);
+        self.update_document_target(&document, &document_url);
         let entry = self
             .auxiliary_contexts
             .get_mut(&id)
@@ -3130,6 +3171,7 @@ impl HostState {
         }
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
+        self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
             self.retired_document_security_origins
@@ -3230,6 +3272,7 @@ impl HostState {
         }
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
+        self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
             self.retired_document_security_origins
@@ -4799,6 +4842,65 @@ fn document_root_for_node(node: &NodeHandle) -> Option<NodeHandle> {
     } else {
         None
     }
+}
+
+/// Finds the HTML element indicated by a URL fragment in this Document.
+/// Literal IDs take precedence over decoded IDs, and IDs take precedence over
+/// legacy `a[name]` anchors even when the anchor occurs earlier in tree order.
+fn find_fragment_target(document: &NodeHandle, url: &str) -> Option<NodeHandle> {
+    let (_, fragment) = url.split_once('#')?;
+    if fragment.is_empty() {
+        return None;
+    }
+    if let Some(target) = find_potential_fragment_target(document, fragment) {
+        return Some(target);
+    }
+    let mut decoded = Vec::with_capacity(fragment.len());
+    let bytes = fragment.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) = (
+                (bytes[index + 1] as char).to_digit(16),
+                (bytes[index + 2] as char).to_digit(16),
+            )
+        {
+            decoded.push(((high << 4) | low) as u8);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let decoded = String::from_utf8_lossy(&decoded);
+    let decoded = decoded.strip_prefix('\u{feff}').unwrap_or(&decoded);
+    if decoded == fragment {
+        return None;
+    }
+    find_potential_fragment_target(document, decoded)
+}
+
+fn find_potential_fragment_target(document: &NodeHandle, fragment: &str) -> Option<NodeHandle> {
+    let mut pending = document.child_nodes();
+    pending.reverse();
+    let mut named_anchor = None;
+    while let Some(node) = pending.pop() {
+        if node.node_type() == NodeType::Element {
+            if node.get_attribute("id").as_deref() == Some(fragment) {
+                return Some(node);
+            }
+            if named_anchor.is_none()
+                && node.is_html_element()
+                && node.tag_name().as_deref() == Some("a")
+                && node.get_attribute("name").as_deref() == Some(fragment)
+            {
+                named_anchor = Some(node.clone());
+            }
+        }
+        pending.extend(node.child_nodes().into_iter().rev());
+    }
+    named_anchor
 }
 
 /// Returns the [`Document`] that owns `node` per the DOM `Node.ownerDocument`
@@ -9781,6 +9883,11 @@ impl Drop for JsRuntime {
         // away; this is observable when two independent runtimes are created
         // and collected in one process (the Acid3 harness does exactly that).
         let mut state = self.host_state.borrow_mut();
+        for target in state.document_targets.drain().map(|(_, target)| target) {
+            if let Some(target) = target.upgrade() {
+                target.set_user_action_state("target", false);
+            }
+        }
         state.iframe_documents.clear();
         state.iframe_context_ids.clear();
         state.node_lifetimes = node_lifetime::NodeLifetimes::default();
