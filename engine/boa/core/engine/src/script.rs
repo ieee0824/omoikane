@@ -18,6 +18,7 @@ use boa_parser::{Parser, Source, source::ReadChar};
 use crate::{
     Context, HostDefined, JsResult, JsString, JsValue, SpannedSourceText,
     bytecompiler::{ByteCompiler, global_declaration_instantiation_context},
+    environments::EnvironmentStack,
     js_string,
     realm::{Realm, RealmEdge},
     spanned_source_text::SourceText,
@@ -275,15 +276,14 @@ impl Script {
     fn prepare_run(&self, context: &mut Context) -> JsResult<()> {
         let codeblock = self.codeblock(context)?;
 
-        let env_fp = context.vm.environments.len() as u32;
         context.vm.push_frame_with_stack(
             CallFrame::new_rooted(
                 codeblock,
                 Some(ActiveRunnable::Script(self.clone())),
-                context.vm.environments.clone(),
+                EnvironmentStack::new(self.inner.realm.environment()),
                 self.inner.realm.to_rooted(),
             )
-            .with_env_fp(env_fp)
+            .with_env_fp(0)
             .with_flags(CallFrameFlags::EXIT_EARLY),
             JsValue::undefined(),
             JsValue::null(),
@@ -322,7 +322,29 @@ impl ScriptEdge {
 #[cfg(test)]
 mod tests {
     use super::Script;
-    use crate::{Context, JsValue, NativeFunction, Source};
+    use crate::{Context, JsValue, NativeFunction, Source, js_string};
+
+    #[test]
+    fn nested_script_uses_global_environment_not_callers_with() {
+        let mut context = Context::default();
+        context
+            .register_global_callable(
+                js_string!("nestedScript"),
+                0,
+                NativeFunction::from_fn_ptr(|_, _, context| {
+                    context.eval(Source::from_bytes("hidden"))
+                }),
+            )
+            .expect("native callback registration");
+
+        let result = context
+            .eval(Source::from_bytes(
+                "globalThis.hidden = 'global'; with ({hidden: 'with'}) { nestedScript(); }",
+            ))
+            .expect("nested script evaluation");
+
+        assert_eq!(result, JsValue::new(js_string!("global")));
+    }
 
     #[test]
     fn native_capture_keeps_script_alive_across_collection() {
