@@ -758,3 +758,37 @@ fn appending_many_times_matches_a_reference_string() {
     assert_eq!(appended.to_std_string_escaped(), expected);
     assert_eq!(appended.len(), expected.len());
 }
+
+#[test]
+fn string_to_number_rejects_noncanonical_infinity_and_signed_prefixed_literals() {
+    for invalid in [
+        "inf",
+        "INF",
+        "infinity",
+        "+inf",
+        "-Inf",
+        "+infinity",
+        "-INFINITY",
+        " +inf ",
+        "0x+1",
+        "0x+0",
+        "0b+1",
+        "0o+7",
+        " 0x+1 ",
+    ] {
+        assert!(JsString::from(invalid).to_number().is_nan(), "{invalid}");
+    }
+
+    for (valid, expected) in [
+        ("Infinity", f64::INFINITY),
+        ("+Infinity", f64::INFINITY),
+        ("-Infinity", f64::NEG_INFINITY),
+        (" 0x10 ", 16.0),
+        ("0b101", 5.0),
+        ("0o17", 15.0),
+        ("0x1FFFFFFFF", 8_589_934_591.0),
+        ("1e400", f64::INFINITY),
+    ] {
+        assert_eq!(JsString::from(valid).to_number(), expected, "{valid}");
+    }
+}

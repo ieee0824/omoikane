@@ -24,6 +24,21 @@ fn call_number() {
 }
 
 #[test]
+fn number_rejects_noncanonical_numeric_strings() {
+    run_test_actions([
+        TestAction::assert("Number.isNaN(Number('+inf'))"),
+        TestAction::assert("Number.isNaN(Number('-INFINITY'))"),
+        TestAction::assert("Number.isNaN(Number('0x+1'))"),
+        TestAction::assert("Number.isNaN(Number('0b+1'))"),
+        TestAction::assert("Number.isNaN(+'+inf')"),
+        TestAction::assert("Number.isNaN('0x+1' * 1)"),
+        TestAction::assert_eq("Number('+Infinity')", f64::INFINITY),
+        TestAction::assert_eq("Number('0x10')", 16),
+        TestAction::assert_eq("Number('0x1FFFFFFFF')", 8_589_934_591_f64),
+    ]);
+}
+
+#[test]
 fn to_exponential() {
     run_test_actions([
         TestAction::assert_eq("Number().toExponential()", js_str!("0e+0")),
