@@ -1446,6 +1446,8 @@ pub(super) fn generated_inline_segments(
     let vertical_align = vertical_align(&style);
     let wb = word_break(&style);
     let ow = overflow_wrap(&style);
+    let mut fragment_style = FragmentStyle::from_computed(&style);
+    fragment_style.pseudo = Some(pseudo);
 
     match generated_content_value(
         content,
@@ -1468,7 +1470,7 @@ pub(super) fn generated_inline_segments(
             metrics,
             line_height,
             vertical_align,
-            style: FragmentStyle::from_computed(&style),
+            style: fragment_style.clone(),
             word_break: wb,
             overflow_wrap: ow,
             white_space_mode: white_space(&style),
@@ -1484,7 +1486,7 @@ pub(super) fn generated_inline_segments(
             metrics,
             line_height: line_height.max(metrics.font_size),
             vertical_align,
-            style: FragmentStyle::from_computed(&style),
+            style: fragment_style,
             word_break: wb,
             overflow_wrap: ow,
             white_space_mode: white_space(&style),

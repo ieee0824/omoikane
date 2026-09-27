@@ -23,6 +23,129 @@ fn sample_tree() -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
 }
 
 #[test]
+fn visited_paint_colors_preserve_ordinary_style_and_alpha() {
+    let mut ordinary = ComputedStyle::default();
+    ordinary
+        .properties
+        .insert("color".into(), ComputedValue::Color("#10203080".into()));
+    ordinary.properties.insert(
+        "background-color".into(),
+        ComputedValue::Color("transparent".into()),
+    );
+    ordinary
+        .properties
+        .insert("width".into(), ComputedValue::Px(12.0));
+    ordinary.properties.insert(
+        "background-image".into(),
+        ComputedValue::Keyword("none".into()),
+    );
+
+    let mut visited = ordinary.clone();
+    visited
+        .properties
+        .insert("color".into(), ComputedValue::Color("#aabbccff".into()));
+    visited.properties.insert(
+        "background-color".into(),
+        ComputedValue::Color("#ff0000".into()),
+    );
+    visited
+        .properties
+        .insert("width".into(), ComputedValue::Px(999.0));
+    visited.properties.insert(
+        "background-image".into(),
+        ComputedValue::Keyword("url(secret.png)".into()),
+    );
+
+    let paint = ordinary.with_visited_paint_colors(&visited);
+    assert_eq!(
+        paint.get("color"),
+        Some(&ComputedValue::Color("#aabbcc80".into()))
+    );
+    assert_eq!(
+        paint.get("background-color"),
+        ordinary.get("background-color")
+    );
+    assert_eq!(paint.get("width"), ordinary.get("width"));
+    assert_eq!(
+        paint.get("background-image"),
+        ordinary.get("background-image")
+    );
+    assert_eq!(
+        ordinary.get("color"),
+        Some(&ComputedValue::Color("#10203080".into())),
+        "the CSSOM style cannot be changed by a paint overlay"
+    );
+}
+
+#[test]
+fn visited_paint_cascade_inherits_color_without_changing_public_styles() {
+    let document = NodeHandle::document();
+    let link = NodeHandle::element("a");
+    link.set_attribute("href", "/read");
+    let child = NodeHandle::element("span");
+    link.append_child(child.clone());
+    document.append_child(link.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "a:link { color: #102030; width: 11px } \
+             a:visited { color: #8040c0; width: 99px }",
+        )
+        .unwrap(),
+    );
+
+    let ordinary_link = resolver.computed_style(&link);
+    let ordinary_child = resolver.computed_style(&child);
+    let mut paint = VisitedPaintStylePass::new(&mut resolver, [link.identity()]);
+    let painted_link = paint.style(&link);
+    let painted_child = paint.style(&child);
+    assert_eq!(
+        crate::paint::color::parse_color(&painted_link.get("color").unwrap().css_text()),
+        crate::paint::color::parse_color("#8040c0")
+    );
+    assert_eq!(
+        crate::paint::color::parse_color(&painted_child.get("color").unwrap().css_text()),
+        crate::paint::color::parse_color("#8040c0")
+    );
+    assert_eq!(painted_link.get("width"), ordinary_link.get("width"));
+    drop(paint);
+    assert_eq!(resolver.computed_style(&link), ordinary_link);
+    assert_eq!(resolver.computed_style(&child), ordinary_child);
+}
+
+#[test]
+fn visited_custom_property_cannot_indirectly_change_paint_color() {
+    let document = NodeHandle::document();
+    let link = NodeHandle::element("a");
+    link.set_attribute("href", "/visited");
+    document.append_child(link.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "a { --tone: #102030; color: var(--tone) } \
+             a:visited { --tone: #aabbcc; width: 99px }",
+        )
+        .unwrap(),
+    );
+    let ordinary = resolver.computed_style(&link);
+    let painted = VisitedPaintStylePass::new(&mut resolver, [link.identity()]).style(&link);
+    assert_eq!(
+        painted
+            .get("color")
+            .and_then(|value| { crate::paint::color::parse_color(&value.css_text()) }),
+        ordinary
+            .get("color")
+            .and_then(|value| { crate::paint::color::parse_color(&value.css_text()) })
+    );
+    assert_eq!(painted.get("width"), ordinary.get("width"));
+    assert_eq!(resolver.computed_style(&link), ordinary);
+}
+
+#[test]
 fn shadow_stylesheets_respect_tree_scope_host_and_slotted_boundaries() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

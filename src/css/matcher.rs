@@ -1,6 +1,6 @@
 //! CSS selector matching against the DOM tree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dom::{Node, NodeHandle, NodeType, WeakNodeHandle, is_actually_disabled};
 
@@ -64,11 +64,39 @@ pub fn matches_selector_with_pseudo(
 pub(crate) struct SelectorMatchCache {
     structural_positions: HashMap<usize, StructuralPositions>,
     relational_matches: HashMap<(usize, usize), bool>,
+    // Only a dedicated style/paint match cache may contain visit state. DOM
+    // selector APIs always construct the default, unvisited cache.
+    visited_link_ids: Option<HashSet<usize>>,
+    active_visited_subject: Option<usize>,
     #[cfg(test)]
     pub(crate) structural_builds: usize,
 }
 
 impl SelectorMatchCache {
+    /// Creates an isolated matcher cache for a visited-link style pass.
+    /// Recreate it when the document's link URLs or visit-store revision change.
+    pub(crate) fn for_visited_links(ids: impl IntoIterator<Item = usize>) -> Self {
+        Self {
+            visited_link_ids: Some(ids.into_iter().collect()),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn contains_visited_link_id(&self, id: usize) -> bool {
+        self.visited_link_ids
+            .as_ref()
+            .is_some_and(|ids| ids.contains(&id))
+    }
+
+    fn is_visited_subject(&self, node: &NodeHandle) -> bool {
+        let id = node.identity();
+        self.active_visited_subject == Some(id)
+            && self
+                .visited_link_ids
+                .as_ref()
+                .is_some_and(|ids| ids.contains(&id))
+    }
+
     fn positions(&mut self, parent: &NodeHandle) -> &StructuralPositions {
         #[cfg(test)]
         if !self.structural_positions.contains_key(&parent.identity()) {
@@ -150,7 +178,14 @@ fn matches_selector_with_scope_mode_cached(
         return false;
     }
 
-    matches_selector_part(
+    // Only the selector's subject may observe the visited state. Ancestor,
+    // sibling, and :has() conditions behave as unvisited even in a paint pass.
+    let outermost_visit_match =
+        cache.visited_link_ids.is_some() && cache.active_visited_subject.is_none();
+    if outermost_visit_match {
+        cache.active_visited_subject = Some(node.identity());
+    }
+    let matched = matches_selector_part(
         node,
         selector,
         selector.parts.len() - 1,
@@ -158,7 +193,11 @@ fn matches_selector_with_scope_mode_cached(
         cache,
         scope_root,
         allow_scope_ancestor_escape,
-    )
+    );
+    if outermost_visit_match {
+        cache.active_visited_subject = None;
+    }
+    matched
 }
 
 /// Returns the pseudo-element targeted by `selector`, if any.
@@ -702,8 +741,9 @@ fn matches_pseudo_class(
         "checked" => node.checked(),
         "valid" => pseudo.is_none() && node.css_validity() == Some(true),
         "invalid" => pseudo.is_none() && node.css_validity() == Some(false),
-        "any-link" | "link" => is_html_hyperlink(node),
-        "visited" => false,
+        "any-link" => is_html_hyperlink(node),
+        "link" => is_html_hyperlink(node) && !cache.is_visited_subject(node),
+        "visited" => is_html_hyperlink(node) && cache.is_visited_subject(node),
         "empty" => node
             .child_nodes()
             .into_iter()
@@ -996,6 +1036,83 @@ mod tests {
         assert!(matches_selector(&lead, &selector(".lead {}")));
         assert!(matches_selector(&lead, &selector("* {}")));
         assert!(!matches_selector(&lead, &selector("section {}")));
+    }
+
+    #[test]
+    fn visited_style_cache_is_separate_from_public_selector_matching() {
+        let link = NodeHandle::element("a");
+        link.set_attribute("href", "/destination");
+        let link_selector = selector("a:link {}");
+        let visited_selector = selector("a:visited {}");
+        let any_link_selector = selector("a:any-link {}");
+        let mut paint_cache = SelectorMatchCache::for_visited_links([link.identity()]);
+
+        assert!(!matches_selector_cached(
+            &link,
+            &link_selector,
+            &mut paint_cache
+        ));
+        assert!(matches_selector_cached(
+            &link,
+            &visited_selector,
+            &mut paint_cache
+        ));
+        assert!(matches_selector_cached(
+            &link,
+            &any_link_selector,
+            &mut paint_cache
+        ));
+        assert!(matches_selector(&link, &link_selector));
+        assert!(!matches_selector(&link, &visited_selector));
+
+        link.remove_attribute("href");
+        assert!(!matches_selector_cached(
+            &link,
+            &visited_selector,
+            &mut paint_cache
+        ));
+        assert!(!matches_selector_cached(
+            &link,
+            &any_link_selector,
+            &mut paint_cache
+        ));
+    }
+
+    #[test]
+    fn visited_paint_matching_does_not_style_other_subjects() {
+        let parent = NodeHandle::element("div");
+        let link = NodeHandle::element("a");
+        link.set_attribute("href", "/destination");
+        let sibling = NodeHandle::element("span");
+        parent.append_child(link.clone());
+        parent.append_child(sibling.clone());
+        let mut paint_cache = SelectorMatchCache::for_visited_links([link.identity()]);
+
+        assert!(matches_selector_cached(
+            &link,
+            &selector("a:is(:visited) {}"),
+            &mut paint_cache
+        ));
+        assert!(matches_selector_cached(
+            &link,
+            &selector("a:not(:link) {}"),
+            &mut paint_cache
+        ));
+        assert!(!matches_selector_cached(
+            &sibling,
+            &selector("a:visited + span {}"),
+            &mut paint_cache
+        ));
+        assert!(matches_selector_cached(
+            &sibling,
+            &selector("a:link + span {}"),
+            &mut paint_cache
+        ));
+        assert!(!matches_selector_cached(
+            &parent,
+            &selector("div:has(a:visited) {}"),
+            &mut paint_cache
+        ));
     }
 
     #[test]

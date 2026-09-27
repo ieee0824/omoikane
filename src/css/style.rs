@@ -325,6 +325,51 @@ impl ComputedStyle {
         &self.properties
     }
 
+    /// Combines a separately cascaded visited style with the ordinary style
+    /// for painting only. The ordinary style remains the sole CSSOM/layout
+    /// style; a visited selector must not change geometry or reveal history
+    /// through computed-style queries.
+    pub(crate) fn with_visited_paint_colors(&self, visited: &Self) -> Self {
+        const VISITED_COLOR_PROPERTIES: &[&str] = &[
+            "color",
+            "background-color",
+            "border-color",
+            "border-top-color",
+            "border-right-color",
+            "border-bottom-color",
+            "border-left-color",
+            "outline-color",
+            "column-rule-color",
+            "text-decoration-color",
+        ];
+
+        let mut paint = self.clone();
+        for name in VISITED_COLOR_PROPERTIES {
+            let (Some(ordinary), Some(visited)) = (self.get(name), visited.get(name)) else {
+                continue;
+            };
+            let (Some(ordinary), Some(visited)) = (
+                crate::paint::color::parse_color(&ordinary.css_text()),
+                crate::paint::color::parse_color(&visited.css_text()),
+            ) else {
+                continue;
+            };
+            // A transparent ordinary color cannot reveal whether a link was
+            // visited. The visited declaration may change RGB, but not alpha.
+            if ordinary.a == 0 {
+                continue;
+            }
+            let value = format!(
+                "#{:02x}{:02x}{:02x}{:02x}",
+                visited.r, visited.g, visited.b, ordinary.a
+            );
+            paint
+                .properties
+                .insert((*name).to_string(), ComputedValue::Color(value));
+        }
+        paint
+    }
+
     pub(crate) fn component_value(&self, name: &str) -> Option<&Value> {
         self.component_values.get(name)
     }
@@ -426,6 +471,7 @@ pub struct StyleResolver {
     pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
     counter_values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
     selector_match_cache: SelectorMatchCache,
+    visited_paint_state: Option<VisitedPaintState>,
     /// Root element's computed font-size in px (for `rem` unit resolution).
     root_font_size: f32,
     /// `true` when `root_font_size` was explicitly set via `set_root_font_size()`,
@@ -476,6 +522,143 @@ pub struct StyleResolver {
     /// Node identities whose inline `style` attribute is blocked by the
     /// owning Document's CSP `style-src` policy.
     blocked_inline_style_nodes: HashSet<usize>,
+}
+
+#[derive(Debug)]
+struct VisitedPaintState {
+    selector_match_cache: SelectorMatchCache,
+    styles: HashMap<usize, ComputedStyle>,
+    pseudo_styles: HashMap<(usize, PseudoElement), ComputedStyle>,
+    affected_nodes: HashSet<usize>,
+}
+
+/// Isolated color cascade for one paint pass. This never writes to the
+/// resolver's public computed-style caches, so CSSOM cannot observe history.
+pub(crate) struct VisitedPaintStylePass<'a> {
+    resolver: &'a mut StyleResolver,
+    selector_match_cache: SelectorMatchCache,
+    styles: HashMap<usize, ComputedStyle>,
+    pseudo_styles: HashMap<(usize, PseudoElement), ComputedStyle>,
+    affected_nodes: HashSet<usize>,
+}
+
+impl<'a> VisitedPaintStylePass<'a> {
+    pub(crate) fn new(
+        resolver: &'a mut StyleResolver,
+        visited_link_ids: impl IntoIterator<Item = usize>,
+    ) -> Self {
+        Self::from_state(
+            resolver,
+            VisitedPaintState {
+                selector_match_cache: SelectorMatchCache::for_visited_links(visited_link_ids),
+                styles: HashMap::new(),
+                pseudo_styles: HashMap::new(),
+                affected_nodes: HashSet::new(),
+            },
+        )
+    }
+
+    fn from_state(resolver: &'a mut StyleResolver, state: VisitedPaintState) -> Self {
+        Self {
+            resolver,
+            selector_match_cache: state.selector_match_cache,
+            styles: state.styles,
+            pseudo_styles: state.pseudo_styles,
+            affected_nodes: state.affected_nodes,
+        }
+    }
+
+    fn into_state(self) -> VisitedPaintState {
+        VisitedPaintState {
+            selector_match_cache: self.selector_match_cache,
+            styles: self.styles,
+            pseudo_styles: self.pseudo_styles,
+            affected_nodes: self.affected_nodes,
+        }
+    }
+
+    pub(crate) fn style(&mut self, node: &NodeHandle) -> ComputedStyle {
+        let key = node.identity();
+        if let Some(style) = self.styles.get(&key) {
+            return style.clone();
+        }
+
+        let ordinary = self.resolver.computed_style(node);
+        let inheritance_parent = flattened_assigned_slot(node).or_else(|| node.parent_node());
+        let inherited_identity = inheritance_parent.as_ref().map(|parent| {
+            if parent.node_type() == NodeType::DocumentFragment {
+                parent
+                    .shadow_host()
+                    .unwrap_or_else(|| parent.clone())
+                    .identity()
+            } else {
+                parent.identity()
+            }
+        });
+        let inherited = inheritance_parent.map(|parent| {
+            if parent.node_type() == NodeType::DocumentFragment {
+                parent
+                    .shadow_host()
+                    .map(|host| self.style(&host))
+                    .unwrap_or_default()
+            } else {
+                self.style(&parent)
+            }
+        });
+        if !self.selector_match_cache.contains_visited_link_id(key)
+            && !inherited_identity.is_some_and(|id| self.affected_nodes.contains(&id))
+        {
+            self.styles.insert(key, ordinary.clone());
+            return ordinary;
+        }
+        self.affected_nodes.insert(key);
+        let visited = self.cascade(node, inherited.as_ref(), None, &ordinary);
+        let paint = ordinary.with_visited_paint_colors(&visited);
+        self.styles.insert(key, paint.clone());
+        paint
+    }
+
+    pub(crate) fn pseudo_style(
+        &mut self,
+        node: &NodeHandle,
+        pseudo: PseudoElement,
+    ) -> Option<ComputedStyle> {
+        let key = (node.identity(), pseudo);
+        if let Some(style) = self.pseudo_styles.get(&key) {
+            return Some(style.clone());
+        }
+        let ordinary = self.resolver.computed_pseudo_style(node, pseudo)?;
+        let parent = self.style(node);
+        if !self.affected_nodes.contains(&node.identity()) {
+            return Some(ordinary);
+        }
+        let visited = self.cascade(node, Some(&parent), Some(pseudo), &ordinary);
+        let paint = ordinary.with_visited_paint_colors(&visited);
+        self.pseudo_styles.insert(key, paint.clone());
+        Some(paint)
+    }
+
+    fn cascade(
+        &mut self,
+        node: &NodeHandle,
+        parent: Option<&ComputedStyle>,
+        pseudo: Option<PseudoElement>,
+        ordinary: &ComputedStyle,
+    ) -> ComputedStyle {
+        let ordinary_cache = std::mem::replace(
+            &mut self.resolver.selector_match_cache,
+            std::mem::take(&mut self.selector_match_cache),
+        );
+        let visited = self.resolver.compute_style_with_pseudo(
+            node,
+            parent,
+            pseudo,
+            Some(&ordinary.custom_properties),
+        );
+        self.selector_match_cache =
+            std::mem::replace(&mut self.resolver.selector_match_cache, ordinary_cache);
+        visited
+    }
 }
 
 /// A validated custom-property registration shared by stylesheet and script
@@ -1904,6 +2087,54 @@ impl StyleResolver {
         self.computed_style(node).get(name).cloned()
     }
 
+    /// Supplies a fresh, private visit snapshot for the current paint call.
+    /// Call after layout so geometry and public computed styles stay unvisited.
+    pub(crate) fn begin_visited_paint(
+        &mut self,
+        visited_link_ids: impl IntoIterator<Item = usize>,
+    ) {
+        let ids: Vec<_> = visited_link_ids.into_iter().collect();
+        if ids.is_empty() {
+            self.visited_paint_state = None;
+            return;
+        }
+        let state = VisitedPaintStylePass::new(self, ids).into_state();
+        self.visited_paint_state = Some(state);
+    }
+
+    pub(crate) fn end_visited_paint(&mut self) {
+        self.visited_paint_state = None;
+    }
+
+    pub(crate) fn has_visited_paint(&self) -> bool {
+        self.visited_paint_state.is_some()
+    }
+
+    fn with_visited_paint_pass<T>(
+        &mut self,
+        action: impl FnOnce(&mut VisitedPaintStylePass<'_>) -> T,
+    ) -> Option<T> {
+        let state = self.visited_paint_state.take()?;
+        let mut pass = VisitedPaintStylePass::from_state(self, state);
+        let result = action(&mut pass);
+        self.visited_paint_state = Some(pass.into_state());
+        Some(result)
+    }
+
+    pub(crate) fn paint_style(&mut self, node: &NodeHandle) -> ComputedStyle {
+        self.with_visited_paint_pass(|pass| pass.style(node))
+            .unwrap_or_else(|| self.computed_style(node))
+    }
+
+    pub(crate) fn paint_pseudo_style(
+        &mut self,
+        node: &NodeHandle,
+        pseudo: PseudoElement,
+    ) -> Option<ComputedStyle> {
+        self.with_visited_paint_pass(|pass| pass.pseudo_style(node, pseudo))
+            .unwrap_or_else(|| self.computed_pseudo_style(node, pseudo))
+    }
+
     /// Resolves computed style for a pseudo-element attached to `node`.
     pub fn computed_pseudo_style(
         &mut self,
@@ -1916,7 +2147,7 @@ impl StyleResolver {
         }
 
         let parent_style = self.computed_style(node);
-        let style = self.compute_style_with_pseudo(node, Some(&parent_style), Some(pseudo));
+        let style = self.compute_style_with_pseudo(node, Some(&parent_style), Some(pseudo), None);
         if style.properties.is_empty() {
             return None;
         }
@@ -1930,7 +2161,7 @@ impl StyleResolver {
         node: &NodeHandle,
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
-        self.compute_style_with_pseudo(node, parent_style, None)
+        self.compute_style_with_pseudo(node, parent_style, None, None)
     }
 
     fn compute_style_with_pseudo(
@@ -1938,6 +2169,7 @@ impl StyleResolver {
         node: &NodeHandle,
         parent_style: Option<&ComputedStyle>,
         pseudo: Option<PseudoElement>,
+        paint_custom_properties: Option<&BTreeMap<String, Value>>,
     ) -> ComputedStyle {
         let mut candidates = Vec::new();
         let mut source_order = 0usize;
@@ -2035,11 +2267,15 @@ impl StyleResolver {
         candidates.sort_by(compare_candidate_priority);
         let unexpanded_candidates = candidates.clone();
 
-        let mut custom_candidates = candidates
-            .iter()
-            .filter(|candidate| candidate.name.starts_with("--"))
-            .cloned()
-            .collect();
+        let mut custom_candidates: Vec<Candidate> = if paint_custom_properties.is_some() {
+            Vec::new()
+        } else {
+            candidates
+                .iter()
+                .filter(|candidate| candidate.name.starts_with("--"))
+                .cloned()
+                .collect()
+        };
         remove_reverted_candidates(&mut custom_candidates, None);
         let inherited_custom_properties = inherited_custom_properties(parent_style);
         let mut custom_properties = inherited_custom_properties.clone();
@@ -2065,7 +2301,9 @@ impl StyleResolver {
                 }
             }
         }
-        let mut custom_properties = resolve_custom_property_values(&custom_properties);
+        let mut custom_properties = paint_custom_properties
+            .cloned()
+            .unwrap_or_else(|| resolve_custom_property_values(&custom_properties));
         candidates = expand_pending_shorthand_candidates(candidates, &custom_properties);
         candidates.sort_by(compare_candidate_priority);
         remove_reverted_candidates(&mut candidates, Some(&custom_properties));
@@ -2149,7 +2387,9 @@ impl StyleResolver {
                 &self.registered_custom_properties,
                 custom_ctx,
             );
-        custom_properties = computed_custom_properties;
+        custom_properties = paint_custom_properties
+            .cloned()
+            .unwrap_or(computed_custom_properties);
         for (name, value) in typed_custom_properties {
             properties.insert(name, value);
         }

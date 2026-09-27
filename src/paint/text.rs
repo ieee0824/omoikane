@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::css::style::PropagatedTextDecoration;
 use crate::css::{ComputedStyle, ComputedValue};
+use crate::dom::Node;
 use crate::font::{
     Font, FontError, FontFallbackCandidate, FontFamilyKey, FontVariantKey, FontWeight, GlyphRaster,
     ShapingDirection, WebFontCandidate, WebFontRegistry, grapheme_spacing_cluster_starts,
@@ -203,6 +204,7 @@ pub(crate) fn paint_text_with_registry(
         // Cache font metrics and placement once per decorating origin on the
         // line; descendants cannot substitute their own font or underline data.
         let mut decorations = HashMap::new();
+        let mut decoration_colors = HashMap::new();
         for fragment in fragments {
             if fragment.style.visibility == crate::layout::Visibility::Hidden {
                 continue;
@@ -215,7 +217,7 @@ pub(crate) fn paint_text_with_registry(
                     // Per-fragment style is used for text-transform and color so
                     // that nested inline elements (e.g. <span>) can have
                     // independent styling.
-                    let frag_color = fragment_text_color(&fragment.style).unwrap_or(fallback_color);
+                    let frag_color = fragment_paint_color(fragment, resolver, fallback_color);
                     let text_transform = fragment_text_transform(&fragment.style);
 
                     let transformed = apply_text_transform(text, text_transform);
@@ -352,7 +354,14 @@ pub(crate) fn paint_text_with_registry(
                     // Descendant longhands therefore cannot restyle or cancel it.
                     for decoration in fragment.style.text_decorations.iter() {
                         let lines = decoration_lines(&decoration.line);
-                        let color = parse_color(&decoration.color).unwrap_or(frag_color);
+                        let color =
+                            *decoration_colors
+                                .entry(decoration.origin)
+                                .or_insert_with(|| {
+                                    decoration_paint_color(
+                                        fragment, decoration, resolver, frag_color,
+                                    )
+                                });
                         let geometry = decorations.entry(decoration.origin).or_insert_with(|| {
                             DecorationGeometry::new(
                                 decoration,
@@ -390,20 +399,30 @@ pub(crate) fn paint_text_with_registry(
                 InlineFragmentContent::InlineSpacing(_)
                 | InlineFragmentContent::InlineEdge(_, _) => {}
                 InlineFragmentContent::Image(image, style) => {
+                    let paint = fragment_box_paint_style(fragment, resolver);
                     paint_inline_image_fragment(
                         canvas,
                         fragment_rect,
                         image,
-                        style,
+                        paint.as_ref().unwrap_or(style),
                         clip,
                         _viewport,
                     );
                 }
                 InlineFragmentContent::InlineBox(style)
                 | InlineFragmentContent::GeneratedBox(style) => {
-                    super::paint_generated_box(canvas, fragment_rect, style, clip, _viewport);
+                    let paint = fragment_box_paint_style(fragment, resolver);
+                    super::paint_generated_box(
+                        canvas,
+                        fragment_rect,
+                        paint.as_ref().unwrap_or(style),
+                        clip,
+                        _viewport,
+                    );
                 }
                 InlineFragmentContent::FormControl(style, value, editing) => {
+                    let paint = fragment_box_paint_style(fragment, resolver);
+                    let style = paint.as_ref().unwrap_or(style);
                     let border = EdgeSizesForPaint::from_style(style);
                     // A block control's owning LayoutBox already painted its
                     // background and border. Inline controls have no such box.
@@ -416,7 +435,7 @@ pub(crate) fn paint_text_with_registry(
                         }
                     }
                     let content_rect = inline_fragment_content_rect(fragment_rect, style, border);
-                    let color = fragment_text_color(&fragment.style).unwrap_or(fallback_color);
+                    let color = fragment_paint_color(fragment, resolver, fallback_color);
                     // Same font policy as the Text branch: the fragment's
                     // resolved installed or web face first, then the global fonts.
                     let web_candidates = select_fragment_web_fonts(web_fonts, fragment);
@@ -604,6 +623,70 @@ pub(crate) fn paint_text_with_registry(
 /// Returns the `color` from a `FragmentStyle`, if present.
 fn fragment_text_color(style: &FragmentStyle) -> Option<Color> {
     style.color.as_deref().and_then(parse_color)
+}
+
+fn fragment_box_paint_style(
+    fragment: &crate::layout::InlineFragment,
+    resolver: &mut crate::css::StyleResolver,
+) -> Option<ComputedStyle> {
+    if !resolver.has_visited_paint() {
+        return None;
+    }
+    match fragment.style.pseudo {
+        Some(pseudo) => resolver.paint_pseudo_style(&fragment.node, pseudo),
+        None => Some(resolver.paint_style(&fragment.node)),
+    }
+}
+
+fn fragment_paint_color(
+    fragment: &crate::layout::InlineFragment,
+    resolver: &mut crate::css::StyleResolver,
+    fallback: Color,
+) -> Color {
+    if let Some(color) = fragment_box_paint_style(fragment, resolver)
+        .as_ref()
+        .and_then(text_color)
+    {
+        return color;
+    }
+    fragment_text_color(&fragment.style).unwrap_or(fallback)
+}
+
+fn decoration_paint_color(
+    fragment: &crate::layout::InlineFragment,
+    decoration: &PropagatedTextDecoration,
+    resolver: &mut crate::css::StyleResolver,
+    fallback: Color,
+) -> Color {
+    let ordinary = parse_color(&decoration.color).unwrap_or(fallback);
+    if !resolver.has_visited_paint() {
+        return ordinary;
+    }
+
+    let mut ancestor = Some(fragment.node.clone());
+    while let Some(node) = ancestor {
+        if node.identity() == decoration.origin.0 {
+            let style = match decoration.origin.1 {
+                Some(pseudo) => resolver.paint_pseudo_style(&node, pseudo),
+                None => Some(resolver.paint_style(&node)),
+            };
+            if let Some(style) = style {
+                let color = style
+                    .get("text-decoration-color")
+                    .map(ComputedValue::css_text);
+                return match color.as_deref() {
+                    Some(value) if value.eq_ignore_ascii_case("currentcolor") => {
+                        text_color(&style).unwrap_or(ordinary)
+                    }
+                    Some(value) => parse_color(value).unwrap_or(ordinary),
+                    None => ordinary,
+                };
+            }
+            break;
+        }
+        ancestor = node.parent_node();
+    }
+    ordinary
 }
 
 /// Returns the `text-transform` keyword from a `FragmentStyle`.

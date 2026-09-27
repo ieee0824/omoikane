@@ -11,6 +11,264 @@ use crate::layout::{
 use crate::paint::*;
 
 #[test]
+fn visited_paint_changes_only_allowed_link_colors() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let link = NodeHandle::element("a");
+    link.set_attribute("href", "/visited");
+    document.append_child(body.clone());
+    body.append_child(link.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } \
+             a:link { display: block; width: 20px; height: 20px; background-color: #ff0000 } \
+             a:visited { width: 40px; background-color: #0000ff }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 60.0,
+        height: 30.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let ordinary = paint_layout_with_web_fonts(&layout, &mut resolver, viewport, Vec::new(), None);
+    let visited = paint_layout_with_visited_links(
+        &layout,
+        &mut resolver,
+        viewport,
+        Vec::new(),
+        None,
+        [link.identity()],
+    );
+
+    assert_eq!(ordinary.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(visited.pixel(5, 5), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(visited.pixel(25, 5), ordinary.pixel(25, 5));
+    assert_eq!(
+        resolver.computed_style(&link).get("width"),
+        Some(&crate::css::ComputedValue::Px(20.0))
+    );
+    assert_eq!(
+        resolver.computed_style(&link).get("background-color"),
+        Some(&crate::css::ComputedValue::Color("#ff0000".into()))
+    );
+}
+
+#[test]
+fn visited_text_color_changes_without_relaying_out_glyphs() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let link = NodeHandle::element("a");
+    link.set_attribute("href", "/visited");
+    link.append_child(NodeHandle::text("link"));
+    document.append_child(body.clone());
+    body.append_child(link.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } \
+             a:link { display: block; color: #ff0000; font-size: 16px } \
+             a:visited { color: #0000ff; font-size: 32px }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let ordinary = paint_layout_with_web_fonts(&layout, &mut resolver, viewport, Vec::new(), None);
+    let visited = paint_layout_with_visited_links(
+        &layout,
+        &mut resolver,
+        viewport,
+        Vec::new(),
+        None,
+        [link.identity()],
+    );
+    let opaque_colors = |canvas: &Canvas| {
+        canvas
+            .pixels()
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 0)
+            .map(|pixel| (pixel[0], pixel[1], pixel[2], pixel[3]))
+            .collect::<Vec<_>>()
+    };
+    let ordinary_colors = opaque_colors(&ordinary);
+    let visited_colors = opaque_colors(&visited);
+    assert!(!ordinary_colors.is_empty());
+    assert!(
+        ordinary_colors
+            .iter()
+            .any(|color| *color == (255, 0, 0, 255))
+    );
+    assert!(
+        visited_colors
+            .iter()
+            .any(|color| *color == (0, 0, 255, 255))
+    );
+    assert_eq!(
+        ordinary_colors.len(),
+        visited_colors.len(),
+        "visited font-size must not change glyph geometry"
+    );
+    assert_eq!(
+        resolver.computed_style(&link).get("font-size"),
+        Some(&crate::css::ComputedValue::Px(16.0))
+    );
+}
+
+#[test]
+fn visited_text_decoration_color_changes_only_at_paint() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let link = NodeHandle::element("a");
+    link.set_attribute("href", "/visited");
+    link.append_child(NodeHandle::text("link"));
+    document.append_child(body.clone());
+    body.append_child(link.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } \
+             a:link { display: block; color: black; text-decoration: underline; \
+                       text-decoration-color: #ff0000 } \
+             a:visited { text-decoration-color: #0000ff }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let ordinary = paint_layout_with_web_fonts(&layout, &mut resolver, viewport, Vec::new(), None);
+    let visited = paint_layout_with_visited_links(
+        &layout,
+        &mut resolver,
+        viewport,
+        Vec::new(),
+        None,
+        [link.identity()],
+    );
+    let has_color =
+        |canvas: &Canvas, rgba: [u8; 4]| canvas.pixels().chunks_exact(4).any(|pixel| pixel == rgba);
+    assert!(has_color(&ordinary, [255, 0, 0, 255]));
+    assert!(has_color(&visited, [0, 0, 255, 255]));
+    assert!(!has_color(&visited, [255, 0, 0, 255]));
+    assert_eq!(
+        resolver.computed_style(&link).get("text-decoration-color"),
+        Some(&crate::css::ComputedValue::Color("#ff0000".into()))
+    );
+}
+
+#[test]
+fn visited_inline_link_background_uses_private_paint_style() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let link = NodeHandle::element("a");
+    link.set_attribute("href", "/visited");
+    link.append_child(NodeHandle::text("link"));
+    document.append_child(body.clone());
+    body.append_child(link.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } \
+             a:link { color: black; background-color: #ff0000 } \
+             a:visited { background-color: #0000ff }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let ordinary = paint_layout_with_web_fonts(&layout, &mut resolver, viewport, Vec::new(), None);
+    let visited = paint_layout_with_visited_links(
+        &layout,
+        &mut resolver,
+        viewport,
+        Vec::new(),
+        None,
+        [link.identity()],
+    );
+    let has_color =
+        |canvas: &Canvas, rgba: [u8; 4]| canvas.pixels().chunks_exact(4).any(|pixel| pixel == rgba);
+    assert!(has_color(&ordinary, [255, 0, 0, 255]));
+    assert!(has_color(&visited, [0, 0, 255, 255]));
+    assert_eq!(
+        resolver.computed_style(&link).get("background-color"),
+        Some(&crate::css::ComputedValue::Color("#ff0000".into()))
+    );
+}
+
+#[test]
+fn visited_generated_text_uses_its_pseudo_element_color() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let link = NodeHandle::element("a");
+    link.set_attribute("href", "/visited");
+    document.append_child(body.clone());
+    body.append_child(link.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } \
+             a:link::before { content: 'X'; color: #ff0000 } \
+             a:visited::before { content: 'X'; color: #0000ff }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 60.0,
+        height: 40.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let ordinary = paint_layout_with_web_fonts(&layout, &mut resolver, viewport, Vec::new(), None);
+    let visited = paint_layout_with_visited_links(
+        &layout,
+        &mut resolver,
+        viewport,
+        Vec::new(),
+        None,
+        [link.identity()],
+    );
+    let has_color =
+        |canvas: &Canvas, rgba: [u8; 4]| canvas.pixels().chunks_exact(4).any(|pixel| pixel == rgba);
+    assert!(has_color(&ordinary, [255, 0, 0, 255]));
+    assert!(has_color(&visited, [0, 0, 255, 255]));
+    assert_eq!(
+        resolver
+            .computed_pseudo_style(&link, crate::css::PseudoElement::Before)
+            .and_then(|style| style.get("color").cloned()),
+        Some(crate::css::ComputedValue::Color("#ff0000".into()))
+    );
+}
+
+#[test]
 fn calc_background_positions_resolve_to_pixel_offsets_on_both_axes() {
     let node = NodeHandle::element("div");
     let mut resolver = StyleResolver::new();
