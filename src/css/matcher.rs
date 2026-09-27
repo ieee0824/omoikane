@@ -681,6 +681,7 @@ fn matches_pseudo_class(
         "hover" | "active" | "focus" | "focus-visible" | "focus-within" => {
             pseudo.is_none() && node.has_user_action_state(&name)
         }
+        "target" => node.has_user_action_state("target"),
         "root" => node
             .parent_node()
             .is_some_and(|parent| parent.node_type() == NodeType::Document),

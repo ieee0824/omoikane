@@ -1462,6 +1462,7 @@ impl NodeHandle {
             "focus" => 4,
             "focus-visible" => 8,
             "focus-within" => 16,
+            "target" => 32,
             _ => return false,
         };
         matches!(&self.0.borrow().data, NodeData::Element(element) if element.user_action_state & bit != 0)
@@ -1475,6 +1476,7 @@ impl NodeHandle {
             "focus" => 4,
             "focus-visible" => 8,
             "focus-within" => 16,
+            "target" => 32,
             _ => return false,
         };
         let mut inner = self.0.borrow_mut();
