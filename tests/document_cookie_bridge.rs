@@ -1,49 +1,23 @@
-use omoikane::{html::TreeBuilder, js::JsRuntime};
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::time::{Duration, Instant};
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
 
-fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream.set_nonblocking(false).unwrap();
-                return stream;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out waiting for HTTP request"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("accept failed: {error}"),
-        }
-    }
-}
+use http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
+use omoikane::{html::TreeBuilder, js::JsRuntime};
+use std::io::Write;
 
 #[test]
 fn server_and_document_cookies_share_one_jar_without_exposing_httponly() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for path in ["/set", "/echo"] {
-            let mut stream = accept_with_timeout(&listener);
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let (line, headers) = request.split_once("\r\n").unwrap();
             assert!(line.starts_with(&format!("GET {path} HTTP/1.1")));
-            let mut headers = String::new();
-            loop {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
-                }
-                headers.push_str(&line);
-            }
             if path == "/set" {
                 stream.write_all(b"HTTP/1.1 204 No Content\r\nSet-Cookie: visible=1; Path=/\r\nSet-Cookie: secret=server; HttpOnly; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             } else {
@@ -88,7 +62,7 @@ fn server_and_document_cookies_share_one_jar_without_exposing_httponly() {
         .eval(&format!("fetch('http://{address}/echo')"))
         .unwrap();
     runtime.run_jobs().unwrap();
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -96,25 +70,14 @@ fn navigation_carries_server_and_script_cookies_between_documents() {
     use omoikane::cdp::CdpSession;
     use serde_json::json;
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for path in ["/first", "/second"] {
-            let mut stream = accept_with_timeout(&listener);
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let (line, headers) = request.split_once("\r\n").unwrap();
             assert!(line.starts_with(&format!("GET {path} HTTP/1.1")), "{line}");
-            let mut headers = String::new();
-            loop {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
-                }
-                headers.push_str(&line);
-            }
             if path == "/second" {
                 assert!(headers.contains("server=1"), "{headers}");
                 assert!(headers.contains("script=2"), "{headers}");
@@ -163,7 +126,7 @@ fn navigation_carries_server_and_script_cookies_between_documents() {
         .dispatch("Runtime.evaluate", json!({"expression": "document.cookie"}))
         .unwrap();
     assert_eq!(second["result"]["value"], "server=1; script=2");
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]

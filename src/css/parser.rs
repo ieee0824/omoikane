@@ -110,6 +110,12 @@ fn split_style_attribute_chunks(input: &str) -> Vec<&str> {
     chunks
 }
 
+fn is_location_pseudo_class(name: &str) -> bool {
+    ["link", "visited", "any-link", "target"]
+        .iter()
+        .any(|known| name.eq_ignore_ascii_case(known))
+}
+
 fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
     selector.parts.iter().all(|part| {
         part.simples.iter().all(|simple| match simple {
@@ -118,6 +124,7 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                 // (`:NTH-CHILD(odd)` is valid), so normalize before gating.
                 let base = name.split_once('(').map_or(name.as_str(), |(base, _)| base);
                 let base = base.to_ascii_lowercase();
+                let location = is_location_pseudo_class(&base);
                 let known = matches!(
                     base.as_str(),
                     "root"
@@ -154,7 +161,8 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                     base.as_str(),
                     "hover" | "active" | "focus" | "focus-visible" | "focus-within"
                 );
-                known
+                (known || location)
+                    && (!location || !name.contains('('))
                     && (!user_action || !name.contains('('))
                     && (!base.starts_with("nth-")
                         || name
@@ -755,6 +763,9 @@ impl Parser {
         let name = self.expect_ident()?;
         if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
             return Ok(SimpleSelector::PseudoClass(name));
+        }
+        if is_location_pseudo_class(&name) {
+            return Err(CssParseError::InvalidSelector);
         }
         self.next(); // consume ParenOpen
         let argument_tokens = self.collect_parenthesized_tokens()?;
