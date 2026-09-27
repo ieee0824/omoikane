@@ -113,3 +113,95 @@ fn committed_visit_changes_pixels_but_not_cssom_or_selector_apis() {
         Some(crate::paint::Color::rgb(255, 0, 0))
     );
 }
+
+#[test]
+fn visited_links_remain_unvisited_in_all_dom_selector_apis() {
+    let document = TreeBuilder::parse(
+        r#"<!doctype html><html><head><style>
+        body { margin: 0 }
+        a { display: block; width: 40px; height: 40px; background-color: #ff0000 }
+        a:visited { background-color: #00ff00 }
+        </style></head><body>
+        <a id="link" href="/destination"></a>
+        <map><area id="area" href="/destination"></map>
+        </body></html>"#,
+    )
+    .document();
+    let storage = StorageManager::new();
+    let session = storage.create_session();
+    let mut runtime = JsRuntime::with_document_url_and_storage(
+        document,
+        "https://example.test/start",
+        storage.clone(),
+        session,
+    )
+    .unwrap();
+    let snapshot = |runtime: &mut JsRuntime| {
+        let value = runtime
+            .eval(
+                r#"(() => {
+                    const link = document.getElementById('link');
+                    const area = document.getElementById('area');
+                    return JSON.stringify({
+                        visited: link.matches(':visited'),
+                        link: link.matches(':link'),
+                        anyLink: link.matches(':any-link'),
+                        nestedVisited: link.matches(':is(:visited)'),
+                        nestedLink: link.matches(':is(:link, :visited)'),
+                        negatedVisited: link.matches(':not(:visited)'),
+                        closestVisited: link.closest(':visited') !== null,
+                        closestUnvisited: link.closest('a:not(:visited)') === link,
+                        queryVisited: document.querySelector(':visited') !== null,
+                        queryNestedVisited: document.querySelectorAll(':is(:visited)').length,
+                        queryLinkList: document.querySelectorAll('a:visited, a:link, area:link').length,
+                        hasVisited: document.querySelector('body:has(a:visited)') !== null,
+                        hasLink: document.querySelector('body:has(a:link)') === document.body,
+                        areaLink: area.matches(':link')
+                    });
+                })()"#,
+            )
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(
+            &value.as_string().unwrap().to_std_string_escaped(),
+        )
+        .unwrap()
+    };
+    let before = snapshot(&mut runtime);
+    assert_eq!(
+        runtime.paint_current_document().unwrap().pixel(20, 20),
+        Some(crate::paint::Color::rgb(255, 0, 0))
+    );
+
+    let destination = "https://example.test/destination";
+    let source = VisitSource::new(
+        StorageOrigin::from_url("https://example.test/start").unwrap(),
+        "https://example.test/start",
+    )
+    .unwrap();
+    storage.record_page_navigation(destination, destination, source);
+    assert_eq!(
+        runtime.paint_current_document().unwrap().pixel(20, 20),
+        Some(crate::paint::Color::rgb(0, 255, 0))
+    );
+    let after = snapshot(&mut runtime);
+    assert_eq!(after, before, "DOM selectors must not reveal the visit");
+    assert_eq!(
+        after,
+        serde_json::json!({
+            "visited": false,
+            "link": true,
+            "anyLink": true,
+            "nestedVisited": false,
+            "nestedLink": true,
+            "negatedVisited": true,
+            "closestVisited": false,
+            "closestUnvisited": true,
+            "queryVisited": false,
+            "queryNestedVisited": 0,
+            "queryLinkList": 2,
+            "hasVisited": false,
+            "hasLink": true,
+            "areaLink": true
+        })
+    );
+}
