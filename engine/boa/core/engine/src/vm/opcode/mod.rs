@@ -1678,11 +1678,9 @@ generate_opcodes! {
 
     /// Pushes `this` value that is related to the object environment of the given binding
     ///
-    /// - Operands:
-    ///   - index: `VaryingOperand`
     /// - Registers:
     ///   - Output: dst
-    ThisForObjectEnvironmentName { dst: VaryingOperand, index: VaryingOperand },
+    ThisForObjectEnvironmentName { dst: VaryingOperand },
 
     /// Pushes the current `super` value to the stack.
     ///

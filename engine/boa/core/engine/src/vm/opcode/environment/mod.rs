@@ -50,13 +50,15 @@ pub(crate) struct ThisForObjectEnvironmentName;
 
 impl ThisForObjectEnvironmentName {
     #[inline(always)]
-    pub(super) fn operation(
-        (dst, index): (VaryingOperand, VaryingOperand),
-        context: &mut Context,
-    ) -> JsResult<()> {
-        let binding_locator = context.vm.frame().code_block.bindings[usize::from(index)].clone();
+    pub(super) fn operation(dst: VaryingOperand, context: &mut Context) -> JsResult<()> {
+        let binding_locator = context
+            .vm
+            .frame_mut()
+            .binding_stack
+            .pop()
+            .expect("locator should have been pushed by GetNameAndLocator");
         let this = context
-            .this_from_object_environment_binding(&binding_locator)?
+            .this_from_resolved_object_environment_binding(&binding_locator)
             .map_or(JsValue::undefined(), Into::into);
         context.vm.set_register(dst.into(), this);
         Ok(())

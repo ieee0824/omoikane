@@ -371,6 +371,7 @@ impl CodeBlock {
             | Instruction::PushUndefined { dst }
             | Instruction::Exception { dst }
             | Instruction::This { dst }
+            | Instruction::ThisForObjectEnvironmentName { dst }
             | Instruction::Super { dst }
             | Instruction::SuperCallPrepare { dst }
             | Instruction::NewTarget { dst }
@@ -449,7 +450,6 @@ impl CodeBlock {
                 format!("value:{value}, dst:{dst}")
             }
             Instruction::PushLiteral { index, dst }
-            | Instruction::ThisForObjectEnvironmentName { index, dst }
             | Instruction::GetFunction { index, dst }
             | Instruction::HasRestrictedGlobalProperty { index, dst }
             | Instruction::CanDeclareGlobalFunction { index, dst }

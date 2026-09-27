@@ -178,3 +178,75 @@ fn eval_out_of_scope() {
         TestAction::assert_eq("f()", JsValue::null()),
     ]);
 }
+
+#[test]
+fn with_method_call_uses_resolved_object_binding() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            let emptyHasCount = 0;
+            const emptyProxy = new Proxy({}, {
+                has(target, property) {
+                    if (property === "Object") emptyHasCount++;
+                    return Reflect.has(target, property);
+                }
+            });
+            with (emptyProxy) { Object(); }
+            let hasCount = 0;
+            let callThis = null;
+            const target = { fn() { callThis = this; } };
+            const proxy = new Proxy(target, {
+                has(target, property) {
+                    if (property === "fn") hasCount++;
+                    return Reflect.has(target, property);
+                }
+            });
+            with (proxy) { fn(); }
+            emptyHasCount === 1 && hasCount === 2 && callThis === proxy
+        "#},
+        true,
+    )]);
+}
+
+#[test]
+fn with_binding_deleted_during_unscopables_lookup() {
+    run_test_actions([
+        TestAction::assert_eq(
+            indoc! {r#"
+            let unscopablesCalled = 0;
+            const object = {
+                binding: 42,
+                get [Symbol.unscopables]() {
+                    unscopablesCalled++;
+                    delete object.binding;
+                    return null;
+                }
+            };
+            let result = null;
+            with (object) { result = binding; }
+            unscopablesCalled === 1 && result === undefined
+        "#},
+            true,
+        ),
+        TestAction::assert_eq(
+            indoc! {r#"
+            const strictObject = {
+                binding: 42,
+                get [Symbol.unscopables]() {
+                    delete strictObject.binding;
+                    return null;
+                }
+            };
+            let strictThrew = false;
+            with (strictObject) {
+                try {
+                    (function() { "use strict"; return binding; })();
+                } catch (error) {
+                    strictThrew = error instanceof ReferenceError;
+                }
+            }
+            strictThrew
+        "#},
+            true,
+        ),
+    ]);
+}
