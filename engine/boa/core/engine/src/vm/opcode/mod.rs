@@ -2297,8 +2297,11 @@ generate_opcodes! {
     Reserved58 => Reserved,
     /// Reserved [`Opcode`].
     Reserved59 => Reserved,
-    /// Reserved [`Opcode`].
-    Reserved60 => Reserved,
+    /// Declare a `var` binding during direct eval declaration instantiation.
+    ///
+    /// - Operands:
+    ///   - binding_index: `VaryingOperand`
+    DefEvalVar { binding_index: VaryingOperand },
     /// Reserved [`Opcode`].
     Reserved61 => Reserved,
     /// Reserved [`Opcode`].

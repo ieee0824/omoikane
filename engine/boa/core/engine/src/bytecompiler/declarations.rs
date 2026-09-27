@@ -858,25 +858,15 @@ impl ByteCompiler<'_> {
                 let dst = self.register_allocator.alloc();
                 self.emit_get_function(&dst, index);
 
-                // i. Let bindingExists be ! varEnv.HasBinding(fn).
-                let (binding, binding_exists) = bindings
+                let binding = bindings
                     .new_function_names
                     .get(&name)
                     .expect("binding must exist");
 
-                // ii. If bindingExists is false, then
-                // iii. Else,
-                if *binding_exists {
-                    // 1. Perform ! varEnv.SetMutableBinding(fn, fo, false).
-                    let index = self.insert_binding(binding.clone());
-                    self.emit_binding_access(BindingAccessOpcode::SetName, &index, &dst);
-                } else {
-                    // 1. NOTE: The following invocation cannot return an abrupt completion because of the validation preceding step 14.
-                    // 2. Perform ! varEnv.CreateMutableBinding(fn, true).
-                    // 3. Perform ! varEnv.InitializeBinding(fn, fo).
-                    let index = self.insert_binding(binding.clone());
-                    self.emit_binding_access(BindingAccessOpcode::DefInitVar, &index, &dst);
-                }
+                // Create or update the eval function binding. DefInitVar restores it
+                // first if a prior direct eval deleted the same binding.
+                let index = self.insert_binding(binding.clone());
+                self.emit_binding_access(BindingAccessOpcode::DefInitVar, &index, &dst);
                 self.register_allocator.dealloc(dst);
             }
         }
@@ -893,7 +883,7 @@ impl ByteCompiler<'_> {
             }
         }
         // 18.b
-        for binding in bindings.new_var_names {
+        for binding in bindings.declared_var_names {
             // i. Let bindingExists be ! varEnv.HasBinding(vn).
             // ii. If bindingExists is false, then
             // 1. NOTE: The following invocation cannot return an abrupt completion because of the validation preceding step 14.
@@ -901,8 +891,7 @@ impl ByteCompiler<'_> {
             // 3. Perform ! varEnv.InitializeBinding(vn, undefined).
             let index = self.insert_binding(binding);
             let value = self.register_allocator.alloc();
-            self.bytecode.emit_push_undefined(value.variable());
-            self.emit_binding_access(BindingAccessOpcode::DefInitVar, &index, &value);
+            self.emit_binding_access(BindingAccessOpcode::DefEvalVar, &index, &value);
             self.register_allocator.dealloc(value);
         }
 
