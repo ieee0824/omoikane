@@ -269,6 +269,38 @@ fn unary_delete() {
 }
 
 #[test]
+fn optional_delete_removes_the_final_property() {
+    run_test_actions([
+        TestAction::assert("{ const obj = { value: 1 }; delete obj?.value && !('value' in obj) }"),
+        TestAction::assert(
+            "{ const obj = { child: { value: 1 } }; delete obj?.child.value && !('value' in obj.child) }",
+        ),
+        TestAction::assert(
+            "{ const obj = { value: 1 }; delete obj?.['value'] && !('value' in obj) }",
+        ),
+        TestAction::assert("{ const obj = null; delete obj?.value }"),
+        TestAction::assert(
+            "{ const obj = { child: null }; delete obj?.child?.value && obj.child === null }",
+        ),
+        TestAction::assert(
+            "{ const obj = { value: 1 }; delete (obj?.value) && !('value' in obj) }",
+        ),
+        TestAction::assert(
+            "{ const obj = { child: { value: 1 }, get() { return this.child; } }; delete obj?.get().value && !('value' in obj.child) }",
+        ),
+        TestAction::assert(
+            "{ const obj = {}; Object.defineProperty(obj, 'value', { value: 1 }); !delete obj?.value && 'value' in obj }",
+        ),
+        TestAction::assert(
+            "{ let calls = 0; const obj = { method() { calls++; } }; delete obj?.method() && calls === 1 }",
+        ),
+        TestAction::assert(
+            "{ const obj = { child: null }; try { delete obj?.child.value; false } catch (error) { error instanceof TypeError } }",
+        ),
+    ]);
+}
+
+#[test]
 fn comma_operator() {
     run_test_actions([
         TestAction::assert_eq(
