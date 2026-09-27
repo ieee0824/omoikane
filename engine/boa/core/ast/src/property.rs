@@ -72,10 +72,47 @@ impl PropertyName {
 impl ToInternedString for PropertyName {
     fn to_interned_string(&self, interner: &Interner) -> String {
         match self {
-            Self::Literal(key) => interner.resolve_expect(key.sym()).to_string(),
+            Self::Literal(key) => {
+                let name = interner.resolve_expect(key.sym()).to_string();
+                if is_identifier_name(&name) {
+                    name
+                } else {
+                    quote_property_name(&name)
+                }
+            }
             Self::Computed(key) => format!("[{}]", key.to_interned_string(interner)),
         }
     }
+}
+
+// Quoting a valid non-ASCII IdentifierName is harmless, while emitting an invalid
+// name without quotes would make the formatted source impossible to parse.
+fn is_identifier_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '$' || first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '$' || ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn quote_property_name(name: &str) -> String {
+    let mut quoted = String::with_capacity(name.len() + 2);
+    quoted.push('"');
+    for ch in name.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\u{2028}' => quoted.push_str("\\u2028"),
+            '\u{2029}' => quoted.push_str("\\u2029"),
+            ch if ch.is_control() => quoted.push_str(&format!("\\u{:04X}", ch as u32)),
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 impl From<Identifier> for PropertyName {

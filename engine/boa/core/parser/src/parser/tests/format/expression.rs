@@ -137,6 +137,23 @@ fn object() {
 }
 
 #[test]
+fn object_non_identifier_keys() {
+    test_formatting(
+        r#"
+        let obj = {
+            normal: 1,
+            "a-b": 2,
+            ":checked + div": 3,
+            "": 4,
+            "quote\"key": 5,
+            "back\\slash": 6,
+        };
+        obj;
+        "#,
+    );
+}
+
+#[test]
 fn array_literal_empty() {
     test_formatting(
         r"
