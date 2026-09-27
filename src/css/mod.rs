@@ -257,7 +257,7 @@ pub enum Rule {
 }
 
 /// One of the 16 page-margin boxes named by an at-rule inside `@page`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PageMarginBox {
     TopLeftCorner,
     TopLeft,

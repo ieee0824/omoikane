@@ -6,7 +6,7 @@ use super::{
     CascadeLayerOrder, ComputedValue, LayerPath, Origin, ResolutionContext, StyleResolver,
     compute_value, layer_block_path, layer_group_rule_is_active,
 };
-use crate::css::{Declaration, Rule, Value};
+use crate::css::{Declaration, PageMarginBox, Rule, Value};
 
 /// The side of a page in a two-sided document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +50,7 @@ impl PageSelectorContext {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedPageStyle {
     properties: BTreeMap<String, Value>,
+    margin_boxes: BTreeMap<PageMarginBox, BTreeMap<String, Value>>,
 }
 
 /// Used paper dimensions and page margins in CSS pixels.
@@ -78,6 +79,19 @@ impl ResolvedPageStyle {
     /// Returns the winning properties in stable name order.
     pub fn properties(&self) -> &BTreeMap<String, Value> {
         &self.properties
+    }
+
+    /// Returns the winning declarations for one page-margin box, if it has any.
+    pub fn margin_box_properties(
+        &self,
+        margin_box: PageMarginBox,
+    ) -> Option<&BTreeMap<String, Value>> {
+        self.margin_boxes.get(&margin_box)
+    }
+
+    /// Returns the winning specified value in one page-margin box.
+    pub fn margin_box_property(&self, margin_box: PageMarginBox, name: &str) -> Option<&Value> {
+        self.margin_box_properties(margin_box)?.get(name)
     }
 
     /// Resolves `size` and physical margins against the supplied print defaults.
@@ -266,6 +280,7 @@ fn parse_page_selector_list(prelude: &str) -> Option<Vec<PageSelector<'_>>> {
 
 #[derive(Debug)]
 struct PageCandidate {
+    margin_box: Option<PageMarginBox>,
     declaration: Declaration,
     origin: Origin,
     layer_order: Vec<usize>,
@@ -332,6 +347,7 @@ fn collect_page_candidates(
             for declaration in &at_rule.declarations {
                 if let Some(specificity) = specificity {
                     candidates.push(PageCandidate {
+                        margin_box: None,
                         declaration: declaration.clone(),
                         origin,
                         layer_order: layer_order.rank(active_layer),
@@ -340,6 +356,29 @@ fn collect_page_candidates(
                     });
                 }
                 *source_order += 1;
+            }
+            if let Some(block) = &at_rule.block {
+                for rule in block {
+                    let Rule::At(margin_rule) = rule else {
+                        continue;
+                    };
+                    let Some(margin_box) = margin_rule.page_margin_box else {
+                        continue;
+                    };
+                    for declaration in &margin_rule.declarations {
+                        if let Some(specificity) = specificity {
+                            candidates.push(PageCandidate {
+                                margin_box: Some(margin_box),
+                                declaration: declaration.clone(),
+                                origin,
+                                layer_order: layer_order.rank(active_layer),
+                                specificity,
+                                source_order: *source_order,
+                            });
+                        }
+                        *source_order += 1;
+                    }
+                }
             }
             continue;
         }
@@ -422,22 +461,34 @@ impl StyleResolver {
                 &mut candidates,
             );
         }
-        let mut winners: BTreeMap<String, PageCandidate> = BTreeMap::new();
+        let mut winners: BTreeMap<(Option<PageMarginBox>, String), PageCandidate> = BTreeMap::new();
         for candidate in candidates {
-            let name = candidate.declaration.name.clone();
+            let key = (candidate.margin_box, candidate.declaration.name.clone());
             if winners
-                .get(&name)
+                .get(&key)
                 .is_none_or(|previous| candidate.outranks(previous))
             {
-                winners.insert(name, candidate);
+                winners.insert(key, candidate);
             }
         }
-        ResolvedPageStyle {
-            properties: winners
-                .into_iter()
-                .map(|(name, candidate)| (name, candidate.declaration.value))
-                .collect(),
+        let mut resolved = ResolvedPageStyle::default();
+        for ((margin_box, name), candidate) in winners {
+            match margin_box {
+                Some(margin_box) => {
+                    resolved
+                        .margin_boxes
+                        .entry(margin_box)
+                        .or_default()
+                        .insert(name, candidate.declaration.value);
+                }
+                None => {
+                    resolved
+                        .properties
+                        .insert(name, candidate.declaration.value);
+                }
+            }
         }
+        resolved
     }
 }
 
@@ -579,5 +630,120 @@ mod tests {
             &PageSelectorContext::new(0, Some("a".into())),
         );
         assert!((px(&page, "margin-left") - 2.0 * 96.0 / 2.54).abs() < 0.01);
+    }
+
+    #[test]
+    fn margin_boxes_follow_page_selectors_and_remain_separate_from_page_properties() {
+        let css = "@page { color: black; @top-center { content: 'default'; color: red } } \
+                   @page :left { @top-center { content: 'left' } } \
+                   @page report { @top-center { content: 'named' } } \
+                   @page report:first { @top-center { content: 'first' } } \
+                   @page report:right { @bottom-center { content: 'right' } } \
+                   @page report:first { @top-center { content: 'latest' } }";
+        let first = style(css, &PageSelectorContext::new(0, Some("report".into())));
+        assert_eq!(first.get("color"), Some(&Value::Keyword("black".into())));
+        assert_eq!(first.get("content"), None);
+        assert_eq!(
+            first.margin_box_property(PageMarginBox::TopCenter, "content"),
+            Some(&Value::String("latest".into()))
+        );
+        assert_eq!(
+            first.margin_box_property(PageMarginBox::TopCenter, "color"),
+            Some(&Value::Keyword("red".into()))
+        );
+        assert_eq!(
+            first.margin_box_property(PageMarginBox::BottomCenter, "content"),
+            Some(&Value::String("right".into()))
+        );
+        let left = style(css, &PageSelectorContext::new(1, None));
+        assert_eq!(
+            left.margin_box_property(PageMarginBox::TopCenter, "content"),
+            Some(&Value::String("left".into()))
+        );
+        assert_eq!(
+            left.margin_box_properties(PageMarginBox::BottomCenter),
+            None
+        );
+        let named_left = style(css, &PageSelectorContext::new(1, Some("report".into())));
+        assert_eq!(
+            named_left.margin_box_property(PageMarginBox::TopCenter, "content"),
+            Some(&Value::String("named".into()))
+        );
+    }
+
+    #[test]
+    fn margin_box_cascade_respects_origin_important_layers_and_conditions() {
+        let mut resolver = StyleResolver::default();
+        resolver.set_media_type(MediaType::Print);
+        resolver.add_stylesheet(
+            Origin::User,
+            parse_stylesheet("@page { @top-left { color: blue !important } }").unwrap(),
+        );
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "@layer early, late; \
+                 @media screen { @page { @top-right { content: 'screen' } } } \
+                 @media print { @supports (display: block) { \
+                   @layer early { @page { @top-left { color: red !important } \
+                                           @top-right { content: 'early' !important } } } \
+                   @layer late { @page { @top-right { content: 'late' !important } } } \
+                 } }",
+            )
+            .unwrap(),
+        );
+        let page = resolver.resolved_page_style(&PageSelectorContext::new(0, None));
+        assert_eq!(
+            page.margin_box_property(PageMarginBox::TopLeft, "color"),
+            Some(&Value::Keyword("blue".into()))
+        );
+        assert_eq!(
+            page.margin_box_property(PageMarginBox::TopRight, "content"),
+            Some(&Value::String("early".into()))
+        );
+        resolver.set_media_type(MediaType::Screen);
+        let screen = resolver.resolved_page_style(&PageSelectorContext::new(0, None));
+        assert_eq!(
+            screen.margin_box_property(PageMarginBox::TopRight, "content"),
+            Some(&Value::String("screen".into()))
+        );
+    }
+
+    #[test]
+    fn all_sixteen_page_margin_boxes_are_resolved_independently() {
+        let names = [
+            "top-left-corner",
+            "top-left",
+            "top-center",
+            "top-right",
+            "top-right-corner",
+            "right-top",
+            "right-middle",
+            "right-bottom",
+            "bottom-right-corner",
+            "bottom-right",
+            "bottom-center",
+            "bottom-left",
+            "bottom-left-corner",
+            "left-bottom",
+            "left-middle",
+            "left-top",
+        ];
+        let mut css = String::from("@page { margin-top: 10px;");
+        for (index, name) in names.iter().enumerate() {
+            css.push_str(&format!("@{name} {{ content: '{index}' }}"));
+        }
+        css.push('}');
+        let page = style(&css, &PageSelectorContext::new(0, None));
+        assert_eq!(page.margin_boxes.len(), names.len());
+        assert_eq!(page.get("content"), None);
+        for (index, name) in names.iter().enumerate() {
+            let margin_box = PageMarginBox::from_name(name).unwrap();
+            assert_eq!(
+                page.margin_box_property(margin_box, "content"),
+                Some(&Value::String(index.to_string())),
+                "{name}"
+            );
+        }
     }
 }
