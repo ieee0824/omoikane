@@ -6322,13 +6322,25 @@ impl JsRuntime {
     /// Commits a same-Document URL change and refreshes its fragment target.
     /// The navigation owner calls this only after accepting the URL transition.
     pub(crate) fn commit_same_document_url(&mut self, url: &str) {
+        self.commit_history_api_url(url);
+        let mut state = self.host_state.borrow_mut();
+        let document = state.document.clone();
+        state.update_document_target(&document, url);
+    }
+
+    /// Updates the committed Document URL for history API changes without
+    /// changing the fragment target. `pushState` and `replaceState` do not
+    /// perform fragment navigation, even when their URL contains a new hash.
+    pub(crate) fn commit_history_api_url(&mut self, url: &str) {
         let mut state = self.host_state.borrow_mut();
         let document = state.document.clone();
         state.location_href = url.to_owned();
         state
             .document_urls
             .insert(document.identity(), url.to_owned());
-        state.update_document_target(&document, url);
+        if let Ok(base_url) = url.parse::<crate::http::Url>() {
+            state.set_main_base_url(base_url);
+        }
     }
 
     /// Uses the browsing session's Cookie store across this Document and its resources.
@@ -12158,6 +12170,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(document_url_native),
         ),
         (
+            js_string!("__omoikane_commit_history_api_url"),
+            1,
+            NativeFunction::from_copy_closure(commit_history_api_url_native),
+        ),
+        (
             js_string!("__omoikane_document_base_url"),
             1,
             NativeFunction::from_copy_closure(document_base_url_native),
@@ -15640,6 +15657,47 @@ fn document_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             .get(&document_id)
             .map(|url| JsValue::from(js_string!(url.as_str())))
             .unwrap_or_else(JsValue::null))
+    })
+}
+
+/// Keeps the committed main Document URL in sync before `pushState` and
+/// `replaceState` return to page script. The session owner records the history
+/// entry separately after the script evaluation completes.
+fn commit_history_api_url_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = args
+        .first()
+        .ok_or_else(|| JsNativeError::typ().with_message("History URL is required"))?
+        .to_string(context)?
+        .to_std_string_escaped();
+    let parsed = url.parse::<crate::http::Url>().ok();
+    let caller = caller_document_id(context);
+    let allowed = with_host_state(|host| {
+        let state = host.borrow();
+        let document_id = state.document.identity();
+        Ok(caller == Some(document_id)
+            && (url == state.location_href
+                || matches!(
+                    (state.document_security_origins.get(&document_id), parsed.as_ref()),
+                    (Some(DocumentSecurityOrigin::Tuple(origin)), Some(url))
+                        if StorageOrigin::from_url(&url.to_string()).as_ref() == Some(origin)
+                )))
+    })?;
+    if !allowed {
+        return Err(cross_origin_access_error(context)?);
+    }
+    with_host_state(|host| {
+        let mut state = host.borrow_mut();
+        let document_id = state.document.identity();
+        state.location_href = url.clone();
+        state.document_urls.insert(document_id, url);
+        if let Some(base_url) = parsed {
+            state.set_main_base_url(base_url);
+        }
+        Ok(JsValue::undefined())
     })
 }
 

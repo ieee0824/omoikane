@@ -148,6 +148,7 @@
   delete globalThis.__omoikane_set_node_owner;
   delete globalThis.__omoikane_collected_nodes;
   const nativeDocumentURL = globalThis.__omoikane_document_url;
+  const nativeCommitHistoryApiURL = globalThis.__omoikane_commit_history_api_url;
   const nativeDocumentBaseURL = globalThis.__omoikane_document_base_url;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
@@ -15667,13 +15668,25 @@
       catch (_) { __historyEntries[__historyIndex].state = null; }
     }
   };
-  globalThis.__omoikane_commit_same_document_navigation = function(href, eventType, previousURL) {
+  globalThis.__omoikane_commit_same_document_navigation = function(href, previousURL) {
     const oldURL = previousURL === undefined ? __loc.href : String(previousURL);
     __applyLocationUrl(href, false);
-    const event = new Event(String(eventType || "popstate"));
-    event.oldURL = oldURL;
-    event.newURL = __loc.href;
-    globalThis.dispatchEvent(event);
+    const dispatchNavigationEvent = type => {
+      const event = new Event(type);
+      if (type === "hashchange") {
+        event.oldURL = oldURL;
+        event.newURL = __loc.href;
+      }
+      globalThis.dispatchEvent(event);
+    };
+    dispatchNavigationEvent("popstate");
+    const fragment = url => {
+      const marker = url.indexOf("#");
+      return marker < 0 ? null : url.slice(marker + 1);
+    };
+    if (fragment(oldURL) !== fragment(__loc.href)) {
+      dispatchNavigationEvent("hashchange");
+    }
   };
   globalThis.__omoikane_set_location = function(href) {
     __applyLocationUrl(href, false);
@@ -15685,6 +15698,7 @@
     pushState(state, unused, url) {
       void unused;
       __applyHistoryUrl(url);
+      if (auxiliaryNavigationId === undefined) nativeCommitHistoryApiURL(__loc.href);
       __historyEntries.splice(__historyIndex + 1);
       __historyEntries.push({ state, href: __loc.href });
       __historyIndex = __historyEntries.length - 1;
@@ -15694,6 +15708,7 @@
     replaceState(state, unused, url) {
       void unused;
       __applyHistoryUrl(url);
+      if (auxiliaryNavigationId === undefined) nativeCommitHistoryApiURL(__loc.href);
       __historyEntries[__historyIndex] = { state, href: __loc.href };
       const stateJSON = JSON.stringify(state);
       scheduleWindowNavigation("replace-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);

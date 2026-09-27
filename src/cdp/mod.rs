@@ -742,6 +742,7 @@ struct SessionHistoryEntry {
     url: String,
     state_json: String,
     form_state: Option<FormStateSnapshot>,
+    document_generation: u64,
 }
 
 /// Document metadata held by the CDP host while its new runtime is owned by a
@@ -826,6 +827,7 @@ impl CdpSession {
                 url: "about:blank".to_string(),
                 state_json: "null".to_string(),
                 form_state: None,
+                document_generation: 0,
             }],
             history_index: 0,
             document_generation: 0,
@@ -1313,22 +1315,25 @@ impl CdpSession {
         let loader_id = self.next_loader_id.to_string();
         self.next_loader_id += 1;
 
-        if method == Method::Get
-            && commit != NavigationCommit::Reload
-            && is_fragment_only_navigation(&self.current_url, url)
-        {
+        let same_document_navigation = match commit {
+            NavigationCommit::Traverse(index) => {
+                self.history_entries[index].document_generation == self.document_generation
+            }
+            _ => is_fragment_only_navigation(&self.current_url, url),
+        };
+        if method == Method::Get && commit != NavigationCommit::Reload && same_document_navigation {
             let form_state = self.navigation_form_state(commit, url)?;
             let previous_url = self.current_url.clone();
             self.commit_history_url(url, commit, None);
             self.current_url = url.to_string();
             self.runtime.commit_same_document_url(url);
+            self.sync_history_length()?;
             self.runtime
                 .eval(&format!(
-                    "__omoikane_commit_same_document_navigation({url:?}, 'hashchange', {previous_url:?})"
+                    "__omoikane_commit_same_document_navigation({url:?}, {previous_url:?})"
                 ))
                 .and_then(|_| self.runtime.run_jobs())
                 .map_err(js_error)?;
-            self.sync_history_length()?;
             if let Some(state) = form_state {
                 self.runtime
                     .restore_form_state(&state, FormStateRestoreMode::Restore)
@@ -1378,7 +1383,7 @@ impl CdpSession {
         if matches!(commit, NavigationCommit::Traverse(_)) {
             self.runtime
                 .eval(&format!(
-                    "__omoikane_commit_same_document_navigation({url:?}, 'popstate', {url:?})"
+                    "__omoikane_commit_same_document_navigation({url:?}, {url:?})"
                 ))
                 .and_then(|_| self.runtime.run_jobs())
                 .map_err(js_error)?;
@@ -1513,6 +1518,7 @@ impl CdpSession {
                         Some(state_json),
                     );
                     self.current_url = url.clone();
+                    self.runtime.commit_history_api_url(&url);
                     self.sync_history_length()?;
                     self.emit(
                         "Page.navigatedWithinDocument",
@@ -1560,6 +1566,7 @@ impl CdpSession {
                     url: url.to_string(),
                     state_json: state_json.unwrap_or_else(|| "null".to_string()),
                     form_state: None,
+                    document_generation: self.document_generation,
                 });
                 self.history_index = self.history_entries.len() - 1;
             }
@@ -1568,16 +1575,30 @@ impl CdpSession {
                     url: url.to_string(),
                     state_json: state_json.unwrap_or_else(|| "null".to_string()),
                     form_state: None,
+                    document_generation: self.document_generation,
                 };
             }
             NavigationCommit::Reload => {
                 let entry = &mut self.history_entries[self.history_index];
+                entry.document_generation = self.document_generation;
                 if entry.url != url {
                     entry.url = url.to_string();
                     entry.form_state = None;
                 }
             }
-            NavigationCommit::Traverse(index) => self.history_index = index,
+            NavigationCommit::Traverse(index) => {
+                let previous_generation = self.history_entries[index].document_generation;
+                self.history_index = index;
+                // When a cross-Document traversal rebuilds one Document, all
+                // of its same-Document history entries now share the new
+                // live generation. The next back/forward between them must
+                // reuse that Document rather than fetch it again.
+                for entry in &mut self.history_entries {
+                    if entry.document_generation == previous_generation {
+                        entry.document_generation = self.document_generation;
+                    }
+                }
+            }
         }
     }
 
@@ -5878,7 +5899,7 @@ mod tests {
         session
             .dispatch(
                 "Runtime.evaluate",
-                json!({ "expression": "globalThis.hashChanges = 0; addEventListener('hashchange', () => hashChanges++); location.assign('#section')" }),
+                json!({ "expression": "globalThis.hashChanges = 0; globalThis.popChanges = 0; addEventListener('hashchange', () => hashChanges++); addEventListener('popstate', () => popChanges++); location.assign('#section')" }),
             )
             .unwrap();
 
@@ -5886,7 +5907,7 @@ mod tests {
         let state = session
             .dispatch(
                 "Runtime.evaluate",
-                json!({ "expression": "document.querySelector('#persistent') !== null && hashChanges === 1 && location.hash === '#section' && document.querySelector(':target')?.id === 'section' && document.getElementById('section').matches(':target') && getComputedStyle(document.getElementById('section')).color === 'rgb(13, 42, 71)' && document.getElementById('child').contentDocument.querySelector(':target') === null" }),
+                json!({ "expression": "document.querySelector('#persistent') !== null && hashChanges === 1 && popChanges === 1 && location.hash === '#section' && document.querySelector(':target')?.id === 'section' && document.getElementById('section').matches(':target') && getComputedStyle(document.getElementById('section')).color === 'rgb(13, 42, 71)' && document.getElementById('child').contentDocument.querySelector(':target') === null" }),
             )
             .unwrap();
         assert_eq!(state["result"]["value"], true);
@@ -5901,7 +5922,7 @@ mod tests {
         let state = session
             .dispatch(
                 "Runtime.evaluate",
-                json!({ "expression": "hashChanges === 2 && document.querySelector(':target')?.id === 'next' && document.querySelectorAll(':target').length === 1 && !document.getElementById('section').matches(':target') && getComputedStyle(document.getElementById('section')).color !== 'rgb(13, 42, 71)' && getComputedStyle(document.getElementById('next')).color === 'rgb(13, 42, 71)' && document.getElementById('child').contentDocument.querySelector(':target') === null" }),
+                json!({ "expression": "hashChanges === 2 && popChanges === 2 && document.querySelector(':target')?.id === 'next' && document.querySelectorAll(':target').length === 1 && !document.getElementById('section').matches(':target') && getComputedStyle(document.getElementById('section')).color !== 'rgb(13, 42, 71)' && getComputedStyle(document.getElementById('next')).color === 'rgb(13, 42, 71)' && document.getElementById('child').contentDocument.querySelector(':target') === null" }),
             )
             .unwrap();
         assert_eq!(state["result"]["value"], true);
@@ -5916,7 +5937,7 @@ mod tests {
         let state = session
             .dispatch(
                 "Runtime.evaluate",
-                json!({ "expression": "hashChanges === 3 && document.querySelector(':target') === null && !document.getElementById('next').matches(':target') && getComputedStyle(document.getElementById('next')).color !== 'rgb(13, 42, 71)'" }),
+                json!({ "expression": "hashChanges === 3 && popChanges === 3 && document.querySelector(':target') === null && !document.getElementById('next').matches(':target') && getComputedStyle(document.getElementById('next')).color !== 'rgb(13, 42, 71)'" }),
             )
             .unwrap();
         assert_eq!(state["result"]["value"], true);
@@ -5930,11 +5951,96 @@ mod tests {
     }
 
     #[test]
+    fn history_api_url_changes_keep_target_until_traversal() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            let body = "<html><head><style>:target { color: rgb(13, 42, 71) }</style></head><body><div id='one'></div><div id='two'></div><div id='three'></div></body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let base_url = format!("http://127.0.0.1:{}/page", address.port());
+        let url = format!("{base_url}#one");
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({ "url": base_url }))
+            .unwrap();
+        server.join().unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "location.hash = '#one'" }),
+            )
+            .unwrap();
+        let generation = session.document_generation;
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "globalThis.originalDocument = document; globalThis.historyEvents = []; addEventListener('popstate', () => historyEvents.push('popstate')); addEventListener('hashchange', () => historyEvents.push('hashchange')); history.pushState({}, '', '/renamed#two'); document.URL === location.href ? document.querySelector(':target')?.id : 'stale URL'" }),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], "one");
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "history.replaceState({}, '', '/renamed#three'); document.URL === location.href ? document.querySelector(':target')?.id : 'stale URL'" }),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], "one");
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "historyEvents.length === 0" }),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], true);
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "history.back()" }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url(), url);
+        assert_eq!(session.document_generation, generation);
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "document === originalDocument && document.querySelector(':target')?.id === 'one' && getComputedStyle(document.getElementById('one')).color === 'rgb(13, 42, 71)' && historyEvents.join(',') === 'popstate,hashchange'" }),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], true);
+
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "history.forward()" }),
+            )
+            .unwrap();
+        assert_eq!(session.document_generation, generation);
+        let state = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "document === originalDocument && location.pathname === '/renamed' && document.querySelector(':target')?.id === 'three' && getComputedStyle(document.getElementById('one')).color !== 'rgb(13, 42, 71)' && getComputedStyle(document.getElementById('three')).color === 'rgb(13, 42, 71)' && historyEvents.join(',') === 'popstate,hashchange,popstate,hashchange'" }),
+            )
+            .unwrap();
+        assert_eq!(state["result"]["value"], true);
+    }
+
+    #[test]
     fn history_state_and_traversal_are_owned_by_browser_session() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            for _ in 0..3 {
+            for _ in 0..1 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut buffer = [0u8; 2048];
                 let size = stream.read(&mut buffer).unwrap();
@@ -5944,13 +6050,7 @@ mod tests {
                     .next()
                     .and_then(|line| line.split_whitespace().nth(1))
                     .unwrap_or("/");
-                let body = if path == "/state" {
-                    format!(
-                        "<html><body><main data-path='{path}'></main><script>document.body.setAttribute('data-startup-history', history.length + ':' + history.state.page)</script></body></html>"
-                    )
-                } else {
-                    format!("<html><body><main data-path='{path}'></main></body></html>")
-                };
+                let body = format!("<html><body><main data-path='{path}'></main></body></html>");
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -5964,6 +6064,12 @@ mod tests {
         let mut session = CdpSession::new().unwrap();
         session
             .dispatch("Page.navigate", json!({ "url": format!("{origin}/start") }))
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "globalThis.initialDocument = document" }),
+            )
             .unwrap();
         session
             .dispatch(
@@ -5992,12 +6098,78 @@ mod tests {
         let restored = session
             .dispatch(
                 "Runtime.evaluate",
-                json!({ "expression": "history.length === 2 && history.state.page === 2 && document.body.getAttribute('data-startup-history') === '2:2' && document.querySelector('main').getAttribute('data-path') === '/state'" }),
+                json!({ "expression": "history.length === 2 && history.state.page === 2 && document === initialDocument && document.URL === location.href && document.querySelector('main').getAttribute('data-path') === '/start'" }),
             )
             .unwrap();
         assert_eq!(restored["result"]["value"], true);
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn restored_document_reuses_its_same_document_history_entries() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 1024];
+                let size = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_owned();
+                let body = format!("<html><body><main data-path='{path}'></main></body></html>");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                requests.push(path);
+            }
+            requests
+        });
+
+        let origin = format!("http://127.0.0.1:{}", address.port());
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch("Page.navigate", json!({"url": format!("{origin}/start")}))
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression": "history.pushState({page: 2}, '', '/state')"}),
+            )
+            .unwrap();
+        session
+            .dispatch("Page.navigate", json!({"url": format!("{origin}/other")}))
+            .unwrap();
+        session
+            .dispatch("Runtime.evaluate", json!({"expression": "history.back()"}))
+            .unwrap();
+        assert_eq!(session.current_url(), format!("{origin}/state"));
+        let restored_generation = session.document_generation;
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression": "globalThis.restoredDocument = document; history.back()"}),
+            )
+            .unwrap();
+        assert_eq!(session.document_generation, restored_generation);
+        assert_eq!(session.current_url(), format!("{origin}/start"));
+        let result = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression": "document === restoredDocument && history.state === null && document.URL === location.href"}),
+            )
+            .unwrap();
+        assert_eq!(result["result"]["value"], true);
+        assert_eq!(server.join().unwrap(), ["/start", "/other", "/state"]);
     }
 
     fn custom_form_state_server(
@@ -6118,7 +6290,7 @@ mod tests {
 
     #[test]
     fn custom_form_state_is_saved_before_pushstate_changes_the_current_entry() {
-        let (origin, server) = custom_form_state_server(3, false);
+        let (origin, server) = custom_form_state_server(1, false);
         let mut session = CdpSession::new().unwrap();
         session
             .dispatch("Page.navigate", json!({"url": format!("{origin}/form")}))
@@ -6136,7 +6308,10 @@ mod tests {
                 json!({"expression": "history.forward()"}),
             )
             .unwrap();
-        assert_custom_form_state(&mut session, r#"[[["second","restore"]],"second"]"#);
+        assert_custom_form_state(
+            &mut session,
+            r#"[[["first","restore"],["second","restore"]],"second"]"#,
+        );
         server.join().unwrap();
     }
 
