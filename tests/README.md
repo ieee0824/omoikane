@@ -93,6 +93,14 @@ its optional PNG artifact is written under `<output-dir>/images/`. Pass that
 directory to the comparison script for the image fixture. Chromium prints the
 markers in the same order as Omoikane.
 
+`page-margin-paint.html` exercises page background and border layers, a
+background image, and a margin-box border. Its Omoikane PNG is written under
+`<output-dir>/paint/`; use that directory with the comparison script. Firefox
+155 prints only the document canvas for this fixture, so its difference image
+is a record of unsupported page and margin-box painting rather than a passing
+pixel reference. Chromium prints the page background, border, and margin-box
+paint; the fixed pixel assertions also cover clockwise and `z-index` ordering.
+
 For a known `FAIL` that affects only specific subtests, set
 `known_failure.failed_subtests` to their exact names. The runner then rejects any
 additional failure, missing expected failure, or timeout instead of accepting all

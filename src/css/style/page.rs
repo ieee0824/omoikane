@@ -150,6 +150,59 @@ impl ResolvedPageStyle {
         length.is_finite().then_some(length)
     }
 
+    /// Returns the used border width for one margin-box side.
+    pub(crate) fn margin_box_border_width(
+        &self,
+        margin_box: PageMarginBox,
+        side: &str,
+        geometry: PageBoxGeometry,
+        percentage_basis: f32,
+    ) -> f32 {
+        let side_style = format!("border-{side}-style");
+        let border_style = self
+            .margin_box_property(margin_box, &side_style)
+            .or_else(|| self.margin_box_property(margin_box, "border-style"));
+        if !matches!(border_style, Some(Value::Keyword(style)) if !style.eq_ignore_ascii_case("none") && !style.eq_ignore_ascii_case("hidden"))
+        {
+            return 0.0;
+        }
+        let side_width = format!("border-{side}-width");
+        self.margin_box_length(margin_box, &side_width, geometry, percentage_basis)
+            .or_else(|| {
+                self.margin_box_length(margin_box, "border-width", geometry, percentage_basis)
+            })
+            .unwrap_or(3.0)
+            .max(0.0)
+    }
+
+    /// Resolves a page-context length against the used page dimensions.
+    pub(crate) fn page_length(
+        &self,
+        name: &str,
+        geometry: PageBoxGeometry,
+        percentage_basis: f32,
+    ) -> Option<f32> {
+        let value = self.get(name)?;
+        let context = ResolutionContext {
+            parent_font_size: self
+                .get("font-size")
+                .and_then(|value| {
+                    match compute_value(value, "font-size", ResolutionContext::default()) {
+                        ComputedValue::Px(size) => Some(size),
+                        _ => None,
+                    }
+                })
+                .unwrap_or(16.0),
+            viewport_width: geometry.width,
+            viewport_height: geometry.height,
+            ..ResolutionContext::default()
+        };
+        let length = compute_value(value, name, context)
+            .resolve_length_percentage(percentage_basis)
+            .or_else(|| matches!(value, Value::Number(zero) if *zero == 0.0).then_some(0.0))?;
+        length.is_finite().then_some(length)
+    }
+
     /// Returns generated content for a margin box, or `None` if no box is generated.
     ///
     /// `normal` and `none` suppress box generation. An empty string still generates

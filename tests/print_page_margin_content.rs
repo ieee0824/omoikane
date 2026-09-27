@@ -191,3 +191,134 @@ fn printed_margin_images_keep_mixed_content_order_and_resolve_relative_urls() {
         "broken image should not suppress adjacent footer text"
     );
 }
+
+#[test]
+fn printed_page_and_margin_box_backgrounds_and_borders_follow_page_layers() {
+    let document =
+        TreeBuilder::parse(include_str!("fixtures/print/page-margin-paint.html")).document();
+    let pages = render_document_pages(
+        &document,
+        Rect {
+            width: 200.0,
+            height: 200.0,
+            ..Rect::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(pages.len(), 1);
+    let page = &pages[0];
+    assert_eq!(page.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(page.pixel(60, 10), Some(Color::rgb(255, 255, 0)));
+    assert_eq!(page.pixel(122, 2), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(page.pixel(40, 80), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(page.pixel(80, 80), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(page.pixel(40, 10), Some(Color::rgb(0, 0, 0)));
+    assert_eq!(page.pixel(60, 45), Some(Color::rgb(255, 255, 0)));
+    if let Ok(directory) = std::env::var("OMOIKANE_PRINT_ARTIFACTS") {
+        let image_dir = format!("{directory}/paint");
+        std::fs::create_dir_all(&image_dir).unwrap();
+        std::fs::write(format!("{image_dir}/page-1.png"), page.encode_png()).unwrap();
+    }
+}
+
+#[test]
+fn printed_margin_boxes_use_clockwise_order_and_z_index_without_splitting_document() {
+    let render = |left_z: i32, center_z: i32| {
+        let source = format!(
+            r#"<html><head><style>
+                html, body {{ margin: 0; background-color: #00ff00 }}
+                @page {{
+                    size: 200px 200px; margin: 40px;
+                    @top-left {{ content: ""; width: 100px; height: 60px; margin-bottom: -20px;
+                        background-color: #ffff00; z-index: {left_z} }}
+                    @top-center {{ content: ""; width: 100px; height: 60px; margin-bottom: -20px;
+                        background-color: #0000ff; z-index: {center_z} }}
+                }}
+            </style></head><body><main>Page body</main></body></html>"#
+        );
+        let document = TreeBuilder::parse(&source).document();
+        render_document_pages(
+            &document,
+            Rect {
+                width: 200.0,
+                height: 200.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap()
+        .remove(0)
+    };
+    let default_order = render(0, 0);
+    assert_eq!(default_order.pixel(60, 10), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(default_order.pixel(60, 45), Some(Color::rgb(0, 0, 255)));
+    let explicit_order = render(1, 0);
+    assert_eq!(explicit_order.pixel(60, 10), Some(Color::rgb(255, 255, 0)));
+    let behind_document = render(-2, -1);
+    assert_eq!(behind_document.pixel(60, 10), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(behind_document.pixel(60, 45), Some(Color::rgb(0, 255, 0)));
+}
+
+#[test]
+fn printed_margin_box_border_and_padding_surround_content_width() {
+    let document = TreeBuilder::parse(
+        r#"<html><head><style>
+            html, body { margin: 0 }
+            @page {
+                size: 200px 200px; margin: 40px;
+                @top-left {
+                    content: "X"; width: 40px; height: 20px;
+                    border: 5px solid #ff0000; padding: 5px;
+                    background-color: #ffffff; color: #000000;
+                    font-size: 20px; text-align: left; vertical-align: top;
+                }
+            }
+        </style></head><body></body></html>"#,
+    )
+    .document();
+    let page = render_document_pages(
+        &document,
+        Rect {
+            width: 200.0,
+            height: 200.0,
+            ..Rect::default()
+        },
+    )
+    .unwrap()
+    .remove(0);
+    assert_eq!(page.pixel(41, 20), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(page.pixel(97, 20), Some(Color::rgb(255, 0, 0)));
+    let glyph = colored_bounds(&page, (40, 0, 100, 40), |pixel| {
+        pixel.r < 100 && pixel.g < 100 && pixel.b < 100
+    })
+    .expect("margin-box glyph");
+    assert!(glyph.0 >= 50 && glyph.1 >= 10, "glyph bounds: {glyph:?}");
+}
+
+#[test]
+fn printed_page_and_margin_borders_default_to_medium_current_color() {
+    let document = TreeBuilder::parse(
+        r#"<html><head><style>
+            html, body { margin: 0 }
+            @page {
+                size: 200px 200px; margin: 40px;
+                color: #0000ff; border: solid;
+                @top-left { content: ""; color: #ff0000; border: solid }
+            }
+        </style></head><body></body></html>"#,
+    )
+    .document();
+    let page = render_document_pages(
+        &document,
+        Rect {
+            width: 200.0,
+            height: 200.0,
+            ..Rect::default()
+        },
+    )
+    .unwrap()
+    .remove(0);
+    assert_eq!(page.pixel(41, 80), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(page.pixel(42, 80), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(page.pixel(43, 80), Some(Color::rgb(255, 255, 255)));
+    assert_eq!(page.pixel(41, 10), Some(Color::rgb(255, 0, 0)));
+}

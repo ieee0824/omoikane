@@ -461,6 +461,9 @@ fn edge_margin_box_rects(page: &PagedPage) -> BTreeMap<PageMarginBox, Rect> {
             if page.style.margin_box_content(margin_box).is_none() {
                 return None;
             }
+            let (leading_margin, trailing_margin, border_padding) =
+                margin_box_axis_edges(&page.style, margin_box, geometry, horizontal, available);
+            let outer_extra = leading_margin + trailing_margin + border_padding;
             let metrics = FontMetrics::from_font_size(page.style.margin_box_font_size(margin_box));
             let fragments = page.margin_box_fragments(margin_box).unwrap_or_default();
             let (min_content, max_content) = margin_content_sizes(&fragments, metrics, horizontal);
@@ -488,17 +491,17 @@ fn edge_margin_box_rects(page: &PagedPage) -> BTreeMap<PageMarginBox, Rect> {
             };
             Some(EdgeBoxMeasure {
                 generated: true,
-                specified: specified.map(|value| value.max(0.0)),
-                min_content,
-                max_content,
+                specified: specified.map(|value| value.max(0.0) + outer_extra),
+                min_content: min_content + outer_extra,
+                max_content: max_content + outer_extra,
                 min_limit: page
                     .style
                     .margin_box_length(margin_box, min_property, geometry, available)
-                    .map(|value| value.max(0.0)),
+                    .map(|value| value.max(0.0) + outer_extra),
                 max_limit: page
                     .style
                     .margin_box_length(margin_box, max_property, geometry, available)
-                    .map(|value| value.max(0.0)),
+                    .map(|value| value.max(0.0) + outer_extra),
             })
         });
         let lengths = edge_box_lengths(measures, available);
@@ -508,6 +511,8 @@ fn edge_margin_box_rects(page: &PagedPage) -> BTreeMap<PageMarginBox, Rect> {
             }
             let (fixed_offset, fixed_length) =
                 fixed_edge_dimension(&page.style, geometry, edge, margin_box, thickness);
+            let (leading_margin, trailing_margin, _) =
+                margin_box_axis_edges(&page.style, margin_box, geometry, horizontal, available);
             let axis_start = match index {
                 0 => start,
                 1 => start + (available - length) / 2.0,
@@ -515,23 +520,65 @@ fn edge_margin_box_rects(page: &PagedPage) -> BTreeMap<PageMarginBox, Rect> {
             };
             let rect = if horizontal {
                 Rect {
-                    x: axis_start,
+                    x: axis_start + leading_margin,
                     y: normal_start + fixed_offset,
-                    width: length,
+                    width: (length - leading_margin - trailing_margin).max(0.0),
                     height: fixed_length,
                 }
             } else {
                 Rect {
                     x: normal_start + fixed_offset,
-                    y: axis_start,
+                    y: axis_start + leading_margin,
                     width: fixed_length,
-                    height: length,
+                    height: (length - leading_margin - trailing_margin).max(0.0),
                 }
             };
             rectangles.insert(margin_box, rect);
         }
     }
     rectangles
+}
+
+fn margin_box_axis_edges(
+    style: &ResolvedPageStyle,
+    margin_box: PageMarginBox,
+    geometry: PageBoxGeometry,
+    horizontal: bool,
+    percentage_basis: f32,
+) -> (f32, f32, f32) {
+    let (leading, trailing) = if horizontal {
+        ("left", "right")
+    } else {
+        ("top", "bottom")
+    };
+    let margin = |side: &str| {
+        style
+            .margin_box_length(
+                margin_box,
+                &format!("margin-{side}"),
+                geometry,
+                percentage_basis,
+            )
+            .unwrap_or(0.0)
+    };
+    let border_padding = [leading, trailing]
+        .into_iter()
+        .map(|side| {
+            let border =
+                style.margin_box_border_width(margin_box, side, geometry, percentage_basis);
+            let padding = style
+                .margin_box_length(
+                    margin_box,
+                    &format!("padding-{side}"),
+                    geometry,
+                    percentage_basis,
+                )
+                .unwrap_or(0.0)
+                .max(0.0);
+            border + padding
+        })
+        .sum();
+    (margin(leading), margin(trailing), border_padding)
 }
 
 fn margin_content_sizes(
@@ -603,6 +650,8 @@ fn fixed_edge_dimension(
     } else {
         "margin-right"
     };
+    let (_, _, border_padding) =
+        margin_box_axis_edges(style, margin_box, geometry, !horizontal, thickness);
     let inset = |name| {
         if matches!(style.margin_box_property(margin_box, name), Some(Value::Keyword(value)) if value.eq_ignore_ascii_case("auto"))
         {
@@ -619,11 +668,11 @@ fn fixed_edge_dimension(
     let mut after_value = inset(after);
     let used = style
         .margin_box_length(margin_box, dimension, geometry, thickness)
-        .map(|length| length.max(0.0));
+        .map(|length| length.max(0.0) + border_padding);
     let length = used.unwrap_or_else(|| {
         let before = before_value.unwrap_or(0.0);
         let after = after_value.unwrap_or(0.0);
-        (thickness - before - after).max(0.0)
+        (thickness - before - after).max(border_padding)
     });
     let minimum = style
         .margin_box_length(
@@ -637,7 +686,8 @@ fn fixed_edge_dimension(
             thickness,
         )
         .unwrap_or(0.0)
-        .max(0.0);
+        .max(0.0)
+        + border_padding;
     let maximum = style
         .margin_box_length(
             margin_box,
@@ -649,6 +699,7 @@ fn fixed_edge_dimension(
             geometry,
             thickness,
         )
+        .map(|length| length.max(0.0) + border_padding)
         .unwrap_or(f32::INFINITY)
         .max(minimum);
     let length = length.clamp(minimum, maximum);
