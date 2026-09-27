@@ -146,6 +146,91 @@ fn visited_custom_property_cannot_indirectly_change_paint_color() {
 }
 
 #[test]
+fn visited_compound_selectors_change_only_link_colors_at_paint() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let link = NodeHandle::element("a");
+    link.set_attribute("href", "/visited");
+    let child = NodeHandle::element("span");
+    let sibling = NodeHandle::element("span");
+    document.append_child(body.clone());
+    body.append_child(link.clone());
+    link.append_child(child.clone());
+    body.append_child(sibling.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { background-color: #eeeeee } \
+             a:not(:visited) { display: block; width: 40px; color: #10203080; \
+                background-color: #ff0000; background-image: none; \
+                border: 3px solid #112233; outline: 2px solid #445566; \
+                text-decoration-color: #778899 } \
+             a:is(:visited) { display: none; width: 400px; color: #aabbcc20; \
+                background-color: #00ff00; background-image: url(secret.png); \
+                border-color: #a1b2c3; outline-color: #b2c3d4; \
+                text-decoration-color: #c3d4e5 } \
+             a:visited + span { color: #abcdef } \
+             body:has(a:visited) { background-color: #3333ff }",
+        )
+        .unwrap(),
+    );
+
+    let ordinary_body = resolver.computed_style(&body);
+    let ordinary_link = resolver.computed_style(&link);
+    let ordinary_sibling = resolver.computed_style(&sibling);
+    let ordinary_child = resolver.computed_style(&child);
+    let mut pass = VisitedPaintStylePass::new(&mut resolver, [link.identity()]);
+    let painted_body = pass.style(&body);
+    let painted_link = pass.style(&link);
+    let painted_child = pass.style(&child);
+    let painted_sibling = pass.style(&sibling);
+
+    assert_eq!(painted_body, ordinary_body);
+    assert_eq!(painted_sibling, ordinary_sibling);
+    assert_eq!(painted_link.get("display"), ordinary_link.get("display"));
+    assert_eq!(painted_link.get("width"), ordinary_link.get("width"));
+    assert_eq!(
+        painted_link.get("background-image"),
+        ordinary_link.get("background-image")
+    );
+    for property in [
+        "border-top-width",
+        "border-top-style",
+        "outline-width",
+        "outline-style",
+    ] {
+        assert_eq!(
+            painted_link.get(property),
+            ordinary_link.get(property),
+            "{property}"
+        );
+    }
+    for (property, expected) in [
+        ("color", "#aabbcc80"),
+        ("background-color", "#00ff00ff"),
+        ("border-top-color", "#a1b2c3ff"),
+        ("border-right-color", "#a1b2c3ff"),
+        ("border-bottom-color", "#a1b2c3ff"),
+        ("border-left-color", "#a1b2c3ff"),
+        ("outline-color", "#b2c3d4ff"),
+        ("text-decoration-color", "#c3d4e5ff"),
+    ] {
+        assert_eq!(
+            painted_link.get(property),
+            Some(&ComputedValue::Color(expected.into())),
+            "{property}"
+        );
+    }
+    assert_eq!(painted_child.get("color"), painted_link.get("color"));
+    assert_ne!(painted_child.get("color"), ordinary_child.get("color"));
+    drop(pass);
+    assert_eq!(resolver.computed_style(&link), ordinary_link);
+    assert_eq!(resolver.computed_style(&body), ordinary_body);
+}
+
+#[test]
 fn shadow_stylesheets_respect_tree_scope_host_and_slotted_boundaries() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -7615,6 +7700,17 @@ fn outline_shorthand_expands_to_longhands_with_correct_values() {
         .find(|d| d.name == "outline-color")
         .expect("should have outline-color");
     assert_eq!(color_decl.value, Value::Keyword("red".to_string()));
+
+    let stylesheet = parse_stylesheet("div { outline: 2px solid #445566; }").unwrap();
+    let Rule::Style(rule) = &stylesheet.rules[0] else {
+        panic!("expected style rule");
+    };
+    let color_decl = rule
+        .declarations
+        .iter()
+        .find(|d| d.name == "outline-color")
+        .expect("hex color should produce outline-color");
+    assert_eq!(color_decl.value, Value::Color("#445566".to_string()));
 }
 
 #[test]
