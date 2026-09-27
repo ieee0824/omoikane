@@ -1,5 +1,6 @@
 use boa_ast::scope::Scope;
 use boa_gc::{Finalize, GcRefCell, Trace, custom_trace};
+use std::cell::RefCell;
 
 use crate::{JsNativeError, JsObject, JsResult, JsValue, builtins::function::OrdinaryFunction};
 
@@ -8,6 +9,10 @@ use super::PoisonableEnvironment;
 #[derive(Debug, Trace, Finalize)]
 pub(crate) struct FunctionEnvironment {
     inner: PoisonableEnvironment,
+    #[unsafe_ignore_trace]
+    deletable_bindings: RefCell<Vec<bool>>,
+    #[unsafe_ignore_trace]
+    deleted_bindings: RefCell<Vec<bool>>,
     slots: Box<FunctionSlots>,
 
     // Safety: Nothing in `Scope` needs tracing.
@@ -26,6 +31,8 @@ impl FunctionEnvironment {
     ) -> Self {
         Self {
             inner: PoisonableEnvironment::new(bindings, poisoned, with),
+            deletable_bindings: RefCell::new(vec![false; bindings as usize]),
+            deleted_bindings: RefCell::new(vec![false; bindings as usize]),
             slots: Box::new(slots),
             scope,
         }
@@ -64,6 +71,59 @@ impl FunctionEnvironment {
     #[track_caller]
     pub(crate) fn set(&self, index: u32, value: JsValue) {
         self.inner.set(index, value);
+        let len = index as usize + 1;
+        let mut deletable = self.deletable_bindings.borrow_mut();
+        if len > deletable.len() {
+            deletable.resize(len, false);
+            self.deleted_bindings.borrow_mut().resize(len, false);
+        }
+    }
+
+    /// Makes bindings introduced by direct eval deletable at runtime.
+    pub(crate) fn extend_from_compile(&self) {
+        let compile_len = self.scope.num_bindings() as usize;
+        let mut bindings = self.inner.bindings().borrow_mut();
+        if compile_len > bindings.len() {
+            bindings.resize(compile_len, None);
+        }
+
+        let mut deletable = self.deletable_bindings.borrow_mut();
+        if compile_len > deletable.len() {
+            deletable.resize(compile_len, true);
+            self.deleted_bindings
+                .borrow_mut()
+                .resize(compile_len, false);
+        }
+    }
+
+    /// Returns whether a binding was deleted by direct eval.
+    pub(crate) fn is_deleted_binding(&self, index: u32) -> bool {
+        self.deleted_bindings
+            .borrow()
+            .get(index as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Restores a deleted binding before a later eval declaration initializes it.
+    pub(crate) fn restore_deleted_binding(&self, index: u32) {
+        if let Some(deleted) = self.deleted_bindings.borrow_mut().get_mut(index as usize) {
+            *deleted = false;
+        }
+    }
+
+    /// Deletes a binding only if direct eval introduced it.
+    pub(crate) fn delete_binding(&self, index: u32) -> bool {
+        let index = index as usize;
+        if self.deleted_bindings.borrow().get(index).copied() == Some(true) {
+            return true;
+        }
+        if self.deletable_bindings.borrow().get(index).copied() != Some(true) {
+            return false;
+        }
+        self.inner.bindings().borrow_mut()[index] = None;
+        self.deleted_bindings.borrow_mut()[index] = true;
+        true
     }
 
     /// `BindThisValue`

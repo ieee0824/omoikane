@@ -448,15 +448,18 @@ impl Context {
     /// are completely removed of runtime checks because the specification guarantees that runtime
     /// semantics cannot add or remove lexical bindings.
     pub(crate) fn find_runtime_binding(&mut self, locator: &mut BindingLocator) -> JsResult<()> {
+        let deleted_binding = self.is_deleted_binding(locator);
         if let Some(env) = self.vm.environments.current_declarative_ref()
             && !env.with()
             && !env.poisoned()
+            && !deleted_binding
         {
             return Ok(());
         }
 
         let (global, min_index) = match locator.scope() {
             BindingLocatorScope::GlobalObject | BindingLocatorScope::GlobalDeclarative => (true, 0),
+            BindingLocatorScope::Stack(_) if deleted_binding => (false, 0),
             BindingLocatorScope::Stack(index) => (false, index),
         };
         let max_index = self.vm.environments.stack.len() as u32;
@@ -464,10 +467,13 @@ impl Context {
         for index in (min_index..max_index).rev() {
             match self.environment_expect(index) {
                 Environment::Declarative(env) => {
-                    if env.poisoned() {
+                    if env.poisoned() || deleted_binding {
                         if let Some(env) = env.kind().as_function()
                             && let Some(b) = env.compile().get_binding(locator.name())
                         {
+                            if env.is_deleted_binding(b.binding_index()) {
+                                continue;
+                            }
                             locator.set_scope(b.scope());
                             locator.set_binding_index(b.binding_index());
                             return Ok(());
@@ -490,6 +496,26 @@ impl Context {
                     }
                 }
             }
+        }
+
+        if deleted_binding
+            && let BindingLocatorScope::Stack(index) = locator.scope()
+            && let Environment::Declarative(env) = self.environment_expect(index)
+            && let Some(function_env) = env.kind().as_function()
+        {
+            let mut scope = function_env.compile().outer();
+            while let Some(current_scope) = scope {
+                if let Some(binding) = current_scope.get_binding(locator.name()) {
+                    locator.set_scope(binding.scope());
+                    locator.set_binding_index(binding.binding_index());
+                    return Ok(());
+                }
+                scope = current_scope.outer();
+            }
+
+            locator.set_scope(BindingLocatorScope::GlobalObject);
+            locator.set_binding_index(0);
+            return Ok(());
         }
 
         if global
@@ -578,6 +604,26 @@ impl Context {
         }
     }
 
+    /// Returns whether an eval-created function binding was deleted.
+    pub(crate) fn is_deleted_binding(&self, locator: &BindingLocator) -> bool {
+        match locator.scope() {
+            BindingLocatorScope::Stack(index) => matches!(
+                self.environment_expect(index),
+                Environment::Declarative(env) if env.is_deleted_binding(locator.binding_index())
+            ),
+            BindingLocatorScope::GlobalObject | BindingLocatorScope::GlobalDeclarative => false,
+        }
+    }
+
+    /// Restores an eval-created function binding before redeclaration.
+    pub(crate) fn restore_deleted_binding(&self, locator: &BindingLocator) {
+        if let BindingLocatorScope::Stack(index) = locator.scope()
+            && let Environment::Declarative(env) = self.environment_expect(index)
+        {
+            env.restore_deleted_binding(locator.binding_index());
+        }
+    }
+
     /// Get the value of a binding.
     ///
     /// # Panics
@@ -658,7 +704,7 @@ impl Context {
             }
             BindingLocatorScope::GlobalDeclarative => Ok(false),
             BindingLocatorScope::Stack(index) => match self.environment_expect(index) {
-                Environment::Declarative(_) => Ok(false),
+                Environment::Declarative(env) => Ok(env.delete_binding(locator.binding_index())),
                 Environment::Object(obj) => {
                     let key = locator.name().clone();
                     let obj = obj.clone();

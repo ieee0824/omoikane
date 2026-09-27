@@ -499,7 +499,9 @@ impl CodeBlock {
             | Instruction::SuperCall { argument_count } => {
                 format!("argument_count:{argument_count}")
             }
-            Instruction::DefVar { binding_index } | Instruction::GetLocator { binding_index } => {
+            Instruction::DefVar { binding_index }
+            | Instruction::DefEvalVar { binding_index }
+            | Instruction::GetLocator { binding_index } => {
                 format!("binding_index:{binding_index}")
             }
             Instruction::DefInitVar { src, binding_index }
@@ -924,7 +926,6 @@ impl CodeBlock {
             | Instruction::Reserved57
             | Instruction::Reserved58
             | Instruction::Reserved59
-            | Instruction::Reserved60
             | Instruction::Reserved61
             | Instruction::Reserved62
             | Instruction::Reserved63 => unreachable!("Reserved opcodes are unreachable"),
