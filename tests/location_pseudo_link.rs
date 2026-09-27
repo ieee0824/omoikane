@@ -115,3 +115,44 @@ fn href_mutations_update_link_selectors_and_computed_style() {
         .unwrap();
     assert_eq!(result.as_boolean(), Some(true));
 }
+
+#[test]
+fn fragment_assignment_updates_target_before_script_returns() {
+    let document = TreeBuilder::parse(
+        "<style>:target { color: rgb(13, 42, 71) }</style><div id='target'></div><div id='other'></div>",
+    )
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/page").unwrap();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const target = document.getElementById('target');
+                const other = document.getElementById('other');
+                if (document.querySelector(':target') !== null) return 'initial';
+                location.href = '#target';
+                if (document.querySelector(':target') !== target ||
+                    !target.matches(':target') ||
+                    getComputedStyle(target).color !== 'rgb(13, 42, 71)') return 'assign';
+                target.remove();
+                document.body.appendChild(target);
+                if (document.querySelector(':target') !== target) return 'reinsert';
+                location.hash = '#other';
+                if (document.querySelector(':target') !== other ||
+                    target.matches(':target') ||
+                    getComputedStyle(other).color !== 'rgb(13, 42, 71)') return 'hash';
+                location.replace('#target');
+                if (document.querySelector(':target') !== target) return 'replace';
+                history.pushState(null, '', '#other');
+                if (document.querySelector(':target') !== target) return 'history-api';
+                location.href = '/different#other';
+                if (document.querySelector(':target') !== target) return 'cross-document';
+                return 'ok';
+            })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(result, "ok");
+}

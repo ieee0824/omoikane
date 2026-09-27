@@ -12175,6 +12175,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(commit_history_api_url_native),
         ),
         (
+            js_string!("__omoikane_commit_fragment_url"),
+            1,
+            NativeFunction::from_copy_closure(commit_fragment_url_native),
+        ),
+        (
             js_string!("__omoikane_document_base_url"),
             1,
             NativeFunction::from_copy_closure(document_base_url_native),
@@ -15698,6 +15703,44 @@ fn commit_history_api_url_native(
             state.set_main_base_url(base_url);
         }
         Ok(JsValue::undefined())
+    })
+}
+
+/// Makes a same-Document fragment target visible to the current script before
+/// the navigation owner later records its history entry and dispatches events.
+fn commit_fragment_url_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = args
+        .first()
+        .ok_or_else(|| JsNativeError::typ().with_message("Fragment URL is required"))?
+        .to_string(context)?
+        .to_std_string_escaped();
+    let caller = caller_document_id(context);
+    let allowed = with_host_state(|host| Ok(caller == Some(host.borrow().document.identity())))?;
+    if !allowed {
+        return Err(cross_origin_access_error(context)?);
+    }
+    with_host_state(|host| {
+        let mut state = host.borrow_mut();
+        let (current_base, current_fragment) = state
+            .location_href
+            .split_once('#')
+            .unwrap_or((&state.location_href, ""));
+        let (next_base, next_fragment) = url.split_once('#').unwrap_or((&url, ""));
+        if current_base != next_base || current_fragment == next_fragment {
+            return Ok(JsValue::from(false));
+        }
+        let document = state.document.clone();
+        state.location_href = url.clone();
+        state.document_urls.insert(document.identity(), url.clone());
+        if let Ok(base_url) = url.parse::<crate::http::Url>() {
+            state.set_main_base_url(base_url);
+        }
+        state.update_document_target(&document, &url);
+        Ok(JsValue::from(true))
     })
 }
 

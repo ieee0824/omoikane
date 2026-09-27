@@ -149,6 +149,7 @@
   delete globalThis.__omoikane_collected_nodes;
   const nativeDocumentURL = globalThis.__omoikane_document_url;
   const nativeCommitHistoryApiURL = globalThis.__omoikane_commit_history_api_url;
+  const nativeCommitFragmentURL = globalThis.__omoikane_commit_fragment_url;
   const nativeDocumentBaseURL = globalThis.__omoikane_document_base_url;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
@@ -15582,6 +15583,7 @@
       return __omoikane_navigate_auxiliary_window(auxiliaryNavigationId, value || String(globalThis.location.href));
     }
     if (isChildWindow) return childNavigation(kind, value, extra);
+    if (kind === "assign" || kind === "replace") nativeCommitFragmentURL(value);
     return __omoikane_schedule_navigation(kind, value, extra);
   };
   let __locationHref = String(__omoikane_location_href);
