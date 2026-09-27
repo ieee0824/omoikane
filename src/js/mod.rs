@@ -6172,6 +6172,18 @@ impl JsRuntime {
         self.host_state.borrow_mut().set_main_base_url(url);
     }
 
+    /// Commits a same-Document URL change and refreshes its fragment target.
+    /// The navigation owner calls this only after accepting the URL transition.
+    pub(crate) fn commit_same_document_url(&mut self, url: &str) {
+        let mut state = self.host_state.borrow_mut();
+        let document = state.document.clone();
+        state.location_href = url.to_owned();
+        state
+            .document_urls
+            .insert(document.identity(), url.to_owned());
+        state.update_document_target(&document, url);
+    }
+
     /// Uses the browsing session's Cookie store across this Document and its resources.
     pub(crate) fn set_shared_cookie_store(&mut self, store: Arc<Mutex<crate::http::CookieJar>>) {
         let mut state = self.host_state.borrow_mut();
