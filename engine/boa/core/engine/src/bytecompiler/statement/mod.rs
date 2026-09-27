@@ -1,4 +1,6 @@
-use super::jump_control::{JumpRecord, JumpRecordAction, JumpRecordKind};
+use super::jump_control::{
+    JumpControlInfo, JumpRecord, JumpRecordAction, JumpRecordKind, ReturnValueLocation,
+};
 use crate::bytecompiler::ByteCompiler;
 use boa_ast::Statement;
 
@@ -69,6 +71,15 @@ impl ByteCompiler<'_> {
                 self.compile_switch(switch, use_expr);
             }
             Statement::Return(ret) => {
+                let slot = if self
+                    .jump_info
+                    .iter()
+                    .any(JumpControlInfo::is_try_with_finally_block)
+                {
+                    Some(self.pending_return_slot())
+                } else {
+                    None
+                };
                 let value = self.register_allocator.alloc();
                 if let Some(expr) = ret.target() {
                     self.compile_expr(expr, &value);
@@ -86,9 +97,15 @@ impl ByteCompiler<'_> {
                     self.bytecode.emit_push_undefined(value.variable());
                 }
 
-                self.push_from_register(&value);
+                if let Some(slot) = slot {
+                    self.bytecode.emit_move(slot.into(), value.variable());
+                } else {
+                    self.push_from_register(&value);
+                }
                 self.register_allocator.dealloc(value);
-                self.r#return(true);
+                self.r#return(
+                    slot.map_or(ReturnValueLocation::OnStack, ReturnValueLocation::InSlot),
+                );
             }
             Statement::Try(t) => self.compile_try(t, use_expr),
             Statement::Expression(expr) => {
@@ -104,16 +121,11 @@ impl ByteCompiler<'_> {
         }
     }
 
-    pub(crate) fn r#return(&mut self, return_value_on_stack: bool) {
+    pub(crate) fn r#return(&mut self, value_location: ReturnValueLocation) {
         let actions = self.return_jump_record_actions();
 
-        JumpRecord::new(
-            JumpRecordKind::Return {
-                return_value_on_stack,
-            },
-            actions,
-        )
-        .perform_actions(Self::DUMMY_ADDRESS, self);
+        JumpRecord::new(JumpRecordKind::Return { value_location }, actions)
+            .perform_actions(Self::DUMMY_ADDRESS, self);
     }
 
     fn return_jump_record_actions(&self) -> Vec<JumpRecordAction> {

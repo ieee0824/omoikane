@@ -8,7 +8,7 @@ use std::ops::Deref;
 
 use super::{Access, Callable, NodeKind, Register, ToJsString};
 use crate::{
-    bytecompiler::{ByteCompiler, Literal},
+    bytecompiler::{ByteCompiler, Literal, ReturnValueLocation},
     vm::GeneratorResumeKind,
 };
 use boa_ast::{
@@ -228,7 +228,7 @@ impl ByteCompiler<'_> {
                     }
                     self.close_active_iterators();
 
-                    self.r#return(true);
+                    self.r#return(ReturnValueLocation::OnStack);
 
                     let generator_delegate_next_throw = self.next_opcode_location();
 
