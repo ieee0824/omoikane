@@ -1520,6 +1520,90 @@ impl<'ctx> ByteCompiler<'ctx> {
         self.patch_jump(skip_undef);
     }
 
+    /// Compile deletion of the final property in an optional chain.
+    ///
+    /// A nullish short circuit succeeds without evaluating later chain items.
+    pub(crate) fn compile_optional_delete(&mut self, optional: &Optional, dst: &Register) {
+        let value = self.register_allocator.alloc();
+        let this = self.register_allocator.alloc();
+        let mut short_circuits = Vec::with_capacity(optional.chain().len());
+
+        match optional.target().flatten() {
+            Expression::PropertyAccess(access) => {
+                self.compile_access_preserve_this(access, &this, &value);
+            }
+            Expression::Optional(inner) => {
+                self.compile_optional_preserve_this(inner, &this, &value);
+            }
+            expr => {
+                self.bytecode.emit_push_undefined(this.variable());
+                self.compile_expr(expr, &value);
+            }
+        }
+
+        let chain = optional.chain();
+        assert!(chain.first().is_some_and(|item| item.shorted()));
+        short_circuits.push(self.jump_if_null_or_undefined(&value));
+
+        for (index, item) in chain.iter().enumerate() {
+            if index > 0 && item.shorted() {
+                short_circuits.push(self.jump_if_null_or_undefined(&value));
+            }
+
+            if index + 1 == chain.len() {
+                self.compile_optional_delete_final(item.kind(), &this, &value, dst);
+            } else {
+                self.compile_optional_item_kind(item.kind(), &this, &value);
+            }
+        }
+
+        let skip_true = self.jump();
+        for label in short_circuits {
+            self.patch_jump(label);
+        }
+        self.bytecode.emit_push_true(dst.variable());
+        self.patch_jump(skip_true);
+
+        self.register_allocator.dealloc(this);
+        self.register_allocator.dealloc(value);
+    }
+
+    /// Delete a final property access, or evaluate a final call as a non-reference.
+    fn compile_optional_delete_final(
+        &mut self,
+        kind: &OptionalOperationKind,
+        this: &Register,
+        value: &Register,
+        dst: &Register,
+    ) {
+        match kind {
+            OptionalOperationKind::SimplePropertyAccess { field } => {
+                self.bytecode.emit_move(dst.variable(), value.variable());
+                match field {
+                    PropertyAccessField::Const(name) => {
+                        let index = self.get_or_insert_name(name.sym());
+                        self.bytecode
+                            .emit_delete_property_by_name(dst.variable(), index.into());
+                    }
+                    PropertyAccessField::Expr(expr) => {
+                        let key = self.register_allocator.alloc();
+                        self.compile_expr(expr, &key);
+                        self.bytecode
+                            .emit_delete_property_by_value(dst.variable(), key.variable());
+                        self.register_allocator.dealloc(key);
+                    }
+                }
+            }
+            OptionalOperationKind::PrivatePropertyAccess { .. } => {
+                unreachable!("deleting private properties should always throw early errors")
+            }
+            OptionalOperationKind::Call { .. } => {
+                self.compile_optional_item_kind(kind, this, value);
+                self.bytecode.emit_push_true(dst.variable());
+            }
+        }
+    }
+
     /// Compile a single operation in an optional chain.
     ///
     /// On successful compilation, the state of the stack on execution will become `...rest, this, value`,
