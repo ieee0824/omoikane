@@ -70,3 +70,37 @@ fn link_selectors_apply_styles_and_match_dom_queries() {
         .unwrap();
     assert_eq!(result.as_boolean(), Some(true));
 }
+
+#[test]
+fn href_mutations_update_link_selectors_and_computed_style() {
+    let document = TreeBuilder::parse(HTML).document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const link = document.getElementById('missing');
+                const area = document.getElementById('area-missing');
+                const linkColor = () => getComputedStyle(link).color;
+                const areaColor = () => getComputedStyle(area).color;
+                const linked = element => element.matches(':any-link') && element.matches(':link');
+                const count = () => document.querySelectorAll(':any-link').length;
+                const originalLinkColor = linkColor();
+                const originalAreaColor = areaColor();
+                if (linked(link) || linked(area) || count() !== 3) return false;
+
+                link.setAttribute('href', '');
+                if (!linked(link) || count() !== 4 || linkColor() !== 'rgb(17, 34, 51)') return false;
+                link.setAttribute('href', '/changed');
+                if (!linked(link) || !link.matches('[href="/changed"]') || count() !== 4) return false;
+                link.removeAttribute('href');
+                if (linked(link) || count() !== 3 || linkColor() !== originalLinkColor) return false;
+
+                area.setAttribute('href', '/map/new');
+                if (!linked(area) || count() !== 4 || areaColor() !== 'rgb(34, 51, 68)') return false;
+                area.removeAttribute('href');
+                return !linked(area) && count() === 3 && areaColor() === originalAreaColor;
+            })()"#,
+        )
+        .unwrap();
+    assert_eq!(result.as_boolean(), Some(true));
+}
