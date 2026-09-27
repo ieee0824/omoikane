@@ -55,6 +55,12 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
         4,
         NativeFunction::from_copy_closure(|_, args, context| {
             let document = parse_node_id(args.first(), context)?;
+            let navigates = args
+                .get(1)
+                .and_then(JsValue::as_string)
+                .is_some_and(|kind| {
+                    matches!(kind.to_std_string_escaped().as_str(), "assign" | "replace")
+                });
             with_host_state(|host| {
                 let (frame, callback, document_url, event_state) = {
                     let mut state = host.borrow_mut();
@@ -107,10 +113,36 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 forwarded.extend_from_slice(&args[1..]);
                 forwarded.push(JsValue::from(js_string!(document_url.as_str())));
                 forwarded.push(event_state.map_or_else(JsValue::null, JsValue::from));
-                callback
+                let (previous_active, source) = if navigates {
+                    let mut state = host.borrow_mut();
+                    let source = state.visit_source_for_document(document);
+                    state.pending_iframe_visits.remove(&frame);
+                    if let Some(source) = &source {
+                        state.pending_iframe_visits.insert(frame, source.clone());
+                    }
+                    let previous_active = state.active_child_navigation_frame.replace(frame);
+                    (previous_active, source)
+                } else {
+                    (None, None)
+                };
+                let result = callback
                     .as_callable()
                     .expect("registered navigation handler")
-                    .call(&JsValue::undefined(), &forwarded, context)
+                    .call(&JsValue::undefined(), &forwarded, context);
+                if navigates {
+                    let mut state = host.borrow_mut();
+                    state.active_child_navigation_frame = previous_active;
+                    if result.is_ok() && state.pending_resource_loads.contains(&frame) {
+                        if let Some(source) = source {
+                            state.pending_iframe_visits.insert(frame, source);
+                        } else {
+                            state.pending_iframe_visits.remove(&frame);
+                        }
+                    } else {
+                        state.pending_iframe_visits.remove(&frame);
+                    }
+                }
+                result
             })
         }),
     )?;

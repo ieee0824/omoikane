@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
 use super::request::Method;
-use super::url::Url;
+use super::{SchemefulSite, url::Url};
 
 /// The `SameSite` attribute of a cookie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,14 +521,7 @@ fn is_public_suffix(domain: &str) -> bool {
 }
 
 fn same_site(a: &Url, b: &Url) -> bool {
-    if a.scheme() != b.scheme() {
-        return false;
-    }
-    let a_host = a.host().trim_matches(['[', ']']);
-    let b_host = b.host().trim_matches(['[', ']']);
-    let a_site = psl::domain_str(a_host).unwrap_or(a_host);
-    let b_site = psl::domain_str(b_host).unwrap_or(b_host);
-    a_site.eq_ignore_ascii_case(b_site)
+    SchemefulSite::from_url(a) == SchemefulSite::from_url(b)
 }
 
 /// Returns `true` if `request_path` path-matches `cookie_path` per RFC 6265 §5.1.4.

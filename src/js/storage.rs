@@ -7,6 +7,8 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use crate::http::SchemefulSite;
+
 const DEFAULT_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
 static NEXT_WEB_LOCK_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -29,6 +31,58 @@ impl StorageOrigin {
 
     pub(crate) fn serialize(&self) -> String {
         format!("{}://{}:{}", self.scheme, self.host, self.port)
+    }
+}
+
+/// The browser-owned lookup key for link coloring. Neither the key nor the
+/// underlying history set is exposed to page JavaScript.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct VisitedLinkKey {
+    destination: String,
+    initiator_origin: StorageOrigin,
+    top_level_site: SchemefulSite,
+}
+
+/// Navigation initiator information captured before the target Document is
+/// installed. Opaque origins and non-HTTP top-level sites have no visit source.
+#[derive(Debug, Clone)]
+pub(crate) struct VisitSource {
+    origin: StorageOrigin,
+    top_level_site: SchemefulSite,
+    same_origin_with_top_level: bool,
+}
+
+impl VisitSource {
+    pub(crate) fn new(origin: StorageOrigin, top_level_url: &str) -> Option<Self> {
+        let top_level_url = top_level_url.parse::<crate::http::Url>().ok()?;
+        let top_level_origin = StorageOrigin {
+            scheme: top_level_url.scheme().to_ascii_lowercase(),
+            host: top_level_url.host().to_ascii_lowercase(),
+            port: top_level_url.port(),
+        };
+        Some(Self {
+            same_origin_with_top_level: origin == top_level_origin,
+            origin,
+            top_level_site: SchemefulSite::from_url(&top_level_url),
+        })
+    }
+}
+
+impl VisitedLinkKey {
+    pub(crate) fn new(
+        destination: &str,
+        initiator_origin: StorageOrigin,
+        top_level_site: SchemefulSite,
+    ) -> Option<Self> {
+        let parsed = url::Url::parse(destination).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
+            return None;
+        }
+        Some(Self {
+            destination: parsed.to_string(),
+            initiator_origin,
+            top_level_site,
+        })
     }
 }
 
@@ -61,6 +115,12 @@ impl StorageArea {
 
 #[derive(Debug)]
 struct StorageState {
+    /// Shared by tabs using this manager, and discarded when the manager is
+    /// dropped. The persistent-storage profile does not write browsing history.
+    visited_links: HashSet<VisitedLinkKey>,
+    /// Advances only when a new visit key is inserted. Zero lets paint skip
+    /// scanning links in a fresh profile with no recorded visits.
+    visited_generation: u64,
     local: HashMap<StorageOrigin, StorageArea>,
     session: HashMap<(u64, StorageOrigin), StorageArea>,
     next_session_id: u64,
@@ -81,6 +141,8 @@ struct StorageState {
 impl Default for StorageState {
     fn default() -> Self {
         Self {
+            visited_links: HashSet::new(),
+            visited_generation: 0,
             local: HashMap::new(),
             session: HashMap::new(),
             next_session_id: 0,
@@ -220,6 +282,74 @@ impl StorageManager {
     /// persistent-storage host support.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records a navigation initiated by a page for subsequent link styling.
+    pub(crate) fn record_visited_link(&self, key: VisitedLinkKey) {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        if state.visited_links.insert(key) {
+            state.visited_generation = state.visited_generation.saturating_add(1);
+        }
+    }
+
+    /// Returns the private visit-store revision for paint-time lookup.
+    pub(crate) fn visited_generation(&self) -> u64 {
+        self.0
+            .lock()
+            .expect("storage manager mutex poisoned")
+            .visited_generation
+    }
+
+    /// Records the requested and committed URLs after a page-initiated
+    /// navigation succeeds. A redirect can therefore color both links.
+    pub(crate) fn record_page_navigation(
+        &self,
+        requested: &str,
+        committed: &str,
+        source: VisitSource,
+    ) {
+        for destination in [requested, committed] {
+            if let Some(key) = VisitedLinkKey::new(
+                destination,
+                source.origin.clone(),
+                source.top_level_site.clone(),
+            ) {
+                self.record_visited_link(key);
+            }
+        }
+        // A destination can already observe visits to its own pages when the
+        // navigation came from the top-level page or its same-origin frame.
+        // A third-party frame must not grant this cross-site history entry.
+        if source.same_origin_with_top_level
+            && let Some(destination_origin) = StorageOrigin::from_url(committed)
+            && let Some(key) = VisitedLinkKey::new(
+                committed,
+                destination_origin.clone(),
+                SchemefulSite::from_parts(&destination_origin.scheme, &destination_origin.host),
+            )
+        {
+            self.record_visited_link(key);
+        }
+    }
+
+    /// Looks up one partitioned link without exposing the history set.
+    pub(crate) fn has_visited_link(&self, key: &VisitedLinkKey) -> bool {
+        self.0
+            .lock()
+            .expect("storage manager mutex poisoned")
+            .visited_links
+            .contains(key)
+    }
+
+    /// Checks one link in its current frame/top-level partition. Unsupported
+    /// URL schemes cannot match the HTTP(S) visit store.
+    pub(crate) fn has_visited_url(&self, destination: &str, source: &VisitSource) -> bool {
+        VisitedLinkKey::new(
+            destination,
+            source.origin.clone(),
+            source.top_level_site.clone(),
+        )
+        .is_some_and(|key| self.has_visited_link(&key))
     }
 
     /// Creates an in-memory storage manager with host-defined quota and
@@ -883,6 +1013,83 @@ fn cache_request_replacement_key(request: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visited_links_are_partitioned_by_initiator_and_top_level_site() {
+        let manager = StorageManager::new();
+        let initiator = StorageOrigin::from_url("https://frame.example.test/page").unwrap();
+        let other_initiator = StorageOrigin::from_url("https://other.example.test/page").unwrap();
+        let site = SchemefulSite::from_parts("https", "top.example.test");
+        let other_site = SchemefulSite::from_parts("https", "other.test");
+        let make_key = |destination: &str, origin: StorageOrigin, site: SchemefulSite| {
+            VisitedLinkKey::new(destination, origin, site).unwrap()
+        };
+        let visited = make_key(
+            "https://destination.test/one#section",
+            initiator.clone(),
+            site.clone(),
+        );
+        assert!(!manager.has_visited_link(&visited));
+        assert_eq!(manager.visited_generation(), 0);
+        manager.record_visited_link(visited.clone());
+        assert!(manager.has_visited_link(&visited));
+        assert_eq!(manager.visited_generation(), 1);
+        manager.record_visited_link(visited.clone());
+        assert_eq!(manager.visited_generation(), 1);
+        assert!(manager.has_visited_link(&make_key(
+            "https://DESTINATION.test:443/one#section",
+            initiator.clone(),
+            site.clone(),
+        )));
+        assert!(!manager.has_visited_link(&make_key(
+            "https://destination.test/one#other",
+            initiator.clone(),
+            site.clone(),
+        )));
+        assert!(!manager.has_visited_link(&make_key(
+            "https://destination.test/one#section",
+            other_initiator,
+            site.clone(),
+        )));
+        assert!(!manager.has_visited_link(&make_key(
+            "https://destination.test/one#section",
+            initiator,
+            other_site,
+        )));
+        assert_eq!(manager.0.lock().unwrap().visited_links.len(), 1);
+        assert!(manager.clone().has_visited_link(&visited));
+        assert!(!StorageManager::new().has_visited_link(&visited));
+    }
+
+    #[test]
+    fn destination_can_see_top_level_or_same_origin_frame_visits_only() {
+        let manager = StorageManager::new();
+        let top = "https://top.example.test/page";
+        let destination = "https://destination.test/landing";
+        let destination_source =
+            VisitSource::new(StorageOrigin::from_url(destination).unwrap(), destination).unwrap();
+        let top_source = VisitSource::new(StorageOrigin::from_url(top).unwrap(), top).unwrap();
+        let third_party_source = VisitSource::new(
+            StorageOrigin::from_url("https://frame.other.test/").unwrap(),
+            top,
+        )
+        .unwrap();
+
+        manager.record_page_navigation(destination, destination, third_party_source);
+        assert!(!manager.has_visited_url(destination, &destination_source));
+
+        // A frame at a different URL but on the top-level origin qualifies.
+        let same_origin_frame_source = VisitSource::new(
+            StorageOrigin::from_url("https://top.example.test/frame").unwrap(),
+            top,
+        )
+        .unwrap();
+        manager.record_page_navigation(destination, destination, same_origin_frame_source);
+        assert!(manager.has_visited_url(destination, &destination_source));
+        let top_manager = StorageManager::new();
+        top_manager.record_page_navigation(destination, destination, top_source);
+        assert!(top_manager.has_visited_url(destination, &destination_source));
+    }
 
     fn temporary_profile(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

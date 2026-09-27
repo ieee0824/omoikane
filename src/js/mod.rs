@@ -96,8 +96,9 @@ mod stylesheet;
 use csp::{CspPolicy, CspViolation, ResourceType};
 use event_loop::{EventLoop, Task};
 pub use storage::{StorageManager, StoragePersistencePolicy};
+pub(crate) use storage::{StorageOrigin, VisitSource};
 use storage::{
-    StorageOrigin, WebLockMode, WebLockNotification, WebLockNotificationKind, WebLockRequestResult,
+    WebLockMode, WebLockNotification, WebLockNotificationKind, WebLockRequestResult,
     WebLockStartResult,
 };
 
@@ -1087,6 +1088,7 @@ enum TimerPayload {
     FormSubmission {
         node_id: usize,
         request: form_submission::Submission,
+        visit_source: Option<VisitSource>,
     },
     /// A geolocation request whose timeout has elapsed.
     GeolocationTimeout { request_id: u64 },
@@ -1657,7 +1659,11 @@ struct HostState {
     /// Resource elements that already have a queued load task. This prevents a
     /// move within one connected document from producing duplicate events.
     pending_resource_loads: HashSet<usize>,
-    navigation_requests: VecDeque<NavigationRequest>,
+    /// Source captured before an iframe navigation's asynchronous load.
+    pending_iframe_visits: HashMap<usize, VisitSource>,
+    /// Preserves a child Window's initiator while its callback changes `src`.
+    active_child_navigation_frame: Option<usize>,
+    navigation_requests: VecDeque<(NavigationRequest, Option<VisitSource>)>,
     /// Per-document fullscreen stacks, with the current element last.
     fullscreen_elements: HashMap<usize, Vec<usize>>,
     /// Whether this embedder exposes a fullscreen-capable presentation host.
@@ -2324,6 +2330,8 @@ impl HostState {
             browsing_context_names: HashMap::new(),
             discarded_node_ids: Vec::new(),
             pending_resource_loads: HashSet::new(),
+            pending_iframe_visits: HashMap::new(),
+            active_child_navigation_frame: None,
             navigation_requests: VecDeque::new(),
             fullscreen_elements: HashMap::new(),
             fullscreen_supported: true,
@@ -2400,6 +2408,116 @@ impl HostState {
         self.invalidate_document_style_cache(document);
     }
 
+    fn visit_source_for_document(&self, document_id: usize) -> Option<VisitSource> {
+        if !self.document_is_active(document_id) {
+            return None;
+        }
+        let DocumentSecurityOrigin::Tuple(origin) =
+            self.document_security_origins.get(&document_id)?
+        else {
+            return None;
+        };
+        let mut top_document_id = document_id;
+        for _ in 0..=self.iframe_documents.len() {
+            let Some(frame_id) = self.iframe_documents.iter().find_map(|(frame_id, entry)| {
+                (entry.document.identity() == top_document_id).then_some(*frame_id)
+            }) else {
+                break;
+            };
+            let frame = self.get_node(frame_id)?;
+            top_document_id = owner_document_for_node(&frame)?.identity();
+        }
+        let top_url = if top_document_id == self.document.identity() {
+            self.location_href.as_str()
+        } else {
+            self.auxiliary_contexts
+                .values()
+                .find(|entry| entry.document.identity() == top_document_id)?
+                .document_url
+                .as_str()
+        };
+        VisitSource::new(origin.clone(), top_url)
+    }
+
+    /// Collects the current document's visited links for a private paint pass.
+    /// The result is never copied into computed styles, layout, or a page API.
+    fn visited_link_ids_for_paint(&self, document: &NodeHandle) -> Vec<usize> {
+        // Most fresh profiles have no visits; avoid a DOM walk until the
+        // private store has at least one entry.
+        if self.storage_manager.visited_generation() == 0 {
+            return Vec::new();
+        }
+        let document_id = document.identity();
+        let Some(source) = self.visit_source_for_document(document_id) else {
+            return Vec::new();
+        };
+        let Some(document_url) = self.document_urls.get(&document_id) else {
+            return Vec::new();
+        };
+        let fallback = url::Url::parse(document_url).ok().or_else(|| {
+            self.base_url_for_document(document_id)
+                .and_then(|base| url::Url::parse(&base.to_string()).ok())
+        });
+        let Some(mut base) = fallback else {
+            return Vec::new();
+        };
+
+        // A document's first light-DOM base element sets its navigation base.
+        // Shadow trees do not contribute to document.querySelector("base[href]").
+        let mut stack = document.child_nodes();
+        stack.reverse();
+        while let Some(node) = stack.pop() {
+            if node.is_html_element()
+                && node.tag_name().as_deref() == Some("base")
+                && let Some(href) = node.get_attribute("href")
+            {
+                if let Ok(resolved) = base.join(&href) {
+                    base = resolved;
+                }
+                break;
+            }
+            let mut children = node.child_nodes();
+            children.reverse();
+            stack.extend(children);
+        }
+
+        let mut visited = Vec::new();
+        let mut stack = vec![document.clone()];
+        while let Some(node) = stack.pop() {
+            if node.is_html_element()
+                && matches!(node.tag_name().as_deref(), Some("a" | "area"))
+                && let Some(href) = node.get_attribute("href")
+                && let Ok(destination) = base.join(&href)
+                && self
+                    .storage_manager
+                    .has_visited_url(destination.as_str(), &source)
+            {
+                visited.push(node.identity());
+            }
+            let mut children = node.child_nodes();
+            if let Some(shadow_root) = node.shadow_root() {
+                children.push(shadow_root);
+            }
+            children.reverse();
+            stack.extend(children);
+        }
+        visited
+    }
+
+    fn note_iframe_navigation_source(&mut self, iframe: &NodeHandle) {
+        let iframe_id = iframe.identity();
+        if self.active_child_navigation_frame == Some(iframe_id) {
+            return;
+        }
+        let source = owner_document_for_node(iframe)
+            .and_then(|owner| self.visit_source_for_document(owner.identity()));
+        if let Some(source) = source {
+            self.pending_iframe_visits.insert(iframe_id, source);
+        } else {
+            self.pending_iframe_visits.remove(&iframe_id);
+        }
+    }
+
     fn clear_document_target(&mut self, document_id: usize) {
         if let Some(target) = self
             .document_targets
@@ -2441,6 +2559,9 @@ impl HostState {
                         .attributes()
                         .is_some_and(|attrs| attrs.contains_key("data")));
             if is_resource && state.pending_resource_loads.insert(node.identity()) {
+                if tag.eq_ignore_ascii_case("iframe") {
+                    state.note_iframe_navigation_source(node);
+                }
                 state.event_loop.enqueue_timer(TimerPayload::ResourceLoad {
                     node_id: node.identity(),
                 });
@@ -2511,6 +2632,9 @@ impl HostState {
             return;
         }
         // A later attribute navigation supersedes a pending form navigation.
+        if is_iframe {
+            self.note_iframe_navigation_source(node);
+        }
         self.event_loop
             .cancel_resource_loads_for_nodes(&HashSet::from([node.identity()]));
         self.pending_resource_loads.remove(&node.identity());
@@ -2602,10 +2726,11 @@ impl HostState {
             // unrelated top-level base URL.
             self.document_base_urls.get(&owner_document_id).cloned()
         };
-        let navigation_url = submission.map_or(resource.as_str(), |request| request.url.as_str());
+        let navigation_url =
+            submission.map_or_else(|| resource.clone(), |request| request.url.clone());
         let inherits_creator_origin = submission.is_none() && resource_attribute == "srcdoc"
             || navigation_url.is_empty()
-            || matches_about_blank_url(navigation_url);
+            || matches_about_blank_url(&navigation_url);
         let (document, csp_headers, child_url) = if let Some(request) = submission {
             self.load_iframe_form_submission(request)?
         } else if resource_attribute == "srcdoc" {
@@ -2760,6 +2885,15 @@ impl HostState {
         // initial about:blank navigations must enqueue load events even when no
         // script ever reads their contentDocument.
         self.schedule_connected_resource_loads(&document, false);
+        let visit_source = self.pending_iframe_visits.remove(&iframe_id);
+        if let (Some(visit_source), Some(committed_url)) = (visit_source, child_url.as_deref()) {
+            let requested_url = resolve_url_reference(&navigation_url, resource_base.as_ref());
+            self.storage_manager.record_page_navigation(
+                &requested_url,
+                committed_url,
+                visit_source,
+            );
+        }
         Ok(document)
     }
 
@@ -3309,6 +3443,7 @@ impl HostState {
 
     fn destroy_iframe_context(&mut self, iframe_id: usize) {
         self.retire_iframe_document(iframe_id);
+        self.pending_iframe_visits.remove(&iframe_id);
         self.iframe_context_ids.remove(&iframe_id);
         self.browsing_context_names.remove(&iframe_id);
     }
@@ -3330,6 +3465,8 @@ impl HostState {
         }
         self.pending_resource_loads
             .retain(|node_id| !subtree_ids.contains(node_id));
+        self.pending_iframe_visits
+            .retain(|node_id, _| !subtree_ids.contains(node_id));
         self.event_loop
             .cancel_resource_loads_for_nodes(&subtree_ids);
     }
@@ -5944,6 +6081,7 @@ impl JsRuntime {
         state.ensure_adjusted_layout();
         let layout_time = start.elapsed();
         let document_id = state.document.identity();
+        let visited_link_ids = state.visited_link_ids_for_paint(&state.document);
         let viewport = state.viewport;
         let base = crate::paint::stylesheet::extract_document_base_url(
             &state.document,
@@ -5971,12 +6109,13 @@ impl JsRuntime {
             crate::layout::with_image_cookie_store(image_cookies, image_site, document_id, || {
                 crate::layout::with_image_base_url(base, || {
                     crate::layout::with_image_animation_time(animation_time, || {
-                        crate::paint::paint_layout_with_web_fonts(
+                        crate::paint::paint_layout_with_visited_links(
                             layout,
                             resolver,
                             viewport,
                             crate::paint::text::load_text_fonts(),
                             Some(&entry.web_fonts),
+                            visited_link_ids,
                         )
                     })
                 })
@@ -6278,6 +6417,18 @@ impl JsRuntime {
 
     /// Takes navigation requests queued by Location/History APIs in FIFO order.
     pub fn take_navigation_requests(&mut self) -> Vec<NavigationRequest> {
+        self.host_state
+            .borrow_mut()
+            .navigation_requests
+            .drain(..)
+            .map(|(request, _)| request)
+            .collect()
+    }
+
+    /// Takes browser-owned visit sources alongside queued navigation requests.
+    pub(crate) fn take_navigation_requests_with_source(
+        &mut self,
+    ) -> Vec<(NavigationRequest, Option<VisitSource>)> {
         self.host_state
             .borrow_mut()
             .navigation_requests
@@ -7489,7 +7640,12 @@ impl JsRuntime {
         })
     }
 
-    fn run_auxiliary_navigation(&mut self, id: u64, url: &str) -> JsResult<()> {
+    fn run_auxiliary_navigation(
+        &mut self,
+        id: u64,
+        url: &str,
+        source: Option<VisitSource>,
+    ) -> JsResult<()> {
         if !self
             .host_state
             .borrow()
@@ -7503,6 +7659,16 @@ impl JsRuntime {
             .borrow_mut()
             .navigate_auxiliary_context(id, url)
             .map_err(|message| JsNativeError::error().with_message(message))?;
+        if let Some(source) = source {
+            let state = self.host_state.borrow();
+            if let Some(committed) = state.document_urls.get(&document_id)
+                && StorageOrigin::from_url(committed).is_some()
+            {
+                state
+                    .storage_manager
+                    .record_page_navigation(url, committed, source);
+            }
+        }
         let realm = match self.ensure_auxiliary_realm(id) {
             Ok(realm) => realm,
             Err(error) => {
@@ -8452,7 +8618,7 @@ impl JsRuntime {
                         Task::Timer { payload, .. } => payload.kind(),
                         Task::Geolocation { .. } => "geolocation",
                         Task::WebLock { .. } => "web-lock",
-                        Task::Navigation(_) => "navigation",
+                        Task::Navigation { .. } => "navigation",
                         Task::AuxiliaryNavigate { .. } => "auxiliary-navigation",
                         Task::PostedMessage { .. } => "posted-message",
                         Task::WindowPostedMessage { .. } => "window-posted-message",
@@ -8543,11 +8709,11 @@ impl JsRuntime {
                     request_id.to_string(),
                 ),
             ),
-            Task::Navigation(request) => {
+            Task::Navigation { request, source } => {
                 self.host_state
                     .borrow_mut()
                     .navigation_requests
-                    .push_back(request);
+                    .push_back((request, source));
                 Ok(())
             }
             Task::PostedMessage { port, data } => {
@@ -8598,7 +8764,9 @@ impl JsRuntime {
                 &wire,
                 ports,
             ),
-            Task::AuxiliaryNavigate { id, url } => self.run_auxiliary_navigation(id, &url),
+            Task::AuxiliaryNavigate { id, url, source } => {
+                self.run_auxiliary_navigation(id, &url, source)
+            }
             Task::BroadcastChannelMessage {
                 channel_id,
                 data,
@@ -9101,17 +9269,49 @@ impl JsRuntime {
                 self.record_error_from("timer callback", result);
                 Ok(())
             }
-            TimerPayload::FormSubmission { node_id, request } => {
-                let Some(frame) = self.host_state.borrow().get_node(node_id) else {
+            TimerPayload::FormSubmission {
+                node_id,
+                request,
+                visit_source,
+            } => {
+                let frame = self.host_state.borrow().get_node(node_id);
+                let Some(frame) = frame else {
+                    self.host_state
+                        .borrow_mut()
+                        .pending_iframe_visits
+                        .remove(&node_id);
                     return Ok(());
                 };
-                if !self.host_state.borrow().node_is_in_active_document(&frame) {
+                let frame_is_active = self.host_state.borrow().node_is_in_active_document(&frame);
+                if !frame_is_active {
+                    self.host_state
+                        .borrow_mut()
+                        .pending_iframe_visits
+                        .remove(&node_id);
                     return Ok(());
                 }
-                self.host_state
+                if let Some(visit_source) = visit_source {
+                    self.host_state
+                        .borrow_mut()
+                        .pending_iframe_visits
+                        .insert(node_id, visit_source);
+                } else {
+                    self.host_state
+                        .borrow_mut()
+                        .pending_iframe_visits
+                        .remove(&node_id);
+                }
+                let loaded = self
+                    .host_state
                     .borrow_mut()
-                    .iframe_document_with_submission(&frame, Some(&request))
-                    .map_err(|message| JsNativeError::typ().with_message(message))?;
+                    .iframe_document_with_submission(&frame, Some(&request));
+                if let Err(message) = loaded {
+                    self.host_state
+                        .borrow_mut()
+                        .pending_iframe_visits
+                        .remove(&node_id);
+                    return Err(JsNativeError::typ().with_message(message).into());
+                }
                 self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
             }
             TimerPayload::ResourceLoad { node_id } => {
@@ -9127,12 +9327,14 @@ impl JsRuntime {
                     let mut state = self.host_state.borrow_mut();
                     state.pending_resource_loads.remove(&node_id);
                     let Some(node) = state.get_node(node_id) else {
+                        state.pending_iframe_visits.remove(&node_id);
                         return Ok(());
                     };
                     let resource_document_id = document_root_for_node(&node)
                         .map(|document| document.identity())
                         .unwrap_or_else(|| state.document.identity());
                     if !state.node_is_in_active_document(&node) {
+                        state.pending_iframe_visits.remove(&node_id);
                         (false, Vec::new(), None, resource_document_id)
                     } else {
                         let mut initial_scripts: Vec<NodeHandle> = Vec::new();
@@ -9168,10 +9370,25 @@ impl JsRuntime {
                             // A newly connected iframe starts a fresh navigation.
                             // This also makes detach/reconnect reload rather than
                             // merely replaying the old document's event.
-                            let document =
-                                state.iframe_content_document(&node).map_err(|message| {
-                                    JsError::from(JsNativeError::error().with_message(message))
-                                })?;
+                            let previous_document = state
+                                .iframe_documents
+                                .get(&node_id)
+                                .map(|entry| entry.document.identity());
+                            let document = match state.iframe_content_document(&node) {
+                                Ok(document) => document,
+                                Err(message) => {
+                                    state.pending_iframe_visits.remove(&node_id);
+                                    return Err(JsNativeError::error()
+                                        .with_message(message)
+                                        .into());
+                                }
+                            };
+                            if previous_document == Some(document.identity()) {
+                                // This queued load became a no-op. A plain
+                                // contentDocument read must not clear a later
+                                // form submission's pending visit source.
+                                state.pending_iframe_visits.remove(&node_id);
+                            }
                             let ids = state
                                 .iframe_documents
                                 .get_mut(&node_id)
@@ -11357,6 +11574,11 @@ fn register_host_bindings(
             js_string!("__omoikane_open_auxiliary_window"),
             2,
             NativeFunction::from_copy_closure(open_auxiliary_window_native),
+        ),
+        (
+            js_string!("__omoikane_navigate_named_link_target"),
+            3,
+            NativeFunction::from_copy_closure(navigate_named_link_target_native),
         ),
         (
             js_string!("__omoikane_auxiliary_window_global"),
@@ -17216,11 +17438,7 @@ fn open_auxiliary_window_native(
         .unwrap_or_else(|| js_string!("_blank").into())
         .to_string(context)?
         .to_std_string_escaped();
-    let opener_document_id = context
-        .realm()
-        .host_defined()
-        .get::<ModuleDocumentId>()
-        .map(|owner| owner.0);
+    let opener_document_id = caller_document_id(context);
     with_host_state(|host| {
         let id = {
             let mut state = host.borrow_mut();
@@ -17232,11 +17450,116 @@ fn open_auxiliary_window_native(
         };
         ensure_auxiliary_realm(context, host, id)?;
         if !url.is_empty() && !matches_about_blank_url(&url) {
-            host.borrow_mut()
+            let mut state = host.borrow_mut();
+            let source = opener_document_id
+                .and_then(|document_id| state.visit_source_for_document(document_id));
+            let resolved_url = opener_document_id
+                .and_then(|document_id| state.base_url_for_document(document_id))
+                .map(|base| resolve_url_reference(&url, Some(&base)))
+                .unwrap_or(url);
+            state
                 .event_loop
-                .enqueue_auxiliary_navigation(id, url);
+                .enqueue_auxiliary_navigation(id, resolved_url, source);
         }
         Ok(JsValue::from(id as f64))
+    })
+}
+
+/// Navigates a named iframe without exposing a cross-origin owner Document or
+/// Node identity to the initiating page.
+fn navigate_named_link_target_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let link_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, link_id)?;
+    let destination = args
+        .get(1)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let target = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    with_host_state(|host| {
+        let (frame_id, document_id, callback, document_url, event_state, visit_source) = {
+            let mut state = host.borrow_mut();
+            let Some(link) = state.get_node(link_id) else {
+                return Ok(JsValue::from(false));
+            };
+            let frame = match state.resolve_named_link_target(&link, &target) {
+                form_submission::NamedLinkTarget::NotFound => return Ok(JsValue::null()),
+                form_submission::NamedLinkTarget::Blocked => return Ok(JsValue::from(false)),
+                form_submission::NamedLinkTarget::Frame(frame) => frame,
+            };
+            let visit_source = owner_document_for_node(&link)
+                .and_then(|source| state.visit_source_for_document(source.identity()));
+            let document = state
+                .iframe_content_document(&frame)
+                .map_err(|message| JsNativeError::typ().with_message(message))?;
+            let owner = owner_document_for_node(&frame)
+                .ok_or_else(|| JsNativeError::typ().with_message("iframe has no owner Document"))?;
+            let callback = state
+                .iframe_navigation
+                .owner(owner.identity())
+                .ok_or_else(|| {
+                    JsNativeError::typ().with_message("iframe owner is no longer active")
+                })?;
+            let document_url = state
+                .document_urls
+                .get(&document.identity())
+                .cloned()
+                .ok_or_else(|| JsNativeError::typ().with_message("iframe URL is unavailable"))?;
+            let event_state = state.shared_event_state_for_node(document.identity());
+            (
+                frame.identity(),
+                document.identity(),
+                callback,
+                document_url,
+                event_state,
+                visit_source,
+            )
+        };
+        let previous_active = {
+            let mut state = host.borrow_mut();
+            state.pending_iframe_visits.remove(&frame_id);
+            if let Some(source) = &visit_source {
+                state.pending_iframe_visits.insert(frame_id, source.clone());
+            }
+            state.active_child_navigation_frame.replace(frame_id)
+        };
+        let forwarded = [
+            JsValue::from(frame_id as f64),
+            JsValue::from(document_id as f64),
+            js_string!("assign").into(),
+            js_string!(destination.as_str()).into(),
+            JsValue::undefined(),
+            js_string!(document_url.as_str()).into(),
+            event_state.map_or_else(JsValue::null, JsValue::from),
+        ];
+        let result = callback
+            .as_callable()
+            .expect("registered iframe navigation handler")
+            .call(&JsValue::undefined(), &forwarded, context);
+        {
+            let mut state = host.borrow_mut();
+            state.active_child_navigation_frame = previous_active;
+            if result.is_ok() && state.pending_resource_loads.contains(&frame_id) {
+                if let Some(source) = visit_source {
+                    state.pending_iframe_visits.insert(frame_id, source);
+                } else {
+                    state.pending_iframe_visits.remove(&frame_id);
+                }
+            } else {
+                state.pending_iframe_visits.remove(&frame_id);
+            }
+        }
+        result.map(|_| JsValue::from(true))
     })
 }
 
@@ -17252,10 +17575,19 @@ fn navigate_auxiliary_window_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let caller = caller_document_id(context);
     with_host_state(|host| {
         let mut state = host.borrow_mut();
         if state.auxiliary_contexts.contains_key(&id) {
-            state.event_loop.enqueue_auxiliary_navigation(id, url);
+            let source =
+                caller.and_then(|document_id| state.visit_source_for_document(document_id));
+            let resolved_url = caller
+                .and_then(|document_id| state.base_url_for_document(document_id))
+                .map(|base| resolve_url_reference(&url, Some(&base)))
+                .unwrap_or(url);
+            state
+                .event_loop
+                .enqueue_auxiliary_navigation(id, resolved_url, source);
         }
         Ok(JsValue::undefined())
     })
@@ -20796,8 +21128,17 @@ fn resolve_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
         Some(value) => value.to_string(context)?.to_std_string_escaped(),
         None => return Ok(js_string!("").into()),
     };
+    let caller_document = caller_document_id(context);
     with_host_state(|state| {
-        let base = state.borrow().base_url.clone();
+        let state = state.borrow();
+        let base = caller_document
+            .and_then(|document_id| state.base_url_for_document(document_id))
+            .or_else(|| {
+                caller_document
+                    .is_none()
+                    .then(|| state.base_url.clone())
+                    .flatten()
+            });
         let resolved = resolve_url_reference(&reference, base.as_ref());
         Ok(js_string!(resolved.as_str()).into())
     })
@@ -20937,8 +21278,13 @@ fn schedule_navigation_native(
                 .into());
         }
     };
+    let caller = caller_document_id(context);
     with_host_state(|state| {
-        state.borrow_mut().event_loop.enqueue_navigation(request);
+        let mut state = state.borrow_mut();
+        let source = caller.and_then(|document| state.visit_source_for_document(document));
+        state
+            .event_loop
+            .enqueue_navigation_from_source(request, source);
         Ok(JsValue::undefined())
     })
 }
@@ -35932,6 +36278,192 @@ b</textarea></form>"#,
             ),
             "NotSupportedError|NotSupportedError|ok",
         );
+    }
+
+    fn serve_visit_documents(first_body: &str) -> (u16, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let first_body = first_body.to_owned();
+        let server = thread::spawn(move || {
+            let mut paths = Vec::new();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while paths.len() < 2 && std::time::Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0u8; 2048];
+                let size = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..size]);
+                let path = request.split_whitespace().nth(1).unwrap().to_owned();
+                let body = if path == "/first" {
+                    first_body.as_str()
+                } else {
+                    "<html><body>second</body></html>"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                paths.push(path);
+            }
+            paths
+        });
+        (port, server)
+    }
+
+    #[test]
+    fn iframe_visits_use_the_navigating_frame_origin_and_top_level_site() {
+        let (port, server) = serve_visit_documents(
+            "<html><body><script>setTimeout(() => location.assign('/second'), 0)</script></body></html>",
+        );
+        let top_url = format!("http://localhost:{port}/top");
+        let first = format!("http://127.0.0.1:{port}/first");
+        let second = format!("http://127.0.0.1:{port}/second");
+        let storage = StorageManager::new();
+        let session = storage.create_session();
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            &top_url,
+            storage.clone(),
+            session,
+        )
+        .unwrap();
+        let owner_source =
+            VisitSource::new(StorageOrigin::from_url(&top_url).unwrap(), &top_url).unwrap();
+        let child_source =
+            VisitSource::new(StorageOrigin::from_url(&first).unwrap(), &top_url).unwrap();
+        assert!(!storage.has_visited_url(&first, &owner_source));
+        runtime
+            .eval(&format!(
+                "const frame = document.createElement('iframe'); frame.src = {first:?}; document.body.appendChild(frame)"
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.tick(0).unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            server.join().unwrap(),
+            vec!["/first".to_string(), "/second".to_string()]
+        );
+        assert!(storage.has_visited_url(&first, &owner_source));
+        assert!(!storage.has_visited_url(&first, &child_source));
+        assert!(storage.has_visited_url(&second, &child_source));
+        assert!(!storage.has_visited_url(&second, &owner_source));
+    }
+
+    #[test]
+    fn popup_visits_use_the_opening_page_then_the_popup_partition() {
+        let (port, server) = serve_visit_documents(
+            "<html><body><script>setTimeout(() => location.assign('/second'), 0)</script></body></html>",
+        );
+        let top_url = format!("http://localhost:{port}/top");
+        let first = format!("http://127.0.0.1:{port}/first");
+        let second = format!("http://127.0.0.1:{port}/second");
+        let storage = StorageManager::new();
+        let session = storage.create_session();
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            &top_url,
+            storage.clone(),
+            session,
+        )
+        .unwrap();
+        let owner_source =
+            VisitSource::new(StorageOrigin::from_url(&top_url).unwrap(), &top_url).unwrap();
+        let popup_source =
+            VisitSource::new(StorageOrigin::from_url(&first).unwrap(), &first).unwrap();
+        runtime
+            .eval(&format!("window.open({first:?}, 'visit-popup')"))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.tick(0).unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            server.join().unwrap(),
+            vec!["/first".to_string(), "/second".to_string()]
+        );
+        assert!(storage.has_visited_url(&first, &owner_source));
+        assert!(!storage.has_visited_url(&second, &owner_source));
+        assert!(storage.has_visited_url(&first, &popup_source));
+        assert!(storage.has_visited_url(&second, &popup_source));
+    }
+
+    #[test]
+    fn reused_popup_resolves_relative_navigation_against_the_opener() {
+        let (port, server) = serve_visit_documents("<html><body>first</body></html>");
+        let top_url = format!("http://localhost:{port}/top");
+        let first = format!("http://127.0.0.1:{port}/first");
+        let second = format!("http://localhost:{port}/second");
+        let storage = StorageManager::new();
+        let session = storage.create_session();
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            &top_url,
+            storage.clone(),
+            session,
+        )
+        .unwrap();
+        let source =
+            VisitSource::new(StorageOrigin::from_url(&top_url).unwrap(), &top_url).unwrap();
+        runtime
+            .eval(&format!("window.open({first:?}, 'reused-popup')"))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval("window.open('/second', 'reused-popup')")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            server.join().unwrap(),
+            vec!["/first".to_string(), "/second".to_string()]
+        );
+        assert!(storage.has_visited_url(&first, &source));
+        assert!(storage.has_visited_url(&second, &source));
+        assert!(!storage.has_visited_url(&format!("http://127.0.0.1:{port}/second"), &source));
+    }
+
+    #[test]
+    fn named_iframe_link_visit_uses_the_child_initiator_partition() {
+        let (port, server) = serve_visit_documents(
+            "<html><body><a href='/second' target='results'>next</a><script>document.querySelector('a').click()</script></body></html>",
+        );
+        let top_url = format!("http://localhost:{port}/top");
+        let first = format!("http://127.0.0.1:{port}/first");
+        let second = format!("http://127.0.0.1:{port}/second");
+        let storage = StorageManager::new();
+        let session = storage.create_session();
+        let mut runtime = JsRuntime::with_document_url_and_storage(
+            default_document(),
+            &top_url,
+            storage.clone(),
+            session,
+        )
+        .unwrap();
+        let owner_source =
+            VisitSource::new(StorageOrigin::from_url(&top_url).unwrap(), &top_url).unwrap();
+        let child_source =
+            VisitSource::new(StorageOrigin::from_url(&first).unwrap(), &top_url).unwrap();
+        runtime
+            .eval(&format!(
+                "const result = document.createElement('iframe'); result.setAttribute('name', 'results'); document.body.appendChild(result); const source = document.createElement('iframe'); source.src = {first:?}; document.body.appendChild(source)"
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            server.join().unwrap(),
+            vec!["/first".to_string(), "/second".to_string()]
+        );
+        assert!(storage.has_visited_url(&first, &owner_source));
+        assert!(storage.has_visited_url(&second, &child_source));
+        assert!(!storage.has_visited_url(&second, &owner_source));
     }
 
     #[test]
@@ -51467,3 +51999,6 @@ b</textarea></form>"#,
 
 #[cfg(test)]
 mod inline_geometry_tests;
+
+#[cfg(test)]
+mod visited_link_tests;

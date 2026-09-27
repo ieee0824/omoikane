@@ -13,6 +13,7 @@ mod data_uri;
 mod http2;
 mod request;
 mod response;
+mod site;
 pub mod url;
 
 #[cfg(test)]
@@ -28,4 +29,5 @@ pub use data_uri::{DataUri, parse_data_uri};
 pub use request::{HttpRequest, Method, default_user_agent};
 pub(crate) use request::{is_forbidden_request_header, is_valid_header};
 pub use response::HttpResponse;
+pub(crate) use site::SchemefulSite;
 pub use url::Url;
