@@ -214,6 +214,42 @@ fn finally_with_loop_break() {
 }
 
 #[test]
+fn nested_finally_break_discards_inner_return() {
+    run_test_actions([
+        TestAction::assert_eq(
+            indoc! {r#"
+                function pendingReturn() {
+                    try {
+                        return 42;
+                    } finally {
+                        do try {
+                            return 43;
+                        } finally {
+                            break;
+                        } while (0);
+                    }
+                }
+                pendingReturn();
+            "#},
+            42,
+        ),
+        TestAction::assert_eq(
+            indoc! {r#"
+                function overriddenReturn() {
+                    try {
+                        return 42;
+                    } finally {
+                        return 43;
+                    }
+                }
+                overriddenReturn();
+            "#},
+            43,
+        ),
+    ]);
+}
+
+#[test]
 fn single_case_switch() {
     run_test_actions([TestAction::assert_eq(
         indoc! {r#"

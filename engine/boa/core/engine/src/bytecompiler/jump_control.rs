@@ -67,12 +67,23 @@ pub(crate) enum JumpRecordAction {
     },
 }
 
+/// Where an explicit return value is stored while finally blocks execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReturnValueLocation {
+    /// On the value stack when no finally block intervenes.
+    OnStack,
+    /// In the function-level pending-return register.
+    InSlot(u32),
+    /// In the accumulator for an implicit return.
+    InAccumulator,
+}
+
 /// Local Control flow type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JumpRecordKind {
     Break,
     Continue,
-    Return { return_value_on_stack: bool },
+    Return { value_location: ReturnValueLocation },
 }
 
 /// This represents a local control flow handling. See [`JumpRecordKind`] for types.
@@ -128,14 +139,18 @@ impl JumpRecord {
         match self.kind {
             JumpRecordKind::Break => compiler.patch_jump(self.label),
             JumpRecordKind::Continue => compiler.patch_jump_with_target(self.label, start_address),
-            JumpRecordKind::Return {
-                return_value_on_stack,
-            } => {
-                if return_value_on_stack {
-                    let value = compiler.register_allocator.alloc();
-                    compiler.pop_into_register(&value);
-                    compiler.bytecode.emit_set_accumulator(value.variable());
-                    compiler.register_allocator.dealloc(value);
+            JumpRecordKind::Return { value_location } => {
+                match value_location {
+                    ReturnValueLocation::OnStack => {
+                        let value = compiler.register_allocator.alloc();
+                        compiler.pop_into_register(&value);
+                        compiler.bytecode.emit_set_accumulator(value.variable());
+                        compiler.register_allocator.dealloc(value);
+                    }
+                    ReturnValueLocation::InSlot(slot) => {
+                        compiler.bytecode.emit_set_accumulator(slot.into());
+                    }
+                    ReturnValueLocation::InAccumulator => {}
                 }
 
                 match (compiler.is_async(), compiler.is_generator()) {

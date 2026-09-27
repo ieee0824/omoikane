@@ -59,7 +59,7 @@ pub(crate) use declarations::{
     eval_declaration_instantiation_context, global_declaration_instantiation_context,
 };
 pub(crate) use function::FunctionCompiler;
-pub(crate) use jump_control::JumpControlInfo;
+pub(crate) use jump_control::{JumpControlInfo, ReturnValueLocation};
 pub(crate) use register::*;
 
 pub(crate) trait ToJsString {
@@ -505,6 +505,9 @@ pub struct ByteCompiler<'ctx> {
     bindings_map: FxHashMap<BindingLocator, u32>,
     jump_info: Vec<JumpControlInfo>,
 
+    /// Dedicated register for a return value pending across finally blocks.
+    pending_return_slot: Option<u32>,
+
     /// Used to handle exception throws that escape the async function types.
     ///
     /// Async functions and async generator functions, need to be closed and resolved.
@@ -609,6 +612,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             names_map: FxHashMap::default(),
             bindings_map: FxHashMap::default(),
             jump_info: Vec::new(),
+            pending_return_slot: None,
             async_handler: None,
             json_parse,
             variable_scope,
@@ -626,6 +630,17 @@ impl<'ctx> ByteCompiler<'ctx> {
 
     pub(crate) fn source_text(&self) -> SourceText {
         self.spanned_source_text.source_text()
+    }
+
+    /// Allocates the function-level pending-return register on first use.
+    pub(crate) fn pending_return_slot(&mut self) -> u32 {
+        if let Some(slot) = self.pending_return_slot {
+            slot
+        } else {
+            let slot = self.register_allocator.alloc_persistent().index();
+            self.pending_return_slot = Some(slot);
+            slot
+        }
     }
 
     pub(crate) const fn strict(&self) -> bool {
@@ -2192,7 +2207,7 @@ impl<'ctx> ByteCompiler<'ctx> {
         if let Some(async_handler) = self.async_handler {
             self.patch_handler(async_handler);
         }
-        self.r#return(false);
+        self.r#return(ReturnValueLocation::InAccumulator);
 
         let final_bytecode_len = self.next_opcode_location();
 
