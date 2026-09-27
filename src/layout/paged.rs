@@ -1,5 +1,7 @@
 //! Page contexts and source fragments for print layout.
 
+use std::collections::BTreeMap;
+
 use crate::css::style::counter_pairs;
 use crate::css::{
     ComputedValue, MediaType, PageBoxGeometry, PageMarginBox, PageMarginContent,
@@ -26,6 +28,8 @@ pub struct PagedPage {
     pub source: Rect,
     /// Page-scoped counter values after this page is generated.
     pub counters: PageCounterValues,
+    /// Generated page-margin box rectangles in page-local coordinates.
+    pub margin_box_rects: BTreeMap<PageMarginBox, Rect>,
 }
 
 /// Built-in counters available to printed page-margin boxes.
@@ -38,6 +42,11 @@ pub struct PageCounterValues {
 }
 
 impl PagedPage {
+    /// Returns the page-local rectangle of a generated page-margin box.
+    pub fn margin_box_rect(&self, margin_box: PageMarginBox) -> Option<Rect> {
+        self.margin_box_rects.get(&margin_box).copied()
+    }
+
     /// Resolves static text and `counter(page)` / `counter(pages)` in one margin box.
     ///
     /// Other generated-content expressions remain available from `style` for
@@ -166,6 +175,7 @@ pub fn layout_paged_tree(
             let style = resolver.resolved_page_style(&selector);
             let geometry = style.geometry((default_sheet.width, default_sheet.height), 0.0);
             let content = content_rect(geometry);
+            let margin_box_rects = corner_margin_box_rects(&style, geometry);
             let capacity = content.height.max(1.0);
             let end = (start + capacity).min(section.end);
             pages.push(PagedPage {
@@ -186,6 +196,7 @@ pub fn layout_paged_tree(
                     height: (end - start).max(0.0),
                 },
                 counters: PageCounterValues { page: 0, pages: 0 },
+                margin_box_rects,
             });
             if end >= section.end {
                 break;
@@ -250,6 +261,62 @@ fn content_rect(geometry: PageBoxGeometry) -> Rect {
         width: (geometry.width - geometry.margin_left - geometry.margin_right).max(0.0),
         height: (geometry.height - geometry.margin_top - geometry.margin_bottom).max(0.0),
     }
+}
+
+fn corner_margin_box_rects(
+    style: &ResolvedPageStyle,
+    geometry: PageBoxGeometry,
+) -> BTreeMap<PageMarginBox, Rect> {
+    let width = geometry.width.max(0.0);
+    let height = geometry.height.max(0.0);
+    let left = geometry.margin_left.clamp(0.0, width);
+    let right = geometry.margin_right.clamp(0.0, width);
+    let top = geometry.margin_top.clamp(0.0, height);
+    let bottom = geometry.margin_bottom.clamp(0.0, height);
+    let mut rectangles = BTreeMap::new();
+    for (margin_box, rect) in [
+        (
+            PageMarginBox::TopLeftCorner,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: left,
+                height: top,
+            },
+        ),
+        (
+            PageMarginBox::TopRightCorner,
+            Rect {
+                x: width - right,
+                y: 0.0,
+                width: right,
+                height: top,
+            },
+        ),
+        (
+            PageMarginBox::BottomLeftCorner,
+            Rect {
+                x: 0.0,
+                y: height - bottom,
+                width: left,
+                height: bottom,
+            },
+        ),
+        (
+            PageMarginBox::BottomRightCorner,
+            Rect {
+                x: width - right,
+                y: height - bottom,
+                width: right,
+                height: bottom,
+            },
+        ),
+    ] {
+        if style.margin_box_content(margin_box).is_some() {
+            rectangles.insert(margin_box, rect);
+        }
+    }
+    rectangles
 }
 
 fn first_page_name(document: &NodeHandle, resolver: &mut StyleResolver) -> Option<String> {
@@ -582,5 +649,173 @@ mod tests {
             Some("7".into())
         );
         assert_eq!(paged.pages[1].counters.page, 21);
+    }
+
+    #[test]
+    fn corner_margin_boxes_follow_asymmetric_page_margins() {
+        let (document, _, _) = document_with_two_boxes();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "@page { size: 200px 300px; margin: 10px 20px 30px 40px; \
+                   @top-left-corner { content: 'tl' } \
+                   @top-right-corner { content: 'tr' } \
+                   @bottom-left-corner { content: 'bl' } \
+                   @bottom-right-corner { content: 'br' } }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 200.0,
+                height: 300.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        let page = &paged.pages[0];
+        assert_eq!(
+            page.margin_box_rect(PageMarginBox::TopLeftCorner),
+            Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 10.0
+            })
+        );
+        assert_eq!(
+            page.margin_box_rect(PageMarginBox::TopRightCorner),
+            Some(Rect {
+                x: 180.0,
+                y: 0.0,
+                width: 20.0,
+                height: 10.0
+            })
+        );
+        assert_eq!(
+            page.margin_box_rect(PageMarginBox::BottomLeftCorner),
+            Some(Rect {
+                x: 0.0,
+                y: 270.0,
+                width: 40.0,
+                height: 30.0
+            })
+        );
+        assert_eq!(
+            page.margin_box_rect(PageMarginBox::BottomRightCorner),
+            Some(Rect {
+                x: 180.0,
+                y: 270.0,
+                width: 20.0,
+                height: 30.0
+            })
+        );
+        assert_eq!(page.margin_box_rect(PageMarginBox::TopCenter), None);
+        for rect in page.margin_box_rects.values() {
+            assert!(
+                rect.x + rect.width <= page.content.x
+                    || rect.x >= page.content.x + page.content.width
+                    || rect.y + rect.height <= page.content.y
+                    || rect.y >= page.content.y + page.content.height
+            );
+        }
+    }
+
+    #[test]
+    fn named_pages_use_their_own_corner_rectangles_and_landscape_sheet() {
+        let (document, first, second) = document_with_two_boxes();
+        first.set_attribute("style", "page: portrait");
+        second.set_attribute("style", "page: landscape");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "body { margin: 0 } div { width: 20px; height: 20px } \
+                 @page portrait { size: 200px 300px; margin: 10px 20px 30px 40px; \
+                     @top-left-corner { content: 'p' } } \
+                 @page landscape { size: 300px 200px; margin: 5px 6px 7px 8px; \
+                     @bottom-right-corner { content: 'l' } }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 200.0,
+                height: 300.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.pages.len(), 2);
+        assert_eq!(
+            paged.pages[0].margin_box_rect(PageMarginBox::TopLeftCorner),
+            Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 10.0
+            })
+        );
+        assert_eq!(
+            paged.pages[0].margin_box_rect(PageMarginBox::BottomRightCorner),
+            None
+        );
+        assert_eq!(paged.pages[1].sheet.width, 300.0);
+        assert_eq!(paged.pages[1].sheet.height, 200.0);
+        assert_eq!(
+            paged.pages[1].margin_box_rect(PageMarginBox::BottomRightCorner),
+            Some(Rect {
+                x: 294.0,
+                y: 193.0,
+                width: 6.0,
+                height: 7.0
+            })
+        );
+        assert_eq!(
+            paged.pages[1].margin_box_rect(PageMarginBox::TopLeftCorner),
+            None
+        );
+    }
+
+    #[test]
+    fn zero_and_overfull_margins_keep_corner_rectangles_finite() {
+        for (css, sheet, expected_width) in [
+            (
+                "@page { size: 20px 10px; margin: 0; @top-left-corner { content: '' } @bottom-right-corner { content: 'x' } }",
+                (20.0, 10.0),
+                0.0,
+            ),
+            (
+                "@page { size: 20px 10px; margin: 15px; @top-left-corner { content: '' } @bottom-right-corner { content: 'x' } }",
+                (20.0, 10.0),
+                15.0,
+            ),
+        ] {
+            let mut resolver = StyleResolver::new();
+            resolver.set_media_type(MediaType::Print);
+            resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+            let style = resolver.resolved_page_style(&PageSelectorContext::new(0, None));
+            let geometry = style.geometry(sheet, 0.0);
+            let rectangles = corner_margin_box_rects(&style, geometry);
+            let top_left = rectangles.get(&PageMarginBox::TopLeftCorner).unwrap();
+            assert_eq!(top_left.width, expected_width);
+            for rect in rectangles.values() {
+                assert!(
+                    rect.x.is_finite()
+                        && rect.y.is_finite()
+                        && rect.width.is_finite()
+                        && rect.height.is_finite()
+                );
+                assert!(rect.width >= 0.0 && rect.height >= 0.0);
+                assert!(rect.x >= 0.0 && rect.y >= 0.0);
+                assert!(rect.x + rect.width <= geometry.width);
+                assert!(rect.y + rect.height <= geometry.height);
+            }
+        }
     }
 }
