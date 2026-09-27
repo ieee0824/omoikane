@@ -415,17 +415,13 @@ impl<'a> JsStr<'a> {
             (Some(b'0'), Some(b'b' | b'B')) => Some(2),
             (Some(b'0'), Some(b'o' | b'O')) => Some(8),
             (Some(b'0'), Some(b'x' | b'X')) => Some(16),
-            // Make sure that no further variants of "infinity" are parsed.
-            (Some(b'i' | b'I'), _) => {
-                return f64::NAN;
-            }
             _ => None,
         };
 
         // Parse numbers that begin with `0b`, `0o` and `0x`.
         if let Some(base) = base {
             let string = &string[2..];
-            if string.is_empty() {
+            if string.is_empty() || string.starts_with(['+', '-']) {
                 return f64::NAN;
             }
 
@@ -446,7 +442,12 @@ impl<'a> JsStr<'a> {
             return value;
         }
 
-        fast_float2::parse(string).unwrap_or(f64::NAN)
+        match fast_float2::parse::<f64, _>(string) {
+            // The three canonical Infinity spellings returned above. An overflowed
+            // decimal literal is still valid, so retain infinity when digits occur.
+            Ok(value) if value.is_finite() || string.bytes().any(|b| b.is_ascii_digit()) => value,
+            Ok(_) | Err(_) => f64::NAN,
+        }
     }
 
     /// Gets an iterator of all the Unicode codepoints of a [`JsStr`].
