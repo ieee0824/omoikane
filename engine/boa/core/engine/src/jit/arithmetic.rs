@@ -1765,12 +1765,13 @@ mod tests {
         let mut values = vec![
             Some(9_007_199_254_740_991_i64),
             Some(3),
-            Some(0),
+            Some(1),
             None,
             None,
             None,
         ];
-        let mut iterations = 1;
+        // Resume after the second body's iteration check, when `i` is 1.
+        let mut iterations = 2;
         let exit = code
             .execute_after_increment(&mut values, &mut iterations, u64::MAX)
             .unwrap();
@@ -1782,8 +1783,8 @@ mod tests {
             }
         ));
 
-        let mut values = vec![Some(-1_000_006), Some(2), Some(0), None, None, None];
-        let mut iterations = 1;
+        let mut values = vec![Some(-1_000_006), Some(2), Some(1), None, None, None];
+        let mut iterations = 2;
         assert!(matches!(
             code.execute_after_increment(&mut values, &mut iterations, u64::MAX),
             Some(ArithmeticExit::Bailout {
