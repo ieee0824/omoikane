@@ -103,6 +103,53 @@ impl ResolvedPageStyle {
         self.margin_box_properties(margin_box)?.get(name)
     }
 
+    /// Returns the inherited font size used to measure one page-margin box.
+    pub fn margin_box_font_size(&self, margin_box: PageMarginBox) -> f32 {
+        let page_font = self
+            .get("font-size")
+            .and_then(|value| {
+                match compute_value(value, "font-size", ResolutionContext::default()) {
+                    ComputedValue::Px(size) if size.is_finite() && size >= 0.0 => Some(size),
+                    _ => None,
+                }
+            })
+            .unwrap_or(16.0);
+        self.margin_box_property(margin_box, "font-size")
+            .and_then(|value| {
+                let context = ResolutionContext {
+                    parent_font_size: page_font,
+                    ..ResolutionContext::default()
+                };
+                match compute_value(value, "font-size", context) {
+                    ComputedValue::Px(size) if size.is_finite() && size >= 0.0 => Some(size),
+                    _ => None,
+                }
+            })
+            .unwrap_or(page_font)
+    }
+
+    /// Resolves a margin-box length against its containing block and page viewport.
+    pub fn margin_box_length(
+        &self,
+        margin_box: PageMarginBox,
+        name: &str,
+        geometry: PageBoxGeometry,
+        percentage_basis: f32,
+    ) -> Option<f32> {
+        let value = self.margin_box_property(margin_box, name)?;
+        let font_size = self.margin_box_font_size(margin_box);
+        let context = ResolutionContext {
+            parent_font_size: font_size,
+            root_font_size: 16.0,
+            viewport_width: geometry.width,
+            viewport_height: geometry.height,
+        };
+        let length = compute_value(value, name, context)
+            .resolve_length_percentage(percentage_basis)
+            .or_else(|| matches!(value, Value::Number(zero) if *zero == 0.0).then_some(0.0))?;
+        length.is_finite().then_some(length)
+    }
+
     /// Returns generated content for a margin box, or `None` if no box is generated.
     ///
     /// `normal` and `none` suppress box generation. An empty string still generates
