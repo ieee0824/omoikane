@@ -15485,6 +15485,16 @@
       if (href !== undefined) scheduleWindowNavigation("assign", href);
     },
   });
+  let __locationHash = __loc.hash;
+  Object.defineProperty(__loc, "hash", {
+    enumerable: true,
+    configurable: false,
+    get() { return __locationHash; },
+    set(value) {
+      const href = locationURLWithComponent(__loc.href, "hash", value);
+      if (href !== __loc.href) __loc.assign(href);
+    },
+  });
   const childLocation = {
     get href() { return childNavigation("location"); },
     set href(value) { this.assign(value); },
@@ -15522,7 +15532,7 @@
     __loc.hostname = match[2].replace(/:\d+$/, "");
     __loc.pathname = match[3] || "/";
     __loc.search = match[4] || "";
-    __loc.hash = match[5] || "";
+    __locationHash = match[5] || "";
     __loc.origin = match[1] + "://" + match[2];
     return href;
   }
