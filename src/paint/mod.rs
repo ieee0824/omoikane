@@ -1186,15 +1186,38 @@ pub fn render_document_pages_with_url(
             page.sheet.width.ceil().max(1.0) as u32,
             page.sheet.height.ceil().max(1.0) as u32,
         );
+        let page_paint_style = page_context_paint_style(page, None);
         let page_background = page
             .style
             .get("background-color")
             .and_then(|value| color::parse_color(&crate::css::serialize_specified_value(value)))
             .unwrap_or(Color::rgb(255, 255, 255));
         canvas.fill_rect(page.sheet, page_background);
+        let margin_boxes = ordered_page_margin_boxes(page);
+        crate::layout::with_image_base_url(effective_base.clone(), || {
+            paint_background_image(&mut canvas, &page_paint_style, page.sheet, None, page.sheet);
+        });
+        text::with_render_glyph_cache(|| {
+            crate::layout::with_image_base_url(effective_base.clone(), || {
+                for &(z_index, margin_box, rect) in &margin_boxes {
+                    if z_index >= 0 {
+                        break;
+                    }
+                    paint_page_margin_box(&mut canvas, page, margin_box, rect, &fonts, web_fonts);
+                }
+            });
+        });
         if let Some(background) = viewport_background_color(&layout, &mut resolver) {
             canvas.fill_rect(page.content, background);
         }
+        let page_border = border::EdgeSizesForPaint::from_style(&page_paint_style);
+        border::paint_rect_borders(
+            &mut canvas,
+            page.content,
+            &page_paint_style,
+            page_border,
+            None,
+        );
         let source_clip = Rect {
             height: page.source.height.min(page.content.height),
             ..page.content
@@ -1210,7 +1233,18 @@ pub fn render_document_pages_with_url(
                 web_fonts,
             );
             crate::layout::with_image_base_url(effective_base.clone(), || {
-                paint_page_margin_text(&mut canvas, page, &fonts, web_fonts);
+                for &(z_index, margin_box, rect) in &margin_boxes {
+                    if z_index >= 0 {
+                        paint_page_margin_box(
+                            &mut canvas,
+                            page,
+                            margin_box,
+                            rect,
+                            &fonts,
+                            web_fonts,
+                        );
+                    }
+                }
             });
         });
         canvases.push(canvas);
@@ -1218,9 +1252,153 @@ pub fn render_document_pages_with_url(
     Ok(canvases)
 }
 
-fn paint_page_margin_text(
+const PAGE_MARGIN_PAINT_ORDER: [PageMarginBox; 16] = [
+    PageMarginBox::TopLeftCorner,
+    PageMarginBox::TopLeft,
+    PageMarginBox::TopCenter,
+    PageMarginBox::TopRight,
+    PageMarginBox::TopRightCorner,
+    PageMarginBox::RightTop,
+    PageMarginBox::RightMiddle,
+    PageMarginBox::RightBottom,
+    PageMarginBox::BottomRightCorner,
+    PageMarginBox::BottomRight,
+    PageMarginBox::BottomCenter,
+    PageMarginBox::BottomLeft,
+    PageMarginBox::BottomLeftCorner,
+    PageMarginBox::LeftBottom,
+    PageMarginBox::LeftMiddle,
+    PageMarginBox::LeftTop,
+];
+
+fn ordered_page_margin_boxes(page: &PagedPage) -> Vec<(i32, PageMarginBox, Rect)> {
+    let mut boxes = PAGE_MARGIN_PAINT_ORDER
+        .into_iter()
+        .filter_map(|margin_box| {
+            let rect = page.margin_box_rect(margin_box)?;
+            let z_index = match page.style.margin_box_property(margin_box, "z-index") {
+                Some(Value::Number(number))
+                    if number.is_finite()
+                        && number.fract() == 0.0
+                        && *number >= i32::MIN as f32
+                        && *number <= i32::MAX as f32 =>
+                {
+                    *number as i32
+                }
+                _ => 0,
+            };
+            Some((z_index, margin_box, rect))
+        })
+        .collect::<Vec<_>>();
+    boxes.sort_by_key(|&(z_index, _, _)| z_index);
+    boxes
+}
+
+fn page_context_paint_style(page: &PagedPage, margin_box: Option<PageMarginBox>) -> ComputedStyle {
+    let mut style = ComputedStyle::default();
+    if let Some(value) = page.style.get("color") {
+        style.set_paint_value("color", crate::css::serialize_specified_value(value));
+    }
+    let declarations = margin_box
+        .and_then(|margin_box| page.style.margin_box_properties(margin_box))
+        .unwrap_or_else(|| page.style.properties());
+    for (name, value) in declarations {
+        style.set_paint_value(name, crate::css::serialize_specified_value(value));
+    }
+    if style.get("border-color").is_none() {
+        style.set_paint_value("border-color", "currentColor".to_string());
+    }
+    for name in [
+        "border-width",
+        "border-top-width",
+        "border-right-width",
+        "border-bottom-width",
+        "border-left-width",
+        "padding",
+        "padding-top",
+        "padding-right",
+        "padding-bottom",
+        "padding-left",
+    ] {
+        let basis = margin_box
+            .and_then(|margin_box| page.margin_box_rect(margin_box))
+            .map_or(page.geometry.width, |rect| rect.width);
+        let length = margin_box
+            .and_then(|margin_box| {
+                page.style
+                    .margin_box_length(margin_box, name, page.geometry, basis)
+            })
+            .or_else(|| {
+                margin_box
+                    .is_none()
+                    .then(|| page.style.page_length(name, page.geometry, basis))
+                    .flatten()
+            });
+        if let Some(length) = length {
+            style.set_resolved_px(name, length.max(0.0));
+        }
+    }
+    if let Some(margin_box) = margin_box {
+        for side in ["top", "right", "bottom", "left"] {
+            let basis = page
+                .margin_box_rect(margin_box)
+                .map_or(page.geometry.width, |rect| rect.width);
+            let width = page
+                .style
+                .margin_box_border_width(margin_box, side, page.geometry, basis);
+            style.set_resolved_px(&format!("border-{side}-width"), width);
+        }
+    } else {
+        for side in ["top", "right", "bottom", "left"] {
+            if border::has_solid_border_side(&style, side)
+                && style.get(&format!("border-{side}-width")).is_none()
+                && style.get("border-width").is_none()
+            {
+                style.set_resolved_px(&format!("border-{side}-width"), 3.0);
+            }
+        }
+    }
+    style
+}
+
+fn paint_page_margin_box(
     canvas: &mut Canvas,
     page: &PagedPage,
+    margin_box: PageMarginBox,
+    rect: Rect,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+) {
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
+    let style = page_context_paint_style(page, Some(margin_box));
+    paint_generated_box(canvas, rect, &style, Some(page.sheet), page.sheet);
+    let border = border::EdgeSizesForPaint::from_style(&style);
+    let padding = |side: &str| {
+        length_property(&style, &format!("padding-{side}"))
+            .or_else(|| length_property(&style, "padding"))
+            .unwrap_or(0.0)
+            .max(0.0)
+    };
+    let padding_top = padding("top");
+    let padding_right = padding("right");
+    let padding_bottom = padding("bottom");
+    let padding_left = padding("left");
+    let content_rect = Rect {
+        x: rect.x + border.left + padding_left,
+        y: rect.y + border.top + padding_top,
+        width: (rect.width - border.total_horizontal() - padding_left - padding_right).max(0.0),
+        height: (rect.height - border.total_vertical() - padding_top - padding_bottom).max(0.0),
+    };
+    paint_page_margin_content(canvas, page, margin_box, content_rect, fonts, web_fonts);
+}
+
+fn paint_page_margin_content(
+    canvas: &mut Canvas,
+    page: &PagedPage,
+    margin_box: PageMarginBox,
+    rect: Rect,
     fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
 ) {
@@ -1229,169 +1407,157 @@ fn paint_page_margin_text(
         Image(Image, f32, f32),
     }
 
-    for (&margin_box, &rect) in &page.margin_box_rects {
-        let Some(fragments) = page.margin_box_fragments(margin_box) else {
-            continue;
-        };
-        if rect.width <= 0.0 || rect.height <= 0.0 {
-            continue;
-        }
-        let font_size = page.style.margin_box_font_size(margin_box);
-        if font_size <= 0.0 {
-            continue;
-        }
-        let property = |name| {
-            page.style
+    let Some(fragments) = page.margin_box_fragments(margin_box) else {
+        return;
+    };
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
+    let font_size = page.style.margin_box_font_size(margin_box);
+    if font_size <= 0.0 {
+        return;
+    }
+    let property = |name| {
+        page.style
                 .margin_box_property(margin_box, name)
                 .filter(|value| !matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("inherit") || keyword.eq_ignore_ascii_case("unset")))
                 .or_else(|| page.style.get(name))
                 .map(crate::css::serialize_specified_value)
-        };
-        let family = property("font-family").map(|family| crate::font::FontFamilyKey::new(&family));
-        let weight = property("font-weight")
-            .map(|value| crate::font::FontWeight::parse(&value))
-            .unwrap_or_default();
-        let font_style = property("font-style").unwrap_or_else(|| "normal".to_string());
-        let stretch = property("font-stretch")
-            .map(|value| crate::font::FontStretch::parse(&value))
-            .unwrap_or_default();
-        let variant = crate::font::FontVariantKey::from_css(weight, &font_style, stretch);
-        let selected = crate::font::select_text_font(
-            "page margin paint",
-            family,
-            None,
-            variant,
-            web_fonts,
-            fonts,
-        );
-        let mut candidates = Vec::with_capacity(fonts.len() + usize::from(selected.is_some()));
-        if let Some(selected) = selected.as_ref() {
-            candidates.push(selected.as_ref());
+    };
+    let family = property("font-family").map(|family| crate::font::FontFamilyKey::new(&family));
+    let weight = property("font-weight")
+        .map(|value| crate::font::FontWeight::parse(&value))
+        .unwrap_or_default();
+    let font_style = property("font-style").unwrap_or_else(|| "normal".to_string());
+    let stretch = property("font-stretch")
+        .map(|value| crate::font::FontStretch::parse(&value))
+        .unwrap_or_default();
+    let variant = crate::font::FontVariantKey::from_css(weight, &font_style, stretch);
+    let selected =
+        crate::font::select_text_font("page margin paint", family, None, variant, web_fonts, fonts);
+    let mut candidates = Vec::with_capacity(fonts.len() + usize::from(selected.is_some()));
+    if let Some(selected) = selected.as_ref() {
+        candidates.push(selected.as_ref());
+    }
+    candidates.extend(fonts.iter().map(Arc::as_ref));
+    let (ascent, line_height) =
+        candidates
+            .first()
+            .map_or((font_size * 0.8, font_size * 1.2), |font| {
+                let metrics = font.layout_metrics(font_size);
+                (
+                    metrics.ascent,
+                    metrics.ascent + metrics.descent + metrics.line_gap,
+                )
+            });
+    let mut rendered = Vec::with_capacity(fragments.len());
+    let mut row_width = 0.0;
+    let mut row_height = 0.0f32;
+    for fragment in fragments {
+        match fragment {
+            PageMarginFragment::Text(content) if !content.is_empty() => {
+                let width =
+                    text::measure_form_control_text_width(&content, font_size, &candidates, 0.0);
+                row_width += width;
+                row_height = row_height.max(line_height);
+                rendered.push(RenderedMarginFragment::Text(content, width));
+            }
+            PageMarginFragment::Image(source) => {
+                let Some(image) = crate::layout::decode_or_fetch_image_asset(&source) else {
+                    continue;
+                };
+                if image.width == 0 || image.height == 0 {
+                    continue;
+                }
+                let scale = (rect.width / image.width as f32)
+                    .min(rect.height / image.height as f32)
+                    .min(1.0);
+                let width = image.width as f32 * scale;
+                let height = image.height as f32 * scale;
+                row_width += width;
+                row_height = row_height.max(height);
+                rendered.push(RenderedMarginFragment::Image(image, width, height));
+            }
+            PageMarginFragment::Text(_) => {}
         }
-        candidates.extend(fonts.iter().map(Arc::as_ref));
-        let (ascent, line_height) =
-            candidates
-                .first()
-                .map_or((font_size * 0.8, font_size * 1.2), |font| {
-                    let metrics = font.layout_metrics(font_size);
-                    (
-                        metrics.ascent,
-                        metrics.ascent + metrics.descent + metrics.line_gap,
-                    )
-                });
-        let mut rendered = Vec::with_capacity(fragments.len());
-        let mut row_width = 0.0;
-        let mut row_height = 0.0f32;
-        for fragment in fragments {
-            match fragment {
-                PageMarginFragment::Text(content) if !content.is_empty() => {
-                    let width = text::measure_form_control_text_width(
+    }
+    if rendered.is_empty() {
+        return;
+    }
+    let horizontal = page
+        .style
+        .margin_box_property(margin_box, "text-align")
+        .and_then(|value| match value {
+            Value::Keyword(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .unwrap_or_else(|| default_page_margin_text_align(margin_box));
+    let vertical = page
+        .style
+        .margin_box_property(margin_box, "vertical-align")
+        .and_then(|value| match value {
+            Value::Keyword(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .unwrap_or_else(|| default_page_margin_vertical_align(margin_box));
+    let x = match horizontal {
+        "center" => rect.x + (rect.width - row_width) / 2.0,
+        "right" | "end" => rect.x + rect.width - row_width,
+        _ => rect.x,
+    };
+    let y = match vertical {
+        "top" => rect.y,
+        "bottom" => rect.y + rect.height - row_height,
+        _ => rect.y + (rect.height - row_height) / 2.0,
+    };
+    let color = property("color")
+        .as_deref()
+        .and_then(color::parse_color)
+        .unwrap_or(Color::rgb(0, 0, 0));
+    let mut fragment_x = x;
+    for fragment in rendered {
+        match fragment {
+            RenderedMarginFragment::Text(content, width) => {
+                let text_rect = Rect {
+                    x: fragment_x,
+                    y: y + (row_height - line_height) / 2.0,
+                    width,
+                    height: line_height,
+                };
+                if candidates.is_empty() {
+                    text::paint_text_placeholder(
+                        canvas,
+                        text_rect,
                         &content,
                         font_size,
-                        &candidates,
+                        color,
+                        Some(rect),
                         0.0,
                     );
-                    row_width += width;
-                    row_height = row_height.max(line_height);
-                    rendered.push(RenderedMarginFragment::Text(content, width));
+                } else {
+                    text::paint_text_with_font_refs(
+                        canvas,
+                        text_rect,
+                        &content,
+                        font_size,
+                        ascent,
+                        &candidates,
+                        color,
+                        Some(rect),
+                        0.0,
+                    );
                 }
-                PageMarginFragment::Image(source) => {
-                    let Some(image) = crate::layout::decode_or_fetch_image_asset(&source) else {
-                        continue;
-                    };
-                    if image.width == 0 || image.height == 0 {
-                        continue;
-                    }
-                    let scale = (rect.width / image.width as f32)
-                        .min(rect.height / image.height as f32)
-                        .min(1.0);
-                    let width = image.width as f32 * scale;
-                    let height = image.height as f32 * scale;
-                    row_width += width;
-                    row_height = row_height.max(height);
-                    rendered.push(RenderedMarginFragment::Image(image, width, height));
-                }
-                PageMarginFragment::Text(_) => {}
+                fragment_x += width;
             }
-        }
-        if rendered.is_empty() {
-            continue;
-        }
-        let horizontal = page
-            .style
-            .margin_box_property(margin_box, "text-align")
-            .and_then(|value| match value {
-                Value::Keyword(value) => Some(value.as_str()),
-                _ => None,
-            })
-            .unwrap_or_else(|| default_page_margin_text_align(margin_box));
-        let vertical = page
-            .style
-            .margin_box_property(margin_box, "vertical-align")
-            .and_then(|value| match value {
-                Value::Keyword(value) => Some(value.as_str()),
-                _ => None,
-            })
-            .unwrap_or_else(|| default_page_margin_vertical_align(margin_box));
-        let x = match horizontal {
-            "center" => rect.x + (rect.width - row_width) / 2.0,
-            "right" | "end" => rect.x + rect.width - row_width,
-            _ => rect.x,
-        };
-        let y = match vertical {
-            "top" => rect.y,
-            "bottom" => rect.y + rect.height - row_height,
-            _ => rect.y + (rect.height - row_height) / 2.0,
-        };
-        let color = property("color")
-            .as_deref()
-            .and_then(color::parse_color)
-            .unwrap_or(Color::rgb(0, 0, 0));
-        let mut fragment_x = x;
-        for fragment in rendered {
-            match fragment {
-                RenderedMarginFragment::Text(content, width) => {
-                    let text_rect = Rect {
-                        x: fragment_x,
-                        y: y + (row_height - line_height) / 2.0,
-                        width,
-                        height: line_height,
-                    };
-                    if candidates.is_empty() {
-                        text::paint_text_placeholder(
-                            canvas,
-                            text_rect,
-                            &content,
-                            font_size,
-                            color,
-                            Some(rect),
-                            0.0,
-                        );
-                    } else {
-                        text::paint_text_with_font_refs(
-                            canvas,
-                            text_rect,
-                            &content,
-                            font_size,
-                            ascent,
-                            &candidates,
-                            color,
-                            Some(rect),
-                            0.0,
-                        );
-                    }
-                    fragment_x += width;
-                }
-                RenderedMarginFragment::Image(image, width, height) => {
-                    let destination = Rect {
-                        x: fragment_x,
-                        y: y + (row_height - height) / 2.0,
-                        width,
-                        height,
-                    };
-                    canvas.draw_image_scaled_clipped(&image, destination, Some(rect));
-                    fragment_x += width;
-                }
+            RenderedMarginFragment::Image(image, width, height) => {
+                let destination = Rect {
+                    x: fragment_x,
+                    y: y + (row_height - height) / 2.0,
+                    width,
+                    height,
+                };
+                canvas.draw_image_scaled_clipped(&image, destination, Some(rect));
+                fragment_x += width;
             }
         }
     }
