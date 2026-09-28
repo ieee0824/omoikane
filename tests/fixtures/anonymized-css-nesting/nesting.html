@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 320px; height: 200px; background: white; }
+  .tile {
+    position: absolute;
+    left: 24px;
+    top: 24px;
+    width: 128px;
+    height: 128px;
+    background: #c02020;
+    & { background: #c02020; }
+    background: #204080;
+    .fill {
+      position: absolute;
+      left: 24px;
+      top: 24px;
+      width: 80px;
+      height: 80px;
+      background: #c02020;
+    }
+    @media screen and (min-width: 1px) {
+      > .fill { background: #20a050; }
+    }
+  }
+</style>
+<div class="tile" id="tile" data-probe><div class="fill" id="fill" data-probe></div></div>

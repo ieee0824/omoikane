@@ -6,6 +6,116 @@ use crate::dom::{NodeHandle, ShadowRootMode};
 
 use super::*;
 
+#[test]
+fn nested_rules_match_descendants_and_preserve_cascade_order() {
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    parent.set_attribute("class", "parent");
+    let child = NodeHandle::element("span");
+    child.set_attribute("class", "child");
+    parent.append_child(child.clone());
+    document.append_child(parent.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(320.0, 200.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".parent { color: blue; .child { width: 12px; } & { color: red; } color: green; @media (min-width: 1px) { > .child { height: 14px; } } }",
+        )
+        .unwrap(),
+    );
+    let parent_style = resolver.computed_style(&parent);
+    assert_eq!(
+        parent_style.get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+    let child_style = resolver.computed_style(&child);
+    assert_eq!(child_style.get("width"), Some(&ComputedValue::Px(12.0)));
+    assert_eq!(child_style.get("height"), Some(&ComputedValue::Px(14.0)));
+}
+
+#[test]
+fn nesting_selector_uses_maximum_parent_specificity() {
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    parent.set_attribute("class", "parent");
+    let child = NodeHandle::element("span");
+    child.set_attribute("class", "child");
+    parent.append_child(child.clone());
+    document.append_child(parent);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#unused, .parent { & .child { color: blue; } } .parent .child { color: red; }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        resolver.computed_style(&child).get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+}
+
+#[test]
+fn nested_selector_list_scopes_each_branch_to_the_parent() {
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    parent.set_attribute("class", "parent");
+    let child = NodeHandle::element("span");
+    child.set_attribute("class", "second");
+    parent.append_child(child.clone());
+    let outside = NodeHandle::element("span");
+    outside.set_attribute("class", "second");
+    document.append_child(parent);
+    document.append_child(outside.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".parent { .first, .second { width: 11px; } > .second { height: 12px; } }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        resolver.computed_style(&child).get("width"),
+        Some(&ComputedValue::Px(11.0))
+    );
+    assert_eq!(
+        resolver.computed_style(&child).get("height"),
+        Some(&ComputedValue::Px(12.0))
+    );
+    assert_ne!(
+        resolver.computed_style(&outside).get("width"),
+        Some(&ComputedValue::Px(11.0))
+    );
+}
+
+#[test]
+fn nested_group_declarations_apply_to_parent_pseudo_element() {
+    let document = NodeHandle::document();
+    let element = NodeHandle::element("div");
+    element.set_attribute("class", "pseudo");
+    document.append_child(element.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(320.0, 200.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(".pseudo::after { --x: FAIL; @media (width > 0px) { --x: PASS; } }")
+            .unwrap(),
+    );
+    let style = resolver
+        .computed_pseudo_style(&element, PseudoElement::After)
+        .expect("pseudo-element style");
+    assert_eq!(
+        style.get("--x"),
+        Some(&ComputedValue::Keyword("PASS".to_string()))
+    );
+}
+
 fn sample_tree() -> (NodeHandle, NodeHandle, NodeHandle, NodeHandle) {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

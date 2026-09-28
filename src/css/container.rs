@@ -205,6 +205,13 @@ fn split_leading_operator(input: &str) -> Option<(&str, &str)> {
 }
 
 fn parse_feature(input: &str) -> Option<Feature> {
+    if let Some(axis) = parse_axis(&input.trim().to_ascii_lowercase()) {
+        return Some(Feature {
+            axis,
+            comparison: Comparison::Greater,
+            value_px: 0.0,
+        });
+    }
     if let Some((feature, value)) = input.split_once(':') {
         let feature = feature.trim().to_ascii_lowercase();
         let (comparison, axis) =
@@ -407,6 +414,12 @@ mod tests {
 
     #[test]
     fn supports_boolean_conditions_and_rejects_invalid_preludes() {
+        let width = parse_container_query("(width)").unwrap();
+        assert!(width.matches(1.0, 0.0));
+        assert!(!width.matches(0.0, 1.0));
+        let height = parse_container_query("(block-size)").unwrap();
+        assert!(height.matches(0.0, 1.0));
+        assert!(!height.matches(1.0, 0.0));
         let query = parse_container_query("not ((width < 100px) or (block-size > 50px))").unwrap();
         assert!(query.matches(100.0, 50.0));
         assert!(!query.matches(99.0, 50.0));

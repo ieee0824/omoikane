@@ -328,6 +328,11 @@ pub struct FontFaceRule {
 pub struct StyleRule {
     pub selectors: Vec<Selector>,
     pub declarations: Vec<Declaration>,
+    /// Nested style/group rules and declarations following the first nested rule.
+    pub rules: Vec<Rule>,
+    /// True when this is the implicit rule for interleaved declarations.
+    /// Its selectors retain the parent's exact specificity, including pseudo-elements.
+    pub nested_declarations: bool,
 }
 
 /// An at-rule.
@@ -570,6 +575,35 @@ mod tests {
             rule.selectors[1].parts[0].simples[1],
             SimpleSelector::PseudoClass("hover".to_string())
         );
+    }
+
+    #[test]
+    fn parses_nested_rules_and_interleaved_declarations_in_source_order() {
+        let sheet = parse_stylesheet(
+            ".parent { color: blue; .child { width: 12px; } color: green; @media (min-width: 1px) { height: 13px; > .child { width: 14px; } } }",
+        )
+        .unwrap();
+        let Rule::Style(parent) = &sheet.rules[0] else {
+            panic!("expected parent style rule");
+        };
+        assert_eq!(parent.declarations.len(), 1);
+        assert_eq!(parent.rules.len(), 3);
+        let Rule::Style(child) = &parent.rules[0] else {
+            panic!("expected nested child style rule");
+        };
+        assert!(!child.nested_declarations);
+        let Rule::Style(late) = &parent.rules[1] else {
+            panic!("expected nested declarations rule");
+        };
+        assert!(late.nested_declarations);
+        assert_eq!(late.declarations.len(), 1);
+        let Rule::At(media) = &parent.rules[2] else {
+            panic!("expected nested @media rule");
+        };
+        let media_rules = media.block.as_ref().unwrap();
+        assert_eq!(media_rules.len(), 2);
+        assert!(matches!(&media_rules[0], Rule::Style(rule) if rule.nested_declarations));
+        assert!(matches!(&media_rules[1], Rule::Style(rule) if !rule.nested_declarations));
     }
 
     #[test]
@@ -1525,6 +1559,17 @@ mod tests {
             queries[0].conditions,
             vec![MediaCondition::MinWidth(1024.0)]
         );
+    }
+
+    #[test]
+    fn boolean_viewport_size_features_require_nonzero_dimensions() {
+        let width = &parse_media_query_list("(width)").unwrap()[0];
+        assert!(evaluate_media_query(width, 1.0, 0.0, false));
+        assert!(!evaluate_media_query(width, 0.0, 1.0, false));
+
+        let height = &parse_media_query_list("(height)").unwrap()[0];
+        assert!(evaluate_media_query(height, 0.0, 1.0, false));
+        assert!(!evaluate_media_query(height, 1.0, 0.0, false));
     }
 
     #[test]

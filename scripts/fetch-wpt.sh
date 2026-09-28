@@ -64,6 +64,7 @@ git_wpt sparse-checkout add \
   "/css/selectors/focus-within-removal.html"
 git_wpt sparse-checkout add "/css/css-conditional/js/CSS-supports-L3.html"
 git_wpt sparse-checkout add "/css/css-conditional/js/supports-conditionText.html"
+git_wpt sparse-checkout add "/css/css-nesting/"
 git_wpt sparse-checkout add "/css/css-cascade/scope-cssom.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-media.html"
 git_wpt sparse-checkout add "/css/css-cascade/scope-supports.html"

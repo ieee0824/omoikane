@@ -33409,7 +33409,7 @@ b</textarea></form>"#,
                 &mut runtime,
                 "getComputedStyle(document.getElementById('outside')).zIndex"
             ),
-            ""
+            "auto"
         );
         assert_eq!(
             eval_str(
@@ -48761,7 +48761,7 @@ b</textarea></form>"#,
 
     /// Neither document's rules leak into the other: a rule that exists only in
     /// the main document does not apply in the sub-document, and vice versa.
-    /// Elements with no matching rule report the default z-index (empty string).
+    /// Elements with no matching rule report the computed default z-index (`auto`).
     #[test]
     fn get_computed_style_does_not_leak_between_main_and_iframe() {
         let mut runtime = runtime_from_html(
@@ -48794,7 +48794,7 @@ b</textarea></form>"#,
                 &mut runtime,
                 "getComputedStyle(document.getElementById('subonly'), '').zIndex"
             ),
-            "",
+            "auto",
             "the sub-document's rule must NOT leak into the main document"
         );
         // Sub-document: its own rule applies; the main document's rule does not.
@@ -48805,7 +48805,7 @@ b</textarea></form>"#,
         );
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(subMain, '').zIndex"),
-            "",
+            "auto",
             "the main document's rule must NOT leak into the sub-document"
         );
     }
@@ -48886,7 +48886,7 @@ b</textarea></form>"#,
                 &mut runtime,
                 "getComputedStyle(document.getElementById('t'), '').zIndex"
             ),
-            "",
+            "auto",
             "the main document has no #t rule, so its #t element starts at the default z-index"
         );
 
@@ -48915,7 +48915,7 @@ b</textarea></form>"#,
                 &mut runtime,
                 "getComputedStyle(document.getElementById('t'), '').zIndex"
             ),
-            "",
+            "auto",
             "the sub-document #t rule must not apply to the main document's #t element"
         );
     }
@@ -48937,7 +48937,7 @@ b</textarea></form>"#,
         // First query, before any rule exists: default z-index.
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
-            "",
+            "auto",
             "with no rule the target must report the default z-index"
         );
 
@@ -48982,7 +48982,7 @@ b</textarea></form>"#,
 
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
-            "",
+            "auto",
             "removing the <style> must drop its rule from the sub-document resolver"
         );
     }
@@ -49029,7 +49029,7 @@ b</textarea></form>"#,
                 &mut runtime,
                 "getComputedStyle(d.getElementById('old'), '').zIndex"
             ),
-            "",
+            "auto",
             "the pre-open() rule must not survive document.open()"
         );
     }
@@ -49060,7 +49060,7 @@ b</textarea></form>"#,
                 &mut runtime,
                 "getComputedStyle(document.getElementById('w'), '').zIndex"
             ),
-            "",
+            "auto",
             "the main document has no #w rule, so its #w element starts at the default z-index"
         );
         runtime
@@ -49096,7 +49096,7 @@ b</textarea></form>"#,
                 &mut runtime,
                 "getComputedStyle(document.getElementById('w'), '').zIndex"
             ),
-            "",
+            "auto",
             "the written sub-document #w rule must not apply to the main document's #w element"
         );
     }
@@ -49128,7 +49128,7 @@ b</textarea></form>"#,
         );
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(subT, '').zIndex"),
-            ""
+            "auto"
         );
 
         // Move the <style> element from the main document into the sub-document.
@@ -49141,7 +49141,7 @@ b</textarea></form>"#,
                 &mut runtime,
                 "getComputedStyle(document.getElementById('t'), '').zIndex"
             ),
-            "",
+            "auto",
             "the rule must disappear from the source (main) document"
         );
         assert_eq!(
@@ -49345,7 +49345,7 @@ b</textarea></form>"#,
         // Prime the sub-document resolver before any rule exists.
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
-            "",
+            "auto",
             "with no rule the target must report the default z-index"
         );
 
@@ -49381,7 +49381,7 @@ b</textarea></form>"#,
         // Prime: the target has no `class`, so `.hot` does not match yet.
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(t, '').zIndex"),
-            "",
+            "auto",
             "before the class is set the .hot rule must not match"
         );
 

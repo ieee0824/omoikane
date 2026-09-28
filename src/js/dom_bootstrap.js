@@ -7176,8 +7176,195 @@
     return -1;
   }
 
-  class CSSStyleRule {
+  // CSS rule parsing closes open blocks at end-of-input. Preserve that
+  // recovery when insertRule receives an otherwise valid truncated rule.
+  function closeOpenCssBlocks(source) {
+    let depth = 0, quote = "", comment = false, escaped = false;
+    for (let index = 0; index < source.length; index++) {
+      const ch = source[index], next = source[index + 1];
+      if (comment) {
+        if (ch === "*" && next === "/") { comment = false; index++; }
+        continue;
+      }
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        if (!depth) return source;
+        depth--;
+      }
+    }
+    return source + "}".repeat(depth);
+  }
+
+  // Split a style block into declarations and child rules without moving
+  // declarations across a nested rule. The native parser owns validation and
+  // cascade; this scanner keeps the original order visible through CSSOM.
+  function splitNestedStyleBody(source, initialDeclarations = true) {
+    const pieces = [];
+    const text = String(source || "");
+    let start = 0, quote = "", comment = false, escaped = false;
+    let parens = 0, brackets = 0, braces = 0;
+    for (let index = 0; index < text.length; index++) {
+      const ch = text[index], next = text[index + 1];
+      if (comment) {
+        if (ch === "*" && next === "/") { comment = false; index++; }
+        continue;
+      }
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "(") parens++;
+      else if (ch === ")") parens = Math.max(0, parens - 1);
+      else if (ch === "[") brackets++;
+      else if (ch === "]") brackets = Math.max(0, brackets - 1);
+      else if (!parens && !brackets && ch === "{") braces++;
+      else if (!parens && !brackets && ch === "}" && braces > 0) {
+        braces--;
+        if (braces === 0) {
+          const piece = text.slice(start, index + 1).trim();
+          if (piece) pieces.push({ rule: true, text: piece });
+          start = index + 1;
+        }
+      } else if (!parens && !brackets && !braces && ch === ";") {
+        const piece = text.slice(start, index + 1).trim();
+        if (piece) pieces.push({ rule: false, text: piece });
+        start = index + 1;
+      }
+    }
+    const tail = text.slice(start).trim();
+    if (tail) pieces.push({ rule: false, text: tail });
+    const rules = [], leading = [];
+    let declarations = [];
+    let sawRule = !initialDeclarations;
+    const flush = () => {
+      if (!declarations.length) return;
+      const block = declarations.join(" ");
+      if (JSON.parse(__omoikane_css_declarations(block)).length === 0) {
+        declarations = [];
+        return;
+      }
+      if (sawRule) rules.push("@-omoikane-nested-declarations { " + block + " }");
+      else leading.push(block);
+      declarations = [];
+    };
+    for (const piece of pieces) {
+      if (piece.rule) {
+        flush();
+        const open = cssRuleBlockStart(piece.text);
+        const selector = open < 0 ? "" : piece.text.slice(0, open).trim();
+        if (/^@/.test(selector) || nestedSelectorIsValid(selector, { inScope: false }))
+          rules.push(piece.text);
+        sawRule = true;
+      } else {
+        declarations.push(piece.text);
+      }
+    }
+    flush();
+    return { leading: leading.join(" "), rules };
+  }
+
+  function hasNestingAmpersand(source) {
+    let quote = "", comment = false, escaped = false;
+    for (let index = 0; index < source.length; index++) {
+      const ch = source[index], next = source[index + 1];
+      if (comment) {
+        if (ch === "*" && next === "/") { comment = false; index++; }
+        continue;
+      }
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "&") return true;
+    }
+    return false;
+  }
+
+  function nestedSelectorText(selector, context) {
+    const source = String(selector).trim();
+    if (!context || context.inScope) return source;
+    const branches = [];
+    let start = 0, quote = "", comment = false, escaped = false;
+    let parens = 0, brackets = 0;
+    for (let index = 0; index < source.length; index++) {
+      const ch = source[index], next = source[index + 1];
+      if (comment) {
+        if (ch === "*" && next === "/") { comment = false; index++; }
+        continue;
+      }
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "(") parens++;
+      else if (ch === ")") parens = Math.max(0, parens - 1);
+      else if (ch === "[") brackets++;
+      else if (ch === "]") brackets = Math.max(0, brackets - 1);
+      else if (ch === "," && !parens && !brackets) {
+        branches.push(source.slice(start, index).trim());
+        start = index + 1;
+      }
+    }
+    branches.push(source.slice(start).trim());
+    return branches.map(branch =>
+      /^[>+~]/.test(branch) || !hasNestingAmpersand(branch) ? "& " + branch : branch
+    ).join(", ");
+  }
+
+  function nestedSelectorIsValid(selector, context) {
+    let source = String(selector).trim();
+    if (!source) return false;
+    if (/&(?:[a-zA-Z_*]|\\)/.test(source)) return false;
+    if (context) {
+      source = nestedSelectorText(source, context);
+      source = source.replace(/&/g, ":scope");
+    }
+    try { return __omoikane_css_rule_count(source + " {}") === 1; }
+    catch (_) { return false; }
+  }
+
+  class CSSGroupingRule {
+    insertRule(rule, index) {
+      if (!this.__innerSheet) {
+        throw new DOMException("The rule has no child rule list.", "InvalidStateError");
+      }
+      return this.__innerSheet.insertRule(rule, index);
+    }
+    deleteRule(index) {
+      if (!this.__innerSheet) {
+        throw new DOMException("The rule has no child rule list.", "InvalidStateError");
+      }
+      return this.__innerSheet.deleteRule(index);
+    }
+    __syncFromInner() {
+      if (!this.__sheet || this.__index < 0 || !this.__innerSheet ||
+          typeof this.__serializeCssText !== "function") return;
+      this.__text = this.__serializeCssText();
+      this.__sheet.__replaceRule(this.__index, this.__text);
+    }
+    get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
+  }
+
+  function serializeChildRules(rules) {
+    const lines = [];
+    for (const rule of rules) {
+      const text = rule.cssText;
+      if (text) lines.push("  " + text);
+    }
+    return lines.join("\n");
+  }
+
+  class CSSStyleRule extends CSSGroupingRule {
     constructor(text, sheet = null, index = -1) {
+      super();
       this.__text = text;
       this.__sheet = sheet;
       this.__index = index;
@@ -7185,33 +7372,79 @@
       const close = this.__text.lastIndexOf("}");
       this.__hasBlock = open >= 0 && close > open;
       this.__selectorText = this.__hasBlock ? this.__text.slice(0, open).trim() : "";
+      if (sheet && sheet.__nestingContext)
+        this.__selectorText = nestedSelectorText(this.__selectorText, sheet.__nestingContext);
+      const body = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
+      const contents = splitNestedStyleBody(body);
       this.__style = declarationView(
-        this.__hasBlock ? this.__text.slice(open + 1, close) : "",
+        contents.leading,
         declarations => {
-          this.__text = this.selectorText + " { " + declarations + " }";
+          void declarations;
+          this.__text = this.__serializeCssText();
           if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
         }
       );
+      this.__innerSheet = new CSSStyleSheet(null, {
+        rules: contents.rules,
+        nestingContext: { parent: this, inScope: false },
+      });
+      this.__innerSheet.__parentRule = this;
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
+    get type() { return 1; }
     get selectorText() { return this.__selectorText; }
     set selectorText(value) {
       if (!this.__hasBlock) return;
       const selector = String(value).trim();
-      let count;
-      try { count = __omoikane_css_rule_count(selector + " {}"); }
-      catch (_error) { return; }
-      if (count !== 1) return;
-      this.__selectorText = selector;
-      this.__text = selector + " { " + this.style.cssText + " }";
+      if (!nestedSelectorIsValid(selector, this.__sheet && this.__sheet.__nestingContext)) return;
+      this.__selectorText = nestedSelectorText(selector, this.__sheet && this.__sheet.__nestingContext);
+      this.__text = this.__serializeCssText();
       if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
     }
-    get cssText() {
-      return this.__hasBlock
-        ? this.selectorText + " { " + this.style.cssText + " }"
-        : this.__text.trim();
+    __serializeCssText() {
+      if (!this.__hasBlock) return this.__text.trim();
+      const declarations = this.style.cssText;
+      const children = serializeChildRules(this.cssRules);
+      if (!children) return this.selectorText + " { " + (declarations ? declarations + " " : "") + "}";
+      return this.selectorText + " {\n" + (declarations ? "  " + declarations + "\n" : "") +
+        children + "\n}";
     }
+    get cssText() { return this.__serializeCssText(); }
     get style() { return this.__style; }
+    set style(value) { this.__style.cssText = value; }
+    get cssRules() { return this.__innerSheet.cssRules; }
+  }
+
+  class CSSNestedDeclarations {
+    constructor(text, sheet = null, index = -1) {
+      this.__sheet = sheet;
+      this.__index = index;
+      const open = cssRuleBlockStart(text), close = text.lastIndexOf("}");
+      const body = open >= 0 && close > open ? text.slice(open + 1, close) : "";
+      this.__style = declarationView(body, declarations => {
+        this.__text = "@-omoikane-nested-declarations { " + declarations + " }";
+        if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
+      });
+      this.__text = text;
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get type() { return 0; }
+    get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
+    get style() { return this.__style; }
+    set style(value) { this.__style.cssText = value; }
+    get cssText() { return this.style.cssText; }
+  }
+
+  function childGroupingSheet(body, sheet, parentRule, inScope = false) {
+    const context = sheet && sheet.__nestingContext;
+    const child = context
+      ? new CSSStyleSheet(null, {
+          rules: splitNestedStyleBody(body, false).rules,
+          nestingContext: { parent: context.parent, inScope: inScope || context.inScope },
+        })
+      : new CSSStyleSheet({ textContent: body });
+    child.__parentRule = parentRule;
+    return child;
   }
 
   class CSSFontFaceRule {
@@ -7266,30 +7499,6 @@
     get initialValue() { return this.__initialValue; }
   }
 
-  class CSSGroupingRule {
-    // Grouping-rule CSSOM mutations operate on a live child stylesheet.  Keep
-    // that child linked to its owning rule so edits are reflected in the
-    // containing stylesheet (and therefore in native style resolution) rather
-    // than being stranded in a detached CSSRuleList snapshot.
-    insertRule(rule, index) {
-      if (!this.__innerSheet) {
-        throw new DOMException("The rule has no child rule list.", "InvalidStateError");
-      }
-      return this.__innerSheet.insertRule(rule, index);
-    }
-    deleteRule(index) {
-      if (!this.__innerSheet) {
-        throw new DOMException("The rule has no child rule list.", "InvalidStateError");
-      }
-      return this.__innerSheet.deleteRule(index);
-    }
-    __syncFromInner() {
-      if (!this.__sheet || this.__index < 0 || !this.__innerSheet ||
-          typeof this.__serializeCssText !== "function") return;
-      this.__text = this.__serializeCssText();
-      this.__sheet.__replaceRule(this.__index, this.__text);
-    }
-  }
   class CSSConditionRule extends CSSGroupingRule {}
 
   function cssLayerNames(prelude) {
@@ -7312,15 +7521,14 @@
         ? cssLayerNames(this.__text.slice("@layer".length, open))[0] || ""
         : "";
       const inner = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
-      this.__innerSheet = new CSSStyleSheet({ textContent: inner });
-      this.__innerSheet.__parentRule = this;
+      this.__innerSheet = childGroupingSheet(inner, sheet, this);
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get type() { return 0; }
     get name() { return this.__name; }
     get cssRules() { return this.__innerSheet.cssRules; }
     __serializeCssText() {
-      const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
+      const nested = serializeChildRules(this.cssRules);
       const name = this.name ? " " + this.name : "";
       return "@layer" + name + " {\n" + (nested ? nested + "\n" : "") + "}";
     }
@@ -7460,6 +7668,31 @@
     }
   }
 
+  class CSSMediaRule extends CSSConditionRule {
+    constructor(text, sheet = null, index = -1) {
+      super();
+      this.__text = text;
+      this.__sheet = sheet;
+      this.__index = index;
+      const open = cssRuleBlockStart(text), close = text.lastIndexOf("}");
+      const prelude = open >= 0 ? text.slice("@media".length, open).trim() : "";
+      const body = open >= 0 && close > open ? text.slice(open + 1, close) : "";
+      this.__media = new MediaList(prelude, () => this.__syncFromInner());
+      this.__innerSheet = childGroupingSheet(body, sheet, this);
+      if (this.__sheet) this.__sheet.__registerRuleView(this);
+    }
+    get type() { return 4; }
+    get conditionText() { return this.media.mediaText; }
+    get media() { return this.__media; }
+    get cssRules() { return this.__innerSheet.cssRules; }
+    __serializeCssText() {
+      const nested = serializeChildRules(this.cssRules);
+      return "@media" + (this.conditionText ? " " + this.conditionText : "") +
+        " {\n" + (nested ? nested + "\n" : "") + "}";
+    }
+    get cssText() { return this.__serializeCssText(); }
+  }
+
   class CSSSupportsRule extends CSSConditionRule {
     constructor(text, sheet = null, index = -1) {
       super();
@@ -7473,15 +7706,14 @@
         ? this.__text.slice("@supports".length, open).trim()
         : "";
       this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
-      this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
-      this.__innerSheet.__parentRule = this;
+      this.__innerSheet = childGroupingSheet(this.__innerText, sheet, this);
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get conditionText() { return this.__conditionText; }
     get matches() { return CSS.supports(this.conditionText); }
     get cssRules() { return this.__innerSheet.cssRules; }
     __serializeCssText() {
-      const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
+      const nested = serializeChildRules(this.cssRules);
       return "@supports" + (this.conditionText ? " " + this.conditionText : "") +
         " {\n" + (nested ? nested + "\n" : "") + "}";
     }
@@ -7506,8 +7738,7 @@
       this.__containerQuery = conditionStart < 0 ? "" :
         (this.__containerName ? prelude.slice(conditionStart) : prelude);
       this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
-      this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
-      this.__innerSheet.__parentRule = this;
+      this.__innerSheet = childGroupingSheet(this.__innerText, sheet, this);
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get containerName() { return this.__containerName; }
@@ -7521,7 +7752,7 @@
     __serializeCssText() {
       const name = this.containerName ? " " + this.containerName : "";
       const query = this.containerQuery ? " " + this.containerQuery : "";
-      const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
+      const nested = serializeChildRules(this.cssRules);
       return "@container" + name + query + " {\n" + (nested ? nested + "\n" : "") + "}";
     }
     get cssText() { return this.__serializeCssText(); }
@@ -7589,8 +7820,7 @@
       this.__start = boundaries.start;
       this.__end = boundaries.end;
       this.__innerText = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
-      this.__innerSheet = new CSSStyleSheet({ textContent: this.__innerText });
-      this.__innerSheet.__parentRule = this;
+      this.__innerSheet = childGroupingSheet(this.__innerText, sheet, this, true);
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
     get start() { return this.__start; }
@@ -7600,7 +7830,7 @@
       let prelude = "@scope";
       if (this.start !== null) prelude += " (" + this.start + ")";
       if (this.end !== null) prelude += " to (" + this.end + ")";
-      const nested = Array.from(this.cssRules, rule => "  " + rule.cssText).join("\n");
+      const nested = serializeChildRules(this.cssRules);
       return prelude + " {\n" + (nested ? nested + "\n" : "") + "}";
     }
     get cssText() { return this.__serializeCssText(); }
@@ -7608,7 +7838,9 @@
 
   function createCssRule(text, sheet = null, index = -1) {
     const ruleSource = cssRuleWithoutLeadingComments(text);
-    return /^@font-face(?=\s|\/\*|\{)/i.test(ruleSource)
+    return /^@-omoikane-nested-declarations(?=\s|\{)/i.test(ruleSource)
+      ? new CSSNestedDeclarations(text, sheet, index)
+      : /^@font-face(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSFontFaceRule(text, sheet, index)
       : /^@property(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSPropertyRule(text, sheet, index)
@@ -7620,6 +7852,8 @@
         : new CSSLayerStatementRule(text, sheet, index))
       : /^@container(?=\s|\/\*|\()/i.test(ruleSource)
       ? new CSSContainerRule(text, sheet, index)
+      : /^@media(?=\s|\/\*|\()/i.test(ruleSource)
+      ? new CSSMediaRule(text, sheet, index)
       : /^@scope(?=\s|\/\*|\(|\{)/i.test(ruleSource)
       ? new CSSScopeRule(text, sheet, index)
       : /^@supports(?=\s|\/\*|\()/i.test(ruleSource)
@@ -7640,7 +7874,8 @@
     const list = new CSSRuleList(sheet);
     return new Proxy(list, {
       get(target, prop) {
-        if (typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop)) return target.item(Number(prop));
+        if (typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop))
+          return target.item(Number(prop)) ?? undefined;
         if (prop === Symbol.iterator) return target.__rules()[Symbol.iterator].bind(target.__rules());
         return target[prop];
       },
@@ -7848,14 +8083,15 @@
   }
 
   class CSSStyleSheet {
-    constructor(ownerNode) {
+    constructor(ownerNode, nested = null) {
       this.__constructed = !ownerNode || !ownerNode.nodeType;
       this.ownerNode = this.__constructed ? null : ownerNode;
       this.__ownerDocument = this.ownerNode ? nodeDocument(this.ownerNode) : globalThis.document;
+      this.__nestingContext = nested && nested.nestingContext;
       this.href = null;
       const ownerText = ownerNode && typeof ownerNode.textContent === "string"
         ? ownerNode.textContent : "";
-      this.__rules = splitCssRules(ownerText);
+      this.__rules = nested && nested.rules ? nested.rules.slice() : splitCssRules(ownerText);
       this.__ownerText = this.ownerNode ? this.ownerNode.textContent : ownerText;
       this.__ruleViews = new Set();
       this.__ruleCache = [];
@@ -7894,7 +8130,12 @@
     }
     __markDirty() {
       if (this.__constructed) this.__syncAdoptedRoots();
-      else dirtyStyleSheets.add(this);
+      else {
+        dirtyStyleSheets.add(this);
+        // Keep the owner node synchronized before script can replace its
+        // contents again; a later replacement must supersede this CSSOM edit.
+        this.__flush();
+      }
       if (this.__parentRule) this.__parentRule.__syncFromInner();
     }
     __registerRuleView(rule) { this.__ruleViews.add(rule); }
@@ -7944,14 +8185,33 @@
         throw new DOMException("The stylesheet is being replaced.", "NotAllowedError");
       }
       const text = String(rule);
+      const nested = this.__nestingContext;
+      if (nested && /^\s*@(font-face|import)(?=\s|\/\*|\{|;)/i.test(text))
+        throw new DOMException("This at-rule cannot be nested here.", "HierarchyRequestError");
+      const blockStart = cssRuleBlockStart(text);
+      let source = closeOpenCssBlocks(text);
+      if (nested && blockStart < 0 && !/^\s*@/.test(text)) {
+        const declarations = JSON.parse(__omoikane_css_declarations(text));
+        const valid = declarations.some(([name, value]) =>
+          name.startsWith("--") || CSS.supports(name, value)
+        );
+        if (!valid) throw new DOMException("Invalid nested declarations.", "SyntaxError");
+        source = "@-omoikane-nested-declarations { " + text.trim() + " }";
+      }
       if (/^\s*@import(?=\s|\/\*)/i.test(text) && cssImportParts(text) === null) {
         throw new DOMException("Invalid @import rule.", "SyntaxError");
       }
       let count;
-      try { count = __omoikane_css_rule_count(text); }
+      if (nested && blockStart >= 0 && !/^\s*@/.test(text)) {
+        const selector = text.slice(0, blockStart).trim();
+        if (!nestedSelectorIsValid(selector, nested)) {
+          throw new DOMException("Invalid nested selector.", "SyntaxError");
+        }
+        count = 1;
+      } else try { count = __omoikane_css_rule_count(source); }
       catch (error) { throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError"); }
       if (count !== 1) throw new DOMException("Exactly one rule is required.", "SyntaxError");
-      if (!scopeRulesValid(text)) {
+      if (!scopeRulesValid(source)) {
         throw new DOMException("Invalid @scope prelude.", "SyntaxError");
       }
       const rules = this.__ruleTexts();
@@ -7959,7 +8219,7 @@
       if (!Number.isInteger(position) || position < 0 || position > rules.length)
         throw new DOMException("The index is out of range.", "IndexSizeError");
       this.__shiftRuleViewsForInsert(position);
-      rules.splice(position, 0, text.trim());
+      rules.splice(position, 0, source.trim());
       this.__markDirty();
       return position;
     }
@@ -7975,6 +8235,7 @@
       this.__shiftRuleViewsForDelete(position);
       this.__markDirty();
     }
+    removeRule(index) { return this.deleteRule(index); }
     replaceSync(text) {
       if (!this.__constructed || this.__replacing) {
         throw new DOMException("Only constructed stylesheets can be replaced.", "NotAllowedError");
@@ -14773,6 +15034,8 @@
   globalThis.CSSRuleList = CSSRuleList;
   globalThis.MediaList = MediaList;
   globalThis.CSSStyleRule = CSSStyleRule;
+  globalThis.CSSNestedDeclarations = CSSNestedDeclarations;
+  globalThis.CSSMediaRule = CSSMediaRule;
   globalThis.CSSFontFaceRule = CSSFontFaceRule;
   globalThis.CSSPropertyRule = CSSPropertyRule;
   globalThis.CSSImportRule = CSSImportRule;
@@ -15792,7 +16055,8 @@
       getPropertyValue(name) {
         const map = readMap();
         const key = __styleNameToCss(name).toLowerCase();
-        return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : "";
+        return Object.prototype.hasOwnProperty.call(map, key) ? map[key] :
+          (key === "z-index" ? "auto" : "");
       },
       getPropertyPriority() { return ""; },
       get length() { return Object.keys(readMap()).length; },
@@ -15810,7 +16074,8 @@
         const indexed = indexedName(map, prop);
         if (indexed !== null) return indexed;
         const key = __styleNameToCss(prop);
-        return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : "";
+        return Object.prototype.hasOwnProperty.call(map, key) ? map[key] :
+          (key === "z-index" ? "auto" : "");
       },
       has(target, prop) {
         // Symbols (e.g. `Symbol.iterator in getComputedStyle(el)`) must never be

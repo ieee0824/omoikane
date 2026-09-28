@@ -41,6 +41,16 @@ pub fn parse_stylesheet(input: &str) -> Result<Stylesheet, CssParseError> {
 /// Parses a standalone selector list, requiring the complete input to be valid.
 pub fn parse_selector_list(input: &str) -> Result<Vec<Selector>, CssParseError> {
     let tokens = tokenize(input)?;
+    let tokens = tokens
+        .iter()
+        .flat_map(|token| {
+            if matches!(token, CssToken::Delim('&')) {
+                vec![CssToken::Colon, CssToken::Ident("scope".to_string())]
+            } else {
+                vec![token.clone()]
+            }
+        })
+        .collect();
     let mut parser = Parser::new(tokens);
     parser.skip_whitespace();
     if parser.peek().is_none() {
@@ -195,6 +205,12 @@ struct Parser {
     next_anonymous_layer_id: usize,
 }
 
+struct NestingContext {
+    selectors: Vec<Selector>,
+    selector_tokens: Vec<CssToken>,
+    in_scope: bool,
+}
+
 fn implicit_scope_anchor() -> SelectorPart {
     SelectorPart {
         combinator: None,
@@ -205,6 +221,107 @@ fn implicit_scope_anchor() -> SelectorPart {
             }],
         }])],
     }
+}
+
+fn nested_declarations_rule(context: &NestingContext, declarations: Vec<Declaration>) -> Rule {
+    Rule::Style(StyleRule {
+        selectors: context.selectors.clone(),
+        declarations,
+        rules: Vec::new(),
+        nested_declarations: true,
+    })
+}
+
+fn nesting_selector_tokens(parent: Option<&NestingContext>) -> Vec<CssToken> {
+    if let Some(parent) = parent {
+        let mut tokens = vec![
+            CssToken::Colon,
+            CssToken::Ident("is".to_string()),
+            CssToken::ParenOpen,
+        ];
+        tokens.extend(parent.selector_tokens.iter().cloned());
+        tokens.push(CssToken::ParenClose);
+        tokens
+    } else {
+        vec![
+            CssToken::Colon,
+            CssToken::Ident("where".to_string()),
+            CssToken::ParenOpen,
+            CssToken::Colon,
+            CssToken::Ident("root".to_string()),
+            CssToken::ParenClose,
+        ]
+    }
+}
+
+fn resolve_nesting_selector(
+    source: &[CssToken],
+    nesting: Option<&NestingContext>,
+) -> Vec<CssToken> {
+    let mut resolved = Vec::new();
+    let mut branch = Vec::new();
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    for token in source {
+        match token {
+            CssToken::ParenOpen => parens += 1,
+            CssToken::ParenClose => parens = parens.saturating_sub(1),
+            CssToken::BracketOpen => brackets += 1,
+            CssToken::BracketClose => brackets = brackets.saturating_sub(1),
+            CssToken::Comma if parens == 0 && brackets == 0 => {
+                resolved.extend(resolve_nesting_branch(&branch, nesting));
+                resolved.push(CssToken::Comma);
+                branch.clear();
+                continue;
+            }
+            _ => {}
+        }
+        branch.push(token.clone());
+    }
+    resolved.extend(resolve_nesting_branch(&branch, nesting));
+    resolved
+}
+
+fn resolve_nesting_branch(source: &[CssToken], nesting: Option<&NestingContext>) -> Vec<CssToken> {
+    let mut resolved = Vec::new();
+    let explicit = source
+        .iter()
+        .any(|token| matches!(token, CssToken::Delim('&')));
+    let leading_combinator = source
+        .iter()
+        .find(|token| !matches!(token, CssToken::Whitespace))
+        .is_some_and(|token| matches!(token, CssToken::Delim('>' | '+' | '~')));
+    if let Some(parent) = nesting
+        && !parent.in_scope
+        && (!explicit || leading_combinator)
+    {
+        resolved.extend(nesting_selector_tokens(Some(parent)));
+        resolved.push(CssToken::Whitespace);
+    }
+    for token in source {
+        if matches!(token, CssToken::Delim('&')) {
+            resolved.extend(nesting_selector_tokens(nesting));
+        } else {
+            resolved.push(token.clone());
+        }
+    }
+    resolved
+}
+
+fn replace_nesting_ampersands(
+    source: &[CssToken],
+    nesting: Option<&NestingContext>,
+) -> Vec<CssToken> {
+    source
+        .iter()
+        .flat_map(|token| {
+            if matches!(token, CssToken::Delim('&')) {
+                nesting_selector_tokens(nesting)
+            } else {
+                vec![token.clone()]
+            }
+        })
+        .collect()
 }
 
 impl Parser {
@@ -224,24 +341,29 @@ impl Parser {
             if self.peek().is_none() {
                 break;
             }
-            rules.push(self.parse_rule()?);
+            rules.push(self.parse_rule(None)?);
             self.skip_whitespace();
         }
         Ok(Stylesheet { rules })
     }
 
-    fn parse_rule(&mut self) -> Result<Rule, CssParseError> {
+    fn parse_rule(&mut self, nesting: Option<&NestingContext>) -> Result<Rule, CssParseError> {
         match self.peek() {
-            Some(CssToken::AtKeyword(_)) => self.parse_at_rule(),
-            _ => self.parse_style_rule(),
+            Some(CssToken::AtKeyword(_)) => self.parse_at_rule(nesting),
+            _ => self.parse_style_rule(nesting),
         }
     }
 
-    fn parse_at_rule(&mut self) -> Result<Rule, CssParseError> {
+    fn parse_at_rule(&mut self, nesting: Option<&NestingContext>) -> Result<Rule, CssParseError> {
         let name = match self.next() {
             Some(CssToken::AtKeyword(name)) => name,
             _ => return Err(CssParseError::ExpectedToken("@keyword")),
         };
+        if nesting.is_some()
+            && (name.eq_ignore_ascii_case("font-face") || name.eq_ignore_ascii_case("import"))
+        {
+            return Err(CssParseError::InvalidDeclaration);
+        }
 
         let mut prelude_tokens = Vec::new();
         let mut paren_depth = 0usize;
@@ -292,12 +414,23 @@ impl Parser {
                         if name.eq_ignore_ascii_case("scope") {
                             self.scope_depth += 1;
                         }
-                        let block = self.parse_rule_block();
+                        let scope_context = nesting.map(|context| NestingContext {
+                            selectors: context.selectors.clone(),
+                            selector_tokens: context.selector_tokens.clone(),
+                            in_scope: context.in_scope || name.eq_ignore_ascii_case("scope"),
+                        });
+                        let block = self.parse_rule_block(scope_context.as_ref());
                         if name.eq_ignore_ascii_case("scope") {
                             self.scope_depth -= 1;
                         }
                         let block = block?;
-                        let prelude = render_tokens(&prelude_tokens).trim().to_string();
+                        let prelude = if name.eq_ignore_ascii_case("scope") {
+                            render_tokens(&replace_nesting_ampersands(&prelude_tokens, nesting))
+                        } else {
+                            render_tokens(&prelude_tokens)
+                        }
+                        .trim()
+                        .to_string();
                         let anonymous_layer_id =
                             if name.eq_ignore_ascii_case("layer") && prelude.is_empty() {
                                 let id = self.next_anonymous_layer_id;
@@ -420,7 +553,15 @@ impl Parser {
         Err(CssParseError::UnexpectedEndOfInput)
     }
 
-    fn parse_rule_block(&mut self) -> Result<Vec<Rule>, CssParseError> {
+    fn parse_rule_block(
+        &mut self,
+        nesting: Option<&NestingContext>,
+    ) -> Result<Vec<Rule>, CssParseError> {
+        if let Some(nesting) = nesting {
+            return self
+                .parse_nested_rule_block(nesting, false)
+                .map(|(_, rules)| rules);
+        }
         let mut rules = Vec::new();
         loop {
             self.skip_whitespace();
@@ -430,7 +571,7 @@ impl Parser {
                     break;
                 }
                 None => return Err(CssParseError::UnexpectedEndOfInput),
-                _ => rules.push(self.parse_rule()?),
+                _ => rules.push(self.parse_rule(None)?),
             }
         }
         Ok(rules)
@@ -454,7 +595,7 @@ impl Parser {
                             .find(|token| !matches!(token, CssToken::Whitespace)),
                         Some(CssToken::CurlyOpen)
                     );
-                    let mut rule = self.parse_at_rule()?;
+                    let mut rule = self.parse_at_rule(None)?;
                     if block_without_prelude && let Rule::At(at_rule) = &mut rule {
                         at_rule.page_margin_box = margin_box;
                     }
@@ -476,14 +617,176 @@ impl Parser {
         Ok((declarations, margin_rules))
     }
 
-    fn parse_style_rule(&mut self) -> Result<Rule, CssParseError> {
-        let selectors = self.parse_selector_list_until(true)?;
+    fn parse_style_rule(
+        &mut self,
+        nesting: Option<&NestingContext>,
+    ) -> Result<Rule, CssParseError> {
+        let start = self.index;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        while let Some(token) = self.peek() {
+            match token {
+                CssToken::CurlyOpen if paren_depth == 0 && bracket_depth == 0 => break,
+                CssToken::Semicolon | CssToken::CurlyClose
+                    if paren_depth == 0 && bracket_depth == 0 =>
+                {
+                    return Err(CssParseError::InvalidSelector);
+                }
+                CssToken::ParenOpen => paren_depth += 1,
+                CssToken::ParenClose => paren_depth = paren_depth.saturating_sub(1),
+                CssToken::BracketOpen => bracket_depth += 1,
+                CssToken::BracketClose => bracket_depth = bracket_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.next();
+        }
+        if self.tokens[start..self.index].windows(2).any(|pair| {
+            matches!(pair[0], CssToken::Delim('&'))
+                && matches!(pair[1], CssToken::Ident(_) | CssToken::Delim('*'))
+        }) {
+            return Err(CssParseError::InvalidSelector);
+        }
+        let selector_tokens = resolve_nesting_selector(&self.tokens[start..self.index], nesting);
+        let mut selector_parser = Parser::new(selector_tokens.clone());
+        selector_parser.scope_depth = self.scope_depth;
+        let selectors = selector_parser.parse_selector_list_until(false)?;
+        selector_parser.skip_whitespace();
+        if selector_parser.peek().is_some() {
+            return Err(CssParseError::InvalidSelector);
+        }
         self.expect_curly_open()?;
-        let declarations = self.parse_declaration_list()?;
+        let context = NestingContext {
+            selectors: selectors.clone(),
+            selector_tokens,
+            in_scope: false,
+        };
+        let (declarations, rules) = self.parse_nested_rule_block(&context, true)?;
         Ok(Rule::Style(StyleRule {
             selectors,
             declarations,
+            rules,
+            nested_declarations: false,
         }))
+    }
+
+    fn parse_nested_rule_block(
+        &mut self,
+        context: &NestingContext,
+        allow_initial_declarations: bool,
+    ) -> Result<(Vec<Declaration>, Vec<Rule>), CssParseError> {
+        let mut initial = Vec::new();
+        let mut pending = Vec::new();
+        let mut rules = Vec::new();
+        let mut saw_rule = !allow_initial_declarations;
+        loop {
+            self.skip_whitespace();
+            match self.peek() {
+                Some(CssToken::CurlyClose) => {
+                    self.next();
+                    break;
+                }
+                Some(CssToken::Semicolon) => {
+                    self.next();
+                    continue;
+                }
+                None => return Err(CssParseError::UnexpectedEndOfInput),
+                _ => {}
+            }
+            let nested_rule = matches!(self.peek(), Some(CssToken::AtKeyword(_)))
+                || self.looks_like_nested_style_rule();
+            if nested_rule {
+                if !pending.is_empty() {
+                    if saw_rule {
+                        rules.push(nested_declarations_rule(
+                            context,
+                            std::mem::take(&mut pending),
+                        ));
+                    } else {
+                        initial.append(&mut pending);
+                    }
+                }
+                let start = self.index;
+                match self.parse_rule(Some(context)) {
+                    Ok(rule) => rules.push(rule),
+                    Err(_) => {
+                        self.index = start;
+                        self.skip_invalid_nested_rule();
+                    }
+                }
+                saw_rule = true;
+            } else {
+                let start = self.index;
+                match self.parse_declaration() {
+                    Ok(mut declarations) => pending.append(&mut declarations),
+                    Err(_) => {
+                        // `expect_colon` may consume the semicolon before it
+                        // rejects an invalid declaration. Rewind so recovery
+                        // cannot mistake the following block for its value.
+                        self.index = start;
+                        self.skip_invalid_declaration(true);
+                    }
+                }
+                if matches!(self.peek(), Some(CssToken::Semicolon)) {
+                    self.next();
+                }
+            }
+        }
+        if !pending.is_empty() {
+            if saw_rule {
+                rules.push(nested_declarations_rule(context, pending));
+            } else {
+                initial = pending;
+            }
+        }
+        Ok((initial, rules))
+    }
+
+    fn looks_like_nested_style_rule(&self) -> bool {
+        if matches!(self.peek(), Some(CssToken::Ident(name)) if name.starts_with("--")) {
+            return false;
+        }
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        for token in &self.tokens[self.index..] {
+            match token {
+                CssToken::ParenOpen => paren_depth += 1,
+                CssToken::ParenClose => paren_depth = paren_depth.saturating_sub(1),
+                CssToken::BracketOpen => bracket_depth += 1,
+                CssToken::BracketClose => bracket_depth = bracket_depth.saturating_sub(1),
+                CssToken::CurlyOpen if paren_depth == 0 && bracket_depth == 0 => return true,
+                CssToken::Semicolon | CssToken::CurlyClose
+                    if paren_depth == 0 && bracket_depth == 0 =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn skip_invalid_nested_rule(&mut self) {
+        let mut depth = 0usize;
+        while let Some(token) = self.peek() {
+            match token {
+                CssToken::CurlyOpen => depth += 1,
+                CssToken::CurlyClose if depth == 0 => break,
+                CssToken::CurlyClose => {
+                    depth -= 1;
+                    self.next();
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                CssToken::Semicolon if depth == 0 => {
+                    self.next();
+                    break;
+                }
+                _ => {}
+            }
+            self.next();
+        }
     }
 
     fn parse_selector_list_until(
@@ -867,7 +1170,7 @@ impl Parser {
 
             match self.parse_declaration() {
                 Ok(mut parsed) => declarations.append(&mut parsed),
-                Err(_) => self.skip_invalid_declaration(),
+                Err(_) => self.skip_invalid_declaration(false),
             }
 
             if matches!(self.peek(), Some(CssToken::Semicolon)) {
@@ -877,12 +1180,17 @@ impl Parser {
         declarations
     }
 
-    fn skip_invalid_declaration(&mut self) {
+    fn skip_invalid_declaration(&mut self, stop_at_curly_close: bool) {
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
         while let Some(token) = self.peek() {
             match token {
                 CssToken::Semicolon if paren_depth == 0 && bracket_depth == 0 => break,
+                CssToken::CurlyClose
+                    if stop_at_curly_close && paren_depth == 0 && bracket_depth == 0 =>
+                {
+                    break;
+                }
                 CssToken::ParenOpen => paren_depth += 1,
                 CssToken::ParenClose => paren_depth = paren_depth.saturating_sub(1),
                 CssToken::BracketOpen => bracket_depth += 1,
