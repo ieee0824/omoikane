@@ -26,7 +26,9 @@ pub use matcher::{
     PseudoElement, Specificity, matches_selector, matches_selector_with_pseudo,
     selector_pseudo_element, specificity,
 };
-pub(crate) use matcher::{SelectorMatchCache, matches_selector_cached};
+pub(crate) use matcher::{
+    SelectorMatchCache, matches_selector_boundary_cached, matches_selector_cached,
+};
 pub use media::{
     MediaType, evaluate_media_query, evaluate_media_query_for_type, parse_media_query_list,
 };

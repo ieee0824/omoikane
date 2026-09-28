@@ -35,9 +35,9 @@ use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 use crate::accessibility::{AccessibilityRenderState, AccessibilitySnapshotState};
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver,
-    matches_selector, parse_scope_prelude, parse_selector_list,
+    parse_scope_prelude, parse_selector_list,
 };
-use crate::css::{SelectorMatchCache, matches_selector_cached};
+use crate::css::{SelectorMatchCache, matches_selector_boundary_cached, matches_selector_cached};
 use crate::dom::{
     Node, NodeHandle, NodeType, ShadowRootMode, WeakNodeHandle, is_actually_disabled,
 };
@@ -20330,16 +20330,25 @@ fn matches_selector_native(
     if form_validation::selector_uses_validation(&selectors) {
         form_validation::flush(node_id, context)?;
     }
+    let scope_id = args
+        .get(2)
+        .map(|value| parse_node_id(Some(value), context))
+        .transpose()?;
+    if let Some(scope_id) = scope_id {
+        ensure_same_origin_node(context, scope_id)?;
+    }
     with_host_state(|state| {
         let state = state.borrow();
         let node = state
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        Ok(JsValue::from(
-            selectors
-                .iter()
-                .any(|selector| matches_selector(&node, selector)),
-        ))
+        let scope = scope_id
+            .and_then(|id| state.get_node(id))
+            .unwrap_or_else(|| node.clone());
+        let mut cache = SelectorMatchCache::default();
+        Ok(JsValue::from(selectors.iter().any(|selector| {
+            matches_selector_boundary_cached(&node, selector, None, &mut cache, Some(&scope))
+        })))
     })
 }
 
@@ -20352,23 +20361,55 @@ fn query_first_matching_descendant(
     node: &NodeHandle,
     selectors: &[Selector],
 ) -> Option<NodeHandle> {
-    find_matching_descendant(node, selectors, &mut SelectorMatchCache::default())
+    let scope = query_scope_root(node);
+    find_matching_descendant(
+        node,
+        selectors,
+        scope.as_ref(),
+        &mut SelectorMatchCache::default(),
+    )
+}
+
+fn query_scope_root(node: &NodeHandle) -> Option<NodeHandle> {
+    if node.node_type() == NodeType::Document {
+        node.child_nodes()
+            .into_iter()
+            .find(|child| child.node_type() == NodeType::Element)
+    } else if node.node_type() == NodeType::Element {
+        Some(node.clone())
+    } else {
+        None
+    }
+}
+
+fn matches_dom_query_selector(
+    node: &NodeHandle,
+    selector: &Selector,
+    cache: &mut SelectorMatchCache,
+    scope: Option<&NodeHandle>,
+) -> bool {
+    if let Some(scope) = scope {
+        matches_selector_boundary_cached(node, selector, None, cache, Some(scope))
+    } else {
+        matches_selector_cached(node, selector, cache)
+    }
 }
 
 fn find_matching_descendant(
     node: &NodeHandle,
     selectors: &[Selector],
+    scope: Option<&NodeHandle>,
     cache: &mut SelectorMatchCache,
 ) -> Option<NodeHandle> {
     for child in node.child_nodes() {
         if child.node_type() == NodeType::Element
             && selectors
                 .iter()
-                .any(|selector| matches_selector_cached(&child, selector, cache))
+                .any(|selector| matches_dom_query_selector(&child, selector, cache, scope))
         {
             return Some(child);
         }
-        if let Some(found) = find_matching_descendant(&child, selectors, cache) {
+        if let Some(found) = find_matching_descendant(&child, selectors, scope, cache) {
             return Some(found);
         }
     }
@@ -20377,9 +20418,11 @@ fn find_matching_descendant(
 
 fn query_all_matching_descendants(node: &NodeHandle, selectors: &[Selector]) -> Vec<NodeHandle> {
     let mut results = Vec::new();
+    let scope = query_scope_root(node);
     collect_matching_descendants(
         node,
         selectors,
+        scope.as_ref(),
         &mut results,
         &mut SelectorMatchCache::default(),
     );
@@ -20389,6 +20432,7 @@ fn query_all_matching_descendants(node: &NodeHandle, selectors: &[Selector]) -> 
 fn collect_matching_descendants(
     node: &NodeHandle,
     selectors: &[Selector],
+    scope: Option<&NodeHandle>,
     results: &mut Vec<NodeHandle>,
     cache: &mut SelectorMatchCache,
 ) {
@@ -20396,11 +20440,11 @@ fn collect_matching_descendants(
         if child.node_type() == NodeType::Element
             && selectors
                 .iter()
-                .any(|selector| matches_selector_cached(&child, selector, cache))
+                .any(|selector| matches_dom_query_selector(&child, selector, cache, scope))
         {
             results.push(child.clone());
         }
-        collect_matching_descendants(&child, selectors, results, cache);
+        collect_matching_descendants(&child, selectors, scope, results, cache);
     }
 }
 

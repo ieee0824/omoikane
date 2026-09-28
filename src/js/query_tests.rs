@@ -195,3 +195,42 @@ fn query_results_retain_retired_documents_without_resurrecting_host_roots() {
         1
     );
 }
+
+#[test]
+fn dom_queries_bind_scope_to_the_query_root() {
+    let document = crate::html::TreeBuilder::parse(
+        "<main id='parent'><div id='level1' class='match'><div id='level2' class='match'></div></div></main>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const parent = document.getElementById('parent');
+                const level1 = document.getElementById('level1');
+                const level2 = document.getElementById('level2');
+                return [
+                    [...parent.querySelectorAll('& .match')].map(n => n.id).join(','),
+                    [...parent.querySelectorAll('& > .match')].map(n => n.id).join(','),
+                    parent.querySelector(':scope > .match') === level1,
+                    parent.querySelectorAll(':scope').length === 0,
+                    document.querySelector(':scope') === document.documentElement,
+                    document.querySelector(':scope #level2') === level2,
+                    level2.matches(':scope'),
+                    level2.matches('&'),
+                    level2.matches('#parent :scope'),
+                    level2.closest(':scope') === level2,
+                    level2.closest('#parent:scope') === null,
+                    level2.closest('#parent') === parent
+                ].join('|');
+            })()"#,
+        )
+        .unwrap()
+        .to_string(&mut runtime.context)
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        result,
+        "level1,level2|level1|true|true|true|true|true|true|true|true|true|true"
+    );
+}
