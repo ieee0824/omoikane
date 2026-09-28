@@ -34,7 +34,7 @@ use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
 use crate::accessibility::{AccessibilityRenderState, AccessibilitySnapshotState};
 use crate::css::{
-    AffineTransform, ComputedStyle, ComputedValue, Origin, Selector, StyleResolver,
+    AffineTransform, ComputedStyle, ComputedValue, Origin, PseudoElement, Selector, StyleResolver,
     parse_scope_prelude, parse_selector_list,
 };
 use crate::css::{SelectorMatchCache, matches_selector_boundary_cached, matches_selector_cached};
@@ -54,6 +54,8 @@ use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 mod compression_stream;
 #[cfg(test)]
 mod compression_stream_tests;
+#[cfg(test)]
+mod computed_pseudo_tests;
 mod document_write;
 #[cfg(test)]
 mod document_write_tests;
@@ -14238,6 +14240,21 @@ fn computed_style_native(
 ) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
+    let pseudo = match args.get(1) {
+        Some(value) if !value.is_null_or_undefined() => {
+            let name = value.to_string(context)?.to_std_string_escaped();
+            if name.starts_with(':') {
+                match name.trim().to_ascii_lowercase().as_str() {
+                    ":before" | "::before" => Some(PseudoElement::Before),
+                    ":after" | "::after" => Some(PseudoElement::After),
+                    _ => return Ok(js_string!("{}").into()),
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     form_validation::flush(node_id, context)?;
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
@@ -14257,14 +14274,28 @@ fn computed_style_native(
         let document_id = document.identity();
         let json = {
             let mut state = state.borrow_mut();
-            let used_size = resolved_layout_size(&mut state, &document, &node);
+            // Ordinary styles initialize the resolver while resolving layout;
+            // pseudo-elements skip layout but still need the current sheets.
+            if pseudo.is_some() {
+                state.ensure_style_resolver(&document);
+            }
+            let used_size = if pseudo.is_none() {
+                resolved_layout_size(&mut state, &document, &node)
+            } else {
+                None
+            };
             match state
                 .document_styles
                 .get_mut(&document_id)
                 .and_then(|entry| entry.resolver.as_mut())
             {
                 Some(resolver) => {
-                    let mut style = resolver.computed_style(&node);
+                    let Some(mut style) = (match pseudo {
+                        Some(pseudo) => resolver.computed_pseudo_style(&node, pseudo),
+                        None => Some(resolver.computed_style(&node)),
+                    }) else {
+                        return Ok(js_string!("{}").into());
+                    };
                     if let Some(used_size) = used_size {
                         let border_box = crate::layout::is_border_box(&style);
                         if resolved_width_applies(&style) {

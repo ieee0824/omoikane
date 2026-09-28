@@ -60,6 +60,7 @@
     { "path": "css/css-nesting/mixed-declarations-rules.html" },
     { "path": "css/css-nesting/nested-declarations-cssom-whitespace.html" },
     { "path": "css/css-nesting/nested-declarations-cssom.html" },
+    { "path": "css/css-nesting/nested-declarations-matching.html" },
     { "path": "css/css-nesting/nested-error-recovery.html" },
     { "path": "css/css-nesting/nested-rule-cssom-invalidation.html" },
     { "path": "css/css-nesting/nesting-layer.html" },
