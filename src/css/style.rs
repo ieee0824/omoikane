@@ -17,6 +17,10 @@ use super::matcher::{
     matches_selector_with_scope_cached,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::font::{
+    CssRelativeFontMetrics, Font, FontFamilyKey, FontStretch, FontVariantKey, FontWeight,
+    WebFontRegistry, load_default_text_fonts_shared, select_text_font,
+};
 use rusqlite::{Connection, params};
 
 use super::{
@@ -441,6 +445,12 @@ struct ResolutionContext {
     parent_font_size: f32,
     /// The root element's computed font-size in px (used for `rem` units).
     root_font_size: f32,
+    /// Computed line-height for `lh` on the element being resolved.
+    line_height: f32,
+    /// Computed line-height of the root element for `rlh`.
+    root_line_height: f32,
+    /// Font-table and glyph measures for the font-relative length units.
+    font_metrics: CssRelativeFontMetrics,
     /// Viewport width in px (used for `vw`, `vmin`, `vmax`).
     viewport_width: f32,
     /// Viewport height in px (used for `vh`, `vmin`, `vmax`).
@@ -452,9 +462,26 @@ impl Default for ResolutionContext {
         Self {
             parent_font_size: 16.0,
             root_font_size: 16.0,
+            line_height: 19.2,
+            root_line_height: 19.2,
+            font_metrics: CssRelativeFontMetrics::fallback(16.0, false),
             viewport_width: 0.0,
             viewport_height: 0.0,
         }
+    }
+}
+
+#[derive(Default)]
+struct CssFontResources {
+    web_fonts: Option<Arc<WebFontRegistry>>,
+}
+
+impl std::fmt::Debug for CssFontResources {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CssFontResources")
+            .field("has_web_fonts", &self.web_fonts.is_some())
+            .finish()
     }
 }
 
@@ -474,6 +501,9 @@ pub struct StyleResolver {
     visited_paint_state: Option<VisitedPaintState>,
     /// Root element's computed font-size in px (for `rem` unit resolution).
     root_font_size: f32,
+    /// Root element's computed line-height in px (for `rlh`).
+    root_line_height: f32,
+    font_resources: CssFontResources,
     /// `true` when `root_font_size` was explicitly set via `set_root_font_size()`,
     /// preventing auto-update from the computed root element style.
     root_font_size_explicit: bool,
@@ -1050,6 +1080,10 @@ fn is_css_length_unit(unit: &str) -> bool {
             | "rem"
             | "ex"
             | "ch"
+            | "cap"
+            | "ic"
+            | "lh"
+            | "rlh"
             | "vw"
             | "vh"
             | "vmin"
@@ -1070,7 +1104,7 @@ fn registered_initial_value_is_independent(value: &Value) -> bool {
     match value {
         Value::Length(_, unit) => !matches!(
             unit.to_ascii_lowercase().as_str(),
-            "em" | "rem" | "ex" | "ch"
+            "em" | "rem" | "ex" | "ch" | "cap" | "ic" | "lh" | "rlh"
         ),
         Value::Function { arguments, .. }
         | Value::List(arguments)
@@ -1328,6 +1362,7 @@ pub(crate) struct ContainerContext {
     pub height: f32,
     pub container_type: String,
     pub names: Vec<String>,
+    pub units: super::ContainerUnitContext,
 }
 
 /// Deterministic post-load instant used for static screenshots.
@@ -1377,6 +1412,79 @@ impl StyleResolver {
         Self::default()
     }
 
+    /// Supplies the loaded web fonts used when resolving font-relative lengths.
+    pub(crate) fn set_web_fonts(&mut self, fonts: Arc<WebFontRegistry>) {
+        self.font_resources.web_fonts = Some(fonts);
+        self.invalidate_style_cache();
+    }
+
+    pub(crate) fn container_unit_context(
+        &self,
+        style: &ComputedStyle,
+    ) -> super::ContainerUnitContext {
+        let font_size = match style.get("font-size") {
+            Some(ComputedValue::Px(size)) => *size,
+            _ => 16.0,
+        };
+        super::ContainerUnitContext {
+            font_size,
+            root_font_size: self.root_font_size(),
+            line_height: used_line_height(Some(style), font_size),
+            root_line_height: self.root_line_height(),
+            metrics: self.css_font_metrics(
+                &style.properties,
+                style.font_family_scope_root(),
+                font_size,
+            ),
+        }
+    }
+
+    fn css_font_metrics(
+        &self,
+        properties: &BTreeMap<String, ComputedValue>,
+        scope_root: Option<usize>,
+        size_px: f32,
+    ) -> CssRelativeFontMetrics {
+        let keyword = |name| match properties.get(name) {
+            Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
+                Some(value.as_str())
+            }
+            _ => None,
+        };
+        let family = keyword("font-family").map(FontFamilyKey::new);
+        let weight = match properties.get("font-weight") {
+            Some(ComputedValue::Number(value)) => FontWeight((*value as u16).clamp(1, 1000)),
+            _ => keyword("font-weight")
+                .map(FontWeight::parse)
+                .unwrap_or_default(),
+        };
+        let stretch = keyword("font-stretch")
+            .map(FontStretch::parse)
+            .unwrap_or_default();
+        let variant =
+            FontVariantKey::from_css(weight, keyword("font-style").unwrap_or("normal"), stretch);
+        let vertical = keyword("writing-mode")
+            .is_some_and(|value| matches!(value, "vertical-rl" | "vertical-lr"));
+        let upright_zero = vertical && keyword("text-orientation") == Some("upright");
+        let system_fonts = load_default_text_fonts_shared();
+        let selected = select_text_font(
+            "style",
+            family,
+            scope_root,
+            variant,
+            self.font_resources.web_fonts.as_deref(),
+            &system_fonts,
+        );
+        let font: Option<&Font> = selected
+            .as_ref()
+            .map(AsRef::as_ref)
+            .or_else(|| system_fonts.first().map(AsRef::as_ref));
+        font.map_or_else(
+            || CssRelativeFontMetrics::fallback(size_px, upright_zero),
+            |font| font.css_relative_metrics(size_px, vertical, upright_zero),
+        )
+    }
+
     /// Whether any loaded stylesheet contains a size container query.
     pub(crate) fn has_container_queries(&self) -> bool {
         self.stylesheets
@@ -1412,6 +1520,14 @@ impl StyleResolver {
             self.root_font_size
         } else {
             16.0
+        }
+    }
+
+    fn root_line_height(&self) -> f32 {
+        if self.root_line_height > 0.0 {
+            self.root_line_height
+        } else {
+            self.root_font_size() * 1.2
         }
     }
 
@@ -2056,20 +2172,21 @@ impl StyleResolver {
         // Auto-update root_font_size from the root element's computed font-size so that
         // `rem` units in descendant elements resolve correctly even without an explicit
         // set_root_font_size() call. Skip if the caller already provided an explicit value.
-        if !self.root_font_size_explicit {
-            let is_root = node.node_type() == NodeType::Element
-                && node
-                    .tag_name()
-                    .as_deref()
-                    .map(|t| t.eq_ignore_ascii_case("html"))
-                    .unwrap_or(false)
-                && node
-                    .parent_node()
-                    .map(|p| p.node_type() == NodeType::Document)
-                    .unwrap_or(false);
-            if is_root && let Some(ComputedValue::Px(px)) = style.get("font-size") {
+        let is_root = node.node_type() == NodeType::Element
+            && node
+                .tag_name()
+                .as_deref()
+                .is_some_and(|tag| tag.eq_ignore_ascii_case("html"))
+            && node
+                .parent_node()
+                .is_some_and(|parent| parent.node_type() == NodeType::Document);
+        if is_root {
+            if !self.root_font_size_explicit
+                && let Some(ComputedValue::Px(px)) = style.get("font-size")
+            {
                 self.root_font_size = *px;
             }
+            self.root_line_height = used_line_height(Some(&style), self.root_font_size());
         }
 
         self.cache.insert(key, style.clone());
@@ -2318,6 +2435,33 @@ impl StyleResolver {
         } else {
             16.0
         };
+        let parent_font_size = parent_style
+            .and_then(|style| style.get("font-size"))
+            .and_then(|value| match value {
+                ComputedValue::Px(px) => Some(*px),
+                _ => None,
+            })
+            .unwrap_or(16.0);
+        let parent_line_height = used_line_height(parent_style, parent_font_size);
+        let root_line_height = self.root_line_height();
+        let uses_font_metrics = candidates
+            .iter()
+            .any(|candidate| value_has_font_metric_unit(&candidate.value))
+            || custom_properties.values().any(value_has_font_metric_unit);
+        let parent_font_metrics = if uses_font_metrics {
+            parent_style.map_or_else(
+                || self.css_font_metrics(&BTreeMap::new(), None, parent_font_size),
+                |style| {
+                    self.css_font_metrics(
+                        &style.properties,
+                        style.font_family_scope_root(),
+                        parent_font_size,
+                    )
+                },
+            )
+        } else {
+            CssRelativeFontMetrics::fallback(parent_font_size, false)
+        };
 
         let mut important_properties = HashSet::new();
         let mut animation_name_scope_root = None;
@@ -2330,16 +2474,12 @@ impl StyleResolver {
             && let Some(resolved_value) =
                 resolve_value_with_custom_properties(&fs_candidate.value, &custom_properties)
         {
-            let parent_fs = parent_style
-                .and_then(|ps| ps.get("font-size"))
-                .and_then(|v| match v {
-                    ComputedValue::Px(px) => Some(*px),
-                    _ => None,
-                })
-                .unwrap_or(16.0);
             let ctx = ResolutionContext {
-                parent_font_size: parent_fs,
+                parent_font_size,
                 root_font_size,
+                line_height: parent_line_height,
+                root_line_height,
+                font_metrics: parent_font_metrics,
                 viewport_width: self.viewport_width,
                 viewport_height: self.viewport_height,
             };
@@ -2347,10 +2487,10 @@ impl StyleResolver {
             // Resolve font-size keywords "smaller" / "larger" relative to parent.
             let resolved = match &computed {
                 ComputedValue::Keyword(kw) if kw.eq_ignore_ascii_case("smaller") => {
-                    ComputedValue::Px(parent_fs * 0.833)
+                    ComputedValue::Px(parent_font_size * 0.833)
                 }
                 ComputedValue::Keyword(kw) if kw.eq_ignore_ascii_case("larger") => {
-                    ComputedValue::Px(parent_fs * 1.2)
+                    ComputedValue::Px(parent_font_size * 1.2)
                 }
                 other => other.clone(),
             };
@@ -2374,9 +2514,55 @@ impl StyleResolver {
         }
 
         let element_font_size = inherited_font_size(parent_style, &properties);
+        let (font_properties, font_scope_root) =
+            candidate_font_properties(&candidates, &custom_properties, parent_style);
+        let element_font_metrics = if uses_font_metrics {
+            self.css_font_metrics(&font_properties, font_scope_root, element_font_size)
+        } else {
+            CssRelativeFontMetrics::fallback(element_font_size, false)
+        };
+        // `lh` on line-height uses the parent's computed line-height, while
+        // other properties use this element's resulting line-height.
+        if let Some(candidate) = candidates
+            .iter()
+            .rfind(|candidate| candidate.name == "line-height")
+            && let Some(value) =
+                resolve_value_with_custom_properties(&candidate.value, &custom_properties)
+        {
+            let ctx = ResolutionContext {
+                parent_font_size: element_font_size,
+                root_font_size,
+                line_height: parent_line_height,
+                root_line_height,
+                font_metrics: element_font_metrics,
+                viewport_width: self.viewport_width,
+                viewport_height: self.viewport_height,
+            };
+            properties.insert(
+                "line-height".to_string(),
+                compute_value(&value, "line-height", ctx),
+            );
+            if candidate.important {
+                important_properties.insert("line-height".to_string());
+            }
+        }
+        let element_line_height = used_line_height_value(
+            properties
+                .get("line-height")
+                .or_else(|| parent_style.and_then(|style| style.get("line-height"))),
+            element_font_size,
+        );
+        let root_line_height = if node.tag_name().as_deref() == Some("html") {
+            element_line_height
+        } else {
+            root_line_height
+        };
         let custom_ctx = ResolutionContext {
             parent_font_size: element_font_size,
             root_font_size,
+            line_height: element_line_height,
+            root_line_height,
+            font_metrics: element_font_metrics,
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
         };
@@ -2400,7 +2586,9 @@ impl StyleResolver {
         remove_reverted_candidates(&mut candidates, Some(&custom_properties));
 
         for candidate in candidates {
-            if candidate.name == "font-size" || candidate.name.starts_with("--") {
+            if matches!(candidate.name.as_str(), "font-size" | "line-height")
+                || candidate.name.starts_with("--")
+            {
                 continue; // already processed above
             }
             log_unsupported_css_if_enabled(&candidate.name, &candidate.value);
@@ -2446,6 +2634,9 @@ impl StyleResolver {
             let ctx = ResolutionContext {
                 parent_font_size: font_size,
                 root_font_size,
+                line_height: element_line_height,
+                root_line_height,
+                font_metrics: element_font_metrics,
                 viewport_width: self.viewport_width,
                 viewport_height: self.viewport_height,
             };
@@ -2652,6 +2843,9 @@ impl StyleResolver {
         let ctx = ResolutionContext {
             parent_font_size: element_font_size,
             root_font_size: self.root_font_size,
+            line_height: used_line_height_value(properties.get("line-height"), element_font_size),
+            root_line_height: self.root_line_height(),
+            font_metrics: CssRelativeFontMetrics::fallback(element_font_size, false),
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
         };
@@ -5874,7 +6068,7 @@ fn container_query_matches(
                 .as_ref()
                 .is_none_or(|name| context.names.iter().any(|candidate| candidate == name));
             if supports_axis && name_matches {
-                return query.matches(context.width, context.height);
+                return query.matches_with_units(context.width, context.height, context.units);
             }
         }
         ancestor = candidate.parent_node();
@@ -8106,6 +8300,9 @@ fn calc_unitless_number(arguments: &[Value]) -> Option<f32> {
     let placeholder = ResolutionContext {
         parent_font_size: 16.0,
         root_font_size: 16.0,
+        line_height: 19.2,
+        root_line_height: 19.2,
+        font_metrics: CssRelativeFontMetrics::fallback(16.0, false),
         viewport_width: 0.0,
         viewport_height: 0.0,
     };
@@ -8587,6 +8784,12 @@ fn resolve_length_to_px(number: f32, unit: &str, ctx: ResolutionContext) -> Opti
         "px" => number,
         "em" => number * ctx.parent_font_size,
         "rem" => number * ctx.root_font_size,
+        "ex" => number * ctx.font_metrics.ex,
+        "ch" => number * ctx.font_metrics.ch,
+        "cap" => number * ctx.font_metrics.cap,
+        "ic" => number * ctx.font_metrics.ic,
+        "lh" => number * ctx.line_height,
+        "rlh" => number * ctx.root_line_height,
         "vw" => number * ctx.viewport_width / 100.0,
         "vh" => number * ctx.viewport_height / 100.0,
         "svw" | "lvw" | "dvw" => number * ctx.viewport_width / 100.0,
@@ -10082,6 +10285,78 @@ fn inherited_font_size(
         return *value;
     }
     16.0
+}
+
+fn used_line_height(style: Option<&ComputedStyle>, font_size: f32) -> f32 {
+    used_line_height_value(style.and_then(|style| style.get("line-height")), font_size)
+}
+
+fn used_line_height_value(value: Option<&ComputedValue>, font_size: f32) -> f32 {
+    match value {
+        Some(ComputedValue::Px(px)) => *px,
+        Some(ComputedValue::Number(multiplier)) => multiplier * font_size,
+        Some(ComputedValue::Percentage(percent)) => percent * font_size / 100.0,
+        _ => font_size * 1.2,
+    }
+}
+
+fn candidate_font_properties(
+    candidates: &[Candidate],
+    custom_properties: &BTreeMap<String, Value>,
+    parent_style: Option<&ComputedStyle>,
+) -> (BTreeMap<String, ComputedValue>, Option<usize>) {
+    let mut properties = BTreeMap::new();
+    let mut scope_root = parent_style.and_then(ComputedStyle::font_family_scope_root);
+    for name in [
+        "font-family",
+        "font-weight",
+        "font-style",
+        "font-stretch",
+        "writing-mode",
+        "text-orientation",
+    ] {
+        if let Some(value) = parent_style.and_then(|style| style.get(name)) {
+            properties.insert(name.to_string(), value.clone());
+        }
+        let Some(candidate) = candidates.iter().rfind(|candidate| candidate.name == name) else {
+            continue;
+        };
+        let Some(value) = resolve_value_with_custom_properties(&candidate.value, custom_properties)
+        else {
+            continue;
+        };
+        if let Value::Keyword(keyword) = &value {
+            if matches!(keyword.to_ascii_lowercase().as_str(), "inherit" | "unset") {
+                continue;
+            }
+            if matches!(keyword.to_ascii_lowercase().as_str(), "initial" | "revert") {
+                properties.remove(name);
+                continue;
+            }
+        }
+        if name == "font-family" {
+            scope_root =
+                font_reference_scope_root(&value, candidate.layer_context.scope_root, parent_style);
+        }
+        properties.insert(
+            name.to_string(),
+            compute_value(&value, name, ResolutionContext::default()),
+        );
+    }
+    (properties, scope_root)
+}
+
+fn value_has_font_metric_unit(value: &Value) -> bool {
+    match value {
+        Value::Length(_, unit) => matches!(
+            unit.to_ascii_lowercase().as_str(),
+            "ex" | "ch" | "cap" | "ic"
+        ),
+        Value::Function { arguments, .. }
+        | Value::List(arguments)
+        | Value::CommaList(arguments) => arguments.iter().any(value_has_font_metric_unit),
+        _ => false,
+    }
 }
 
 pub(crate) fn is_color_keyword(keyword: &str) -> bool {

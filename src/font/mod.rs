@@ -499,6 +499,44 @@ impl Font {
         }
     }
 
+    /// Font-relative CSS lengths in pixels, without shaping a text run.
+    /// Missing table metrics or glyphs use the CSS Values fallback measures.
+    pub(crate) fn css_relative_metrics(
+        &self,
+        size_px: f32,
+        vertical: bool,
+        upright_zero: bool,
+    ) -> CssRelativeFontMetrics {
+        let Some(face) = Face::from_slice(self.inner.font_data(), self.face_index) else {
+            return CssRelativeFontMetrics::fallback(size_px, upright_zero);
+        };
+        let scale = size_px / face.units_per_em().max(1) as f32;
+        let advance = |character, vertical| {
+            let glyph = face.glyph_index(character)?;
+            let units = if vertical {
+                face.glyph_ver_advance(glyph)?
+            } else {
+                face.glyph_hor_advance(glyph)?
+            };
+            (units > 0).then_some(units as f32 * scale)
+        };
+        CssRelativeFontMetrics {
+            ex: face
+                .x_height()
+                .filter(|height| *height > 0)
+                .map_or(size_px * 0.5, |height| height as f32 * scale),
+            cap: face
+                .capital_height()
+                .filter(|height| *height > 0)
+                .map_or(face.ascender().max(0) as f32 * scale, |height| {
+                    height as f32 * scale
+                }),
+            ch: advance('0', vertical && upright_zero)
+                .unwrap_or(size_px * if upright_zero { 1.0 } else { 0.5 }),
+            ic: advance('水', vertical).unwrap_or(size_px),
+        }
+    }
+
     /// Returns the font's preferred underline thickness at `size_px`.
     pub fn underline_thickness(&self, size_px: f32) -> Option<f32> {
         let face = Face::from_slice(self.inner.font_data(), self.face_index)?;
@@ -514,6 +552,26 @@ impl Font {
         let face = Face::from_slice(self.inner.font_data(), self.face_index)?;
         let metrics = face.underline_metrics()?;
         Some(-(metrics.position as f32) * size_px / face.units_per_em().max(1) as f32)
+    }
+}
+
+/// Resolved font-relative CSS measures for one font size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CssRelativeFontMetrics {
+    pub ex: f32,
+    pub cap: f32,
+    pub ch: f32,
+    pub ic: f32,
+}
+
+impl CssRelativeFontMetrics {
+    pub(crate) fn fallback(size_px: f32, upright_zero: bool) -> Self {
+        Self {
+            ex: size_px * 0.5,
+            cap: size_px,
+            ch: size_px * if upright_zero { 1.0 } else { 0.5 },
+            ic: size_px,
+        }
     }
 }
 

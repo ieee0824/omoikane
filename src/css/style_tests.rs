@@ -2852,6 +2852,158 @@ fn resolves_em_and_percentage_font_sizes() {
 }
 
 #[test]
+fn font_relative_line_height_units_use_parent_for_own_font_and_line_height() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "html { font-size: 10px; line-height: 20px } \
+             body { font-size: 20px; line-height: 30px } \
+             h1 { font-size: 2lh; line-height: 1.5lh; width: 2lh; height: 3rlh }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(60.0)));
+    assert_eq!(style.get("line-height"), Some(&ComputedValue::Px(45.0)));
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(90.0)));
+    assert_eq!(style.get("height"), Some(&ComputedValue::Px(60.0)));
+}
+
+#[test]
+fn font_relative_units_use_loaded_font_tables_and_glyph_advances() {
+    let (_document, _body, title, _html) = sample_tree();
+    let font = Font::load_from_bytes(
+        include_bytes!(
+            "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"
+        )
+        .to_vec(),
+    )
+    .unwrap();
+    let expected = font.css_relative_metrics(20.0, false, false);
+    let mut registry = WebFontRegistry::new();
+    registry.push(
+        "RelativeFixture",
+        FontWeight::default(),
+        crate::font::FontStyle::default(),
+        font,
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.set_web_fonts(Arc::new(registry));
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "h1 { font-family: RelativeFixture; font-size: 20px; \
+             width: 10ch; height: 2ex; max-width: 3cap; min-height: 1ic }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("width"),
+        Some(&ComputedValue::Px(expected.ch * 10.0))
+    );
+    assert_eq!(
+        style.get("height"),
+        Some(&ComputedValue::Px(expected.ex * 2.0))
+    );
+    assert_eq!(
+        style.get("max-width"),
+        Some(&ComputedValue::Px(expected.cap * 3.0))
+    );
+    assert_eq!(
+        style.get("min-height"),
+        Some(&ComputedValue::Px(expected.ic))
+    );
+}
+
+#[test]
+fn font_size_ex_uses_parent_metrics_while_width_uses_own_metrics() {
+    let (_document, _body, title, _html) = sample_tree();
+    let font = Font::load_from_bytes(
+        include_bytes!(
+            "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"
+        )
+        .to_vec(),
+    )
+    .unwrap();
+    let parent_ex = font.css_relative_metrics(20.0, false, false).ex;
+    let own_size = parent_ex * 2.0;
+    let own_ex = font.css_relative_metrics(own_size, false, false).ex;
+    let mut registry = WebFontRegistry::new();
+    registry.push(
+        "RelativeFixture",
+        FontWeight::default(),
+        crate::font::FontStyle::default(),
+        font,
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.set_web_fonts(Arc::new(registry));
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { font-family: RelativeFixture; font-size: 20px } \
+             h1 { font-size: 2ex; width: 2ex }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(style.get("font-size"), Some(&ComputedValue::Px(own_size)));
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(own_ex * 2.0)));
+}
+
+#[test]
+fn font_relative_units_resolve_through_calc_variables_and_registered_lengths() {
+    let (_document, _body, title, _html) = sample_tree();
+    let font = Font::load_from_bytes(
+        include_bytes!(
+            "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"
+        )
+        .to_vec(),
+    )
+    .unwrap();
+    let expected = font.css_relative_metrics(20.0, false, false);
+    let mut registry = WebFontRegistry::new();
+    registry.push(
+        "RelativeFixture",
+        FontWeight::default(),
+        crate::font::FontStyle::default(),
+        font,
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.set_web_fonts(Arc::new(registry));
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@property --registered-gap { syntax: '<length>'; inherits: false; initial-value: 5px; } \
+             h1 { font-family: RelativeFixture; font-size: 20px; \
+             --registered-gap: 2ch; --loose-gap: 1ex; \
+             width: calc(var(--registered-gap) + var(--loose-gap)); \
+             height: calc(1cap + 1ic) }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&title);
+    assert_eq!(
+        style.get("--registered-gap"),
+        Some(&ComputedValue::Px(expected.ch * 2.0))
+    );
+    assert_eq!(
+        style.get("width"),
+        Some(&ComputedValue::Px(expected.ch * 2.0 + expected.ex))
+    );
+    assert_eq!(
+        style.get("height"),
+        Some(&ComputedValue::Px(expected.cap + expected.ic))
+    );
+}
+
+#[test]
 fn resolves_clamp_font_size_with_viewport_units() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();

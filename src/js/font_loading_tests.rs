@@ -25,6 +25,47 @@ fn font_url() -> String {
 }
 
 #[test]
+fn ch_width_recomputes_when_its_web_font_finishes_loading() {
+    let document = TreeBuilder::parse(
+        "<!doctype html><style>#sample{font-family:RuntimeFont,monospace;font-size:20px;width:10ch}</style><div id=sample></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let before = eval_json(
+        &mut runtime,
+        "document.getElementById('sample').getBoundingClientRect().width",
+    )
+    .as_f64()
+    .unwrap();
+    runtime
+        .eval(&format!(
+            "globalThis.relativeFace=new FontFace('RuntimeFont',{});document.fonts.add(relativeFace);relativeFace.load();",
+            serde_json::to_string(&format!("url({})", font_url())).unwrap()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let after = eval_json(
+        &mut runtime,
+        "document.getElementById('sample').getBoundingClientRect().width",
+    )
+    .as_f64()
+    .unwrap();
+    let font = crate::font::Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-arabic-fallback/DejaVuSans.ttf").to_vec(),
+    )
+    .unwrap();
+    let expected = font.css_relative_metrics(20.0, false, false).ch * 10.0;
+    assert!(
+        (after - expected as f64).abs() < 0.02,
+        "before={before}, after={after}, expected={expected}"
+    );
+    assert!(
+        (after - before).abs() > 0.1,
+        "loading the font must invalidate the used ch width"
+    );
+}
+
+#[test]
 fn url_face_is_task_loaded_and_membership_controls_layout() {
     let mut runtime = runtime();
     runtime

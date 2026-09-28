@@ -141,6 +141,9 @@ impl ResolvedPageStyle {
         let context = ResolutionContext {
             parent_font_size: font_size,
             root_font_size: 16.0,
+            line_height: font_size * 1.2,
+            root_line_height: 19.2,
+            font_metrics: crate::font::CssRelativeFontMetrics::fallback(font_size, false),
             viewport_width: geometry.width,
             viewport_height: geometry.height,
         };

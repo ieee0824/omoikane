@@ -1,5 +1,29 @@
 //! CSS Container Queries size-condition parsing and evaluation.
 
+use crate::font::CssRelativeFontMetrics;
+
+/// Font metrics captured from the queried container, not the styled descendant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ContainerUnitContext {
+    pub font_size: f32,
+    pub root_font_size: f32,
+    pub line_height: f32,
+    pub root_line_height: f32,
+    pub metrics: CssRelativeFontMetrics,
+}
+
+impl Default for ContainerUnitContext {
+    fn default() -> Self {
+        Self {
+            font_size: 16.0,
+            root_font_size: 16.0,
+            line_height: 19.2,
+            root_line_height: 19.2,
+            metrics: CssRelativeFontMetrics::fallback(16.0, false),
+        }
+    }
+}
+
 /// A parsed `@container` prelude.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ContainerQuery {
@@ -26,7 +50,43 @@ enum Axis {
 struct Feature {
     axis: Axis,
     comparison: Comparison,
-    value_px: f32,
+    value: LengthValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LengthValue {
+    number: f32,
+    unit: LengthUnit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LengthUnit {
+    Px,
+    Em,
+    Rem,
+    Ex,
+    Ch,
+    Cap,
+    Ic,
+    Lh,
+    Rlh,
+}
+
+impl LengthValue {
+    fn resolve(self, context: ContainerUnitContext) -> f32 {
+        self.number
+            * match self.unit {
+                LengthUnit::Px => 1.0,
+                LengthUnit::Em => context.font_size,
+                LengthUnit::Rem => context.root_font_size,
+                LengthUnit::Ex => context.metrics.ex,
+                LengthUnit::Ch => context.metrics.ch,
+                LengthUnit::Cap => context.metrics.cap,
+                LengthUnit::Ic => context.metrics.ic,
+                LengthUnit::Lh => context.line_height,
+                LengthUnit::Rlh => context.root_line_height,
+            }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +101,16 @@ enum Comparison {
 impl ContainerQuery {
     /// Evaluates the query in the engine's current horizontal writing mode.
     pub fn matches(&self, width: f32, height: f32) -> bool {
-        self.condition.matches(width, height)
+        self.matches_with_units(width, height, ContainerUnitContext::default())
+    }
+
+    pub(crate) fn matches_with_units(
+        &self,
+        width: f32,
+        height: f32,
+        units: ContainerUnitContext,
+    ) -> bool {
+        self.condition.matches(width, height, units)
     }
 
     /// Whether evaluating this query requires block-axis size containment.
@@ -51,16 +120,16 @@ impl ContainerQuery {
 }
 
 impl Condition {
-    fn matches(&self, width: f32, height: f32) -> bool {
+    fn matches(&self, width: f32, height: f32, units: ContainerUnitContext) -> bool {
         match self {
-            Self::Feature(feature) => feature.matches(width, height),
+            Self::Feature(feature) => feature.matches(width, height, units),
             Self::And(conditions) => conditions
                 .iter()
-                .all(|condition| condition.matches(width, height)),
+                .all(|condition| condition.matches(width, height, units)),
             Self::Or(conditions) => conditions
                 .iter()
-                .any(|condition| condition.matches(width, height)),
-            Self::Not(condition) => !condition.matches(width, height),
+                .any(|condition| condition.matches(width, height, units)),
+            Self::Not(condition) => !condition.matches(width, height, units),
         }
     }
 
@@ -76,19 +145,20 @@ impl Condition {
 }
 
 impl Feature {
-    fn matches(&self, width: f32, height: f32) -> bool {
+    fn matches(&self, width: f32, height: f32, units: ContainerUnitContext) -> bool {
         let actual = match self.axis {
             Axis::Inline => width,
             Axis::Block => height,
         };
+        let expected = self.value.resolve(units);
         match self.comparison {
-            Comparison::Less => actual < self.value_px,
-            Comparison::LessEqual => actual <= self.value_px,
+            Comparison::Less => actual < expected,
+            Comparison::LessEqual => actual <= expected,
             // Layout uses single-precision geometry, so decimal lengths and
             // accumulated box arithmetic can differ by a tiny subpixel amount.
-            Comparison::Equal => (actual - self.value_px).abs() <= 0.01,
-            Comparison::GreaterEqual => actual >= self.value_px,
-            Comparison::Greater => actual > self.value_px,
+            Comparison::Equal => (actual - expected).abs() <= 0.01,
+            Comparison::GreaterEqual => actual >= expected,
+            Comparison::Greater => actual > expected,
         }
     }
 }
@@ -174,12 +244,12 @@ fn parse_chained_range(input: &str) -> Option<Condition> {
             Condition::Feature(Feature {
                 axis,
                 comparison: reverse_comparison(parse_comparison(left_operator)?),
-                value_px: parse_length(left_value)?,
+                value: parse_length(left_value)?,
             }),
             Condition::Feature(Feature {
                 axis,
                 comparison: parse_comparison(right_operator)?,
-                value_px: parse_length(right_value)?,
+                value: parse_length(right_value)?,
             }),
         ]));
     }
@@ -225,7 +295,7 @@ fn parse_feature(input: &str) -> Option<Feature> {
         return Some(Feature {
             axis,
             comparison,
-            value_px: parse_length(value)?,
+            value: parse_length(value)?,
         });
     }
 
@@ -241,14 +311,14 @@ fn parse_feature(input: &str) -> Option<Feature> {
             return Some(Feature {
                 axis,
                 comparison: parse_comparison(operator)?,
-                value_px: parse_length(right)?,
+                value: parse_length(right)?,
             });
         }
         if let Some(axis) = parse_axis(&right.to_ascii_lowercase()) {
             return Some(Feature {
                 axis,
                 comparison: reverse_comparison(parse_comparison(operator)?),
-                value_px: parse_length(left)?,
+                value: parse_length(left)?,
             });
         }
     }
@@ -284,19 +354,32 @@ fn reverse_comparison(comparison: Comparison) -> Comparison {
     }
 }
 
-fn parse_length(input: &str) -> Option<f32> {
+fn parse_length(input: &str) -> Option<LengthValue> {
     let lower = input.trim().to_ascii_lowercase();
     if lower == "0" {
-        return Some(0.0);
+        return Some(LengthValue {
+            number: 0.0,
+            unit: LengthUnit::Px,
+        });
     }
-    for (suffix, scale) in [("rem", 16.0), ("em", 16.0), ("px", 1.0)] {
+    for (suffix, unit) in [
+        ("rlh", LengthUnit::Rlh),
+        ("rem", LengthUnit::Rem),
+        ("cap", LengthUnit::Cap),
+        ("ex", LengthUnit::Ex),
+        ("ch", LengthUnit::Ch),
+        ("ic", LengthUnit::Ic),
+        ("lh", LengthUnit::Lh),
+        ("em", LengthUnit::Em),
+        ("px", LengthUnit::Px),
+    ] {
         if let Some(number) = lower.strip_suffix(suffix) {
             return number
                 .trim()
                 .parse::<f32>()
                 .ok()
                 .filter(|value| *value >= 0.0)
-                .map(|value| value * scale);
+                .map(|number| LengthValue { number, unit });
         }
     }
     None
@@ -388,7 +471,7 @@ fn is_custom_ident(input: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_container_query;
+    use super::{ContainerUnitContext, parse_container_query};
 
     #[test]
     fn parses_named_and_unnamed_size_queries() {
@@ -433,5 +516,25 @@ mod tests {
         );
         assert!(parse_container_query("card style(--theme: dark)").is_none());
         assert!(parse_container_query("card (orientation: landscape)").is_none());
+    }
+
+    #[test]
+    fn font_relative_queries_use_the_queried_containers_metrics() {
+        let mut units = ContainerUnitContext {
+            font_size: 20.0,
+            root_font_size: 16.0,
+            line_height: 30.0,
+            root_line_height: 24.0,
+            metrics: crate::font::CssRelativeFontMetrics::fallback(20.0, false),
+        };
+        let query = parse_container_query("(min-width: 3lh)").unwrap();
+        assert!(query.matches_with_units(90.0, 0.0, units));
+        units.line_height = 40.0;
+        assert!(!query.matches_with_units(90.0, 0.0, units));
+
+        let query = parse_container_query("(min-width: 10ch)").unwrap();
+        assert!(query.matches_with_units(100.0, 0.0, units));
+        units.metrics.ch = 12.0;
+        assert!(!query.matches_with_units(100.0, 0.0, units));
     }
 }

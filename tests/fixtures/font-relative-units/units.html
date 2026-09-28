@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Font-relative length comparison</title>
+<style>
+  html { font-size: 16px; line-height: 24px; }
+  body { margin: 8px; font-family: "Liberation Mono"; font-size: 20px; line-height: 30px; }
+  .bar { height: 12px; margin-bottom: 6px; background: #3868ac; }
+  #ex { width: 10ex; }
+  #ch { width: 10ch; }
+  #cap { width: 10cap; }
+  #ic { width: 10ic; }
+  #lh { width: 3lh; }
+  #rlh { width: 3rlh; }
+  #nested { font-size: 2lh; line-height: 1.5lh; }
+  #nested .bar { width: 2lh; background: #b06b35; }
+</style>
+<div id="ex" class="bar" data-probe></div>
+<div id="ch" class="bar" data-probe></div>
+<div id="cap" class="bar" data-probe></div>
+<div id="ic" class="bar" data-probe></div>
+<div id="lh" class="bar" data-probe></div>
+<div id="rlh" class="bar" data-probe></div>
+<div id="nested" data-probe><div id="nested-lh" class="bar" data-probe></div></div>

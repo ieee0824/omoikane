@@ -83,6 +83,11 @@ git_wpt sparse-checkout add \
   "/css/css-cascade/parsing/layer-import-parsing.html" \
   "/css/css-cascade/parsing/supports-import-parsing.html"
 git_wpt sparse-checkout add "/fonts/Ahem.ttf" "/fonts/noto/noto-sans-v8-latin-regular.woff"
+git_wpt sparse-checkout add \
+  "/fonts/ahem.css" \
+  "/css/css-values/ch-recalc-on-font-load.html" \
+  "/css/css-values/cap-invalidation.html" \
+  "/css/css-values/rlh-invalidation.html"
 git_wpt sparse-checkout add "/css/css-variables/variable-substitution-shorthands.html"
 git_wpt sparse-checkout add "/css/css-cascade/layer-counter-style-override.html"
 git_wpt sparse-checkout add "/css/css-properties-values-api/register-property.html" "/css/css-properties-values-api/register-property-syntax-parsing.html" "/css/css-properties-values-api/at-property-cssom.html" "/css/css-properties-values-api/determine-registration.html" "/css/css-properties-values-api/registered-properties-inheritance.html" "/css/css-properties-values-api/registered-property-cssom.html" "/css/css-properties-values-api/resources/utils.js"

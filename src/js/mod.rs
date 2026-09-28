@@ -4215,6 +4215,8 @@ impl HostState {
         for (scope_root, parent_scope_root) in font_scope_parents {
             web_fonts.register_scope_parent(scope_root, parent_scope_root);
         }
+        let web_fonts = Arc::new(web_fonts);
+        resolver.set_web_fonts(web_fonts.clone());
         let blocked_inline_styles = if policy.allows_inline(ResourceType::Style) {
             HashSet::new()
         } else {
@@ -4237,7 +4239,7 @@ impl HostState {
             DocumentStyleEntry {
                 resolver: Some(resolver),
                 resources,
-                web_fonts: Arc::new(web_fonts),
+                web_fonts,
                 dirty: false,
                 needs_full_sample: true,
             },
