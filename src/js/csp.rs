@@ -340,30 +340,9 @@ fn path_part_matches(source: &str, target: &str) -> bool {
     if !exact {
         source_parts.pop();
     }
-    source_parts
-        .iter()
-        .zip(&target_parts)
-        .all(|(left, right)| percent_decode_segment(left) == percent_decode_segment(right))
-}
-
-fn percent_decode_segment(segment: &str) -> Vec<u8> {
-    let bytes = segment.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let Some(high) = (bytes[index + 1] as char).to_digit(16)
-            && let Some(low) = (bytes[index + 2] as char).to_digit(16)
-        {
-            decoded.push((high * 16 + low) as u8);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    decoded
+    source_parts.iter().zip(&target_parts).all(|(left, right)| {
+        crate::http::percent_decode_bytes(left) == crate::http::percent_decode_bytes(right)
+    })
 }
 
 fn scheme_matches(expected: &str, actual: &str) -> bool {

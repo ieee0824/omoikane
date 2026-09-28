@@ -3,7 +3,6 @@
 use std::io::Cursor;
 use std::io::Read;
 
-use base64::Engine;
 use flate2::read::ZlibDecoder;
 
 use super::{DataUri, GifDisposal, Image, ImageAnimation, ImageFrame, PaintError};
@@ -398,66 +397,35 @@ pub(crate) fn decode_jpeg(bytes: &[u8]) -> Result<Image, PaintError> {
 
 /// Parses a `data:` URI into either text or binary content.
 pub fn parse_data_uri(uri: &str) -> Result<DataUri, PaintError> {
-    let payload = match uri.get(..5) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("data:") => &uri[5..],
-        _ => return Err(PaintError::InvalidDataUri),
+    let Some(prefix) = uri.get(..5) else {
+        return Err(PaintError::InvalidDataUri);
     };
-    let (metadata, data) = payload.split_once(',').ok_or(PaintError::InvalidDataUri)?;
-    let mut mime_type = "text/plain".to_string();
-    let mut is_base64 = false;
-
-    if !metadata.is_empty() {
-        for (index, part) in metadata.split(';').enumerate() {
-            if index == 0 && !part.is_empty() {
-                mime_type = part.to_string();
-                continue;
-            }
-            if part.eq_ignore_ascii_case("base64") {
-                is_base64 = true;
-            }
-        }
+    if !prefix.eq_ignore_ascii_case("data:") {
+        return Err(PaintError::InvalidDataUri);
     }
-
+    let metadata = uri[5..]
+        .split_once(',')
+        .map(|(metadata, _)| metadata)
+        .ok_or(PaintError::InvalidDataUri)?;
+    let is_base64 = metadata
+        .split(';')
+        .skip(1)
+        .any(|part| part.eq_ignore_ascii_case("base64"));
+    let parsed = crate::http::parse_data_uri(uri).ok_or(if is_base64 {
+        PaintError::InvalidBase64
+    } else {
+        PaintError::InvalidDataUri
+    })?;
     if is_base64 {
-        let decoded_payload = percent_decode(data);
-        let data = base64::engine::general_purpose::STANDARD
-            .decode(decoded_payload)
-            .map_err(|_| PaintError::InvalidBase64)?;
-        Ok(DataUri::Binary { mime_type, data })
+        Ok(DataUri::Binary {
+            mime_type: parsed.mime_type,
+            data: parsed.data,
+        })
     } else {
         Ok(DataUri::Text {
-            mime_type,
-            data: percent_decode(data),
+            mime_type: parsed.mime_type,
+            data: String::from_utf8_lossy(&parsed.data).into_owned(),
         })
-    }
-}
-
-pub(crate) fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) =
-                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-        {
-            out.push((high << 4) | low);
-            index += 3;
-            continue;
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-pub(crate) fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
     }
 }
 
