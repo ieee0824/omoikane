@@ -80,7 +80,7 @@ def main() -> int:
     actual_pages = numbered_pages(args.actual_dir, "page")
     results = []
     for index, (actual_path, reference_path) in enumerate(
-        zip(actual_pages, reference_pages, strict=True), start=1
+        zip(actual_pages, reference_pages), start=1
     ):
         with Image.open(actual_path) as actual_image, Image.open(
             reference_path
@@ -88,9 +88,16 @@ def main() -> int:
             actual = actual_image.convert("RGB")
             reference = reference_image.convert("RGB")
             if actual.size != reference.size:
-                raise AssertionError(
-                    f"page {index}: dimensions {actual.size} != {reference.size}"
+                results.append(
+                    {
+                        "page": index,
+                        "actual_size": actual.size,
+                        "reference_size": reference.size,
+                        "changed_pixels": None,
+                        "diff_bbox": None,
+                    }
                 )
+                continue
             diff = ImageChops.difference(actual, reference)
             changed_pixels = sum(pixel != (0, 0, 0) for pixel in diff.getdata())
             results.append(
@@ -101,8 +108,21 @@ def main() -> int:
                     "diff_bbox": diff.getbbox(),
                 }
             )
-    print(json.dumps({"pages": results}, sort_keys=True))
-    return int(not results or any(page["changed_pixels"] for page in results))
+    print(
+        json.dumps(
+            {
+                "actual_page_count": len(actual_pages),
+                "reference_page_count": len(reference_pages),
+                "pages": results,
+            },
+            sort_keys=True,
+        )
+    )
+    return int(
+        not results
+        or len(actual_pages) != len(reference_pages)
+        or any(page["changed_pixels"] != 0 for page in results)
+    )
 
 
 if __name__ == "__main__":

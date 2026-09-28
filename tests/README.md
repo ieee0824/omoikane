@@ -61,9 +61,10 @@ CI automatically writes to `.artifacts/wpt/results` and uploads both these
 revision-scoped files and the flat `WPT_REPORT`, matching the
 `report.json` convention used by the Web API surface probe.
 
-The print path has a separate reftest for the four pinned
-`css/css-page/layers-00*-print.html` cases. It renders both upstream HTML and
-the matching reference as pages, then compares every page pixel:
+The print path has separate reftests for the four pinned
+`css/css-page/layers-00*-print.html` cases and four
+`css/css-page/page-name-and-break-00*-print.html` cases. It renders upstream
+HTML and the matching reference as pages, then compares every page pixel:
 
 ```bash
 WPT_ROOT=target/wpt scripts/fetch-wpt.sh
@@ -79,8 +80,32 @@ python3 scripts/compare-print-page-firefox.py \
   --geckodriver <path> --actual-dir <output-dir> --output-dir <reference-dir>
 ```
 
-The script saves the Firefox PDF/PNGs and reports page dimensions and changed
-pixels.
+The script saves the Firefox PDF/PNGs and reports page counts, dimensions, and
+changed pixels as JSON. It exits nonzero when pages or pixels differ.
+
+`combined-pagination.html` combines a named page size and margin change,
+side-requested blank pages, a nested `break-inside: avoid-page` block, wrapped
+paragraph text, and a tall table cell. Run
+`cargo test --locked --test print_page_combined` with
+`OMOIKANE_PRINT_ARTIFACTS=<output-dir>` to save the
+pages under `<output-dir>/combined-pagination/`. For the Firefox reference, pass
+`--fixture tests/fixtures/print/combined-pagination.html`, that artifact
+subdirectory, `--page-width-css-px 100`, and `--page-height-css-px 60` to the
+comparison script. It saves the PDF/PNGs before reporting the expected page
+count mismatch.
+
+In the Firefox 155.0.1 comparison on 2026-09-28, Omoikane produced 10 pages:
+the first was 100×60 pixels, later pages were 140×60, and pages 2 and 9 were
+blank. The heading, kept block, and table lines appeared on pages 3, 4, and
+6–8 respectively. Firefox's print API returned seven 100×60-pixel pages with
+no blank page; the heading, kept block, and table lines appeared on pages 2,
+3, and 5–6. Its explicit print sheet size means this reference cannot verify
+the named page width change. The first 100×60 page matched exactly (zero
+changed pixels); later pages have different dimensions or content placement,
+so a sheet-by-sheet pixel match is not expected. The regression test asserts
+Omoikane's complete marker order, both blank sheets, and wrapped paragraph
+content without discarding the Firefox discrepancy.
+
 For the page-margin text fixture, set `OMOIKANE_PRINT_ARTIFACTS=<output-dir>`
 and run `cargo test --locked --test print_page_margin_content`. Pass
 `--fixture tests/fixtures/print/page-margin-text.html` and

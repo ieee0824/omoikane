@@ -218,7 +218,12 @@ collect_pattern \
   "/css/css-page/layers-003-print.html" \
   "/css/css-page/layers-003-print-ref.html" \
   "/css/css-page/layers-004-print.html" \
-  "/css/css-page/layers-004-print-ref.html"
+  "/css/css-page/layers-004-print-ref.html" \
+  "/css/css-page/page-name-and-break-001-print.html" \
+  "/css/css-page/page-name-and-break-002-print.html" \
+  "/css/css-page/page-name-and-break-003-print.html" \
+  "/css/css-page/page-name-and-break-004-print.html" \
+  "/css/css-page/page-name-and-break-print-ref.html"
 current_revision="$(git_wpt rev-parse HEAD 2>/dev/null || true)"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
