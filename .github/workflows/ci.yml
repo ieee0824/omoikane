@@ -2,6 +2,7 @@ name: CI
 
 permissions:
   contents: read
+  pull-requests: read
 
 on:
   push:
@@ -12,8 +13,17 @@ on:
   schedule:
     - cron: "17 3 * * 1"
 
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  changes:
+    uses: ./.github/workflows/change-scope.yml
+
   format:
+    needs: changes
+    if: needs.changes.outputs.run_full == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +37,8 @@ jobs:
         run: python3 scripts/check_rustfmt.py
 
   test:
+    needs: changes
+    if: needs.changes.outputs.run_full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,6 +81,8 @@ jobs:
 
 
   gate4-prepare:
+    needs: changes
+    if: needs.changes.outputs.run_full == 'true'
     runs-on: ubuntu-24.04
     outputs:
       shards: ${{ steps.matrix.outputs.shards }}
@@ -142,8 +156,8 @@ jobs:
 
   # Preserve the existing required-check name; missing/failed partitions are no-go.
   jit-stress:
-    needs: [gate4-prepare, gate4-partition]
-    if: always()
+    needs: [changes, gate4-prepare, gate4-partition]
+    if: always() && needs.changes.outputs.run_full == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -171,6 +185,8 @@ jobs:
           if-no-files-found: error
 
   wpt-smoke:
+    needs: changes
+    if: needs.changes.outputs.run_full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

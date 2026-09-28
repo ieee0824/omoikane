@@ -10,13 +10,19 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: native-jit-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/change-scope.yml
+
   native:
+    needs: changes
+    if: needs.changes.outputs.run_full == 'true'
     name: Native JIT (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
