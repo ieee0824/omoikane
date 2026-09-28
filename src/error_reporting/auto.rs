@@ -1,10 +1,8 @@
 //! Explicitly enabled unattended delivery using the manual submission policy.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use super::{
     EventStore, ManualSubmission, ManualSubmissionError, ReporterConfig, SubmissionApproval,
-    SubmissionBackend,
+    SubmissionBackend, now_ms,
 };
 
 /// Outcome of one bounded automatic delivery scan.
@@ -80,13 +78,6 @@ impl<'a> AutoSubmission<'a> {
         result.attempted = self.manual.attempted_count().saturating_sub(before);
         Ok(result)
     }
-}
-
-fn now_ms() -> i64 {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

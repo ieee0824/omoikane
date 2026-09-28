@@ -9,12 +9,12 @@
 use std::{
     fmt, fs,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::SafeEvent;
+use super::{SafeEvent, now_ms};
 
 const SCHEMA_VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x4f4d_4f45;
@@ -548,11 +548,4 @@ fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
-}
-
-fn now_ms() -> i64 {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
 }
