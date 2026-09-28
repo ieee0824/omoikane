@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::css::style::ContainerContext;
 use crate::css::style::counter_pairs;
 use crate::css::{
-    ComputedValue, MediaType, PageBoxGeometry, PageMarginBox, PageMarginContent,
+    ComputedStyle, ComputedValue, MediaType, PageBoxGeometry, PageMarginBox, PageMarginContent,
     PageSelectorContext, PageSide, ResolvedPageStyle, StyleResolver, Value,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -257,6 +257,13 @@ struct FlowSection {
     start: f32,
     end: f32,
     requested_side: Option<PageSide>,
+}
+
+struct FlowBoundary {
+    name: Option<String>,
+    position: f32,
+    forced_break: Option<ForcedPageBreak>,
+    first_in_flow: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1178,30 +1185,40 @@ fn first_page_name(document: &NodeHandle, resolver: &mut StyleResolver) -> Optio
 }
 
 fn first_body_break_side(document: &NodeHandle, resolver: &mut StyleResolver) -> Option<PageSide> {
-    let body = find_body_node(document)?;
-    for child in body.child_nodes() {
-        match child.node_type() {
-            NodeType::Text if child.data().is_some_and(|text| !text.trim().is_empty()) => {
-                // Text before this element forms an earlier in-flow box.
-                return None;
+    fn first_side(node: &NodeHandle, resolver: &mut StyleResolver) -> Option<PageSide> {
+        for child in node.child_nodes() {
+            match child.node_type() {
+                NodeType::Text if child.data().is_some_and(|text| !text.trim().is_empty()) => {
+                    // Text before this element forms an earlier in-flow box.
+                    return None;
+                }
+                NodeType::Element => {}
+                _ => continue,
             }
-            NodeType::Element => {}
-            _ => continue,
+            let style = resolver.computed_style(&child);
+            if matches!(
+                style.get("display"),
+                Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
+            ) || matches!(
+                style.get("position"),
+                Some(ComputedValue::Keyword(value))
+                    if value.eq_ignore_ascii_case("absolute") || value.eq_ignore_ascii_case("fixed")
+            ) {
+                continue;
+            }
+            if let Some(side) =
+                forced_page_break(style.get("break-before")).and_then(ForcedPageBreak::side)
+            {
+                return Some(side);
+            }
+            return can_fragment_style_descendants(&style)
+                .then(|| first_side(&child, resolver))
+                .flatten();
         }
-        let style = resolver.computed_style(&child);
-        if matches!(
-            style.get("display"),
-            Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
-        ) || matches!(
-            style.get("position"),
-            Some(ComputedValue::Keyword(value))
-                if value.eq_ignore_ascii_case("absolute") || value.eq_ignore_ascii_case("fixed")
-        ) {
-            continue;
-        }
-        return forced_page_break(style.get("break-before")).and_then(ForcedPageBreak::side);
+        None
     }
-    None
+
+    first_side(&find_body_node(document)?, resolver)
 }
 
 fn find_body_node(node: &NodeHandle) -> Option<NodeHandle> {
@@ -1261,6 +1278,10 @@ fn can_fragment_descendants(layout: &LayoutBox, resolver: &mut StyleResolver) ->
         return true;
     }
     let style = resolver.computed_style(&layout.node);
+    can_fragment_style_descendants(&style)
+}
+
+fn can_fragment_style_descendants(style: &ComputedStyle) -> bool {
     let unsupported_display = matches!(
         style.get("display"),
         Some(ComputedValue::Keyword(value))
@@ -1362,65 +1383,94 @@ fn flow_sections(
     if !has_printable_flow(body) {
         flow_end = content_start;
     }
-    let mut sections = Vec::new();
-    let mut current_name = body
-        .children
-        .iter()
-        .find(|child| is_in_flow_principal(child))
-        .and_then(|child| page_name(&child.node, resolver));
-    let mut start = content_start;
-    let mut requested_side = None;
-    for (child_index, child) in body
+    fn collect_boundaries(
+        box_: &LayoutBox,
+        resolver: &mut StyleResolver,
+        boundaries: &mut Vec<FlowBoundary>,
+        first_in_flow: bool,
+        inherited_name: &Option<String>,
+    ) {
+        let style = resolver.computed_style(&box_.node);
+        let name = match style.get("page") {
+            Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("auto") => {
+                Some(value.clone())
+            }
+            _ => inherited_name.clone(),
+        };
+        let before = forced_page_break(style.get("break-before"));
+        let after = forced_page_break(style.get("break-after"));
+        let border = box_.dimensions.border_box();
+        boundaries.push(FlowBoundary {
+            name: name.clone(),
+            position: border.y - box_.dimensions.margin.top,
+            forced_break: before,
+            first_in_flow,
+        });
+        if can_fragment_descendants(box_, resolver) {
+            for (index, child) in box_
+                .children
+                .iter()
+                .filter(|child| is_in_flow_principal(child))
+                .enumerate()
+            {
+                collect_boundaries(
+                    child,
+                    resolver,
+                    boundaries,
+                    first_in_flow && index == 0,
+                    &name,
+                );
+            }
+        }
+        if after.is_some() {
+            boundaries.push(FlowBoundary {
+                name,
+                position: border.y + border.height + box_.dimensions.margin.bottom,
+                forced_break: after,
+                first_in_flow: false,
+            });
+        }
+    }
+
+    let mut boundaries = Vec::new();
+    let body_name = page_name(&body.node, resolver);
+    for (index, child) in body
         .children
         .iter()
         .filter(|child| is_in_flow_principal(child))
         .enumerate()
     {
-        let name = page_name(&child.node, resolver);
-        let child_style = resolver.computed_style(&child.node);
-        let break_before = forced_page_break(child_style.get("break-before"));
-        if name != current_name || break_before.is_some() {
-            let boundary = if child_index == 0 && break_before.is_some() {
+        collect_boundaries(child, resolver, &mut boundaries, index == 0, &body_name);
+    }
+    let mut sections = Vec::new();
+    let mut current_name = boundaries
+        .first()
+        .and_then(|boundary| boundary.name.clone());
+    let mut start = content_start;
+    let mut requested_side = None;
+    for boundary in boundaries {
+        let name = boundary.name;
+        let forced_break = boundary.forced_break;
+        if name != current_name || forced_break.is_some() {
+            let position = if boundary.first_in_flow && forced_break.is_some() {
                 // A break before the first in-flow child propagates to the
                 // root; do not manufacture a page for the body top margin.
                 start
             } else {
-                (child.dimensions.border_box().y - child.dimensions.margin.top)
-                    .max(start)
-                    .min(flow_end)
+                boundary.position.max(start).min(flow_end)
             };
-            if boundary > start {
+            if position > start {
                 sections.push(FlowSection {
                     name: current_name,
                     start,
-                    end: boundary,
+                    end: position,
                     requested_side,
                 });
                 requested_side = None;
             }
             current_name = name;
-            start = boundary;
-            if let Some(side) = break_before.and_then(ForcedPageBreak::side) {
-                requested_side = Some(side);
-            }
-        }
-        let break_after = forced_page_break(child_style.get("break-after"));
-        if break_after.is_some() {
-            let border = child.dimensions.border_box();
-            let boundary = (border.y + border.height + child.dimensions.margin.bottom)
-                .max(start)
-                .min(flow_end);
-            if boundary > start {
-                sections.push(FlowSection {
-                    name: current_name.clone(),
-                    start,
-                    end: boundary,
-                    requested_side,
-                });
-                requested_side = None;
-            }
-            start = boundary;
-            if let Some(side) = break_after.and_then(ForcedPageBreak::side) {
+            start = position;
+            if let Some(side) = forced_break.and_then(ForcedPageBreak::side) {
                 requested_side = Some(side);
             }
         }
