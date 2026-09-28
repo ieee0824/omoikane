@@ -6,6 +6,10 @@ bounded connection acceptance, bounded request-header reading, and joining a
 server worker during normal completion or client-side unwinding. Each test keeps
 its own HTTP responses, cookie/origin rules, request order, and assertions.
 
+Unit tests in `src/` import the same helper through `src/test_support/mod.rs`.
+`src/js/stylesheet.rs` is the first migrated unit-test server; the other local
+servers remain tracked by Issue #1089.
+
 Issue #885 first migrates `document_cookie_bridge.rs` and
 `fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,
 header/body boundary, and worker-join behavior. The following current fixture

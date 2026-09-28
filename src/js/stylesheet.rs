@@ -345,33 +345,27 @@ impl StylesheetLoader {
 mod tests {
     use super::*;
     use crate::html::TreeBuilder;
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers,
+    };
+    use std::io::Write;
 
     #[test]
     fn stylesheet_uses_top_level_site_for_samesite_cookies() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let target: Url = format!("http://{}/style.css", listener.local_addr().unwrap())
             .parse()
             .unwrap();
-        let server = std::thread::spawn(move || {
+        let server = FixtureWorker::spawn(move || {
             let mut cookies = Vec::new();
             for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(&stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let mut cookie = None;
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some(value) = line.strip_prefix("Cookie: ") {
-                        cookie = Some(value.trim().to_string());
-                    }
-                }
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let cookie = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Cookie: "))
+                    .map(|value| value.trim().to_string());
                 cookies.push(cookie);
                 stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: 19\r\nConnection: close\r\n\r\nbody { color: red }").unwrap();
             }
@@ -406,9 +400,6 @@ mod tests {
             assert!(blocked.is_empty());
             assert_eq!(css, "body { color: red }");
         }
-        assert_eq!(
-            server.join().unwrap(),
-            [None, Some("strict=1; lax=2".to_string())]
-        );
+        assert_eq!(server.join(), [None, Some("strict=1; lax=2".to_string())]);
     }
 }
