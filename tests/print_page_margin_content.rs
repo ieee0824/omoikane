@@ -1,10 +1,15 @@
 use omoikane::html::TreeBuilder;
 use omoikane::layout::Rect;
 use omoikane::paint::{Color, render_document_pages_with_url};
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::io::Write;
+
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 
 #[path = "common/print.rs"]
 mod print_support;
@@ -63,31 +68,14 @@ const MARKER: &[u8] = include_bytes!("fixtures/print/margin-marker.png");
 
 #[test]
 fn printed_margin_images_keep_mixed_content_order_and_resolve_relative_urls() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "relative image was not requested"
-                    );
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => panic!("image test server: {error}"),
-            }
-        };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut request = [0; 1024];
-        let size = stream.read(&mut request).unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT)
+            .expect("relative image was not requested");
+        let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         assert!(
-            String::from_utf8_lossy(&request[..size]).starts_with("GET /print/margin-marker.png "),
+            request.starts_with("GET /print/margin-marker.png "),
             "unexpected relative image request"
         );
         let header = format!(
@@ -112,7 +100,7 @@ fn printed_margin_images_keep_mixed_content_order_and_resolve_relative_urls() {
         Some(&base_url),
     )
     .unwrap();
-    server.join().unwrap();
+    server.join();
     assert_eq!(pages.len(), 1);
     let page = &pages[0];
     print_support::save_pages(&pages, Some("images"));
