@@ -49151,9 +49151,8 @@ b</textarea></form>"#,
         );
     }
 
-    /// A sub-document resolver uses its owning iframe's laid-out content box
-    /// for `vw`/`vh` resolution. This fixture's iframe fills the 800px parent
-    /// width and has zero laid-out height.
+    /// A sub-document resolver uses the owning iframe's default 300x150
+    /// content box, while its 2px UA border remains outside the viewport.
     #[test]
     fn iframe_computed_style_uses_configured_viewport() {
         let mut runtime = runtime_from_html(
@@ -49172,13 +49171,13 @@ b</textarea></form>"#,
 
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(t, '').width"),
-            "400px",
-            "50vw of an 800px viewport must resolve to 400px in the sub-document"
+            "150px",
+            "50vw of the iframe's 300px viewport must resolve to 150px"
         );
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(t, '').height"),
-            "0px",
-            "25vh of the iframe's zero-height viewport must resolve to 0px"
+            "37.5px",
+            "25vh of the iframe's 150px viewport must resolve to 37.5px"
         );
         assert_eq!(
             eval_str(
@@ -49187,6 +49186,50 @@ b</textarea></form>"#,
             ),
             "inline",
             "the iframe keeps its Firefox UA display while providing a child viewport"
+        );
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                "(() => { const f = document.getElementById('f'); const s = getComputedStyle(f); const r = f.getBoundingClientRect(); return JSON.stringify([s.width, s.height, r.width, r.height]); })()"
+            ),
+            r#"["300px","150px",304,154]"#,
+            "the inline replaced iframe has Firefox's default content and border-box sizes"
+        );
+    }
+
+    #[test]
+    fn iframe_default_size_keeps_max_constraints_and_dimension_attributes() {
+        let mut runtime = runtime_from_html(
+            r#"<html><head><style>
+                 body { margin: 0; }
+                 iframe.constrained { max-width: 80px; max-height: 40px; }
+               </style></head><body>
+                 <iframe id="limited" class="constrained"></iframe>
+                 <iframe id="hinted" width="220" height="70"></iframe>
+               </body></html>"#,
+        );
+        runtime.set_viewport(800.0, 600.0);
+
+        assert_eq!(
+            eval_str(
+                &mut runtime,
+                r#"(() => {
+                    const limited = document.getElementById('limited');
+                    const hinted = document.getElementById('hinted');
+                    const child = limited.contentDocument.createElement('div');
+                    child.style.cssText = 'width:100vw;height:100vh';
+                    limited.contentDocument.body.appendChild(child);
+                    const childStyle = getComputedStyle(child);
+                    const size = frame => {
+                        const style = getComputedStyle(frame);
+                        const rect = frame.getBoundingClientRect();
+                        return [style.width, style.height, rect.width, rect.height];
+                    };
+                    return JSON.stringify([size(limited), childStyle.width,
+                        childStyle.height, size(hinted)]);
+                })()"#
+            ),
+            r#"[["80px","40px",84,44],"80px","40px",["220px","70px",224,74]]"#
         );
     }
 
@@ -49229,7 +49272,7 @@ b</textarea></form>"#,
     #[test]
     fn set_viewport_invalidates_existing_iframe_resolver() {
         let mut runtime = runtime_from_html(
-            r#"<html><style>body { margin: 0; }</style><body><iframe id="f"></iframe></body></html>"#,
+            r#"<html><style>body { margin: 0; } iframe { width: 50vw; height: 50vh; }</style><body><iframe id="f"></iframe></body></html>"#,
         );
         runtime.set_viewport(800.0, 600.0);
         runtime
@@ -49243,14 +49286,14 @@ b</textarea></form>"#,
             .unwrap();
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(t, '').width"),
-            "400px"
+            "200px"
         );
 
         // Widen the viewport: the cached sub-document resolver must rebuild.
         runtime.set_viewport(1000.0, 600.0);
         assert_eq!(
             eval_str(&mut runtime, "getComputedStyle(t, '').width"),
-            "500px",
+            "250px",
             "a viewport change must invalidate the cached sub-document resolver"
         );
     }

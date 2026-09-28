@@ -9105,6 +9105,17 @@ fn apply_ua_defaults(
     }
 
     match tag.as_str() {
+        "iframe" => {
+            // HTML's rendering defaults give the replaced element a 2px inset border.
+            for side in ["top", "right", "bottom", "left"] {
+                properties
+                    .entry(format!("border-{side}-style"))
+                    .or_insert(ComputedValue::Keyword("inset".to_string()));
+                properties
+                    .entry(format!("border-{side}-width"))
+                    .or_insert(ComputedValue::Px(2.0));
+            }
+        }
         "video" | "canvas" | "picture" => {
             properties
                 .entry("display".to_string())

@@ -130,6 +130,38 @@ fn find_layout_box<'a>(layout: &'a LayoutBox, node: &NodeHandle) -> Option<&'a L
         .find_map(|child| find_layout_box(child, node))
 }
 
+#[test]
+fn default_iframe_is_an_inline_replaced_box_with_a_300_by_150_content_area() {
+    let body = NodeHandle::element("body");
+    let lead = NodeHandle::element("span");
+    lead.set_attribute("style", "display:inline-block;width:20px;height:10px");
+    let iframe = NodeHandle::element("iframe");
+    body.append_child(lead.clone());
+    body.append_child(iframe.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    let root = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
+    let lead_box = find_layout_box(&root, &lead).unwrap();
+    let iframe_box = find_layout_box(&root, &iframe).unwrap();
+    assert_eq!(iframe_box.dimensions.content.width, 300.0);
+    assert_eq!(iframe_box.dimensions.content.height, 150.0);
+    let border_box = iframe_box.dimensions.border_box();
+    assert_eq!(border_box.width, 304.0);
+    assert_eq!(border_box.height, 154.0);
+    let lead_border_box = lead_box.dimensions.border_box();
+    assert_eq!(border_box.x, lead_border_box.x + lead_border_box.width);
+}
+
 fn find_pseudo_box<'a>(
     layout: &'a LayoutBox,
     node: &NodeHandle,

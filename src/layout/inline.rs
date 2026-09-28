@@ -931,7 +931,6 @@ fn collect_element_inline_segments(
     {
         let available_width = context.available_width.max(0.0);
         // An inline iframe still needs a layout box for its child viewport.
-        // Keep its existing stretch width until #926 supplies intrinsic sizing.
         let containing_width =
             if inline_frame || super::resolved_length(&style, "width", available_width).is_some() {
                 available_width
