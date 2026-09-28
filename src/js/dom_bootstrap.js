@@ -1040,7 +1040,7 @@
   // Stamp `node` and its shadow-including subtree with `doc`. Native ids keep
   // adoption independent of page changes to wrapper prototypes, and following
   // shadow roots ensures their detached ownerDocument remains the adopted one.
-  function stampOwnerDoc(node, doc) {
+  function stampOwnerDoc(node, doc, fresh = false) {
     if (!node) return;
     const attributeState = safeWeakMapGet(attributeNodeStates, node);
     if (attributeState) {
@@ -1052,7 +1052,7 @@
     const docId = internalNodeId(doc);
     if (docId !== undefined) setOwnerDocumentId(ownerDocumentIds, node, docId);
     if (__omoikane_node_type(id) === 1) {
-      const attributeNamespaces = safeWeakMapGet(attributeNodeCache, node);
+      const attributeNamespaces = fresh ? null : safeWeakMapGet(attributeNodeCache, node);
       if (attributeNamespaces) {
         safeApply(mapForEachIntrinsic, attributeNamespaces, [attributes => {
           safeApply(mapForEachIntrinsic, attributes, [attribute => {
@@ -1067,11 +1067,16 @@
           templateContentsOwnerDocument(doc)
         );
       }
-      const shadowId = __omoikane_shadow_root(id);
-      if (shadowId !== null && shadowId !== undefined) {
-        stampOwnerDoc(wrapNode(shadowId), doc);
+      if (!fresh) {
+        const shadowId = __omoikane_shadow_root(id);
+        if (shadowId !== null && shadowId !== undefined) {
+          stampOwnerDoc(wrapNode(shadowId), doc);
+        }
       }
     }
+    // Nodes returned by the Document.create* methods have no descendants yet.
+    // Template contents are handled above; adoption still uses the full walk.
+    if (fresh) return;
     const children = internalChildNodes(node);
     for (let i = 0; i < children.length; i++) {
       stampOwnerDoc(children[i], doc);
@@ -2119,7 +2124,7 @@
     const key = traversalDocumentKey(doc);
     let state = traversalByDocument.get(key);
     if (!state) {
-      state = { iterators: [], ranges: [] };
+      state = { iterators: [], ranges: [], documentBoundaryRangesOnly: undefined };
       traversalByDocument.set(key, state);
     }
     return state;
@@ -2143,7 +2148,9 @@
     // Realms and later removals conservatively retain the existing path once
     // any traversal object has existed.
     browsingInput.removalMayAffectTraversal = true;
-    const entries = traversalState(doc)[kind];
+    const state = traversalState(doc);
+    if (kind === "ranges") state.documentBoundaryRangesOnly = undefined;
+    const entries = state[kind];
     // WeakRef targets stay alive through the current ECMAScript job. Sweeping
     // every insertion would therefore be quadratic in createRange-heavy code;
     // periodic registration sweeps plus every mutation/detach keep it bounded
@@ -2157,7 +2164,9 @@
   }
 
   function unregisterTraversal(doc, kind, value) {
-    const entries = traversalState(doc)[kind];
+    const state = traversalState(doc);
+    if (kind === "ranges") state.documentBoundaryRangesOnly = undefined;
+    const entries = state[kind];
     if (!hasWeakTraversalRegistry) {
       const index = entries.indexOf(value);
       if (index !== -1) entries.splice(index, 1);
@@ -2236,10 +2245,25 @@
     const state = traversalByDocument.get(traversalDocumentKey(doc));
     if (!state) return;
     for (const iterator of traversalEntries(state.iterators)) iterator.__preRemove(removed);
+    if (parent !== doc) {
+      if (state.documentBoundaryRangesOnly === undefined) {
+        state.documentBoundaryRangesOnly = traversalEntries(state.ranges).every(range =>
+          range.__startContainer === doc && range.__endContainer === doc);
+      }
+      if (state.documentBoundaryRangesOnly) return;
+    }
     const ranges = traversalEntries(state.ranges);
     if (ranges.length) {
-      const index = indexOfNode(removed);
-      for (const range of ranges) range.__preRemove(parent, removed, index);
+      let index;
+      for (const range of ranges) {
+        // A boundary on the Document cannot move when one of its descendants
+        // changes. Keep the direct-child case: removing it shifts offsets on
+        // the Document itself.
+        if (parent !== doc &&
+            range.__startContainer === doc && range.__endContainer === doc) continue;
+        if (index === undefined) index = indexOfNode(removed);
+        range.__preRemove(parent, removed, index);
+      }
     }
   }
 
@@ -6111,6 +6135,8 @@
   }
 
   function selectionRangeMutated(range) {
+    const state = traversalByDocument.get(traversalDocumentKey(range.__doc));
+    if (state) state.documentBoundaryRangesOnly = undefined;
     if (!range.__selectionDocument) return;
     const selection = selectionByDocument.get(range.__selectionDocument);
     if (selection && selection.__range === range) queueSelectionChange(selection.__doc);
@@ -6402,7 +6428,7 @@
     // detached (before it is inserted into any tree). Once the node is inserted,
     // its tree root wins (see the ownerDocument getter), matching DOM adoption.
     __own(node) {
-      if (node) stampOwnerDoc(node, this);
+      if (node) stampOwnerDoc(node, this, true);
       return node;
     }
 
@@ -6433,7 +6459,7 @@
         ? __omoikane_create_element(name)
         : nativeCreateElementNS(null, name);
       const element = this.__own(wrapNode(nativeId));
-      if (element.localName.toLowerCase() === "script") {
+      if (name.toLowerCase() === "script") {
         __omoikane_mark_inserted_script(element.__id);
       }
       if (browsingInput.hasCustomElementDefinitions) {
@@ -8410,7 +8436,9 @@
   }
   function retireIframeWindowProxies(root) {
     if (!root || !browsingInput.removalMayAffectIframeWindowProxy) return;
-    if (root.nodeType === 1 &&
+    const rootType = root.nodeType;
+    if (rootType !== 1 && rootType !== 9 && rootType !== 11) return;
+    if (rootType === 1 &&
         asciiLowercase(internalNodeLocalName(root) || "") === "iframe") {
       retireIframeWindowProxy(root);
     }
@@ -8425,7 +8453,9 @@
   // does not run under event dispatch.
   function markIframeDocumentsHidden(root, affectedDocuments) {
     if (!root) return;
-    if (root.nodeType === 1 &&
+    const rootType = root.nodeType;
+    if (rootType !== 1 && rootType !== 9 && rootType !== 11) return;
+    if (rootType === 1 &&
         asciiLowercase(internalNodeLocalName(root) || "") === "iframe") {
       const documentId = nativeExistingIframeDocument(root.__id);
       if (documentId !== null && documentId !== undefined &&
