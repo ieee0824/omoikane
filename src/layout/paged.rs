@@ -10,6 +10,7 @@ use crate::css::{
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 
+use super::table::{TableDisplay, html_table_span_attribute, table_display_for_node};
 use super::{FontMetrics, LayoutBox, PositionScheme, Rect, layout_tree, measure_text_width};
 
 /// One page of a paged layout and its slice of the document flow.
@@ -1278,7 +1279,7 @@ fn can_fragment_descendants(layout: &LayoutBox, resolver: &mut StyleResolver) ->
         Some(ComputedValue::Keyword(value))
             if matches!(
                 value.to_ascii_lowercase().as_str(),
-                "table" | "inline-table" | "table-row" | "table-cell"
+                "inline-table" | "table-row" | "table-cell"
                     | "flex" | "inline-flex" | "grid" | "inline-grid"
             )
     );
@@ -1349,6 +1350,13 @@ fn page_break_candidates(
         breaks: &mut PageBreakCandidates,
         include_nested_children: bool,
     ) {
+        if parent.node.tag_name().is_some() {
+            let style = resolver.computed_style(&parent.node);
+            if table_display_for_node(&parent.node, &style) == Some(TableDisplay::Table) {
+                collect_table_row_breaks(parent, resolver, breaks);
+                return;
+            }
+        }
         let mut line_ends = parent
             .lines
             .iter()
@@ -1423,6 +1431,52 @@ fn page_break_candidates(
         (left.y - right.y).abs() < 0.01 && left.line_group == right.line_group
     });
     breaks
+}
+
+fn collect_table_row_breaks(
+    table: &LayoutBox,
+    resolver: &mut StyleResolver,
+    breaks: &mut PageBreakCandidates,
+) {
+    let mut rows = Vec::new();
+    for child in table
+        .children
+        .iter()
+        .filter(|child| is_in_flow_principal(child))
+    {
+        let style = resolver.computed_style(&child.node);
+        match table_display_for_node(&child.node, &style) {
+            Some(TableDisplay::Row) => rows.push(child),
+            Some(TableDisplay::RowGroup) => {
+                rows.extend(child.children.iter().filter(|row| {
+                    if !is_in_flow_principal(row) {
+                        return false;
+                    }
+                    let style = resolver.computed_style(&row.node);
+                    table_display_for_node(&row.node, &style) == Some(TableDisplay::Row)
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    let mut span_end = 0;
+    for (index, row) in rows.iter().enumerate() {
+        for cell in &row.children {
+            let span = html_table_span_attribute(&cell.node, "rowspan").unwrap_or(1);
+            span_end = span_end.max(index.saturating_add(span).min(rows.len()));
+        }
+        if span_end <= index + 1 {
+            let boundary = row.dimensions.border_box().y + row.dimensions.border_box().height;
+            if boundary.is_finite() {
+                breaks.points.push(PageBreakCandidate {
+                    y: boundary,
+                    line_group: None,
+                    line_index: 0,
+                });
+            }
+        }
+    }
 }
 
 fn flow_sections(
