@@ -2,9 +2,15 @@ use omoikane::css::{matches_selector, parse_selector_list};
 use omoikane::dom::{Node, NodeType};
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::thread;
+use std::io::Write;
+
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 
 const HTML: &str = r#"<!doctype html><html><head>
 <style>:target { color: rgb(13, 42, 71) }</style></head><body>
@@ -194,13 +200,12 @@ fn cross_origin_iframe_fragment_navigation_keeps_document_inaccessible() {
 
 #[test]
 fn iframe_initial_url_fragment_selects_its_own_target() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 1024];
-            stream.read(&mut request).unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let body = "<style>:target { color: rgb(13, 42, 71) }</style><div id='section'></div>";
             write!(
                 stream,
@@ -231,7 +236,7 @@ fn iframe_initial_url_fragment_selects_its_own_target() {
             })()"#,
         )
         .unwrap();
-    server.join().unwrap();
+    server.join();
     let report: serde_json::Value =
         serde_json::from_str(&result.as_string().unwrap().to_std_string_escaped()).unwrap();
     assert_eq!(
