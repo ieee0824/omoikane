@@ -1,7 +1,8 @@
 //! Page contexts and source fragments for print layout.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
+use crate::css::style::ContainerContext;
 use crate::css::style::counter_pairs;
 use crate::css::{
     ComputedValue, MediaType, PageBoxGeometry, PageMarginBox, PageMarginContent,
@@ -24,6 +25,8 @@ pub struct PagedPage {
     pub sheet: Rect,
     /// Printable content rectangle in page-local coordinates.
     pub content: Rect,
+    /// Index of the document layout at this page's printable width.
+    layout_index: usize,
     /// Content fragments placed on this page, in document order.
     pub fragments: Vec<PageContentFragment>,
     /// Position where layout resumes on the next page, if any.
@@ -212,10 +215,34 @@ fn page_content_fragments(
 /// Print layout with page-specific contexts and a reusable document box tree.
 #[derive(Debug, Clone)]
 pub struct PagedLayout {
-    /// Laid-out document flow.
+    /// Continuous flow at the first page's content width, used for pagination.
     pub layout: LayoutBox,
     /// Output pages in document order.
     pub pages: Vec<PagedPage>,
+    /// Additional document layouts for pages with a different content width.
+    alternate_layouts: Vec<LayoutBox>,
+    /// Query-container dimensions captured alongside each document layout.
+    container_contexts: Vec<HashMap<usize, ContainerContext>>,
+}
+
+impl PagedLayout {
+    /// Returns the document layout calculated at this page's content width.
+    pub(crate) fn layout_for_page(&self, page: &PagedPage) -> &LayoutBox {
+        if page.layout_index == 0 {
+            &self.layout
+        } else {
+            &self.alternate_layouts[page.layout_index - 1]
+        }
+    }
+
+    /// Restores query-container styles for the selected page layout before paint.
+    pub(crate) fn restore_style_context_for_page(
+        &self,
+        page: &PagedPage,
+        resolver: &mut StyleResolver,
+    ) {
+        resolver.set_container_contexts(self.container_contexts[page.layout_index].clone());
+    }
 }
 
 #[derive(Debug)]
@@ -227,10 +254,10 @@ struct FlowSection {
 
 /// Lays out a document for print and builds page contexts from `@page` rules.
 ///
-/// The current flow is laid out at the first page's content width. Subsequent
-/// page contexts can vary the sheet and margins; their source slices are
-/// positioned in those page areas. Page-local line reflow is handled by the
-/// fragmentation work tracked separately from this entry point.
+/// Pagination coordinates come from the first page's flow. Each distinct
+/// content width also has a cached document layout so block sizes and child
+/// placement match the destination page. Re-splitting lines at a width change
+/// is handled by the next fragmentation stage.
 pub fn layout_paged_tree(
     document: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -264,6 +291,9 @@ pub fn layout_paged_tree(
     let first_content = content_rect(first_geometry);
     let layout = layout_tree(document, resolver, first_content)?;
     let sections = flow_sections(&layout, resolver, first_content.y);
+    let mut alternate_layouts = Vec::new();
+    let mut container_contexts = vec![resolver.container_contexts_snapshot()];
+    let mut layout_by_width = HashMap::from([(first_content.width.to_bits(), 0)]);
 
     let mut pages = Vec::new();
     for (section_index, section) in sections.iter().enumerate() {
@@ -281,6 +311,23 @@ pub fn layout_paged_tree(
             let style = resolver.resolved_page_style(&selector);
             let geometry = style.geometry((default_sheet.width, default_sheet.height), 0.0);
             let content = content_rect(geometry);
+            let layout_index = if let Some(&index) = layout_by_width.get(&content.width.to_bits()) {
+                index
+            } else {
+                let page_layout = layout_tree(
+                    document,
+                    resolver,
+                    Rect {
+                        width: content.width,
+                        ..first_content
+                    },
+                )?;
+                alternate_layouts.push(page_layout);
+                container_contexts.push(resolver.container_contexts_snapshot());
+                let index = alternate_layouts.len();
+                layout_by_width.insert(content.width.to_bits(), index);
+                index
+            };
             let margin_box_rects = corner_margin_box_rects(&style, geometry);
             let remaining = section.end - cursor.flow_y;
             if !remaining.is_finite() || remaining < 0.0 {
@@ -300,7 +347,7 @@ pub fn layout_paged_tree(
             let source = Rect {
                 x: first_content.x,
                 y: cursor.flow_y,
-                width: first_content.width,
+                width: content.width,
                 height: (end_y - cursor.flow_y).max(0.0),
             };
             let continuation = if end_y < section.end {
@@ -324,6 +371,7 @@ pub fn layout_paged_tree(
                     height: geometry.height,
                 },
                 content,
+                layout_index,
                 fragments: vec![PageContentFragment {
                     start: cursor,
                     end,
@@ -382,7 +430,12 @@ pub fn layout_paged_tree(
         };
         page.margin_box_rects.extend(edge_margin_box_rects(page));
     }
-    Some(PagedLayout { layout, pages })
+    Some(PagedLayout {
+        layout,
+        pages,
+        alternate_layouts,
+        container_contexts,
+    })
 }
 
 fn page_selector(index: usize, name: Option<String>, first_side: PageSide) -> PageSelectorContext {
