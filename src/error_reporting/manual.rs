@@ -1,12 +1,8 @@
 //! Explicit, local preview and submission boundary for sanitized reports.
 
-use std::{
-    cell::Cell,
-    fmt,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{cell::Cell, fmt, time::Duration};
 
-use super::{EventStore, ReporterConfig, Repository, StoreError, StoredReport};
+use super::{EventStore, ReporterConfig, Repository, StoreError, StoredReport, now_ms};
 
 const DELIVERY_LEASE: Duration = Duration::from_secs(30 * 60);
 
@@ -340,13 +336,6 @@ impl<'a> ManualSubmission<'a> {
 
 fn duration_ms(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-}
-
-fn now_ms() -> i64 {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

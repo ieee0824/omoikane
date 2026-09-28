@@ -28,6 +28,14 @@ pub use reporter::{ErrorReporter, ReporterError, ReporterStats};
 pub use store::{EventStore, RetentionPolicy, StoreError, StoredReport, SubmissionState};
 
 use serde::Serialize;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn now_ms() -> i64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+}
 
 /// Broad subsystem responsible for an error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
