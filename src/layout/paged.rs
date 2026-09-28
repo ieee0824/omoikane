@@ -364,6 +364,8 @@ pub fn layout_paged_tree(
                     height: geometry.height,
                 },
                 content,
+                // The inserted page contains no document-flow fragments.
+                layout_index: 0,
                 fragments: Vec::new(),
                 continuation: Some(cursor),
                 source,
