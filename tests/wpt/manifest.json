@@ -66,6 +66,7 @@
     { "path": "css/css-nesting/parsing.html" },
     { "path": "css/css-nesting/serialize-group-rules-with-decls.html" },
     { "path": "css/css-nesting/set-selector-text.html" },
+    { "path": "css/css-nesting/top-level-is-scope.html" },
     { "path": "css/css-nesting/top-level-parent-pseudo-specificity.html" },
     { "path": "css/css-overscroll-behavior/parsing/overscroll-behavior-valid.html" },
     { "path": "css/css-overscroll-behavior/parsing/overscroll-behavior-invalid.html" },

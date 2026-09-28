@@ -3596,9 +3596,19 @@
     }
 
     closest(selector) {
+      const requested = String(selector);
       let current = this;
       while (current) {
-        if (current.nodeType === 1 && current.matches(selector)) return current;
+        if (current.nodeType === 1) {
+          try {
+            if (__omoikane_matches_selector(current.__id, requested, this.__id)) return current;
+          } catch (error) {
+            if (error && error.name === "SyntaxError") {
+              throw new DOMException(error.message, "SyntaxError");
+            }
+            throw error;
+          }
+        }
         current = current.parentNode;
       }
       return null;
