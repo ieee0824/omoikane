@@ -414,11 +414,28 @@ impl Parser {
                         if name.eq_ignore_ascii_case("scope") {
                             self.scope_depth += 1;
                         }
-                        let scope_context = nesting.map(|context| NestingContext {
-                            selectors: context.selectors.clone(),
-                            selector_tokens: context.selector_tokens.clone(),
-                            in_scope: context.in_scope || name.eq_ignore_ascii_case("scope"),
-                        });
+                        let scope_context = nesting
+                            .map(|context| NestingContext {
+                                selectors: context.selectors.clone(),
+                                selector_tokens: context.selector_tokens.clone(),
+                                in_scope: context.in_scope || name.eq_ignore_ascii_case("scope"),
+                            })
+                            .or_else(|| {
+                                name.eq_ignore_ascii_case("scope").then(|| NestingContext {
+                                    selectors: vec![Selector {
+                                        parts: vec![implicit_scope_anchor()],
+                                    }],
+                                    selector_tokens: vec![
+                                        CssToken::Colon,
+                                        CssToken::Ident("where".to_string()),
+                                        CssToken::ParenOpen,
+                                        CssToken::Colon,
+                                        CssToken::Ident("scope".to_string()),
+                                        CssToken::ParenClose,
+                                    ],
+                                    in_scope: true,
+                                })
+                            });
                         let block = self.parse_rule_block(scope_context.as_ref());
                         if name.eq_ignore_ascii_case("scope") {
                             self.scope_depth -= 1;

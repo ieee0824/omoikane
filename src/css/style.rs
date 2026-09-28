@@ -900,7 +900,7 @@ fn valid_registered_literal(value: &str) -> bool {
         && !value.contains([',', '<', '>', '+', '#'])
         && !matches!(
             value.to_ascii_lowercase().as_str(),
-            "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default"
+            "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "revert-rule" | "default"
         )
 }
 
@@ -2362,6 +2362,7 @@ impl StyleResolver {
                     .as_ref()
                     .map(NodeHandle::identity),
             };
+            let rule_order = source_order;
             for declaration in super::parse_style_attribute(&inline_style) {
                 candidates.push(Candidate {
                     name: canonical_property_name(&declaration.name).to_string(),
@@ -2377,6 +2378,7 @@ impl StyleResolver {
                     },
                     scope_proximity: None,
                     source_order,
+                    rule_order,
                     encapsulation_order: tree_scope_order(&self.stylesheet_scopes, node),
                     layer_context,
                     layer_path: None,
@@ -3363,7 +3365,7 @@ fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
         // not be discarded by the enumerated-value validation.
         let is_css_wide = matches!(
             lower.as_str(),
-            "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+            "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "revert-rule"
         );
         if !is_css_wide && !valid.iter().any(|candidate| *candidate == lower) {
             return true;
@@ -4709,7 +4711,7 @@ fn is_position_offset_property(name: &str) -> bool {
 fn is_css_wide_keyword(lowercased: &str) -> bool {
     matches!(
         lowercased,
-        "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+        "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "revert-rule"
     )
 }
 
@@ -4860,6 +4862,8 @@ struct Candidate {
     /// Ancestor hops from the styled element to the applicable scoping root.
     scope_proximity: Option<usize>,
     source_order: usize,
+    /// First declaration position of the originating style rule.
+    rule_order: usize,
     /// Position of this declaration's tree scope in tree-of-trees order.
     /// Encapsulation order reverses for important declarations.
     encapsulation_order: usize,
@@ -5499,6 +5503,7 @@ fn collect_rule_candidates(
     for rule in rules {
         match rule {
             Rule::Style(style_rule) => {
+                let rule_order = *source_order;
                 let parent_might_match =
                     element_keys.is_none_or(|keys| style_rule_might_match(style_rule, keys));
                 let mut matching = None;
@@ -5573,6 +5578,7 @@ fn collect_rule_candidates(
                             specificity,
                             scope_proximity: active_scope.map(|_| proximity),
                             source_order: *source_order,
+                            rule_order,
                             encapsulation_order,
                             layer_context,
                             layer_path: active_layer.cloned(),
@@ -6793,6 +6799,7 @@ fn remove_reverted_candidates(
     struct PropertyRevertState {
         reverted_layers: HashSet<RevertedLayer>,
         reverted_origins: HashSet<Origin>,
+        reverted_rules: HashSet<(Origin, usize)>,
         winner_found: bool,
     }
 
@@ -6808,11 +6815,17 @@ fn remove_reverted_candidates(
         if state.reverted_origins.contains(&origin) {
             continue;
         }
+        let rule = (origin, candidate.rule_order);
+        if state.reverted_rules.contains(&rule) {
+            continue;
+        }
         let layer = RevertedLayer::from(candidate);
         if state.reverted_layers.contains(&layer) {
             continue;
         }
-        if is_revert_layer_value(&candidate.value) {
+        if is_revert_rule_value(&candidate.value) {
+            state.reverted_rules.insert(rule);
+        } else if is_revert_layer_value(&candidate.value) {
             state.reverted_layers.insert(layer);
         } else if is_revert_value(&candidate.value) {
             state.reverted_origins.insert(origin);
@@ -6829,6 +6842,9 @@ fn remove_reverted_candidates(
                     .reverted_layers
                     .contains(&RevertedLayer::from(candidate))
                     || state.reverted_origins.contains(&candidate.origin)
+                    || state
+                        .reverted_rules
+                        .contains(&(candidate.origin, candidate.rule_order))
             })
     });
 }
@@ -6867,6 +6883,10 @@ fn candidate_can_win_before_revert(
 
 fn is_revert_layer_value(value: &Value) -> bool {
     matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("revert-layer"))
+}
+
+fn is_revert_rule_value(value: &Value) -> bool {
+    matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("revert-rule"))
 }
 
 fn is_revert_value(value: &Value) -> bool {
@@ -9767,6 +9787,7 @@ fn collect_builtin_ua_candidates(
         origin: Origin::UserAgent,
         scope_root: None,
     };
+    let rule_order = *source_order;
     for side in ["top", "right", "bottom", "left"] {
         candidates.push(Candidate {
             name: format!("margin-{side}"),
@@ -9782,6 +9803,7 @@ fn collect_builtin_ua_candidates(
             },
             scope_proximity: None,
             source_order: *source_order,
+            rule_order,
             encapsulation_order: 0,
             layer_context,
             layer_path: None,
@@ -10087,7 +10109,7 @@ fn resolve_initial_css_wide_keywords(properties: &mut BTreeMap<String, ComputedV
                 ComputedValue::Keyword(keyword)
                     if matches!(
                         keyword.to_ascii_lowercase().as_str(),
-                        "initial" | "unset" | "revert" | "revert-layer"
+                        "initial" | "unset" | "revert" | "revert-layer" | "revert-rule"
                     )
             )
             .then(|| name.clone())
