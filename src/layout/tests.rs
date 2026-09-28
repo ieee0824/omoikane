@@ -11031,6 +11031,60 @@ fn size_container_query_uses_named_ancestor_content_box() {
 }
 
 #[test]
+fn container_query_em_uses_each_containers_computed_font_size() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    document.append_child(body.clone());
+    let mut items = Vec::new();
+    for size in [20, 40] {
+        let container = NodeHandle::element("section");
+        container.set_attribute("style", &format!("font-size:{size}px"));
+        let item = NodeHandle::element("article");
+        container.append_child(item.clone());
+        body.append_child(container);
+        items.push(item);
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "section { width: 300px; container-type: inline-size; } \
+             article { width: 10px; } \
+             @container (width >= 10em) { article { width: 100px; } }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        find_layout_box(&layout, &items[0])
+            .unwrap()
+            .dimensions
+            .content
+            .width,
+        100.0
+    );
+    assert_eq!(
+        find_layout_box(&layout, &items[1])
+            .unwrap()
+            .dimensions
+            .content
+            .width,
+        10.0
+    );
+}
+
+#[test]
 fn container_query_does_not_query_the_styled_element_itself() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

@@ -1566,6 +1566,7 @@ fn collect_container_contexts(
                 height: layout.dimensions.content.height,
                 container_type,
                 names,
+                units: resolver.container_unit_context(&style),
             },
         );
     }

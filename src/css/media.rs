@@ -381,8 +381,8 @@ fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
     }
 }
 
-/// Parses a CSS length value like `768px` or `48em` and converts it to pixels.
-/// Supports `px`, `em`, and `rem` (at 16px per em/rem); other units return `None`.
+/// Parses a media-query length using the initial font and line-height metrics.
+/// Media queries are outside any element, so document font styles do not apply.
 fn parse_length_to_px(s: &str) -> Option<f32> {
     let lower = s.trim().to_ascii_lowercase();
     if let Some(num_str) = lower.strip_suffix("px") {
@@ -394,8 +394,51 @@ fn parse_length_to_px(s: &str) -> Option<f32> {
     if let Some(num_str) = lower.strip_suffix("em") {
         return num_str.trim().parse::<f32>().ok().map(|n| n * 16.0);
     }
+    for unit in ["rlh", "lh", "cap", "ex", "ch", "ic"] {
+        if let Some(number) = lower.strip_suffix(unit) {
+            let number = number.trim().parse::<f32>().ok()?;
+            let metrics = crate::font::load_default_text_fonts_shared()
+                .first()
+                .map(|font| font.css_relative_metrics(16.0, false, false))
+                .unwrap_or_else(|| crate::font::CssRelativeFontMetrics::fallback(16.0, false));
+            let basis = match unit {
+                "ex" => metrics.ex,
+                "ch" => metrics.ch,
+                "cap" => metrics.cap,
+                "ic" => metrics.ic,
+                "lh" | "rlh" => 19.2,
+                _ => unreachable!(),
+            };
+            return Some(number * basis);
+        }
+    }
     if lower == "0" {
         return Some(0.0);
     }
     None
+}
+
+#[cfg(test)]
+mod font_relative_tests {
+    use super::*;
+
+    #[test]
+    fn media_query_font_units_use_initial_not_document_metrics() {
+        let metrics = crate::font::load_default_text_fonts_shared()
+            .first()
+            .map(|font| font.css_relative_metrics(16.0, false, false))
+            .unwrap_or_else(|| crate::font::CssRelativeFontMetrics::fallback(16.0, false));
+        for (unit, basis) in [
+            ("ex", metrics.ex),
+            ("ch", metrics.ch),
+            ("cap", metrics.cap),
+            ("ic", metrics.ic),
+            ("lh", 19.2),
+            ("rlh", 19.2),
+        ] {
+            let query = parse_media_query_list(&format!("(min-width: 2{unit})")).unwrap();
+            assert!(evaluate_media_query(&query[0], basis * 2.0, 100.0, false));
+            assert!(!evaluate_media_query(&query[0], basis, 100.0, false));
+        }
+    }
 }

@@ -18,7 +18,7 @@ mod tokenizer;
 mod transform;
 mod transition;
 
-pub(crate) use container::{ContainerQuery, parse_container_query};
+pub(crate) use container::{ContainerQuery, ContainerUnitContext, parse_container_query};
 pub(crate) use filter::{
     FilterFunction, interpolate_filter_lists, normalize_filter_list, parse_filter_list,
 };
