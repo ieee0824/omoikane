@@ -1,4 +1,5 @@
 //! Core library for the Omoikane headless browser engine.
+//! Cache probe: verify that a host-only source change reuses Boa artifacts.
 
 // Layout and paint pipelines intentionally pass explicit rendering context.
 #![allow(clippy::too_many_arguments)]
