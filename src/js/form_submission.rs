@@ -226,12 +226,12 @@ impl HostState {
     pub(super) fn load_iframe_form_submission(
         &mut self,
         submission: &Submission,
-    ) -> Result<(NodeHandle, Vec<String>, Option<String>), String> {
+    ) -> Result<(NodeHandle, Vec<String>, Option<String>), JsHostError> {
         if submission.method.eq_ignore_ascii_case("GET") {
             let site = self.location_href.parse::<crate::http::Url>().ok();
             return Ok(self.load_iframe_document(&submission.url, site.as_ref()));
         }
-        let url: crate::http::Url = submission.url.parse().map_err(|error| format!("{error}"))?;
+        let url: crate::http::Url = submission.url.parse()?;
         let mut request = crate::http::HttpRequest::new(crate::http::Method::Post, url);
         if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
             request.set_cookie_context(site, false);
@@ -242,10 +242,7 @@ impl HostState {
         if let Some(content_type) = &submission.content_type {
             request.set_header("Content-Type", content_type);
         }
-        let response = self
-            .http_client
-            .send(request)
-            .map_err(|error| error.to_string())?;
+        let response = self.http_client.send(request)?;
         let mime = response.header("Content-Type").unwrap_or("");
         let document = if is_html_mime_type(mime) {
             crate::html::TreeBuilder::parse(&crate::html::decode_html_response(&response))
@@ -408,7 +405,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 state.pending_resource_loads.remove(&id);
                 state
                     .iframe_document_with_submission(&frame, Some(&request))
-                    .map_err(|message| JsNativeError::typ().with_message(message))?;
+                    .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
                 state.schedule_connected_resource_loads(&frame, true);
                 Ok(JsValue::undefined())
             })

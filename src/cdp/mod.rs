@@ -1000,9 +1000,9 @@ impl CdpSession {
         let result = self
             .runtime
             .find_in_page(action, &query)
-            .map_err(|message| JsonRpcError {
+            .map_err(|error| JsonRpcError {
                 code: -32000,
-                message,
+                message: error.to_string(),
             })?;
         serde_json::to_value(result).map_err(|error| JsonRpcError {
             code: -32000,

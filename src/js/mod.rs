@@ -57,6 +57,9 @@ mod compression_stream_tests;
 #[cfg(test)]
 mod computed_pseudo_tests;
 mod document_write;
+mod errors;
+use errors::JsHostError;
+pub use errors::{FindInPageError, JsEvaluationError, NotificationPermissionError};
 #[cfg(test)]
 mod document_write_tests;
 mod font_descriptors;
@@ -2168,11 +2171,11 @@ fn sanitize_viewport_dimension(dim: f32) -> f32 {
     }
 }
 
-fn take_monotonic_id(next: &mut u64, label: &str) -> Result<u64, String> {
+fn take_monotonic_id(next: &mut u64, label: &'static str) -> Result<u64, JsHostError> {
     let id = *next;
     let following = id
         .checked_add(1)
-        .ok_or_else(|| format!("{label} id space exhausted"))?;
+        .ok_or(JsHostError::IdSpaceExhausted(label))?;
     *next = following;
     Ok(id)
 }
@@ -2659,7 +2662,7 @@ impl HostState {
     /// skeleton (`<html><head></head><body></body></html>`). Other resources are
     /// parsed as HTML or XML (including SVG) according to their content type;
     /// unsupported content types and load failures yield the empty skeleton.
-    fn iframe_content_document(&mut self, iframe: &NodeHandle) -> Result<NodeHandle, String> {
+    fn iframe_content_document(&mut self, iframe: &NodeHandle) -> Result<NodeHandle, JsHostError> {
         self.iframe_document_with_submission(iframe, None)
     }
 
@@ -2667,9 +2670,9 @@ impl HostState {
         &mut self,
         iframe: &NodeHandle,
         submission: Option<&form_submission::Submission>,
-    ) -> Result<NodeHandle, String> {
+    ) -> Result<NodeHandle, JsHostError> {
         if !self.node_is_in_active_document(iframe) {
-            return Err("iframe owner document is no longer active".into());
+            return Err(JsHostError::InactiveIframeOwner);
         }
         let attributes = iframe.attributes().unwrap_or_default();
         let is_iframe = iframe
@@ -2901,7 +2904,7 @@ impl HostState {
         Ok(document)
     }
 
-    fn new_opaque_security_origin(&mut self) -> Result<DocumentSecurityOrigin, String> {
+    fn new_opaque_security_origin(&mut self) -> Result<DocumentSecurityOrigin, JsHostError> {
         take_monotonic_id(&mut self.next_opaque_origin_id, "opaque origin")
             .map(DocumentSecurityOrigin::Opaque)
     }
@@ -2912,7 +2915,7 @@ impl HostState {
         &mut self,
         opener_document_id: usize,
         name: &str,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, JsHostError> {
         if !name.is_empty()
             && name != "_blank"
             && let Some((id, _)) = self
@@ -2986,12 +2989,16 @@ impl HostState {
 
     /// Commits a new Document while preserving the popup's browsing-context
     /// identity. The old Realm stays rooted until the replacement is ready.
-    fn navigate_auxiliary_context(&mut self, id: u64, requested: &str) -> Result<usize, String> {
+    fn navigate_auxiliary_context(
+        &mut self,
+        id: u64,
+        requested: &str,
+    ) -> Result<usize, JsHostError> {
         let (opener_document_id, current_document_id) = {
             let entry = self
                 .auxiliary_contexts
                 .get(&id)
-                .ok_or_else(|| "auxiliary context is closed".to_owned())?;
+                .ok_or(JsHostError::AuxiliaryContextClosed)?;
             (entry.opener_document_id, entry.document.identity())
         };
         let base = self
@@ -3040,7 +3047,7 @@ impl HostState {
         let entry = self
             .auxiliary_contexts
             .get_mut(&id)
-            .ok_or_else(|| "auxiliary context was closed".to_owned())?;
+            .ok_or(JsHostError::AuxiliaryContextClosedDuringNavigation)?;
         let old_document = std::mem::replace(&mut entry.document, document);
         let _old_realm = entry.realm.take();
         entry.document_url = document_url.clone();
@@ -5416,16 +5423,16 @@ impl JsRuntime {
         &mut self,
         action: FindInPageAction,
         query: &str,
-    ) -> Result<FindInPageResult, String> {
-        let action = serde_json::to_string(action.as_str()).map_err(|error| error.to_string())?;
-        let query = serde_json::to_string(query).map_err(|error| error.to_string())?;
+    ) -> Result<FindInPageResult, FindInPageError> {
+        let action = serde_json::to_string(action.as_str()).map_err(FindInPageError::Serialize)?;
+        let query = serde_json::to_string(query).map_err(FindInPageError::Serialize)?;
         let script = format!("JSON.stringify(__omoikane_find_in_page({action}, {query}))");
-        let value = self.eval(&script).map_err(|error| error.to_string())?;
+        let value = self.eval(&script).map_err(FindInPageError::JavaScript)?;
         let payload = value
             .as_string()
-            .ok_or_else(|| "page search did not return a JSON string".to_string())?
+            .ok_or(FindInPageError::MissingJsonString)?
             .to_std_string_escaped();
-        serde_json::from_str(&payload).map_err(|error| error.to_string())
+        serde_json::from_str(&payload).map_err(FindInPageError::Deserialize)
     }
 
     /// Creates (or returns) the Boa Realm used by an iframe's document.
@@ -5579,7 +5586,7 @@ impl JsRuntime {
         url: &str,
         document: NodeHandle,
     ) -> (
-        Result<JsValue, String>,
+        Result<JsValue, JsEvaluationError>,
         std::time::Duration,
         std::time::Duration,
     ) {
@@ -5587,7 +5594,7 @@ impl JsRuntime {
             Ok(realm) => realm,
             Err(error) => {
                 return (
-                    Err(error.to_string()),
+                    Err(JsEvaluationError::JavaScript(error)),
                     std::time::Duration::ZERO,
                     std::time::Duration::ZERO,
                 );
@@ -5595,7 +5602,7 @@ impl JsRuntime {
         };
         if document_id != self.document().identity() && realm.is_none() {
             return (
-                Err("script document Realm is no longer live".to_string()),
+                Err(JsEvaluationError::DocumentRealmRetired),
                 std::time::Duration::ZERO,
                 std::time::Duration::ZERO,
             );
@@ -6990,21 +6997,18 @@ impl JsRuntime {
         }
     }
 
-    /// Evaluates JavaScript source code, converting `JsError` into `Err(String)`.
+    /// Evaluates JavaScript source code and retains any Boa error for the embedder.
     ///
-    /// This does not catch Rust panics; it only converts JS-level errors.
-    pub fn eval_safe(&mut self, source: &str) -> Result<JsValue, String> {
-        match self.eval(source) {
-            Ok(value) => Ok(value),
-            Err(error) => Err(format!("{error}")),
-        }
+    /// This does not catch Rust panics; it only returns JS-level errors.
+    pub fn eval_safe(&mut self, source: &str) -> Result<JsValue, JsEvaluationError> {
+        self.eval(source).map_err(JsEvaluationError::JavaScript)
     }
 
     fn eval_safe_timed(
         &mut self,
         source: &str,
     ) -> (
-        Result<JsValue, String>,
+        Result<JsValue, JsEvaluationError>,
         std::time::Duration,
         std::time::Duration,
         std::time::Duration,
@@ -7015,7 +7019,7 @@ impl JsRuntime {
                 Ok(script) => script,
                 Err(error) => {
                     return (
-                        Err(error.to_string()),
+                        Err(JsEvaluationError::JavaScript(error)),
                         parse_start.elapsed(),
                         std::time::Duration::ZERO,
                         std::time::Duration::ZERO,
@@ -7027,7 +7031,7 @@ impl JsRuntime {
             let compile_start = std::time::Instant::now();
             if let Err(error) = script.codeblock(context) {
                 return (
-                    Err(error.to_string()),
+                    Err(JsEvaluationError::JavaScript(error)),
                     parse_elapsed,
                     compile_start.elapsed(),
                     std::time::Duration::ZERO,
@@ -7036,7 +7040,9 @@ impl JsRuntime {
             let compile_elapsed = compile_start.elapsed();
 
             let execute_start = std::time::Instant::now();
-            let result = script.evaluate(context).map_err(|error| error.to_string());
+            let result = script
+                .evaluate(context)
+                .map_err(JsEvaluationError::JavaScript);
             (
                 result,
                 parse_elapsed,
@@ -7057,7 +7063,7 @@ impl JsRuntime {
         url: &str,
         document: NodeHandle,
     ) -> (
-        Result<JsValue, String>,
+        Result<JsValue, JsEvaluationError>,
         std::time::Duration,
         std::time::Duration,
     ) {
@@ -7073,7 +7079,7 @@ impl JsRuntime {
             Ok(module) => module,
             Err(error) => {
                 return (
-                    Err(error.to_string()),
+                    Err(JsEvaluationError::JavaScript(error)),
                     parse_start.elapsed(),
                     std::time::Duration::ZERO,
                 );
@@ -7083,14 +7089,14 @@ impl JsRuntime {
         let execute_start = std::time::Instant::now();
         let _module_document = activate_module_document(&self.host_state, document.identity());
         let promise = self.with_active_host_value(|context| module.load_link_evaluate(context));
-        let result =
-            self.run_jobs()
-                .map_err(|error| error.to_string())
-                .and_then(|()| match promise.state() {
-                    PromiseState::Fulfilled(_) => Ok(JsValue::undefined()),
-                    PromiseState::Rejected(error) => Err(error.display().to_string()),
-                    PromiseState::Pending => Err("module evaluation remained pending".to_string()),
-                });
+        let result = self
+            .run_jobs()
+            .map_err(JsEvaluationError::JavaScript)
+            .and_then(|()| match promise.state() {
+                PromiseState::Fulfilled(_) => Ok(JsValue::undefined()),
+                PromiseState::Rejected(error) => Err(JsEvaluationError::ModuleRejected(error)),
+                PromiseState::Pending => Err(JsEvaluationError::ModulePending),
+            });
         // Module evaluation is also driven synchronously here. A modal-dialog
         // suspension therefore cannot outlive this call, even when evaluation
         // exits through the pending/error cases above.
@@ -7153,11 +7159,12 @@ impl JsRuntime {
 
     /// Sets the deterministic Notification permission used by this runtime's
     /// Window. This is an embedder/test hook and is not exposed to page JS.
-    pub fn set_notification_permission(&mut self, permission: &str) -> Result<(), String> {
+    pub fn set_notification_permission(
+        &mut self,
+        permission: &str,
+    ) -> Result<(), NotificationPermissionError> {
         if !matches!(permission, "default" | "granted" | "denied") {
-            return Err(format!(
-                "invalid notification permission {permission:?}; expected one of default, granted, denied"
-            ));
+            return Err(NotificationPermissionError::Invalid(permission.to_string()));
         }
         let changed = {
             let mut state = self.host_state.borrow_mut();
@@ -7676,7 +7683,7 @@ impl JsRuntime {
             .host_state
             .borrow_mut()
             .navigate_auxiliary_context(id, url)
-            .map_err(|message| JsNativeError::error().with_message(message))?;
+            .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
         if let Some(source) = source {
             let state = self.host_state.borrow();
             if let Some(committed) = state.document_urls.get(&document_id)
@@ -9323,12 +9330,12 @@ impl JsRuntime {
                     .host_state
                     .borrow_mut()
                     .iframe_document_with_submission(&frame, Some(&request));
-                if let Err(message) = loaded {
+                if let Err(error) = loaded {
                     self.host_state
                         .borrow_mut()
                         .pending_iframe_visits
                         .remove(&node_id);
-                    return Err(JsNativeError::typ().with_message(message).into());
+                    return Err(JsNativeError::typ().with_message(error.to_string()).into());
                 }
                 self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
             }
@@ -9394,10 +9401,10 @@ impl JsRuntime {
                                 .map(|entry| entry.document.identity());
                             let document = match state.iframe_content_document(&node) {
                                 Ok(document) => document,
-                                Err(message) => {
+                                Err(error) => {
                                     state.pending_iframe_visits.remove(&node_id);
                                     return Err(JsNativeError::error()
-                                        .with_message(message)
+                                        .with_message(error.to_string())
                                         .into());
                                 }
                             };
@@ -9645,7 +9652,7 @@ impl JsRuntime {
                                             &source,
                                         )
                                         .map(|_| JsValue::undefined())
-                                        .map_err(|error| error.to_string()),
+                                        .map_err(JsEvaluationError::JavaScript),
                                 };
                                 if let Err(error) = result {
                                     let context = script_source_context(&source);
@@ -17531,7 +17538,7 @@ fn window_post_message_native(
             }
             let document = state
                 .iframe_content_document(&iframe)
-                .map_err(|message| JsNativeError::error().with_message(message))?;
+                .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
             let Some(context_id) = state.iframe_context_ids.get(&target_id).copied() else {
                 return Ok(JsValue::undefined());
             };
@@ -17600,7 +17607,7 @@ fn open_auxiliary_window_native(
                 opener_document_id.unwrap_or_else(|| state.document.identity());
             state
                 .open_auxiliary_context(opener_document_id, &name)
-                .map_err(|message| JsNativeError::error().with_message(message))?
+                .map_err(|error| JsNativeError::error().with_message(error.to_string()))?
         };
         ensure_auxiliary_realm(context, host, id)?;
         if !url.is_empty() && !matches_about_blank_url(&url) {
@@ -17655,7 +17662,7 @@ fn navigate_named_link_target_native(
                 .and_then(|source| state.visit_source_for_document(source.identity()));
             let document = state
                 .iframe_content_document(&frame)
-                .map_err(|message| JsNativeError::typ().with_message(message))?;
+                .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
             let owner = owner_document_for_node(&frame)
                 .ok_or_else(|| JsNativeError::typ().with_message("iframe has no owner Document"))?;
             let callback = state
@@ -18357,10 +18364,11 @@ fn worklet_add_module_native(
             result
         };
         if let Err(error) = evaluation {
+            let message = error.to_string();
             return Ok(worklet_status(
                 false,
-                worklet_error_name(&error),
-                &error,
+                worklet_error_name(&message),
+                &message,
                 false,
             ));
         }
@@ -21594,8 +21602,8 @@ fn iframe_content_document_native(
                 let document = state
                     .borrow_mut()
                     .iframe_content_document(&iframe)
-                    .map_err(|message| {
-                        JsError::from(JsNativeError::error().with_message(message))
+                    .map_err(|error| {
+                        JsError::from(JsNativeError::error().with_message(error.to_string()))
                     })?;
                 let exposed = {
                     let state = state.borrow();
@@ -21728,7 +21736,9 @@ fn iframe_context_state_native(
         let document = state
             .borrow_mut()
             .iframe_content_document(&iframe)
-            .map_err(|message| JsError::from(JsNativeError::error().with_message(message)))?;
+            .map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
         let state = state.borrow();
         let Some(context_id) = state.iframe_context_ids.get(&iframe_id).copied() else {
             return Ok(js_string!("closed").into());
@@ -38163,8 +38173,16 @@ b</textarea></form>"#,
 
         runtime.set_notification_permission("granted").unwrap();
         let invalid_permission = runtime.set_notification_permission("unknown").unwrap_err();
-        assert!(invalid_permission.contains("unknown"));
-        assert!(invalid_permission.contains("default, granted, denied"));
+        assert!(matches!(
+            invalid_permission,
+            NotificationPermissionError::Invalid(_)
+        ));
+        assert!(invalid_permission.to_string().contains("unknown"));
+        assert!(
+            invalid_permission
+                .to_string()
+                .contains("default, granted, denied")
+        );
         runtime
             .eval(
                 r#"globalThis.notificationEvents = [];
