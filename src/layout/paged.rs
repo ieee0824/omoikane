@@ -511,8 +511,34 @@ pub fn layout_paged_tree(
                         break;
                     }
                 }
+                let within_page = candidates
+                    .table_lines
+                    .partition_point(|candidate| candidate.y <= end_y);
+                for candidate in candidates.table_lines[..within_page].iter().rev() {
+                    if candidate.y <= preferred.unwrap_or(cursor.flow_y) {
+                        break;
+                    }
+                    if candidate.group_height > content.height + 0.01 {
+                        preferred = Some(candidate.y);
+                        break;
+                    }
+                }
                 if let Some(boundary) = preferred.or(fallback) {
                     end_y = boundary;
+                }
+                let first = candidates
+                    .avoid_ranges
+                    .partition_point(|range| range.start <= cursor.flow_y + 0.01);
+                let last = candidates
+                    .avoid_ranges
+                    .partition_point(|range| range.start < end_y - 0.01);
+                if first < last {
+                    for range in &candidates.avoid_ranges[first..last] {
+                        if range.end > end_y + 0.01 {
+                            end_y = range.start;
+                            break;
+                        }
+                    }
                 }
             }
             if remaining > 0.0 && end_y <= cursor.flow_y {
@@ -1324,10 +1350,44 @@ struct PageLineGroup {
     widows: usize,
 }
 
+struct PageAvoidRange {
+    start: f32,
+    end: f32,
+}
+
+struct TableLineBreak {
+    y: f32,
+    group_height: f32,
+}
+
 #[derive(Default)]
 struct PageBreakCandidates {
     points: Vec<PageBreakCandidate>,
     line_groups: Vec<PageLineGroup>,
+    avoid_ranges: Vec<PageAvoidRange>,
+    table_lines: Vec<TableLineBreak>,
+}
+
+fn collect_page_avoid_range(
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    breaks: &mut PageBreakCandidates,
+) {
+    if !matches!(
+        style.get("break-inside"),
+        Some(ComputedValue::Keyword(value))
+            if value.eq_ignore_ascii_case("avoid") || value.eq_ignore_ascii_case("avoid-page")
+    ) {
+        return;
+    }
+    let bounds = layout.dimensions.border_box();
+    let end = bounds.y + bounds.height;
+    if bounds.y.is_finite() && end.is_finite() && end > bounds.y {
+        breaks.avoid_ranges.push(PageAvoidRange {
+            start: bounds.y,
+            end,
+        });
+    }
 }
 
 impl PageBreakCandidates {
@@ -1373,6 +1433,7 @@ fn page_break_candidates(
     ) {
         if parent.node.tag_name().is_some() {
             let style = resolver.computed_style(&parent.node);
+            collect_page_avoid_range(parent, &style, breaks);
             if table_display_for_node(&parent.node, &style) == Some(TableDisplay::Table) {
                 collect_table_row_breaks(parent, resolver, breaks);
                 return;
@@ -1452,6 +1513,12 @@ fn page_break_candidates(
         (left.y - right.y).abs() < 0.01 && left.line_group == right.line_group
     });
     breaks
+        .avoid_ranges
+        .sort_by(|left, right| left.start.total_cmp(&right.start));
+    breaks
+        .table_lines
+        .sort_by(|left, right| left.y.total_cmp(&right.y));
+    breaks
 }
 
 fn collect_table_row_breaks(
@@ -1459,6 +1526,22 @@ fn collect_table_row_breaks(
     resolver: &mut StyleResolver,
     breaks: &mut PageBreakCandidates,
 ) {
+    fn collect_cell_lines(cell: &LayoutBox, group_height: f32, breaks: &mut PageBreakCandidates) {
+        for line in &cell.lines {
+            let y = line.rect.y + line.rect.height;
+            if y.is_finite() {
+                breaks.table_lines.push(TableLineBreak { y, group_height });
+            }
+        }
+        for child in cell
+            .children
+            .iter()
+            .filter(|child| is_in_flow_principal(child))
+        {
+            collect_cell_lines(child, group_height, breaks);
+        }
+    }
+
     let mut rows = Vec::new();
     for child in table
         .children
@@ -1482,7 +1565,10 @@ fn collect_table_row_breaks(
     }
 
     let mut span_end = 0;
+    let mut group_start = 0;
     for (index, row) in rows.iter().enumerate() {
+        let style = resolver.computed_style(&row.node);
+        collect_page_avoid_range(row, &style, breaks);
         for cell in &row.children {
             let span = html_table_span_attribute(&cell.node, "rowspan").unwrap_or(1);
             span_end = span_end.max(index.saturating_add(span).min(rows.len()));
@@ -1496,6 +1582,16 @@ fn collect_table_row_breaks(
                     line_index: 0,
                 });
             }
+            let first = rows[group_start].dimensions.border_box();
+            let group_height = boundary - first.y;
+            if group_height.is_finite() && group_height > 0.0 {
+                for group_row in &rows[group_start..=index] {
+                    for cell in &group_row.children {
+                        collect_cell_lines(cell, group_height, breaks);
+                    }
+                }
+            }
+            group_start = index + 1;
         }
     }
 }
