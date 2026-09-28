@@ -36440,6 +36440,12 @@ b</textarea></form>"#,
                     thread::sleep(Duration::from_millis(10));
                     continue;
                 };
+                stream.set_nonblocking(false).unwrap();
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                stream.set_read_timeout(Some(remaining)).unwrap();
                 let mut request = [0u8; 2048];
                 let size = stream.read(&mut request).unwrap();
                 let request = String::from_utf8_lossy(&request[..size]);
