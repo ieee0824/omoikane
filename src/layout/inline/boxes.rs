@@ -234,6 +234,7 @@ pub(super) fn finish(
                 rect,
                 metrics: owner.metrics,
                 vertical_align: owner.align,
+                source_end_token: 0,
                 style: FragmentStyle::from_computed(&owner.style),
             });
             emitted_owners.insert(id);

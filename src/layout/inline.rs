@@ -1,5 +1,6 @@
 //! Inline layout: text segments, line breaking, and inline image handling.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,6 +26,64 @@ use super::{
 };
 
 mod boxes;
+
+thread_local! {
+    static PRINT_INLINE_SKIP: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Relayout inline formatting contexts after their already printed token prefixes.
+pub(super) fn with_print_inline_skips<T>(
+    owners: &[(NodeHandle, usize)],
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Vec<(usize, usize)>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PRINT_INLINE_SKIP.with(|cell| *cell.borrow_mut() = std::mem::take(&mut self.0));
+        }
+    }
+
+    let previous = PRINT_INLINE_SKIP.with(|cell| {
+        std::mem::replace(
+            &mut *cell.borrow_mut(),
+            owners
+                .iter()
+                .map(|(owner, offset)| (owner.identity(), *offset))
+                .collect(),
+        )
+    });
+    let _restore = Restore(previous);
+    f()
+}
+
+fn segment_token_units(segment: &InlineSegment) -> usize {
+    match &segment.content {
+        InlineSegmentContent::Text(text) => text.graphemes(true).count(),
+        InlineSegmentContent::InlineEdge(_, _) => 0,
+        _ => 1,
+    }
+}
+
+fn skip_inline_prefix(segments: &mut Vec<InlineSegment>, token_offset: usize) {
+    let mut remaining = token_offset;
+    segments.retain_mut(|segment| {
+        if remaining == 0 {
+            return true;
+        }
+        let units = segment_token_units(segment);
+        if units <= remaining {
+            remaining -= units;
+            return false;
+        }
+        if let InlineSegmentContent::Text(text) = &mut segment.content {
+            *text = text.graphemes(true).skip(remaining).collect();
+            remaining = 0;
+            return true;
+        }
+        false
+    });
+}
 
 // ── Text align ──────────────────────────────────────────────────────────────
 
@@ -209,6 +268,21 @@ fn layout_inline_nodes_impl(
         ));
     }
     coalesce_adjacent_text_segments(&mut segments);
+    let source_start_token = generated_owner
+        .cloned()
+        .or_else(|| nodes.first().and_then(NodeHandle::parent_node))
+        .map(|owner| {
+            PRINT_INLINE_SKIP.with(|cell| {
+                cell.borrow()
+                    .iter()
+                    .find(|(id, _)| *id == owner.identity())
+                    .map_or(0, |(_, offset)| *offset)
+            })
+        })
+        .unwrap_or(0);
+    if source_start_token > 0 {
+        skip_inline_prefix(&mut segments, source_start_token);
+    }
     let strut_metrics = nodes
         .first()
         .and_then(NodeHandle::parent_node)
@@ -219,6 +293,7 @@ fn layout_inline_nodes_impl(
         .unwrap_or((start_x, available_width));
     let mut lines = layout_inline_segments(
         &segments,
+        source_start_token,
         line_start_x,
         start_y,
         line_available_width,
@@ -331,6 +406,7 @@ pub(super) fn layout_vertical_inline_nodes(
     };
     let mut horizontal_lines = layout_inline_segments(
         &segments,
+        0,
         line_start,
         0.0,
         line_height,
@@ -573,6 +649,7 @@ fn apply_text_overflow(
             },
             metrics: marker_metrics,
             vertical_align: VerticalAlign::Baseline,
+            source_end_token: 0,
             style: marker_style,
         };
         visible.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
@@ -1515,6 +1592,7 @@ pub(super) fn layout_block_pseudo_content(
     coalesce_adjacent_text_segments(&mut segments);
     layout_inline_segments(
         &segments,
+        0,
         start_x,
         start_y,
         available_width,
@@ -2591,6 +2669,7 @@ pub(super) fn exceeds_available_inline_width(used: f32, available: f32) -> bool 
 fn break_text_by_characters(
     text: &str,
     segment: &InlineSegment,
+    source_start_token: usize,
     height: f32,
     cursor: &mut InlineCursor,
     lines: &mut Vec<LineBox>,
@@ -2598,7 +2677,7 @@ fn break_text_by_characters(
     align: TextAlign,
     line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
 ) {
-    for ch_str in split_chars(text) {
+    for (index, ch_str) in split_chars(text).into_iter().enumerate() {
         let ch_width = measure_text_width(&ch_str, segment.metrics);
         if cursor.x > cursor.start_x
             && exceeds_available_inline_width(
@@ -2619,6 +2698,7 @@ fn break_text_by_characters(
             },
             metrics: segment.metrics,
             vertical_align: segment.vertical_align,
+            source_end_token: source_start_token + index + 1,
             style: segment.style.clone(),
         });
         cursor.x += ch_width;
@@ -2628,6 +2708,7 @@ fn break_text_by_characters(
 
 fn layout_inline_segments(
     segments: &[InlineSegment],
+    source_start_token: usize,
     start_x: f32,
     start_y: f32,
     available_width: f32,
@@ -2649,6 +2730,7 @@ fn layout_inline_segments(
     );
 
     let mut prev_segment_allows_wrapping = true;
+    let mut source_token = source_start_token;
     for segment in segments {
         let overflow_wrap = segment.overflow_wrap;
         let allows_wrapping = segment.white_space_mode.allows_wrapping();
@@ -2656,6 +2738,7 @@ fn layout_inline_segments(
         for piece in split_segment(segment) {
             match piece {
                 InlinePiece::Newline => {
+                    source_token += 1;
                     // An explicit line break occupies a line even when no
                     // glyph precedes it. Retain its owner for empty pre lines.
                     current_fragments.push(InlineFragment {
@@ -2669,6 +2752,7 @@ fn layout_inline_segments(
                         },
                         metrics: segment.metrics,
                         vertical_align: segment.vertical_align,
+                        source_end_token: source_token,
                         style: segment.style.clone(),
                     });
                     cursor.wrap_line(
@@ -2684,6 +2768,13 @@ fn layout_inline_segments(
                     width,
                     height,
                 } => {
+                    let piece_start_token = source_token;
+                    source_token += match &content {
+                        InlineFragmentContent::Text(text) => text.graphemes(true).count(),
+                        InlineFragmentContent::InlineEdge(_, _)
+                        | InlineFragmentContent::InlineSpacing(_) => 0,
+                        _ => 1,
+                    };
                     let collapsible_whitespace = segment.white_space_mode.collapses_whitespace()
                         && matches!(&content, InlineFragmentContent::Text(text) if text
                             .chars()
@@ -2746,6 +2837,7 @@ fn layout_inline_segments(
                         break_text_by_characters(
                             &text,
                             segment,
+                            piece_start_token,
                             height,
                             &mut cursor,
                             &mut lines,
@@ -2767,6 +2859,7 @@ fn layout_inline_segments(
                         },
                         metrics: segment.metrics,
                         vertical_align: segment.vertical_align,
+                        source_end_token: source_token,
                         style: segment.style.clone(),
                     });
                     cursor.x += width;

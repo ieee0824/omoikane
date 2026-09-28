@@ -732,6 +732,9 @@ pub struct InlineFragment {
     pub rect: Rect,
     pub metrics: FontMetrics,
     pub vertical_align: VerticalAlign,
+    /// Position after this fragment in its formatting context's normalized
+    /// inline stream. Print pagination uses it to resume after a line break.
+    pub source_end_token: usize,
     /// Minimal style information extracted from the element's `ComputedStyle`.
     /// Used by the paint stage to apply per-fragment `text-transform`,
     /// `text-decoration`, and `color` rather than inheriting from the

@@ -49,6 +49,7 @@ pub struct PagedPage {
 pub struct PageContinuation {
     section_index: usize,
     flow_y: f32,
+    inline_token: Option<usize>,
 }
 
 impl PageContinuation {
@@ -60,6 +61,11 @@ impl PageContinuation {
     /// Returns the current vertical position in the source flow.
     pub fn flow_y(self) -> f32 {
         self.flow_y
+    }
+
+    /// Returns the normalized inline-token position when a line continues.
+    pub fn inline_token(self) -> Option<usize> {
+        self.inline_token
     }
 }
 
@@ -291,16 +297,55 @@ pub fn layout_paged_tree(
     let first_content = content_rect(first_geometry);
     let layout = layout_tree(document, resolver, first_content)?;
     let sections = flow_sections(&layout, resolver, first_content.y);
+    let inline_flows = (sections.len() == 1)
+        .then(|| find_body_layout(&layout))
+        .flatten()
+        .and_then(|body| {
+            let children = body
+                .children
+                .iter()
+                .filter(|child| child.pseudo.is_none())
+                .collect::<Vec<_>>();
+            if children.is_empty() || children.iter().any(|child| child.lines.is_empty()) {
+                return None;
+            }
+            let flows = children
+                .into_iter()
+                .map(|child| {
+                    let total_tokens = child
+                        .lines
+                        .iter()
+                        .flat_map(|line| &line.fragments)
+                        .map(|fragment| fragment.source_end_token)
+                        .max()
+                        .unwrap_or(0);
+                    (child.node.clone(), total_tokens)
+                })
+                .collect::<Vec<_>>();
+            flows.iter().all(|(_, total)| *total > 0).then_some(flows)
+        });
+    let total_inline_tokens = inline_flows
+        .as_ref()
+        .map(|flows| flows.iter().map(|(_, total)| total).sum::<usize>());
+    let inline_owner_id = inline_flows
+        .as_ref()
+        .and_then(|flows| flows.first())
+        .map_or(0, |(owner, _)| owner.identity());
     let mut alternate_layouts = Vec::new();
+    let mut alternate_sections = Vec::new();
     let mut container_contexts = vec![resolver.container_contexts_snapshot()];
-    let mut layout_by_width = HashMap::from([(first_content.width.to_bits(), 0)]);
+    let mut layout_by_flow =
+        HashMap::from([((first_content.width.to_bits(), inline_owner_id, 0), 0)]);
 
     let mut pages = Vec::new();
     for (section_index, section) in sections.iter().enumerate() {
+        let mut inline_token: usize = 0;
         let mut cursor = PageContinuation {
             section_index,
             flow_y: section.start,
+            inline_token: total_inline_tokens.map(|_| 0),
         };
+        let mut section_started = false;
         loop {
             if pages.len() >= 1024 {
                 // Returning a truncated document would silently discard the
@@ -311,38 +356,99 @@ pub fn layout_paged_tree(
             let style = resolver.resolved_page_style(&selector);
             let geometry = style.geometry((default_sheet.width, default_sheet.height), 0.0);
             let content = content_rect(geometry);
-            let layout_index = if let Some(&index) = layout_by_width.get(&content.width.to_bits()) {
+            let layout_key = (content.width.to_bits(), inline_owner_id, inline_token);
+            let layout_index = if let Some(&index) = layout_by_flow.get(&layout_key) {
                 index
             } else {
-                let page_layout = layout_tree(
-                    document,
-                    resolver,
-                    Rect {
-                        width: content.width,
-                        ..first_content
-                    },
-                )?;
+                let content_rect = Rect {
+                    width: content.width,
+                    ..first_content
+                };
+                let page_layout = if let Some(flows) = &inline_flows {
+                    let mut prefix = 0;
+                    let offsets = flows
+                        .iter()
+                        .map(|(owner, total)| {
+                            let offset = inline_token.saturating_sub(prefix).min(*total);
+                            prefix += total;
+                            (owner.clone(), offset)
+                        })
+                        .collect::<Vec<_>>();
+                    super::inline::with_print_inline_skips(&offsets, || {
+                        layout_tree(document, resolver, content_rect)
+                    })?
+                } else {
+                    layout_tree(document, resolver, content_rect)?
+                };
+                let page_sections = flow_sections(&page_layout, resolver, first_content.y);
                 alternate_layouts.push(page_layout);
+                alternate_sections.push(page_sections);
                 container_contexts.push(resolver.container_contexts_snapshot());
                 let index = alternate_layouts.len();
-                layout_by_width.insert(content.width.to_bits(), index);
+                layout_by_flow.insert(layout_key, index);
                 index
             };
+            let page_section = if layout_index == 0 {
+                section
+            } else {
+                alternate_sections[layout_index - 1].get(section_index)?
+            };
+            if !section_started || inline_flows.is_some() {
+                cursor.flow_y = page_section.start;
+                section_started = true;
+            }
             let margin_box_rects = corner_margin_box_rects(&style, geometry);
-            let remaining = section.end - cursor.flow_y;
+            let remaining = page_section.end - cursor.flow_y;
             if !remaining.is_finite() || remaining < 0.0 {
                 return None;
             }
             if remaining > 0.0 && (!content.height.is_finite() || content.height <= 0.0) {
                 return None;
             }
-            let end_y = (cursor.flow_y + content.height).min(section.end);
+            let end_y = (cursor.flow_y + content.height).min(page_section.end);
             if remaining > 0.0 && end_y <= cursor.flow_y {
                 return None;
             }
+            let end_inline_token = if let Some(flows) = &inline_flows {
+                let page_layout = if layout_index == 0 {
+                    &layout
+                } else {
+                    &alternate_layouts[layout_index - 1]
+                };
+                let mut prefix = 0;
+                let mut end_token = inline_token;
+                for (owner, total) in flows {
+                    let owner_layout = find_layout_for_node(page_layout, owner)?;
+                    let consumed = owner_layout
+                        .lines
+                        .iter()
+                        .filter(|line| {
+                            line.rect.y >= cursor.flow_y
+                                && line.rect.y + line.rect.height <= end_y + 0.01
+                        })
+                        .flat_map(|line| &line.fragments)
+                        .map(|fragment| fragment.source_end_token)
+                        .max()
+                        .unwrap_or(0);
+                    if consumed > 0 {
+                        end_token = end_token.max(prefix + consumed);
+                    }
+                    prefix += total;
+                }
+                if end_token <= inline_token && inline_token < prefix {
+                    return None;
+                }
+                Some(end_token)
+            } else {
+                None
+            };
+            let continues_inline = end_inline_token
+                .zip(total_inline_tokens)
+                .is_some_and(|(end_token, total)| end_token < total);
             let end = PageContinuation {
                 section_index,
                 flow_y: end_y,
+                inline_token: end_inline_token,
             };
             let source = Rect {
                 x: first_content.x,
@@ -350,7 +456,7 @@ pub fn layout_paged_tree(
                 width: content.width,
                 height: (end_y - cursor.flow_y).max(0.0),
             };
-            let continuation = if end_y < section.end {
+            let continuation = if continues_inline || end_y < page_section.end {
                 Some(end)
             } else {
                 sections
@@ -358,6 +464,7 @@ pub fn layout_paged_tree(
                     .map(|next| PageContinuation {
                         section_index: section_index + 1,
                         flow_y: next.start,
+                        inline_token: None,
                     })
             };
             pages.push(PagedPage {
@@ -388,9 +495,19 @@ pub fn layout_paged_tree(
                 counters: PageCounterValues { page: 0, pages: 0 },
                 margin_box_rects,
             });
-            if end_y >= section.end {
+            if continues_inline {
+                inline_token = end_inline_token?;
+                cursor = PageContinuation {
+                    section_index,
+                    flow_y: page_section.start,
+                    inline_token: Some(inline_token),
+                };
+                continue;
+            }
+            if end_y >= page_section.end {
                 break;
             }
+            inline_token = end_inline_token.unwrap_or(0);
             cursor = end;
         }
     }
@@ -999,6 +1116,16 @@ fn find_body_layout(layout: &LayoutBox) -> Option<&LayoutBox> {
     layout.children.iter().find_map(find_body_layout)
 }
 
+fn find_layout_for_node<'a>(layout: &'a LayoutBox, node: &NodeHandle) -> Option<&'a LayoutBox> {
+    if layout.pseudo.is_none() && &layout.node == node {
+        return Some(layout);
+    }
+    layout
+        .children
+        .iter()
+        .find_map(|child| find_layout_for_node(child, node))
+}
+
 fn has_printable_flow(layout: &LayoutBox) -> bool {
     layout.dimensions.border_box().height > 0.0
         || !layout.lines.is_empty()
@@ -1088,6 +1215,237 @@ fn flow_sections(
 mod tests {
     use super::*;
     use crate::css::{Origin, parse_stylesheet};
+
+    fn assert_width_change_preserves_inline_text(
+        first_width: u32,
+        later_width: u32,
+        repetitions: usize,
+    ) {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let text = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".repeat(repetitions);
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(NodeHandle::text(&text));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body, p {{ margin: 0 }} p {{ font-size: 10px; line-height: 20px; word-break: break-all }} \
+                 @page {{ size: {later_width}px 40px; margin: 0 }} \
+                 @page :first {{ size: {first_width}px 40px; margin: 0 }}",
+            ))
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: first_width as f32,
+                height: 40.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert!(paged.pages.len() >= 2);
+        let mut printed = String::new();
+        for page in &paged.pages {
+            let body = find_body_layout(paged.layout_for_page(page)).unwrap();
+            let paragraph = body
+                .children
+                .iter()
+                .find(|child| child.node == paragraph)
+                .unwrap();
+            for line in &paragraph.lines {
+                if line.rect.y >= page.source.y && line.rect.y < page.source.y + page.source.height
+                {
+                    for fragment in &line.fragments {
+                        if let Some(text) = fragment.text() {
+                            printed.push_str(text);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(printed, text);
+    }
+
+    #[test]
+    fn widening_page_does_not_drop_or_repeat_inline_text() {
+        assert_width_change_preserves_inline_text(80, 200, 1);
+    }
+
+    #[test]
+    fn narrowing_page_does_not_drop_or_repeat_inline_text() {
+        assert_width_change_preserves_inline_text(200, 80, 2);
+    }
+
+    #[test]
+    fn continuation_tracks_text_across_adjacent_nodes_and_inline_elements() {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        let span = NodeHandle::element("span");
+        let expected = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(NodeHandle::text("ABCDEFGHIJKLMN"));
+        paragraph.append_child(NodeHandle::text("OPQRSTUV"));
+        span.append_child(NodeHandle::text("WXYZabcdefghijklmnopqrstuvwxyz"));
+        paragraph.append_child(span);
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "body, p { margin: 0 } p { font-size: 10px; line-height: 20px; word-break: break-all } \
+                 @page { size: 200px 40px; margin: 0 } \
+                 @page :first { size: 80px 40px; margin: 0 }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 80.0,
+                height: 40.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        let mut printed = String::new();
+        for page in &paged.pages {
+            let body = find_body_layout(paged.layout_for_page(page)).unwrap();
+            let paragraph = body
+                .children
+                .iter()
+                .find(|child| child.node == paragraph)
+                .unwrap();
+            for line in &paragraph.lines {
+                if line.rect.y >= page.source.y && line.rect.y < page.source.y + page.source.height
+                {
+                    for fragment in &line.fragments {
+                        if let Some(text) = fragment.text() {
+                            printed.push_str(text);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(printed, expected);
+    }
+
+    #[test]
+    fn continuation_preserves_text_across_multiple_paragraphs() {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let first = NodeHandle::element("p");
+        let second = NodeHandle::element("p");
+        let first_text = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let second_text = "0123456789";
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(first.clone());
+        body.append_child(second.clone());
+        first.append_child(NodeHandle::text(first_text));
+        second.append_child(NodeHandle::text(second_text));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "body, p { margin: 0 } p { font-size: 10px; line-height: 20px; word-break: break-all } \
+                 @page { size: 200px 40px; margin: 0 } \
+                 @page :first { size: 80px 40px; margin: 0 }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 80.0,
+                height: 40.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        let mut first_printed = String::new();
+        let mut second_printed = String::new();
+        for page in &paged.pages {
+            let body = find_body_layout(paged.layout_for_page(page)).unwrap();
+            for (node, printed) in [(&first, &mut first_printed), (&second, &mut second_printed)] {
+                let paragraph = body
+                    .children
+                    .iter()
+                    .find(|child| &child.node == node)
+                    .unwrap();
+                for line in &paragraph.lines {
+                    if line.rect.y >= page.source.y
+                        && line.rect.y < page.source.y + page.source.height
+                    {
+                        for fragment in &line.fragments {
+                            if let Some(text) = fragment.text() {
+                                printed.push_str(text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(first_printed, first_text);
+        assert_eq!(second_printed, second_text);
+    }
+
+    #[test]
+    fn named_page_text_uses_its_own_line_count_and_page_extent() {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let first = NodeHandle::element("p");
+        let second = NodeHandle::element("p");
+        first.set_attribute("style", "page: narrow; height: 40px");
+        second.set_attribute("style", "page: wide");
+        first.append_child(NodeHandle::text("FIRST"));
+        second.append_child(NodeHandle::text("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn"));
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(first);
+        body.append_child(second.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "body, p { margin: 0 } p { font-size: 10px; line-height: 20px; word-break: break-all } \
+                 @page narrow { size: 80px 40px; margin: 0 } \
+                 @page wide { size: 200px 40px; margin: 0 }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 80.0,
+                height: 40.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.pages.len(), 2);
+        let body = find_body_layout(paged.layout_for_page(&paged.pages[1])).unwrap();
+        let second_box = body
+            .children
+            .iter()
+            .find(|child| child.node == second)
+            .unwrap();
+        assert_eq!(second_box.lines.len(), 2);
+    }
 
     fn document_with_two_boxes() -> (NodeHandle, NodeHandle, NodeHandle) {
         let document = NodeHandle::document();
