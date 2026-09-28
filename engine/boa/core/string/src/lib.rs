@@ -1,4 +1,5 @@
 //! A Latin1 or UTF-16 encoded, reference counted, immutable string.
+//! Cache probe: verify that a Boa-only source change invalidates Gate 5 artifacts.
 
 // Required per unsafe code standards to ensure every unsafe usage is properly documented.
 // - `unsafe_op_in_unsafe_fn` will be warn-by-default in edition 2024:
