@@ -335,7 +335,7 @@ pub fn layout_paged_tree(
     let mut alternate_layouts = Vec::new();
     let mut alternate_sections = Vec::new();
     let mut container_contexts = vec![resolver.container_contexts_snapshot()];
-    let mut nested_breaks = vec![nested_child_breaks(&layout, resolver)];
+    let mut page_breaks = vec![page_break_candidates(&layout, resolver, true)];
     let mut layout_by_flow = HashMap::new();
 
     let mut pages = Vec::new();
@@ -458,15 +458,12 @@ pub fn layout_paged_tree(
                         layout_tree(document, resolver, content_rect)?
                     };
                     let page_sections = flow_sections(&page_layout, resolver, first_content.y);
-                    let page_nested_breaks = if inline_flows.is_some() {
-                        Vec::new()
-                    } else {
-                        nested_child_breaks(&page_layout, resolver)
-                    };
+                    let page_break_candidates =
+                        page_break_candidates(&page_layout, resolver, inline_flows.is_none());
                     alternate_layouts.push(page_layout);
                     alternate_sections.push(page_sections);
                     container_contexts.push(resolver.container_contexts_snapshot());
-                    nested_breaks.push(page_nested_breaks);
+                    page_breaks.push(page_break_candidates);
                     let index = alternate_layouts.len();
                     layout_by_flow.insert(layout_key, index);
                     index
@@ -489,8 +486,8 @@ pub fn layout_paged_tree(
                 return None;
             }
             let mut end_y = (cursor.flow_y + content.height).min(page_section.end);
-            if inline_flows.is_none() && end_y < page_section.end {
-                let candidates = &nested_breaks[layout_index];
+            if end_y < page_section.end {
+                let candidates = &page_breaks[layout_index];
                 let within_page = candidates.partition_point(|&candidate| candidate <= end_y);
                 if let Some(&boundary) = candidates[..within_page].last()
                     && boundary > cursor.flow_y
@@ -1259,38 +1256,69 @@ fn is_in_flow_principal(layout: &LayoutBox) -> bool {
         )
 }
 
-fn nested_child_breaks(layout: &LayoutBox, resolver: &mut StyleResolver) -> Vec<f32> {
-    fn collect(parent: &LayoutBox, resolver: &mut StyleResolver, breaks: &mut Vec<f32>) {
+fn can_fragment_descendants(layout: &LayoutBox, resolver: &mut StyleResolver) -> bool {
+    if layout.node.tag_name().is_none() {
+        return true;
+    }
+    let style = resolver.computed_style(&layout.node);
+    let unsupported_display = matches!(
+        style.get("display"),
+        Some(ComputedValue::Keyword(value))
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "table" | "inline-table" | "table-row" | "table-cell"
+                    | "flex" | "inline-flex" | "grid" | "inline-grid"
+            )
+    );
+    let floating = matches!(
+        style.get("float"),
+        Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none")
+    );
+    !unsupported_display && !floating
+}
+
+fn page_break_candidates(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    include_nested_children: bool,
+) -> Vec<f32> {
+    fn collect(
+        parent: &LayoutBox,
+        resolver: &mut StyleResolver,
+        breaks: &mut Vec<f32>,
+        include_nested_children: bool,
+    ) {
+        for line in &parent.lines {
+            let boundary = line.rect.y + line.rect.height;
+            if boundary.is_finite() {
+                breaks.push(boundary);
+            }
+        }
         let mut seen_block = false;
         for child in parent
             .children
             .iter()
             .filter(|child| is_in_flow_principal(child))
         {
+            if !can_fragment_descendants(child, resolver) {
+                continue;
+            }
             let block = child.node.tag_name().is_some_and(|_| {
                 let style = resolver.computed_style(&child.node);
-                let block_display = matches!(
-                    style.get("display"),
-                    Some(ComputedValue::Keyword(value))
-                        if matches!(
-                            value.to_ascii_lowercase().as_str(),
-                            "block" | "flow-root" | "list-item"
-                        )
-                );
-                let floating = matches!(
-                    style.get("float"),
-                    Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none")
-                );
-                block_display && !floating
+                let display = match style.get("display") {
+                    Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
+                    _ => String::new(),
+                };
+                matches!(display.as_str(), "block" | "flow-root" | "list-item")
             });
-            if block && seen_block {
+            if include_nested_children && block && seen_block {
                 let boundary = child.dimensions.border_box().y - child.dimensions.margin.top;
                 if boundary.is_finite() {
                     breaks.push(boundary);
                 }
             }
             seen_block |= block;
-            collect(child, resolver, breaks);
+            collect(child, resolver, breaks, include_nested_children);
         }
     }
 
@@ -1301,7 +1329,9 @@ fn nested_child_breaks(layout: &LayoutBox, resolver: &mut StyleResolver) -> Vec<
             .iter()
             .filter(|child| is_in_flow_principal(child))
         {
-            collect(child, resolver, &mut breaks);
+            if can_fragment_descendants(child, resolver) {
+                collect(child, resolver, &mut breaks, include_nested_children);
+            }
         }
     }
     breaks.sort_by(f32::total_cmp);
@@ -1410,6 +1440,48 @@ fn flow_sections(
 mod tests {
     use super::*;
     use crate::css::{Origin, parse_stylesheet};
+
+    #[test]
+    fn paginated_paragraph_stops_at_a_complete_line() {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(paragraph.clone());
+        paragraph.append_child(NodeHandle::text(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".repeat(4),
+        ));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "@page { size: 80px 45px; margin: 0 } body, p { margin: 0 } \
+                 p { font-size: 10px; line-height: 20px; word-break: break-all }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 80.0,
+                height: 45.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+
+        assert!(paged.pages.len() >= 2);
+        assert_eq!(paged.pages[0].fragments[0].end.flow_y(), 40.0);
+        assert!(
+            paged.pages[1].fragments[0]
+                .start
+                .inline_token()
+                .is_some_and(|token| token > 0)
+        );
+    }
 
     #[test]
     fn nested_block_children_produce_a_continuation_at_the_child_boundary() {
