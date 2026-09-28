@@ -15201,17 +15201,83 @@
   const frameElementId = globalThis.__omoikane_frame_element_id;
   try { delete globalThis.__omoikane_frame_element_id; } catch (_) {}
   globalThis.frameElement = frameElementId == null ? null : wrapNode(frameElementId);
-  // Window named properties expose parsed elements with an `id` as global
-  // bindings (for example `<style id=theme>` is reachable as `theme`). Keep
-  // built-in globals intact. These properties remain writable because an
-  // explicit script global takes precedence over Window named access.
-  globalThis.__omoikane_install_window_named_properties = function() {
+  // Named access is live: scripts can add, rename, or remove an element and
+  // observe the change before the next task. Keep explicit globals and built-in
+  // properties ahead of document names.
+  const windowNamedGetters = new Map();
+  const windowNameAttribute = (node, name) => {
+    const id = internalNodeId(node);
+    return id === undefined ? null : __omoikane_get_attribute(id, name);
+  };
+  const windowNameChildren = node => {
+    const id = internalNodeId(node);
+    const children = id === undefined ? null : __omoikane_child_node_ids(id);
+    return children ? children.map(childId => wrapNode(childId)) : [];
+  };
+  const windowNamedElements = name => {
+    const elements = [];
+    const visit = node => {
+      for (const child of windowNameChildren(node)) {
+        if (internalNodeType(child) !== 1) continue;
+        const tag = internalNodeLocalName(child) || "";
+        if (windowNameAttribute(child, "id") === name ||
+            ((tag === "embed" || tag === "form" || tag === "img" || tag === "object") &&
+             windowNameAttribute(child, "name") === name)) {
+          elements.push(child);
+        }
+        visit(child);
+      }
+    };
+    visit(globalThis.document);
+    return elements;
+  };
+  const windowNamedValue = name => {
+    let frame = null;
+    let firstFrameFound = false;
+    const visit = node => {
+      for (const child of windowNameChildren(node)) {
+        if (internalNodeType(child) !== 1) continue;
+        if (!firstFrameFound && internalNodeLocalName(child) === "iframe" &&
+            windowNameAttribute(child, "name") === name) {
+          firstFrameFound = true;
+          if (child.contentDocument !== null) frame = child.contentWindow;
+        }
+        visit(child);
+      }
+    };
+    visit(globalThis.document);
+    if (firstFrameFound) return frame === null ? undefined : frame;
+    const elements = windowNamedElements(name);
+    if (elements.length === 1) return elements[0];
+    if (elements.length > 1) {
+      return makeHTMLCollection(() => windowNamedElements(name), () => false);
+    }
+    return undefined;
+  };
+  const subtreeHasWindowName = node => {
+    const nodeType = internalNodeType(node);
+    if (nodeType !== 1 && nodeType !== 9 && nodeType !== 11) return false;
+    if (nodeType === 1) {
+      const tag = internalNodeLocalName(node) || "";
+      if (windowNameAttribute(node, "id") || tag === "iframe" ||
+          ((tag === "embed" || tag === "form" || tag === "img" || tag === "object") &&
+           windowNameAttribute(node, "name"))) {
+        return true;
+      }
+    }
+    return windowNameChildren(node).some(subtreeHasWindowName);
+  };
+  const refreshWindowNamedProperties = function() {
+    if (!globalThis.document) return;
+    const names = new Set();
+    const firstFrameNames = new Map();
     let frameIndex = 0;
     const visit = node => {
-      for (const child of node.childNodes) {
-        if (child.nodeType !== 1) continue;
-        if ((child.localName || "").toLowerCase() === "iframe") {
-          const index = String(frameIndex++);
+      for (const child of windowNameChildren(node)) {
+        if (internalNodeType(child) !== 1) continue;
+        const tag = internalNodeLocalName(child) || "";
+        if (tag === "iframe") {
+          const index = `${frameIndex++}`;
           if (!Object.prototype.hasOwnProperty.call(globalThis, index)) {
             Object.defineProperty(globalThis, index, {
               configurable: true,
@@ -15220,20 +15286,49 @@
             });
           }
         }
-        const id = child.getAttribute("id");
-        if (id && !Object.prototype.hasOwnProperty.call(globalThis, id)) {
-          Object.defineProperty(globalThis, id, {
-            configurable: true,
-            enumerable: true,
-            writable: true,
-            value: child,
-          });
+        const id = windowNameAttribute(child, "id");
+        if (id) names.add(id);
+        const name = windowNameAttribute(child, "name");
+        if (name && (tag === "embed" || tag === "form" || tag === "img" || tag === "object")) {
+          names.add(name);
+        }
+        if (name && tag === "iframe" && !firstFrameNames.has(name)) {
+          firstFrameNames.set(name, child.contentDocument !== null);
         }
         visit(child);
       }
     };
     visit(globalThis.document);
+    for (const [name, sameOrigin] of firstFrameNames) {
+      if (sameOrigin) names.add(name);
+    }
+    for (const [name, getter] of windowNamedGetters) {
+      const current = Object.getOwnPropertyDescriptor(globalThis, name);
+      if (current?.get !== getter) {
+        windowNamedGetters.delete(name);
+      } else if (!names.has(name)) {
+        delete globalThis[name];
+        windowNamedGetters.delete(name);
+      }
+    }
+    for (const name of names) {
+      if (windowNamedGetters.has(name) || name in globalThis) continue;
+      const getter = () => windowNamedValue(name);
+      Object.defineProperty(globalThis, name, {
+        configurable: true,
+        enumerable: true,
+        get: getter,
+        set(value) {
+          windowNamedGetters.delete(name);
+          Object.defineProperty(globalThis, name, {
+            configurable: true, enumerable: true, writable: true, value,
+          });
+        },
+      });
+      windowNamedGetters.set(name, getter);
+    }
   };
+  globalThis.__omoikane_install_window_named_properties = refreshWindowNamedProperties;
   globalThis.customElements = registryForDocument(globalThis.document);
   globalThis.__omoikane_set_current_script = function(id) {
     globalThis.document.__currentScript =
@@ -17801,7 +17896,24 @@
     }
   }
 
+  function refreshWindowNamesForMutation(target, type, init) {
+    const namedTreeChanged = type === "childList" &&
+      ((!init.addedNodes && !init.removedNodes) ||
+       (init.addedNodes || []).some(subtreeHasWindowName) ||
+       (init.removedNodes || []).some(subtreeHasWindowName));
+    const attributeName = init.attributeName;
+    const namedAttributeChanged = type === "attributes" &&
+      (attributeName === "id" || attributeName === "name");
+    if (!namedTreeChanged && !namedAttributeChanged) return;
+    const targetDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
+    if (targetDocument === globalThis.document &&
+        (target === globalThis.document || internalIsConnected(target))) {
+      refreshWindowNamedProperties();
+    }
+  }
+
   function queueMutation(target, type, init = {}) {
+    refreshWindowNamesForMutation(target, type, init);
     if (xpathMutationHook) xpathMutationHook(target);
     if (type === "childList") customFormChildrenChanged(target, init);
     for (const observer of mutationObservers) {

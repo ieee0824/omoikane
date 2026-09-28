@@ -50,6 +50,7 @@
     { "path": "css/css-conditional/js/CSS-supports-L3.html" },
     { "path": "css/css-conditional/js/supports-conditionText.html" },
     { "path": "css/css-nesting/block-skipping.html" },
+    { "path": "css/css-nesting/cssom.html" },
     { "path": "css/css-nesting/implicit-nesting-ident-recovery.html" },
     { "path": "css/css-nesting/implicit-nesting-ident.html" },
     { "path": "css/css-nesting/invalid-inner-rules.html" },
