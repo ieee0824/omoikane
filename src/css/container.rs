@@ -279,7 +279,10 @@ fn parse_feature(input: &str) -> Option<Feature> {
         return Some(Feature {
             axis,
             comparison: Comparison::Greater,
-            value_px: 0.0,
+            value: LengthValue {
+                number: 0.0,
+                unit: LengthUnit::Px,
+            },
         });
     }
     if let Some((feature, value)) = input.split_once(':') {
