@@ -2094,6 +2094,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                         },
                         metrics: FontMetrics::from_font_size(8.0),
                         vertical_align: VerticalAlign::Top,
+                        source_end_token: 0,
                         style: FragmentStyle::default(),
                     }],
                     text_overflow: None,
@@ -10768,6 +10769,7 @@ fn form_control_label_uses_web_font_variant() {
                 rect: viewport,
                 metrics: FontMetrics::from_font_size(16.0),
                 vertical_align: VerticalAlign::Baseline,
+                source_end_token: 0,
                 style: FragmentStyle {
                     font_family: Some("btnface".to_string()),
                     ..FragmentStyle::default()
@@ -10856,6 +10858,7 @@ fn focused_text_control_paints_selection_and_caret() {
         rect: viewport,
         metrics: FontMetrics::from_font_size(16.0),
         vertical_align: VerticalAlign::Baseline,
+        source_end_token: 0,
         style: FragmentStyle::default(),
     };
     let layout = |fragment| LayoutBox {
