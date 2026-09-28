@@ -27,3 +27,5 @@ PR #1110の通常CI、Browser behavior、Native JIT、CodeQL、Gate 5、`--inclu
 ## 文書のみの変更判定
 
 ルートの`AGENTS.md`と`README.md`、`docs/`配下のMarkdownだけを軽量経路の対象にする。workflow、スクリプト、fixture、WPT入力の変更、変更範囲が確定できないイベントは通常の検証を実行する。
+
+判定用checkは文書のみの場合も実行する。required checkが未作成のまま残らないよう、重いjobはworkflow全体を除外せずjob単位でskipする。
