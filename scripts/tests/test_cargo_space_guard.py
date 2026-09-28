@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -48,6 +49,45 @@ class CargoSpaceGuardTests(unittest.TestCase):
             guard.validate_run_target(self.root, self.workspace)
         target = self.root / "cache" / "issue-737"
         self.assertEqual(guard.validate_run_target(target, self.workspace), target)
+
+    def test_mount_type_uses_longest_matching_mount(self):
+        mounts = (
+            "1 0 0:1 / / rw - overlay overlay rw\n"
+            "2 1 0:2 / /workspace rw - virtiofs shared rw\n"
+            "3 1 0:3 / /target rw - ext4 disk rw\n"
+            "4 2 0:4 / /workspace/special\\040cache rw - ext4 disk rw\n"
+        )
+        self.assertEqual(
+            guard.filesystem_type_from_mountinfo(
+                Path("/workspace/.artifacts/target/test"), mounts
+            ),
+            "virtiofs",
+        )
+        self.assertEqual(
+            guard.filesystem_type_from_mountinfo(Path("/target/omoikane"), mounts),
+            "ext4",
+        )
+        self.assertEqual(
+            guard.filesystem_type_from_mountinfo(
+                Path("/workspace/special cache/test"), mounts
+            ),
+            "ext4",
+        )
+
+    def test_run_rejects_virtiofs_before_creating_target(self):
+        target = self.root / "cache" / "virtiofs"
+        with patch.object(guard, "target_filesystem_type", return_value="virtiofs"):
+            with self.assertRaisesRegex(ValueError, "Cargo target on virtiofs"):
+                guard.run_guarded(
+                    [self.root / "command-that-must-not-run"],
+                    target,
+                    self.workspace,
+                    required_free=1,
+                    minimum_free=0,
+                    maximum_target=guard.GIB,
+                    poll_seconds=0.01,
+                )
+        self.assertFalse(target.exists())
 
     def test_size_argument_rejects_non_finite_values(self):
         for value in ("nan", "inf", "-1"):
@@ -223,6 +263,19 @@ class CargoSpaceGuardTests(unittest.TestCase):
         binding = json.loads((target / guard.BINDING_NAME).read_text())
         self.assertEqual(binding["workspace"], str(self.workspace.resolve()))
         self.assertEqual(binding["uid"], os.geteuid())
+
+    def test_reset_remains_available_for_a_virtiofs_target(self):
+        target = self.root / "cache" / "failed-on-virtiofs"
+        guard.prepare_target(target, self.workspace)
+        artifact = target / "debug" / "deps" / "failed-test"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(b"broken executable")
+        with patch.object(guard, "target_filesystem_type", return_value="virtiofs"):
+            quarantine = guard.reset_target(target, self.workspace, execute=True)
+        self.assertEqual(
+            (quarantine / artifact.relative_to(target)).read_bytes(),
+            b"broken executable",
+        )
 
     def test_reset_refuses_an_active_or_foreign_target(self):
         target = self.root / "cache" / "active"

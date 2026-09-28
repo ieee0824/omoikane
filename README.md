@@ -250,6 +250,7 @@ python3 scripts/cargo-space-guard.py run -- cargo build --locked
 ```
 
 - ビルド成果物はホストの `target/` と分け、worktreeごとの専用ディレクトリへ出力します。同じtargetを別worktreeで再利用せず、Cargoを `sudo` で実行しないでください。guardは初回実行時にtargetをworktreeの絶対パスと実行UIDへ紐付け、別worktree・別UIDによる再利用と、所有者または書込み権限が不整合な成果物をCargo起動前に拒否します。
+- targetはvirtiofsのホスト共有領域を避け、`/target/<worktree>` のようなローカルボリュームへ置きます。[Issue #1025](https://github.com/ieee0824/omoikane/issues/1025)では、virtiofs上で権限操作が断続的に失敗し、正常終了したリンカーのELFに実行ビットが付かない現象を確認しました。guardはLinuxのmount情報からvirtiofsのtargetを判定し、Cargo起動前に拒否します。調査環境では `/workspace` がvirtiofs、`/target` がext4で、ext4上の専用targetで全体テストを確認しています。
 - 全体テストなど容量が大きい処理では、開始時22 GiB・実行中2 GiBの空きと、target 20 GiBの上限もguardが確認します。
 
 ```bash
@@ -258,11 +259,12 @@ python3 scripts/cargo-space-guard.py run -- \
   cargo test --locked -- --include-ignored --test-threads=1
 ```
 
-Cargoがobjectへの `Permission denied` を報告した場合や、その直後にLLVM内部symbolなどの大量の未定義参照が出た場合は、同じtargetで再試行したり、個別のobject・incrementalディレクトリだけを削除したりしません。guard管理下のtarget全体を隔離し、同じパスへclean targetを再作成してから再実行します。`reset`はdry-runが既定で、実行中のtarget、別worktreeに紐付いたtarget、source・証跡・保持印を含むディレクトリを拒否します。
+Cargoがobjectへの `Permission denied` を報告した場合、統合テストELFの実行ビットがなく起動できない場合や、その直後にLLVM内部symbolなどの大量の未定義参照が出た場合は、同じtargetで再試行したり、個別のobject・incrementalディレクトリだけを削除したりしません。guard管理下のtarget全体を隔離し、ext4上に新しいworktree専用targetを用意して再実行します。`reset`はdry-runが既定で、実行中のtarget、別worktreeに紐付いたtarget、source・証跡・保持印を含むディレクトリを拒否します。
 
 ```bash
 python3 scripts/cargo-space-guard.py reset --target-dir "$CARGO_TARGET_DIR"
 python3 scripts/cargo-space-guard.py reset --target-dir "$CARGO_TARGET_DIR" --execute
+export CARGO_TARGET_DIR="/target/$(basename "$PWD")"
 python3 scripts/cargo-space-guard.py run -- cargo build --locked
 ```
 

@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -101,6 +102,41 @@ def validate_run_target(path: Path, workspace: Path) -> Path:
     if target == source or source in target.parents or target in source.parents:
         raise ValueError("target must be separate from the source worktree")
     return target
+
+
+def filesystem_type_from_mountinfo(path: Path, mountinfo: str) -> str | None:
+    """Return the filesystem type of the longest matching Linux mount point."""
+    best_mount = None
+    best_type = None
+    for line in mountinfo.splitlines():
+        try:
+            mount, filesystem = line.split(" - ", 1)
+            encoded_point = mount.split()[4]
+            filesystem_type = filesystem.split()[0]
+        except (IndexError, ValueError):
+            continue
+        point = Path(
+            re.sub(
+                r"\\([0-7]{3})",
+                lambda match: chr(int(match.group(1), 8)),
+                encoded_point,
+            )
+        )
+        if (path == point or point in path.parents) and (
+            best_mount is None or len(point.parts) > len(best_mount.parts)
+        ):
+            best_mount = point
+            best_type = filesystem_type
+    return best_type
+
+
+def target_filesystem_type(path: Path) -> str | None:
+    """Read the target mount type on Linux; other platforms have no mountinfo."""
+    try:
+        mountinfo = Path("/proc/self/mountinfo").read_text()
+    except FileNotFoundError:
+        return None
+    return filesystem_type_from_mountinfo(path, mountinfo)
 
 
 def current_binding(workspace: Path) -> TargetBinding:
@@ -323,6 +359,12 @@ def run_guarded(
     size: Callable[[Path], int] = directory_size,
 ) -> int:
     target = validate_run_target(target, workspace)
+    if target_filesystem_type(target) == "virtiofs":
+        raise ValueError(
+            "Cargo target on virtiofs can lose executable permissions; "
+            "use a dedicated ext4-backed target such as /target/<worktree>: "
+            f"{target}"
+        )
     target.mkdir(parents=True, exist_ok=True)
     target_lock = lock_target(target, blocking=False)
     if target_lock is None:
