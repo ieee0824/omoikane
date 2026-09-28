@@ -10,6 +10,7 @@ Unit tests in `src/` import the same helper through `src/test_support/mod.rs`.
 `src/js/stylesheet.rs` is the first migrated unit-test server; the other local
 servers remain tracked by Issue #1089.
 `print_page_margin_content.rs` also uses the shared fixture for its image request.
+`location_pseudo_target.rs` also uses the shared fixture for its iframe requests.
 
 Issue #885 first migrates `document_cookie_bridge.rs` and
 `fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,

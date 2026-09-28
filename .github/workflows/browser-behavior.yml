@@ -9,13 +9,19 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: browser-behavior-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/change-scope.yml
+
   browser:
+    needs: changes
+    if: needs.changes.outputs.run_full == 'true'
     name: Browser (${{ matrix.platform.target }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 45
