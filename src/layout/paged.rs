@@ -10,7 +10,7 @@ use crate::css::{
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 
-use super::{FontMetrics, LayoutBox, Rect, layout_tree, measure_text_width};
+use super::{FontMetrics, LayoutBox, PositionScheme, Rect, layout_tree, measure_text_width};
 
 /// One page of a paged layout and its slice of the document flow.
 #[derive(Debug, Clone)]
@@ -250,6 +250,37 @@ struct FlowSection {
     name: Option<String>,
     start: f32,
     end: f32,
+    requested_side: Option<PageSide>,
+}
+
+#[derive(Clone, Copy)]
+enum ForcedPageBreak {
+    Page,
+    Side(PageSide),
+}
+
+impl ForcedPageBreak {
+    fn side(self) -> Option<PageSide> {
+        match self {
+            Self::Page => None,
+            Self::Side(side) => Some(side),
+        }
+    }
+}
+
+fn forced_page_break(value: Option<&ComputedValue>) -> Option<ForcedPageBreak> {
+    let Some(ComputedValue::Keyword(value)) = value else {
+        return None;
+    };
+    if value.eq_ignore_ascii_case("page") {
+        Some(ForcedPageBreak::Page)
+    } else if value.eq_ignore_ascii_case("left") {
+        Some(ForcedPageBreak::Side(PageSide::Left))
+    } else if value.eq_ignore_ascii_case("right") {
+        Some(ForcedPageBreak::Side(PageSide::Right))
+    } else {
+        None
+    }
 }
 
 /// Lays out a document for print and builds page contexts from `@page` rules.
@@ -272,7 +303,7 @@ pub fn layout_paged_tree(
     }
     resolver.set_viewport(default_sheet.width, default_sheet.height);
     resolver.set_media_type(MediaType::Print);
-    let first_side = document
+    let progression_first_side = document
         .child_nodes()
         .iter()
         .find(|child| child.tag_name().as_deref() == Some("html"))
@@ -284,6 +315,9 @@ pub fn layout_paged_tree(
             _ => None,
         })
         .unwrap_or(PageSide::Right);
+    // A side break propagated from the first in-flow body child changes the
+    // side of the first printed page; no leading blank sheet is emitted.
+    let first_side = first_body_break_side(document, resolver).unwrap_or(progression_first_side);
     let first_name = first_page_name(document, resolver);
     let first_selector = page_selector(0, first_name, first_side);
     let first_style = resolver.resolved_page_style(&first_selector);
@@ -301,6 +335,44 @@ pub fn layout_paged_tree(
             section_index,
             flow_y: section.start,
         };
+        if section.requested_side.is_some_and(|requested| {
+            page_selector(pages.len(), section.name.clone(), first_side).side != requested
+        }) {
+            if pages.len() >= 1024 {
+                return None;
+            }
+            let mut selector = page_selector(pages.len(), section.name.clone(), first_side);
+            selector.blank = true;
+            let style = resolver.resolved_page_style(&selector);
+            let geometry = style.geometry((default_sheet.width, default_sheet.height), 0.0);
+            let content = content_rect(geometry);
+            let source = Rect {
+                x: first_content.x,
+                y: cursor.flow_y,
+                width: first_content.width,
+                height: 0.0,
+            };
+            let margin_box_rects = corner_margin_box_rects(&style, geometry);
+            pages.push(PagedPage {
+                selector,
+                style,
+                geometry,
+                sheet: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: geometry.width,
+                    height: geometry.height,
+                },
+                content,
+                // The inserted page contains no document-flow fragments.
+                layout_index: 0,
+                fragments: Vec::new(),
+                continuation: Some(cursor),
+                source,
+                counters: PageCounterValues { page: 0, pages: 0 },
+                margin_box_rects,
+            });
+        }
         loop {
             if pages.len() >= 1024 {
                 // Returning a truncated document would silently discard the
@@ -971,6 +1043,33 @@ fn first_page_name(document: &NodeHandle, resolver: &mut StyleResolver) -> Optio
         .or_else(|| page_name(&body, resolver))
 }
 
+fn first_body_break_side(document: &NodeHandle, resolver: &mut StyleResolver) -> Option<PageSide> {
+    let body = find_body_node(document)?;
+    for child in body.child_nodes() {
+        match child.node_type() {
+            NodeType::Text if child.data().is_some_and(|text| !text.trim().is_empty()) => {
+                // Text before this element forms an earlier in-flow box.
+                return None;
+            }
+            NodeType::Element => {}
+            _ => continue,
+        }
+        let style = resolver.computed_style(&child);
+        if matches!(
+            style.get("display"),
+            Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
+        ) || matches!(
+            style.get("position"),
+            Some(ComputedValue::Keyword(value))
+                if value.eq_ignore_ascii_case("absolute") || value.eq_ignore_ascii_case("fixed")
+        ) {
+            continue;
+        }
+        return forced_page_break(style.get("break-before")).and_then(ForcedPageBreak::side);
+    }
+    None
+}
+
 fn find_body_node(node: &NodeHandle) -> Option<NodeHandle> {
     if node.tag_name().as_deref() == Some("body") {
         return Some(node.clone());
@@ -1005,6 +1104,14 @@ fn has_printable_flow(layout: &LayoutBox) -> bool {
         || layout.children.iter().any(has_printable_flow)
 }
 
+fn is_in_flow_principal(layout: &LayoutBox) -> bool {
+    layout.pseudo.is_none()
+        && !matches!(
+            layout.position_scheme,
+            PositionScheme::Absolute | PositionScheme::Fixed
+        )
+}
+
 fn flow_sections(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
@@ -1020,6 +1127,7 @@ fn flow_sections(
             name: None,
             start: content_start,
             end: flow_end.max(content_start),
+            requested_side: None,
         }];
     };
     // The root's default margins can extend scroll geometry even when there
@@ -1031,35 +1139,46 @@ fn flow_sections(
     let mut current_name = body
         .children
         .iter()
-        .find(|child| child.pseudo.is_none())
+        .find(|child| is_in_flow_principal(child))
         .and_then(|child| page_name(&child.node, resolver));
     let mut start = content_start;
-    for child in body.children.iter().filter(|child| child.pseudo.is_none()) {
+    let mut requested_side = None;
+    for (child_index, child) in body
+        .children
+        .iter()
+        .filter(|child| is_in_flow_principal(child))
+        .enumerate()
+    {
         let name = page_name(&child.node, resolver);
         let child_style = resolver.computed_style(&child.node);
-        let break_before = matches!(
-            child_style.get("break-before"),
-            Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("page")
-        );
-        if name != current_name || break_before {
-            let boundary = (child.dimensions.border_box().y - child.dimensions.margin.top)
-                .max(start)
-                .min(flow_end);
+        let break_before = forced_page_break(child_style.get("break-before"));
+        if name != current_name || break_before.is_some() {
+            let boundary = if child_index == 0 && break_before.is_some() {
+                // A break before the first in-flow child propagates to the
+                // root; do not manufacture a page for the body top margin.
+                start
+            } else {
+                (child.dimensions.border_box().y - child.dimensions.margin.top)
+                    .max(start)
+                    .min(flow_end)
+            };
             if boundary > start {
                 sections.push(FlowSection {
                     name: current_name,
                     start,
                     end: boundary,
+                    requested_side,
                 });
+                requested_side = None;
             }
             current_name = name;
             start = boundary;
+            if let Some(side) = break_before.and_then(ForcedPageBreak::side) {
+                requested_side = Some(side);
+            }
         }
-        let break_after = matches!(
-            child_style.get("break-after"),
-            Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("page")
-        );
-        if break_after {
+        let break_after = forced_page_break(child_style.get("break-after"));
+        if break_after.is_some() {
             let border = child.dimensions.border_box();
             let boundary = (border.y + border.height + child.dimensions.margin.bottom)
                 .max(start)
@@ -1069,9 +1188,14 @@ fn flow_sections(
                     name: current_name.clone(),
                     start,
                     end: boundary,
+                    requested_side,
                 });
+                requested_side = None;
             }
             start = boundary;
+            if let Some(side) = break_after.and_then(ForcedPageBreak::side) {
+                requested_side = Some(side);
+            }
         }
     }
     if flow_end > start || sections.is_empty() {
@@ -1079,6 +1203,7 @@ fn flow_sections(
             name: current_name,
             start,
             end: flow_end.max(start),
+            requested_side,
         });
     }
     sections
@@ -1355,6 +1480,187 @@ mod tests {
         .unwrap();
         assert_eq!(paged.pages[0].selector.side, PageSide::Left);
         assert_eq!(paged.pages[0].content.x, 11.0);
+    }
+
+    #[test]
+    fn side_breaks_before_and_after_body_children_insert_only_needed_blank_pages() {
+        for (direction, property, requested, expect_blank) in [
+            ("ltr", "break-before: left", PageSide::Left, false),
+            ("ltr", "break-before: right", PageSide::Right, true),
+            ("rtl", "break-before: right", PageSide::Right, false),
+            ("rtl", "break-before: left", PageSide::Left, true),
+            ("ltr", "break-after: left", PageSide::Left, false),
+            ("ltr", "break-after: right", PageSide::Right, true),
+            ("rtl", "break-after: right", PageSide::Right, false),
+            ("rtl", "break-after: left", PageSide::Left, true),
+        ] {
+            let (document, first, second) = document_with_two_boxes();
+            first.set_attribute("style", "height: 20px");
+            second.set_attribute("style", "height: 20px");
+            if property.starts_with("break-before") {
+                second.set_attribute("style", format!("height: 20px; {property}"));
+            } else {
+                first.set_attribute("style", format!("height: 20px; {property}"));
+            }
+            let mut resolver = StyleResolver::new();
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet(&format!(
+                    "html {{ direction: {direction} }} body {{ margin: 0 }} \
+                     @page {{ size: 100px 100px; margin: 0 }}"
+                ))
+                .unwrap(),
+            );
+            let paged = layout_paged_tree(
+                &document,
+                &mut resolver,
+                Rect {
+                    width: 100.0,
+                    height: 100.0,
+                    ..Rect::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                paged.pages.len(),
+                if expect_blank { 3 } else { 2 },
+                "{direction} {property}"
+            );
+            let first_page = &paged.pages[0];
+            let last_page = paged.pages.last().unwrap();
+            assert!(!first_page.selector.blank);
+            assert!(!last_page.selector.blank);
+            assert_eq!(last_page.selector.side, requested, "{direction} {property}");
+            assert_eq!(first_page.fragments.len(), 1);
+            assert_eq!(last_page.fragments.len(), 1);
+            assert_eq!(
+                first_page.fragments[0].end.flow_y(),
+                last_page.fragments[0].start.flow_y(),
+                "{direction} {property}"
+            );
+            if expect_blank {
+                let blank = &paged.pages[1];
+                assert!(blank.selector.blank, "{direction} {property}");
+                assert!(blank.fragments.is_empty());
+                assert_eq!(blank.source.height, 0.0);
+                assert_eq!(blank.continuation, Some(last_page.fragments[0].start));
+                assert_eq!(blank.counters.page, 2);
+                assert_eq!(blank.counters.pages, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn first_child_side_break_selects_the_first_printed_page_without_a_blank() {
+        for (direction, property, expected) in [
+            ("ltr", "break-before: left", PageSide::Left),
+            ("rtl", "break-before: right", PageSide::Right),
+        ] {
+            let (document, first, _) = document_with_two_boxes();
+            first.set_attribute("style", format!("height: 20px; {property}"));
+            let mut resolver = StyleResolver::new();
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet(&format!(
+                    "html {{ direction: {direction} }} body {{ margin: 0 }} \
+                     @page {{ size: 100px 100px; margin: 0 }}"
+                ))
+                .unwrap(),
+            );
+            let paged = layout_paged_tree(
+                &document,
+                &mut resolver,
+                Rect {
+                    width: 100.0,
+                    height: 100.0,
+                    ..Rect::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(paged.pages.len(), 1, "{direction} {property}");
+            assert_eq!(paged.pages[0].selector.side, expected);
+            assert!(!paged.pages[0].selector.blank);
+            assert_eq!(paged.pages[0].selector.index, 0);
+        }
+    }
+
+    #[test]
+    fn later_before_side_wins_over_earlier_after_side() {
+        let (document, first, second) = document_with_two_boxes();
+        first.set_attribute("style", "height: 20px; break-after: left");
+        second.set_attribute("style", "height: 20px; break-before: right");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("body { margin: 0 } @page { size: 100px 100px; margin: 0 }").unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 100.0,
+                height: 100.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.pages.len(), 3);
+        assert!(paged.pages[1].selector.blank);
+        assert_eq!(paged.pages[2].selector.side, PageSide::Right);
+    }
+
+    #[test]
+    fn side_break_uses_page_number_after_an_oversized_previous_box() {
+        let (document, first, second) = document_with_two_boxes();
+        first.set_attribute("style", "height: 180px");
+        second.set_attribute("style", "height: 20px; break-before: left");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("body { margin: 0 } @page { size: 100px 100px; margin: 0 }").unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 100.0,
+                height: 100.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.pages.len(), 4);
+        assert_eq!(paged.pages[0].selector.side, PageSide::Right);
+        assert_eq!(paged.pages[1].selector.side, PageSide::Left);
+        assert!(paged.pages[2].selector.blank);
+        assert_eq!(paged.pages[2].selector.side, PageSide::Right);
+        assert_eq!(paged.pages[3].selector.side, PageSide::Left);
+        assert_eq!(paged.pages[3].fragments[0].start.flow_y(), 180.0);
+    }
+
+    #[test]
+    fn ordinary_page_break_does_not_insert_a_blank_page() {
+        let (document, first, second) = document_with_two_boxes();
+        first.set_attribute("style", "height: 20px");
+        second.set_attribute("style", "height: 20px; break-before: page");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("body { margin: 0 } @page { size: 100px 100px; margin: 0 }").unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 100.0,
+                height: 100.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.pages.len(), 2);
+        assert!(paged.pages.iter().all(|page| !page.selector.blank));
+        assert_eq!(paged.pages[1].selector.side, PageSide::Left);
     }
 
     #[test]
