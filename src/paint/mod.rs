@@ -163,9 +163,8 @@ pub(crate) use color::{
 };
 #[allow(unused_imports)]
 pub(crate) use image::{
-    decode_gif_animation, decode_jpeg, decode_png, decode_png_fallback, decode_webp, hex_value,
-    paeth_predictor, parse_background_image_value, parse_size_token, percent_decode,
-    unfilter_png_scanline,
+    decode_gif_animation, decode_jpeg, decode_png, decode_png_fallback, decode_webp,
+    paeth_predictor, parse_background_image_value, parse_size_token, unfilter_png_scanline,
 };
 #[allow(unused_imports)]
 pub(crate) use stylesheet::{

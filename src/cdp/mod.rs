@@ -2763,8 +2763,15 @@ impl CdpSession {
                     Vec::new(),
                 ));
             }
-            if let Some(data) = url.strip_prefix("data:text/html,") {
-                return Ok((percent_decode(data), 200, url.to_string(), Vec::new()));
+            if let Some(data) = crate::http::parse_data_uri(url)
+                && data.mime_type.eq_ignore_ascii_case("text/html")
+            {
+                return Ok((
+                    String::from_utf8_lossy(&data.data).into_owned(),
+                    200,
+                    url.to_string(),
+                    Vec::new(),
+                ));
             }
         }
         let parsed: crate::http::url::Url = url
@@ -3885,36 +3892,6 @@ fn button_mask(button: i32) -> u64 {
         4 => 16,
         _ => 0,
     }
-}
-
-fn percent_decode(input: &str) -> String {
-    let mut output = String::new();
-    let bytes = input.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 2 < bytes.len() => {
-                if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3])
-                    && let Ok(value) = u8::from_str_radix(hex, 16)
-                {
-                    output.push(value as char);
-                    index += 3;
-                    continue;
-                }
-                output.push('%');
-                index += 1;
-            }
-            b'+' => {
-                output.push(' ');
-                index += 1;
-            }
-            byte => {
-                output.push(byte as char);
-                index += 1;
-            }
-        }
-    }
-    output
 }
 
 fn cdp_node_type(node: &NodeHandle) -> u8 {
@@ -6534,6 +6511,47 @@ mod tests {
             ])
         );
         assert_eq!(html["outerHTML"], "<main id=\"app\"><p>Hello</p></main>");
+    }
+
+    #[test]
+    fn cdp_data_uri_navigation_decodes_utf8_without_replacing_plus() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({"url": "data:text/html,%3Cp%3E%E3%81%82+%E3%81%84%3C%2Fp%3E"}),
+            )
+            .unwrap();
+        let result = session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression": "document.body.textContent"}),
+            )
+            .unwrap();
+        assert_eq!(result["result"]["value"], "あ+い");
+    }
+
+    #[test]
+    fn cdp_data_uri_navigation_accepts_charset_and_base64() {
+        let mut session = CdpSession::new().unwrap();
+        for (url, expected) in [
+            (
+                "data:text/html;charset=utf-8,%3Cp%3Echarset%3C%2Fp%3E",
+                "charset",
+            ),
+            ("data:text/html;base64,PHA+YmFzZTY0PC9wPg==", "base64"),
+        ] {
+            session
+                .dispatch("Page.navigate", json!({"url": url}))
+                .unwrap();
+            let result = session
+                .dispatch(
+                    "Runtime.evaluate",
+                    json!({"expression": "document.body.textContent"}),
+                )
+                .unwrap();
+            assert_eq!(result["result"]["value"], expected);
+        }
     }
 
     #[test]
