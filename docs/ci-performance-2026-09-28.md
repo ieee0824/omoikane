@@ -18,6 +18,8 @@
 
 macOSの残り10件は、復元したfingerprintよりcheckout直後のソースの更新時刻が新しいため再ビルドされた。ソース変更時のキャッシュキー切り替えにはBoaのRustソース、manifest、lockfileを含めた。実際にBoaソースを変更した別runでの再ビルド確認は未実施。
 
+初回runで保存されたsuite用キャッシュの容量は、Linux ARM64がRust 385 MB・Boa 66 MB、Linux x86_64がRust 400 MB・Boa 68 MB、macOS ARM64がRust 298 MB・Boa 58 MB。これはGitHub cache一覧の表示値を十進MBへ丸めたもので、転送量や展開後のディスク使用量ではない。
+
 WPT準備は変更前のGate 5で49〜72秒、専用WPT jobで73〜86秒。PR #1110ではGate 5で3.3〜5.5秒、専用jobで5秒だった。旧新のsparse-checkoutパターン239件は一致し、WPTテストも成功した。
 
 PR #1110の通常CI、Browser behavior、Native JIT、CodeQL、Gate 5、`--include-ignored`、Acid3、WPT、Web API、aggregateは成功した。文書だけのPRと連続pushの挙動は別に実行して確認する。
