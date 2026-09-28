@@ -25,3 +25,6 @@ pub mod realtime;
 mod screenshot;
 pub mod svg;
 pub mod xml;
+
+#[cfg(test)]
+pub(crate) mod test_support;
