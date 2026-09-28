@@ -7,6 +7,77 @@ use crate::dom::{NodeHandle, ShadowRootMode};
 use super::*;
 
 #[test]
+fn revert_rule_ignores_the_winning_style_rule() {
+    let document = crate::html::TreeBuilder::parse(
+        "<html><body><div id='ordinary'></div><div id='nested'></div>\
+         <div id='nested-declarations'></div><div id='scope'></div></body></html>",
+    )
+    .document();
+    let mut resolver = StyleResolver::new();
+    resolver.set_viewport(320.0, 200.0);
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            r#"
+                #ordinary { color: green; }
+                #ordinary { color: red; color: revert-rule; }
+                :root {
+                    #nested { color: green; }
+                    #nested { color: red; color: revert-rule; }
+                    #nested-declarations {
+                        color: green;
+                        & { color: red; color: revert-rule; }
+                    }
+                }
+                @scope (#scope) { color: green; }
+                #scope { color: red; color: revert-rule; }
+            "#,
+        )
+        .unwrap(),
+    );
+    for id in ["ordinary", "nested", "nested-declarations", "scope"] {
+        let node = document.query_selector(&format!("#{id}")).unwrap();
+        assert_eq!(
+            resolver.computed_style(&node).get("color"),
+            Some(&ComputedValue::Color("green".to_string())),
+            "revert-rule must expose the prior rule for {id}"
+        );
+    }
+}
+
+#[test]
+fn revert_rule_is_css_wide_and_respects_important_and_other_properties() {
+    assert!(supports_declaration("color", "revert-rule"));
+    assert!(supports_declaration("width", "revert-rule"));
+    assert!(!supports_declaration("made-up-property", "revert-rule"));
+
+    let document = NodeHandle::document();
+    let element = NodeHandle::element("div");
+    document.append_child(element.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { color: green; width: 17px; --token: base; } \
+             div { color: red !important; color: revert-rule !important; \
+                   width: 31px; width: revert-rule; \
+                   --token: changed; --token: revert-rule; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.get("color"),
+        Some(&ComputedValue::Color("green".to_string()))
+    );
+    assert_eq!(style.get("width"), Some(&ComputedValue::Px(17.0)));
+    assert_eq!(
+        style.get("--token"),
+        Some(&ComputedValue::Keyword("base".to_string()))
+    );
+}
+
+#[test]
 fn nested_rules_match_descendants_and_preserve_cascade_order() {
     let document = NodeHandle::document();
     let parent = NodeHandle::element("div");
