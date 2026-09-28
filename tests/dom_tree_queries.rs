@@ -193,3 +193,51 @@ fn removal_adjusts_only_ranges_in_the_ordinary_removed_subtree() {
         Some(true)
     );
 }
+
+#[test]
+fn removing_document_child_adjusts_document_range_offsets() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+                    const doc = document.implementation.createDocument(null, 'root', null);
+                    const range = doc.createRange();
+                    range.setStart(doc, 1);
+                    range.setEnd(doc, 1);
+                    doc.removeChild(doc.documentElement);
+                    return range.startContainer === doc && range.endContainer === doc &&
+                        range.startOffset === 0 && range.endOffset === 0;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn range_boundary_move_invalidates_document_only_removal_cache() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+                    const parent = document.createElement('section');
+                    parent.innerHTML = '<i></i><b>target</b>';
+                    document.body.appendChild(parent);
+                    const range = document.createRange();
+                    parent.removeChild(parent.firstChild); // primes the document-boundary cache
+                    const removed = parent.firstChild;
+                    range.setStart(removed.firstChild, 1);
+                    range.setEnd(removed.firstChild, 4);
+                    parent.removeChild(removed);
+                    return range.startContainer === parent && range.endContainer === parent &&
+                        range.startOffset === 0 && range.endOffset === 0;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
