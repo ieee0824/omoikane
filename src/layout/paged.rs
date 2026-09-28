@@ -489,10 +489,22 @@ pub fn layout_paged_tree(
             let mut end_y = (cursor.flow_y + content.height).min(page_section.end);
             if end_y < page_section.end {
                 let candidates = &page_breaks[layout_index];
-                let within_page = candidates.partition_point(|&candidate| candidate <= end_y);
-                if let Some(&boundary) = candidates[..within_page].last()
-                    && boundary > cursor.flow_y
-                {
+                let within_page = candidates
+                    .points
+                    .partition_point(|candidate| candidate.y <= end_y);
+                let mut fallback = None;
+                let mut preferred = None;
+                for candidate in candidates.points[..within_page].iter().rev() {
+                    if candidate.y <= cursor.flow_y {
+                        break;
+                    }
+                    fallback.get_or_insert(candidate.y);
+                    if candidates.is_preferred(candidate, cursor.flow_y) {
+                        preferred = Some(candidate.y);
+                        break;
+                    }
+                }
+                if let Some(boundary) = preferred.or(fallback) {
                     end_y = boundary;
                 }
             }
@@ -1278,15 +1290,64 @@ fn can_fragment_descendants(layout: &LayoutBox, resolver: &mut StyleResolver) ->
     !unsupported_display && !floating
 }
 
+#[derive(Clone, Copy)]
+struct PageBreakCandidate {
+    y: f32,
+    line_group: Option<usize>,
+    line_index: usize,
+}
+
+struct PageLineGroup {
+    line_ends: Vec<f32>,
+    orphans: usize,
+    widows: usize,
+}
+
+#[derive(Default)]
+struct PageBreakCandidates {
+    points: Vec<PageBreakCandidate>,
+    line_groups: Vec<PageLineGroup>,
+}
+
+impl PageBreakCandidates {
+    fn is_preferred(&self, candidate: &PageBreakCandidate, cursor_y: f32) -> bool {
+        let Some(group_index) = candidate.line_group else {
+            return true;
+        };
+        let group = &self.line_groups[group_index];
+        let lines_after = group.line_ends.len() - candidate.line_index - 1;
+        if lines_after == 0 {
+            return true;
+        }
+        let consumed = group
+            .line_ends
+            .partition_point(|&end| end <= cursor_y + 0.01);
+        let lines_here = (candidate.line_index + 1).saturating_sub(consumed);
+        lines_here >= group.orphans && lines_after >= group.widows
+    }
+}
+
+fn page_line_minima(resolver: &mut StyleResolver, layout: &LayoutBox) -> (usize, usize) {
+    let Some(_) = layout.node.tag_name() else {
+        return (2, 2);
+    };
+    let style = resolver.computed_style(&layout.node);
+    let minimum = |name| match style.get(name) {
+        Some(ComputedValue::Number(value)) if value.is_finite() && *value >= 1.0 => *value as usize,
+        _ => 2,
+    };
+    (minimum("orphans"), minimum("widows"))
+}
+
 fn page_break_candidates(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     include_nested_children: bool,
-) -> Vec<f32> {
+) -> PageBreakCandidates {
     fn collect(
         parent: &LayoutBox,
         resolver: &mut StyleResolver,
-        breaks: &mut Vec<f32>,
+        breaks: &mut PageBreakCandidates,
         include_nested_children: bool,
     ) {
         if parent.node.tag_name().is_some() {
@@ -1296,11 +1357,28 @@ fn page_break_candidates(
                 return;
             }
         }
-        for line in &parent.lines {
-            let boundary = line.rect.y + line.rect.height;
-            if boundary.is_finite() {
-                breaks.push(boundary);
+        let mut line_ends = parent
+            .lines
+            .iter()
+            .map(|line| line.rect.y + line.rect.height)
+            .filter(|boundary| boundary.is_finite())
+            .collect::<Vec<_>>();
+        if !line_ends.is_empty() {
+            line_ends.sort_by(f32::total_cmp);
+            let (orphans, widows) = page_line_minima(resolver, parent);
+            let group_index = breaks.line_groups.len();
+            for (line_index, &y) in line_ends.iter().enumerate() {
+                breaks.points.push(PageBreakCandidate {
+                    y,
+                    line_group: Some(group_index),
+                    line_index,
+                });
             }
+            breaks.line_groups.push(PageLineGroup {
+                line_ends,
+                orphans,
+                widows,
+            });
         }
         let mut seen_block = false;
         for child in parent
@@ -1322,7 +1400,11 @@ fn page_break_candidates(
             if include_nested_children && block && seen_block {
                 let boundary = child.dimensions.border_box().y - child.dimensions.margin.top;
                 if boundary.is_finite() {
-                    breaks.push(boundary);
+                    breaks.points.push(PageBreakCandidate {
+                        y: boundary,
+                        line_group: None,
+                        line_index: 0,
+                    });
                 }
             }
             seen_block |= block;
@@ -1330,7 +1412,7 @@ fn page_break_candidates(
         }
     }
 
-    let mut breaks = Vec::new();
+    let mut breaks = PageBreakCandidates::default();
     if let Some(body) = find_body_layout(layout) {
         for child in body
             .children
@@ -1342,15 +1424,19 @@ fn page_break_candidates(
             }
         }
     }
-    breaks.sort_by(f32::total_cmp);
-    breaks.dedup_by(|left, right| (*left - *right).abs() < 0.01);
+    breaks
+        .points
+        .sort_by(|left, right| left.y.total_cmp(&right.y));
+    breaks.points.dedup_by(|left, right| {
+        (left.y - right.y).abs() < 0.01 && left.line_group == right.line_group
+    });
     breaks
 }
 
 fn collect_table_row_breaks(
     table: &LayoutBox,
     resolver: &mut StyleResolver,
-    breaks: &mut Vec<f32>,
+    breaks: &mut PageBreakCandidates,
 ) {
     let mut rows = Vec::new();
     for child in table
@@ -1383,7 +1469,11 @@ fn collect_table_row_breaks(
         if span_end <= index + 1 {
             let boundary = row.dimensions.border_box().y + row.dimensions.border_box().height;
             if boundary.is_finite() {
-                breaks.push(boundary);
+                breaks.points.push(PageBreakCandidate {
+                    y: boundary,
+                    line_group: None,
+                    line_index: 0,
+                });
             }
         }
     }
