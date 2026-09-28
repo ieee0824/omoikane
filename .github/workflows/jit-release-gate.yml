@@ -8,13 +8,19 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: jit-release-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/change-scope.yml
+
   prepare:
+    needs: changes
+    if: needs.changes.outputs.run_full == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -74,9 +80,25 @@ jobs:
         run: cp .artifacts/jit-gate5/inputs/Cargo.lock Cargo.lock
       - uses: Swatinem/rust-cache@v2
         with:
-          key: jit-gate5-v1-${{ matrix.target }}-${{ matrix.kind }}
+          # Refresh the stale macOS entry and evaluate the new Boa side cache
+          # against a newly saved dependency cache on a warm run.
+          key: jit-gate5-v2-${{ matrix.target }}-${{ matrix.kind }}
           cache-workspace-crates: true
           cache-on-failure: true
+      # rust-cache sees only the root workspace and drops the nested Boa path
+      # dependencies from target/debug. Restore them after rust-cache cleanup.
+      - name: Restore Boa suite artifacts
+        if: matrix.kind == 'suite'
+        id: boa-cache
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/debug/.fingerprint/boa_*
+            target/debug/build/boa_*
+            target/debug/deps/boa_*
+            target/debug/deps/libboa_*
+          key: boa-gate5-v1-${{ matrix.target }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.github/workflows/jit-release-gate.yml', 'engine/boa/Cargo.lock', 'engine/boa/**/Cargo.toml', 'engine/boa/**/*.rs') }}
       - uses: actions/cache@v4
         if: matrix.kind == 'suite'
         with:
@@ -91,7 +113,19 @@ jobs:
         env:
           GATE_KIND: ${{ matrix.kind }}
           GATE_TARGET: ${{ matrix.target }}
+          CARGO_LOG: ${{ matrix.target == 'aarch64-apple-darwin' && matrix.kind == 'suite' && 'cargo::core::compiler::fingerprint=info' || '' }}
         run: python3 scripts/jit-gate5.py "$GATE_KIND" "$GATE_TARGET" .artifacts/jit-gate5
+      - name: Save Boa suite artifacts
+        if: matrix.kind == 'suite' && steps.boa-cache.outputs.cache-hit != 'true' && success()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/debug/.fingerprint/boa_*
+            target/debug/build/boa_*
+            target/debug/deps/boa_*
+            target/debug/deps/libboa_*
+          key: boa-gate5-v1-${{ matrix.target }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.github/workflows/jit-release-gate.yml', 'engine/boa/Cargo.lock', 'engine/boa/**/Cargo.toml', 'engine/boa/**/*.rs') }}
       - name: Upload the verified distribution archive
         if: matrix.kind == 'package'
         uses: actions/upload-artifact@v4
@@ -114,8 +148,8 @@ jobs:
 
   gate:
     name: Gate 5 aggregate
-    needs: [prepare, target]
-    if: always()
+    needs: [changes, prepare, target]
+    if: always() && needs.changes.outputs.run_full == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
