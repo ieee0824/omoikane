@@ -1197,13 +1197,7 @@ pub fn render_document_pages_with_url(
     let mut canvases = Vec::with_capacity(paged.pages.len());
     for page in &paged.pages {
         paged.restore_style_context_for_page(page, &mut resolver);
-        let mut layout = paged.layout_for_page(page).clone();
-        crate::layout::translate_layout_box(
-            &mut layout,
-            page.content.x - page.source.x,
-            page.content.y - page.source.y,
-            &mut resolver,
-        );
+        let layout = paged.layout_for_page(page);
         let mut canvas = Canvas::new(
             page.sheet.width.ceil().max(1.0) as u32,
             page.sheet.height.ceil().max(1.0) as u32,
@@ -1240,17 +1234,12 @@ pub fn render_document_pages_with_url(
             page_border,
             None,
         );
-        let source_clip = Rect {
-            height: page.source.height.min(page.content.height),
-            ..page.content
-        };
         text::with_render_glyph_cache(|| {
-            paint_box(
+            paint_page_content_fragments(
                 &mut canvas,
-                &layout,
+                layout,
+                page,
                 &mut resolver,
-                Some(source_clip),
-                page.sheet,
                 &fonts,
                 web_fonts,
             );
@@ -1275,6 +1264,42 @@ pub fn render_document_pages_with_url(
         ));
     }
     Ok(canvases)
+}
+
+fn paint_page_content_fragments(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    page: &PagedPage,
+    resolver: &mut StyleResolver,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+) {
+    for fragment in &page.fragments {
+        let painted_area = Rect {
+            width: fragment.source.width.min(fragment.destination.width),
+            height: fragment.source.height.min(fragment.destination.height),
+            ..fragment.destination
+        };
+        let Some(clip) = intersect(painted_area, page.content) else {
+            continue;
+        };
+        let mut fragment_layout = layout.clone();
+        crate::layout::translate_layout_box(
+            &mut fragment_layout,
+            fragment.destination.x - fragment.source.x,
+            fragment.destination.y - fragment.source.y,
+            resolver,
+        );
+        paint_box(
+            canvas,
+            &fragment_layout,
+            resolver,
+            Some(clip),
+            page.sheet,
+            fonts,
+            web_fonts,
+        );
+    }
 }
 
 fn orient_printed_page(canvas: Canvas, orientation: Option<&Value>) -> Canvas {

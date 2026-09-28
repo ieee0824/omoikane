@@ -6,9 +6,52 @@ use crate::dom::NodeHandle;
 use crate::html::TreeBuilder;
 use crate::layout::{
     BoxDimensions, FontMetrics, FragmentStyle, InlineFragment, LineBox, Rect,
-    TextControlPaintState, VerticalAlign, layout_tree,
+    TextControlPaintState, VerticalAlign, layout_paged_tree, layout_tree,
 };
 use crate::paint::*;
+
+#[test]
+fn printed_content_uses_each_fragment_destination_and_clip() {
+    let document =
+        TreeBuilder::parse("<body><div id='blue'></div><div id='red'></div></body>").document();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@page { size: 60px 60px; margin: 0 } \
+             body { margin: 0 } \
+             div { width: 60px; height: 20px } \
+             #blue { background: blue } #red { background: red }",
+        )
+        .unwrap(),
+    );
+    let sheet = Rect {
+        width: 60.0,
+        height: 60.0,
+        ..Rect::default()
+    };
+    let mut paged = layout_paged_tree(&document, &mut resolver, sheet).unwrap();
+    let first = paged.pages[0].fragments[0].clone();
+    let mut second = first.clone();
+    paged.pages[0].fragments[0].source.height = 20.0;
+    paged.pages[0].fragments[0].destination.height = 20.0;
+    second.source.y += 20.0;
+    second.source.height = 20.0;
+    second.destination.y += 40.0;
+    second.destination.height = 20.0;
+    paged.pages[0].fragments.push(second);
+
+    let page = &paged.pages[0];
+    paged.restore_style_context_for_page(page, &mut resolver);
+    let layout = paged.layout_for_page(page);
+    let mut canvas = Canvas::new(60, 60);
+    canvas.fill_rect(sheet, Color::rgb(255, 255, 255));
+    paint_page_content_fragments(&mut canvas, layout, page, &mut resolver, &[], None);
+
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(canvas.pixel(10, 30), Some(Color::rgb(255, 255, 255)));
+    assert_eq!(canvas.pixel(10, 50), Some(Color::rgb(255, 0, 0)));
+}
 
 #[test]
 fn visited_paint_changes_only_allowed_link_colors() {

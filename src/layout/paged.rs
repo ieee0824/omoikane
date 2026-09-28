@@ -31,8 +31,8 @@ pub struct PagedPage {
     pub fragments: Vec<PageContentFragment>,
     /// Position where layout resumes on the next page, if any.
     pub continuation: Option<PageContinuation>,
-    /// Compatibility slice used by the current print painter until it paints
-    /// the page-local fragments directly.
+    /// Compatibility slice for callers that inspect the page's continuous
+    /// source flow. Painting uses `fragments` instead.
     pub source: Rect,
     /// Page-scoped counter values after this page is generated.
     pub counters: PageCounterValues,
