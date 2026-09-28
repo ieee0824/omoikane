@@ -29,6 +29,7 @@ fn computed_style_uses_before_and_after_pseudo_cascade() {
                     after.color,
                     after.getPropertyValue('--x'),
                     ordinary.color,
+                    getComputedStyle(target, '').color,
                     ordinary.getPropertyValue('--x'),
                     getComputedStyle(target, '::unknown').getPropertyValue('color'),
                     getComputedStyle(target, '::part(foo)').getPropertyValue('color'),
@@ -44,7 +45,7 @@ fn computed_style_uses_before_and_after_pseudo_cascade() {
         .to_std_string_escaped();
     assert_eq!(
         result,
-        "rgb(0, 0, 255)|before|inherited|rgb(0, 128, 0)|nested|rgb(255, 0, 0)||||rgb(255, 0, 0)||rgb(0, 0, 0)"
+        "rgb(0, 0, 255)|before|inherited|rgb(0, 128, 0)|nested|rgb(255, 0, 0)|rgb(255, 0, 0)||||rgb(255, 0, 0)||rgb(0, 0, 0)"
     );
 }
 
