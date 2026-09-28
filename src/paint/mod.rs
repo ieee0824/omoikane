@@ -1197,7 +1197,8 @@ pub fn render_document_pages_with_url(
 
     let mut canvases = Vec::with_capacity(paged.pages.len());
     for page in &paged.pages {
-        let mut layout = paged.layout.clone();
+        paged.restore_style_context_for_page(page, &mut resolver);
+        let mut layout = paged.layout_for_page(page).clone();
         crate::layout::translate_layout_box(
             &mut layout,
             page.content.x - page.source.x,

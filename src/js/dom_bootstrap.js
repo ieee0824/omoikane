@@ -16158,17 +16158,26 @@
     __dispatchPendingTransitionEvents();
   };
   globalThis.getComputedStyle = function(element, pseudoElt) {
-    void pseudoElt;
+    const pseudo = pseudoElt == null || pseudoElt === "" ? null : String(pseudoElt);
     flushStyleSheets();
     if (element && element.__id != null) {
       const nodeId = element.__id;
       try {
+        if (pseudo === null) {
+          JSON.parse(__omoikane_computed_style(nodeId));
+          const style = __makeComputedStyle(() => {
+            flushStyleSheets();
+            return JSON.parse(__omoikane_computed_style(nodeId));
+          });
+          __dispatchPendingTransitionEvents();
+          return style;
+        }
         // Resolve once before dispatching transition events, preserving the
         // synchronous behavior of getComputedStyle itself.
-        JSON.parse(__omoikane_computed_style(nodeId));
+        JSON.parse(__omoikane_computed_style(nodeId, pseudo));
         const style = __makeComputedStyle(() => {
           flushStyleSheets();
-          return JSON.parse(__omoikane_computed_style(nodeId));
+          return JSON.parse(__omoikane_computed_style(nodeId, pseudo));
         });
         __dispatchPendingTransitionEvents();
         return style;

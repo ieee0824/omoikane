@@ -9,7 +9,12 @@ fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                // macOS can preserve the listener's nonblocking mode on an
+                // accepted socket, before the client has sent its request.
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 assert!(
                     Instant::now() < deadline,
@@ -20,6 +25,26 @@ fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
             Err(error) => panic!("accept failed: {error}"),
         }
     }
+}
+
+#[test]
+fn accepted_stream_waits_for_a_delayed_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = std::thread::spawn(move || {
+        let mut stream = TcpStream::connect(address).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        stream
+            .write_all(b"GET /delayed HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+    });
+    let stream = accept_with_timeout(&listener);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    assert_eq!(read_request(&stream), ("/delayed".to_string(), None));
+    client.join().unwrap();
 }
 
 fn read_request(stream: &TcpStream) -> (String, Option<String>) {
