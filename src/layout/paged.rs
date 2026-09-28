@@ -24,12 +24,53 @@ pub struct PagedPage {
     pub sheet: Rect,
     /// Printable content rectangle in page-local coordinates.
     pub content: Rect,
-    /// Slice of the continuous source flow placed on this page.
+    /// Content fragments placed on this page, in document order.
+    pub fragments: Vec<PageContentFragment>,
+    /// Position where layout resumes on the next page, if any.
+    pub continuation: Option<PageContinuation>,
+    /// Compatibility slice used by the current print painter until it paints
+    /// the page-local fragments directly.
     pub source: Rect,
     /// Page-scoped counter values after this page is generated.
     pub counters: PageCounterValues,
     /// Generated page-margin box rectangles in page-local coordinates.
     pub margin_box_rects: BTreeMap<PageMarginBox, Rect>,
+}
+
+/// A position in the print flow from which pagination can resume.
+///
+/// The section identifies a named-page or forced-break region. Its flow
+/// coordinate refers to the current continuous layout; later fragmentation
+/// stages can extend this cursor with positions inside a box or line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageContinuation {
+    section_index: usize,
+    flow_y: f32,
+}
+
+impl PageContinuation {
+    /// Returns the index of the flow section containing this position.
+    pub fn section_index(self) -> usize {
+        self.section_index
+    }
+
+    /// Returns the current vertical position in the source flow.
+    pub fn flow_y(self) -> f32 {
+        self.flow_y
+    }
+}
+
+/// A piece of document flow assigned to one printed page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageContentFragment {
+    /// Position at the start of this fragment.
+    pub start: PageContinuation,
+    /// Position immediately after this fragment.
+    pub end: PageContinuation,
+    /// Source-space rectangle represented by this fragment.
+    pub source: Rect,
+    /// Page-local rectangle into which this fragment is placed.
+    pub destination: Rect,
 }
 
 /// Built-in counters available to printed page-margin boxes.
@@ -225,19 +266,53 @@ pub fn layout_paged_tree(
     let sections = flow_sections(&layout, resolver, first_content.y);
 
     let mut pages = Vec::new();
-    for section in sections {
-        let mut start = section.start;
+    for (section_index, section) in sections.iter().enumerate() {
+        let mut cursor = PageContinuation {
+            section_index,
+            flow_y: section.start,
+        };
         loop {
             if pages.len() >= 1024 {
-                break;
+                // Returning a truncated document would silently discard the
+                // continuation and make a successful render look complete.
+                return None;
             }
             let selector = page_selector(pages.len(), section.name.clone(), first_side);
             let style = resolver.resolved_page_style(&selector);
             let geometry = style.geometry((default_sheet.width, default_sheet.height), 0.0);
             let content = content_rect(geometry);
             let margin_box_rects = corner_margin_box_rects(&style, geometry);
-            let capacity = content.height.max(1.0);
-            let end = (start + capacity).min(section.end);
+            let remaining = section.end - cursor.flow_y;
+            if !remaining.is_finite() || remaining < 0.0 {
+                return None;
+            }
+            if remaining > 0.0 && (!content.height.is_finite() || content.height <= 0.0) {
+                return None;
+            }
+            let end_y = (cursor.flow_y + content.height).min(section.end);
+            if remaining > 0.0 && end_y <= cursor.flow_y {
+                return None;
+            }
+            let end = PageContinuation {
+                section_index,
+                flow_y: end_y,
+            };
+            let source = Rect {
+                x: first_content.x,
+                y: cursor.flow_y,
+                width: first_content.width,
+                height: (end_y - cursor.flow_y).max(0.0),
+            };
+            let continuation = if end_y < section.end {
+                Some(end)
+            } else {
+                sections
+                    .get(section_index + 1)
+                    .map(|next| PageContinuation {
+                        section_index: section_index + 1,
+                        flow_y: next.start,
+                    })
+            };
             pages.push(PagedPage {
                 selector,
                 style,
@@ -249,19 +324,26 @@ pub fn layout_paged_tree(
                     height: geometry.height,
                 },
                 content,
-                source: Rect {
-                    x: first_content.x,
-                    y: start,
-                    width: first_content.width,
-                    height: (end - start).max(0.0),
-                },
+                fragments: vec![PageContentFragment {
+                    start: cursor,
+                    end,
+                    source,
+                    destination: Rect {
+                        x: content.x,
+                        y: content.y,
+                        width: content.width,
+                        height: source.height,
+                    },
+                }],
+                continuation,
+                source,
                 counters: PageCounterValues { page: 0, pages: 0 },
                 margin_box_rects,
             });
-            if end >= section.end {
+            if end_y >= section.end {
                 break;
             }
-            start = end;
+            cursor = end;
         }
     }
     let total_pages = pages.len();
@@ -864,12 +946,18 @@ fn find_body_layout(layout: &LayoutBox) -> Option<&LayoutBox> {
     layout.children.iter().find_map(find_body_layout)
 }
 
+fn has_printable_flow(layout: &LayoutBox) -> bool {
+    layout.dimensions.border_box().height > 0.0
+        || !layout.lines.is_empty()
+        || layout.children.iter().any(has_printable_flow)
+}
+
 fn flow_sections(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     content_start: f32,
 ) -> Vec<FlowSection> {
-    let flow_end = layout
+    let mut flow_end = layout
         .scrollable_overflow()
         .1
         .max(layout.dimensions.content.height)
@@ -881,6 +969,11 @@ fn flow_sections(
             end: flow_end.max(content_start),
         }];
     };
+    // The root's default margins can extend scroll geometry even when there
+    // is no body content. Preserve a margin-only printed page in that case.
+    if !has_printable_flow(body) {
+        flow_end = content_start;
+    }
     let mut sections = Vec::new();
     let mut current_name = body
         .children
@@ -1015,6 +1108,174 @@ mod tests {
         assert!(paged.pages.len() >= 3);
         let body = find_body_layout(&paged.layout).unwrap();
         assert!((body.children[0].dimensions.content.width - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn page_fragments_advance_through_oversized_flow_without_gaps() {
+        let (document, first, _) = document_with_two_boxes();
+        first.set_attribute("style", "height: 250px");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("body { margin: 0 } @page { size: 100px 100px; margin: 0 }").unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 100.0,
+                height: 100.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.pages.len(), 3);
+        let first_y = paged.pages[0].fragments[0].start.flow_y();
+        let last_y = paged.pages.last().unwrap().fragments[0].end.flow_y();
+        let mut covered = 0.0;
+        for (index, page) in paged.pages.iter().enumerate() {
+            assert_eq!(page.selector.index, index);
+            assert_eq!(page.fragments.len(), 1);
+            let fragment = &page.fragments[0];
+            assert_eq!(fragment.start.section_index(), 0);
+            assert_eq!(fragment.end.section_index(), 0);
+            assert_eq!(fragment.source, page.source);
+            assert_eq!(fragment.destination.x, page.content.x);
+            assert_eq!(fragment.destination.y, page.content.y);
+            assert_eq!(fragment.destination.height, fragment.source.height);
+            assert!(fragment.source.height > 0.0);
+            assert!(fragment.source.height <= page.content.height);
+            covered += fragment.source.height;
+            assert_eq!(
+                page.continuation,
+                paged
+                    .pages
+                    .get(index + 1)
+                    .map(|next| next.fragments[0].start)
+            );
+        }
+        assert_eq!(covered, last_y - first_y);
+    }
+
+    #[test]
+    fn exact_page_boundary_does_not_create_an_extra_fragment() {
+        let (document, first, _) = document_with_two_boxes();
+        first.set_attribute("style", "height: 200px");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("body { margin: 0 } @page { size: 100px 100px; margin: 0 }").unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 100.0,
+                height: 100.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.pages.len(), 2);
+        assert_eq!(paged.pages[0].fragments[0].source.height, 100.0);
+        assert_eq!(paged.pages[1].fragments[0].source.height, 100.0);
+        assert_eq!(
+            paged.pages[0].continuation,
+            Some(paged.pages[1].fragments[0].start)
+        );
+        assert_eq!(paged.pages[1].continuation, None);
+    }
+
+    #[test]
+    fn continuation_moves_to_the_next_named_page_section() {
+        let (document, first, second) = document_with_two_boxes();
+        first.set_attribute("style", "page: a; height: 20px");
+        second.set_attribute("style", "page: b; height: 20px");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "body { margin: 0 } @page a { size: 100px 100px; margin: 0 } \
+                 @page b { size: 100px 100px; margin: 0 }",
+            )
+            .unwrap(),
+        );
+        let paged = layout_paged_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                width: 100.0,
+                height: 100.0,
+                ..Rect::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.pages.len(), 2);
+        let first = &paged.pages[0];
+        let second = &paged.pages[1];
+        assert_eq!(first.fragments[0].start.section_index(), 0);
+        assert_eq!(second.fragments[0].start.section_index(), 1);
+        assert_eq!(
+            (first.selector.index, first.selector.name.as_deref()),
+            (0, Some("a"))
+        );
+        assert_eq!(
+            (second.selector.index, second.selector.name.as_deref()),
+            (1, Some("b"))
+        );
+        assert_eq!(first.continuation, Some(second.fragments[0].start));
+        assert_eq!(
+            first.fragments[0].end.flow_y(),
+            second.fragments[0].start.flow_y()
+        );
+        assert_eq!(second.continuation, None);
+    }
+
+    #[test]
+    fn page_with_no_printable_height_does_not_discard_flow() {
+        let (document, first, _) = document_with_two_boxes();
+        first.set_attribute("style", "height: 20px");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("body { margin: 0 } @page { size: 100px 100px; margin: 60px }")
+                .unwrap(),
+        );
+        assert!(
+            layout_paged_tree(
+                &document,
+                &mut resolver,
+                Rect {
+                    width: 100.0,
+                    height: 100.0,
+                    ..Rect::default()
+                }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn page_limit_returns_failure_instead_of_truncated_output() {
+        let (document, first, _) = document_with_two_boxes();
+        first.set_attribute("style", "height: 1025px");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("body { margin: 0 } @page { size: 100px 1px; margin: 0 }").unwrap(),
+        );
+        assert!(
+            layout_paged_tree(
+                &document,
+                &mut resolver,
+                Rect {
+                    width: 100.0,
+                    height: 1.0,
+                    ..Rect::default()
+                }
+            )
+            .is_none()
+        );
     }
 
     #[test]
