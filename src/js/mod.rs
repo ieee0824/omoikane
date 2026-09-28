@@ -19101,11 +19101,13 @@ fn websocket_connect_native(
             .as_ref()
             .map(|url| format!("{}://{}", url.scheme(), url.authority()));
         let client = crate::realtime::WebSocketClient::connect(&url, &protocols, origin.as_deref())
-            .map_err(|error| JsError::from(JsNativeError::error().with_message(error)))?;
+            .map_err(|error| {
+                JsError::from(JsNativeError::error().with_message(error.to_string()))
+            })?;
         let protocol = client.protocol().to_string();
-        let mut reader = client
-            .try_clone()
-            .map_err(|error| JsError::from(JsNativeError::error().with_message(error)))?;
+        let mut reader = client.try_clone().map_err(|error| {
+            JsError::from(JsNativeError::error().with_message(error.to_string()))
+        })?;
         let (sender, incoming) = channel();
         thread::spawn(move || {
             loop {
@@ -19118,7 +19120,7 @@ fn websocket_connect_native(
                         }
                     }
                     Err(error) => {
-                        let _ = sender.send(WebSocketReadResult::Error(error));
+                        let _ = sender.send(WebSocketReadResult::Error(error.to_string()));
                         break;
                     }
                 }
@@ -19156,10 +19158,9 @@ fn websocket_send_native(
         let connection = state.websocket_clients.get_mut(&id).ok_or_else(|| {
             JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
         })?;
-        connection
-            .client
-            .send(payload, binary)
-            .map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
+        connection.client.send(payload, binary).map_err(|error| {
+            JsError::from(JsNativeError::error().with_message(error.to_string()))
+        })?;
         Ok(JsValue::undefined())
     })
 }
@@ -19213,10 +19214,9 @@ fn websocket_close_native(
             .ok_or_else(|| {
                 JsError::from(JsNativeError::error().with_message("WebSocket is not connected"))
             })?;
-        connection
-            .client
-            .close(code, &reason)
-            .map_err(|e| JsError::from(JsNativeError::error().with_message(e)))?;
+        connection.client.close(code, &reason).map_err(|error| {
+            JsError::from(JsNativeError::error().with_message(error.to_string()))
+        })?;
         Ok(JsValue::undefined())
     })
 }

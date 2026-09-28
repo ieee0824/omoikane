@@ -11,6 +11,103 @@ use std::time::Duration;
 use base64::Engine as _;
 
 use crate::cdp::{WebSocketFrame, WebSocketOpcode, websocket_accept_key};
+use crate::http::url::UrlParseError;
+
+/// Errors produced by the WebSocket client or its wire protocol.
+#[derive(Debug)]
+pub enum RealtimeError {
+    /// Only unencrypted `ws:` URLs are supported.
+    UnsupportedUrlScheme,
+    /// The WebSocket URL could not be parsed.
+    Url(UrlParseError),
+    /// A socket operation failed.
+    Io(std::io::Error),
+    /// A client nonce or frame mask could not be generated.
+    Random(getrandom::Error),
+    /// The server sent more than the allowed handshake header size.
+    HandshakeTooLarge,
+    /// The handshake response was not UTF-8.
+    InvalidHandshakeEncoding(std::string::FromUtf8Error),
+    /// The server did not accept the WebSocket upgrade.
+    UpgradeRejected,
+    /// The server's accept key did not match the request.
+    InvalidAccept,
+    /// The server selected a protocol that the client did not offer.
+    UnrequestedProtocol,
+    /// A continuation frame arrived before a message began.
+    UnexpectedContinuation,
+    /// A text message contained invalid UTF-8.
+    InvalidTextFrame(std::string::FromUtf8Error),
+    /// A message ended without a text or binary opcode.
+    MissingMessageOpcode,
+    /// Decoding a complete WebSocket frame failed.
+    Frame(crate::cdp::CdpError),
+    /// The connection closed while a frame was being read.
+    ConnectionClosed,
+    /// A server frame sets reserved bits without an extension.
+    UnsupportedRsvBits,
+    /// A server frame uses an unsupported opcode.
+    UnsupportedOpcode,
+    /// A server frame is masked, which only clients may do.
+    MaskedServerFrame,
+    /// A control frame is fragmented or has an oversized payload.
+    InvalidControlFrame,
+    /// A server frame cannot fit in this process's address space.
+    FrameTooLarge,
+}
+
+impl std::fmt::Display for RealtimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedUrlScheme => write!(f, "only ws: WebSocket URLs are supported"),
+            Self::Url(error) => write!(f, "{error}"),
+            Self::Io(error) => write!(f, "{error}"),
+            Self::Random(error) => write!(f, "{error}"),
+            Self::HandshakeTooLarge => write!(f, "WebSocket handshake is too large"),
+            Self::InvalidHandshakeEncoding(_) => write!(f, "invalid handshake encoding"),
+            Self::UpgradeRejected => write!(f, "server rejected WebSocket upgrade"),
+            Self::InvalidAccept => write!(f, "invalid Sec-WebSocket-Accept"),
+            Self::UnrequestedProtocol => {
+                write!(f, "server selected an unrequested WebSocket protocol")
+            }
+            Self::UnexpectedContinuation => write!(f, "unexpected continuation frame"),
+            Self::InvalidTextFrame(_) => write!(f, "invalid UTF-8 text frame"),
+            Self::MissingMessageOpcode => write!(f, "missing WebSocket message opcode"),
+            Self::Frame(error) => write!(f, "{error}"),
+            Self::ConnectionClosed => write!(f, "WebSocket connection closed"),
+            Self::UnsupportedRsvBits => write!(f, "WebSocket RSV bits require an extension"),
+            Self::UnsupportedOpcode => write!(f, "unsupported WebSocket opcode"),
+            Self::MaskedServerFrame => write!(f, "server WebSocket frames must not be masked"),
+            Self::InvalidControlFrame => write!(f, "invalid fragmented control frame"),
+            Self::FrameTooLarge => write!(f, "WebSocket frame is too large"),
+        }
+    }
+}
+
+impl std::error::Error for RealtimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Url(error) => Some(error),
+            Self::Io(error) => Some(error),
+            Self::Random(error) => Some(error),
+            Self::InvalidHandshakeEncoding(error) | Self::InvalidTextFrame(error) => Some(error),
+            Self::Frame(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for RealtimeError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<UrlParseError> for RealtimeError {
+    fn from(error: UrlParseError) -> Self {
+        Self::Url(error)
+    }
+}
 
 /// A message read from a WebSocket connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,21 +127,20 @@ pub struct WebSocketClient {
 
 impl WebSocketClient {
     /// Connects to a `ws:` URL and validates the server handshake.
-    pub fn connect(url: &str, protocols: &[String], origin: Option<&str>) -> Result<Self, String> {
+    pub fn connect(
+        url: &str,
+        protocols: &[String],
+        origin: Option<&str>,
+    ) -> Result<Self, RealtimeError> {
         let http_url = url
             .strip_prefix("ws://")
             .map(|rest| format!("http://{rest}"))
-            .ok_or_else(|| "only ws: WebSocket URLs are supported".to_string())?;
-        let parsed = http_url
-            .parse::<crate::http::Url>()
-            .map_err(|error| error.to_string())?;
-        let mut stream = TcpStream::connect((parsed.host(), parsed.port()))
-            .map_err(|error| error.to_string())?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(|e| e.to_string())?;
+            .ok_or(RealtimeError::UnsupportedUrlScheme)?;
+        let parsed = http_url.parse::<crate::http::Url>()?;
+        let mut stream = TcpStream::connect((parsed.host(), parsed.port()))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut nonce = [0u8; 16];
-        getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
+        getrandom::fill(&mut nonce).map_err(RealtimeError::Random)?;
         let key = base64::engine::general_purpose::STANDARD.encode(nonce);
         let mut request = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n",
@@ -62,26 +158,25 @@ impl WebSocketClient {
             request.push_str(&format!("Origin: {origin}\r\n"));
         }
         request.push_str("\r\n");
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|e| e.to_string())?;
+        stream.write_all(request.as_bytes())?;
 
         let mut response = Vec::new();
         let mut byte = [0u8; 1];
         while !response.ends_with(b"\r\n\r\n") {
-            stream.read_exact(&mut byte).map_err(|e| e.to_string())?;
+            stream.read_exact(&mut byte)?;
             response.push(byte[0]);
             if response.len() > 32 * 1024 {
-                return Err("WebSocket handshake is too large".into());
+                return Err(RealtimeError::HandshakeTooLarge);
             }
         }
-        let response = String::from_utf8(response).map_err(|_| "invalid handshake encoding")?;
+        let response =
+            String::from_utf8(response).map_err(RealtimeError::InvalidHandshakeEncoding)?;
         let mut lines = response.split("\r\n");
         if !lines
             .next()
             .is_some_and(|line| line.starts_with("HTTP/1.1 101 "))
         {
-            return Err("server rejected WebSocket upgrade".into());
+            return Err(RealtimeError::UpgradeRejected);
         }
         let mut accept = None;
         let mut protocol = String::new();
@@ -97,10 +192,10 @@ impl WebSocketClient {
         }
         let expected_accept = websocket_accept_key(&key);
         if accept != Some(expected_accept.as_str()) {
-            return Err("invalid Sec-WebSocket-Accept".into());
+            return Err(RealtimeError::InvalidAccept);
         }
         if !protocol.is_empty() && !protocols.iter().any(|candidate| candidate == &protocol) {
-            return Err("server selected an unrequested WebSocket protocol".into());
+            return Err(RealtimeError::UnrequestedProtocol);
         }
         Ok(Self {
             stream,
@@ -115,7 +210,7 @@ impl WebSocketClient {
     }
 
     /// Sends one text or binary message as a masked client frame.
-    pub fn send(&mut self, payload: Vec<u8>, binary: bool) -> Result<(), String> {
+    pub fn send(&mut self, payload: Vec<u8>, binary: bool) -> Result<(), RealtimeError> {
         let frame = WebSocketFrame {
             fin: true,
             opcode: if binary {
@@ -129,7 +224,7 @@ impl WebSocketClient {
     }
 
     /// Reads one complete message, joining continuation frames and answering ping.
-    pub fn read_message(&mut self) -> Result<WebSocketMessage, String> {
+    pub fn read_message(&mut self) -> Result<WebSocketMessage, RealtimeError> {
         let mut opcode = None;
         let mut payload = Vec::new();
         loop {
@@ -164,7 +259,7 @@ impl WebSocketClient {
                 }
                 WebSocketOpcode::Continuation => {
                     if opcode.is_none() {
-                        return Err("unexpected continuation frame".into());
+                        return Err(RealtimeError::UnexpectedContinuation);
                     }
                     payload.extend(frame.payload);
                     if frame.fin {
@@ -176,14 +271,14 @@ impl WebSocketClient {
         match opcode {
             Some(WebSocketOpcode::Text) => String::from_utf8(payload)
                 .map(WebSocketMessage::Text)
-                .map_err(|_| "invalid UTF-8 text frame".into()),
+                .map_err(RealtimeError::InvalidTextFrame),
             Some(WebSocketOpcode::Binary) => Ok(WebSocketMessage::Binary(payload)),
-            _ => Err("missing WebSocket message opcode".into()),
+            _ => Err(RealtimeError::MissingMessageOpcode),
         }
     }
 
     /// Starts the close handshake with a masked close frame.
-    pub fn close(&mut self, code: u16, reason: &str) -> Result<(), String> {
+    pub fn close(&mut self, code: u16, reason: &str) -> Result<(), RealtimeError> {
         let mut payload = code.to_be_bytes().to_vec();
         payload.extend_from_slice(reason.as_bytes());
         let frame = WebSocketFrame {
@@ -195,17 +290,17 @@ impl WebSocketClient {
     }
 
     /// Clones the underlying socket for an independent background reader.
-    pub fn try_clone(&self) -> Result<Self, String> {
+    pub fn try_clone(&self) -> Result<Self, RealtimeError> {
         Ok(Self {
-            stream: self.stream.try_clone().map_err(|error| error.to_string())?,
+            stream: self.stream.try_clone()?,
             protocol: self.protocol.clone(),
             read_buffer: Vec::new(),
         })
     }
 
-    fn write_client_frame(&mut self, frame: &WebSocketFrame) -> Result<(), String> {
+    fn write_client_frame(&mut self, frame: &WebSocketFrame) -> Result<(), RealtimeError> {
         let mut mask = [0u8; 4];
-        getrandom::fill(&mut mask).map_err(|error| error.to_string())?;
+        getrandom::fill(&mut mask).map_err(RealtimeError::Random)?;
         let payload_len = frame.payload.len();
         let mut bytes = vec![if frame.fin { 0x80 } else { 0 } | frame.opcode.as_u8()];
         match payload_len {
@@ -227,12 +322,11 @@ impl WebSocketClient {
                 .enumerate()
                 .map(|(index, byte)| byte ^ mask[index % 4]),
         );
-        self.stream
-            .write_all(&bytes)
-            .map_err(|error| error.to_string())
+        self.stream.write_all(&bytes)?;
+        Ok(())
     }
 
-    fn read_frame(&mut self) -> Result<WebSocketFrame, String> {
+    fn read_frame(&mut self) -> Result<WebSocketFrame, RealtimeError> {
         loop {
             if let Some(expected) = server_frame_length(&self.read_buffer)?
                 && self.read_buffer.len() >= expected
@@ -242,32 +336,32 @@ impl WebSocketClient {
                         self.read_buffer.drain(..consumed);
                         return Ok(frame);
                     }
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => return Err(RealtimeError::Frame(error)),
                 }
             }
             let mut chunk = [0u8; 4096];
-            let count = self.stream.read(&mut chunk).map_err(|e| e.to_string())?;
+            let count = self.stream.read(&mut chunk)?;
             if count == 0 {
-                return Err("WebSocket connection closed".into());
+                return Err(RealtimeError::ConnectionClosed);
             }
             self.read_buffer.extend_from_slice(&chunk[..count]);
         }
     }
 }
 
-fn server_frame_length(bytes: &[u8]) -> Result<Option<usize>, String> {
+fn server_frame_length(bytes: &[u8]) -> Result<Option<usize>, RealtimeError> {
     if bytes.len() < 2 {
         return Ok(None);
     }
     if bytes[0] & 0x70 != 0 {
-        return Err("WebSocket RSV bits require an extension".into());
+        return Err(RealtimeError::UnsupportedRsvBits);
     }
     let opcode = bytes[0] & 0x0f;
     if !matches!(opcode, 0 | 1 | 2 | 8 | 9 | 10) {
-        return Err("unsupported WebSocket opcode".into());
+        return Err(RealtimeError::UnsupportedOpcode);
     }
     if bytes[1] & 0x80 != 0 {
-        return Err("server WebSocket frames must not be masked".into());
+        return Err(RealtimeError::MaskedServerFrame);
     }
     let mut cursor = 2;
     let length = match bytes[1] & 0x7f {
@@ -288,12 +382,12 @@ fn server_frame_length(bytes: &[u8]) -> Result<Option<usize>, String> {
             raw.copy_from_slice(&bytes[2..10]);
             u64::from_be_bytes(raw)
                 .try_into()
-                .map_err(|_| "WebSocket frame is too large")?
+                .map_err(|_| RealtimeError::FrameTooLarge)?
         }
         _ => unreachable!(),
     };
     if opcode >= 8 && (bytes[0] & 0x80 == 0 || length > 125) {
-        return Err("invalid fragmented control frame".into());
+        return Err(RealtimeError::InvalidControlFrame);
     }
     Ok(Some(cursor + length))
 }
@@ -363,14 +457,38 @@ mod tests {
 
     #[test]
     fn malformed_websocket_frame_is_rejected_without_waiting_for_more_bytes() {
+        let invalid_opcode = server_frame_length(&[0x83, 0]).unwrap_err();
+        assert!(matches!(invalid_opcode, RealtimeError::UnsupportedOpcode));
+        assert_eq!(invalid_opcode.to_string(), "unsupported WebSocket opcode");
+        let invalid_control = server_frame_length(&[0x89, 126, 0, 126]).unwrap_err();
+        assert!(matches!(
+            invalid_control,
+            RealtimeError::InvalidControlFrame
+        ));
         assert_eq!(
-            server_frame_length(&[0x83, 0]).unwrap_err(),
-            "unsupported WebSocket opcode"
-        );
-        assert_eq!(
-            server_frame_length(&[0x89, 126, 0, 126]).unwrap_err(),
+            invalid_control.to_string(),
             "invalid fragmented control frame"
         );
+    }
+
+    #[test]
+    fn typed_realtime_errors_keep_visible_messages_and_sources() {
+        let unsupported = WebSocketClient::connect("wss://example.test", &[], None).unwrap_err();
+        assert!(matches!(unsupported, RealtimeError::UnsupportedUrlScheme));
+        assert_eq!(
+            unsupported.to_string(),
+            "only ws: WebSocket URLs are supported"
+        );
+
+        let invalid_url = WebSocketClient::connect("ws://", &[], None).unwrap_err();
+        assert!(matches!(invalid_url, RealtimeError::Url(_)));
+        assert_eq!(invalid_url.to_string(), "empty host in URL");
+        assert!(std::error::Error::source(&invalid_url).is_some());
+
+        let invalid_text =
+            RealtimeError::InvalidTextFrame(String::from_utf8(vec![0xff]).unwrap_err());
+        assert_eq!(invalid_text.to_string(), "invalid UTF-8 text frame");
+        assert!(std::error::Error::source(&invalid_text).is_some());
     }
 
     fn read_frame(stream: &mut TcpStream) -> (WebSocketFrame, Vec<u8>) {

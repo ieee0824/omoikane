@@ -34,7 +34,7 @@ struct OmoikaneBrowserHandle {
 impl OmoikaneBrowserHandle {
     fn new() -> Result<Self, String> {
         Ok(Self {
-            session: RefCell::new(CdpSession::new()?),
+            session: RefCell::new(CdpSession::new().map_err(|error| error.to_string())?),
             last_error: RefCell::new(None),
         })
     }

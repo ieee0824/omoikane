@@ -24,6 +24,7 @@ use crate::error_reporting::{
 };
 use crate::html::{TreeBuilder, decode_html_response};
 use crate::http::{Client, HttpRequest, Method};
+use crate::http::{HttpParseError, url::UrlParseError};
 #[cfg(test)]
 use crate::js::PageTaskSource;
 use crate::js::{
@@ -64,6 +65,70 @@ impl std::fmt::Display for CdpError {
 }
 
 impl std::error::Error for CdpError {}
+
+/// Errors produced while constructing or navigating a CDP page session.
+#[derive(Debug)]
+pub enum CdpSessionError {
+    /// JavaScript runtime setup or document installation failed.
+    JavaScript(boa_engine::JsError),
+    /// The requested navigation URL was invalid.
+    Url(UrlParseError),
+    /// Loading the requested document failed.
+    Http(HttpParseError),
+    /// A page startup task completed for a retired document generation.
+    StalePageTaskCompletion,
+    /// A page startup task was cancelled.
+    PageTaskCancelled,
+    /// A page startup task exceeded its wall-clock limit.
+    PageTaskTimedOut,
+    /// The browser session no longer has an active page.
+    Unavailable,
+}
+
+impl std::fmt::Display for CdpSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::JavaScript(error) => write!(f, "{error}"),
+            Self::Url(error) => write!(f, "{error}"),
+            Self::Http(error) => write!(f, "{error}"),
+            Self::StalePageTaskCompletion => write!(f, "stale page startup task completion"),
+            Self::PageTaskCancelled => write!(f, "page startup task was cancelled"),
+            Self::PageTaskTimedOut => {
+                write!(f, "page startup task exceeded its wall-clock timeout")
+            }
+            Self::Unavailable => write!(f, "Browser session is unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for CdpSessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::JavaScript(error) => Some(error),
+            Self::Url(error) => Some(error),
+            Self::Http(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<boa_engine::JsError> for CdpSessionError {
+    fn from(error: boa_engine::JsError) -> Self {
+        Self::JavaScript(error)
+    }
+}
+
+impl From<UrlParseError> for CdpSessionError {
+    fn from(error: UrlParseError) -> Self {
+        Self::Url(error)
+    }
+}
+
+impl From<HttpParseError> for CdpSessionError {
+    fn from(error: HttpParseError) -> Self {
+        Self::Http(error)
+    }
+}
 
 /// A parsed HTTP upgrade request for the WebSocket handshake.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -774,12 +839,12 @@ pub(crate) enum PreparedPageNavigation {
 
 impl CdpSession {
     /// Creates a new session with an empty `about:blank` document.
-    pub fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self, CdpSessionError> {
         Self::with_storage_manager(StorageManager::new())
     }
 
     /// Creates a tab with its own session storage in a shared browser profile.
-    pub fn with_storage_manager(storage_manager: StorageManager) -> Result<Self, String> {
+    pub fn with_storage_manager(storage_manager: StorageManager) -> Result<Self, CdpSessionError> {
         let storage_session_id = storage_manager.create_session();
         let storage_lifetime = TabStorageLifetime {
             manager: storage_manager.clone(),
@@ -792,7 +857,7 @@ impl CdpSession {
             storage_manager.clone(),
             storage_session_id,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(CdpSessionError::JavaScript)?;
         runtime.set_shared_cookie_store(Arc::clone(&cookie_store));
         let mut http_client = Client::new();
         http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
@@ -845,7 +910,7 @@ impl CdpSession {
         };
         session
             .install_runtime_helpers()
-            .map_err(js_error_message)?;
+            .map_err(CdpSessionError::JavaScript)?;
         session.rebuild_node_index();
         Ok(session)
     }
@@ -1271,9 +1336,9 @@ impl CdpSession {
         );
         let (html, status, document_url, csp_headers) = self
             .load_page_request(url, Method::Get, None, None)
-            .map_err(|message| JsonRpcError {
+            .map_err(|error| JsonRpcError {
                 code: -32000,
-                message,
+                message: error.to_string(),
             })?;
         let form_state = self.navigation_form_state(history_commit, &document_url)?;
         let (history_length, history_state) = self.prospective_history_state(history_commit);
@@ -1286,9 +1351,9 @@ impl CdpSession {
                 &csp_headers,
                 form_state.as_ref(),
             )
-            .map_err(|message| JsonRpcError {
+            .map_err(|error| JsonRpcError {
                 code: -32000,
-                message,
+                message: error.to_string(),
             })?;
         commit.history_commit = history_commit;
         commit.loader_id = loader_id.clone();
@@ -1358,9 +1423,9 @@ impl CdpSession {
 
         let (html, status, document_url, csp_headers) = self
             .load_page_request(url, method, body, content_type)
-            .map_err(|message| JsonRpcError {
+            .map_err(|error| JsonRpcError {
                 code: -32000,
-                message,
+                message: error.to_string(),
             })?;
 
         let form_state = self.navigation_form_state(commit, &document_url)?;
@@ -1373,9 +1438,9 @@ impl CdpSession {
             &csp_headers,
             form_state.as_ref(),
         )
-        .map_err(|message| JsonRpcError {
+        .map_err(|error| JsonRpcError {
             code: -32000,
-            message,
+            message: error.to_string(),
         })?;
 
         self.commit_history_url(&document_url, commit, None);
@@ -2753,7 +2818,7 @@ impl CdpSession {
         method: Method,
         body: Option<Vec<u8>>,
         content_type: Option<String>,
-    ) -> Result<(String, u16, String, Vec<String>), String> {
+    ) -> Result<(String, u16, String, Vec<String>), CdpSessionError> {
         if method == Method::Get {
             if url == "about:blank" {
                 return Ok((
@@ -2774,9 +2839,7 @@ impl CdpSession {
                 ));
             }
         }
-        let parsed: crate::http::url::Url = url
-            .parse()
-            .map_err(|error: crate::http::url::UrlParseError| error.to_string())?;
+        let parsed: crate::http::url::Url = url.parse()?;
         let mut request = HttpRequest::new(method, parsed);
         if let Ok(site) = self.current_url.parse::<crate::http::Url>() {
             request.set_cookie_context(site, true);
@@ -2787,10 +2850,7 @@ impl CdpSession {
         if let Some(body) = body {
             request.set_body(body);
         }
-        let response = self
-            .http_client
-            .send(request)
-            .map_err(|error| error.to_string())?;
+        let response = self.http_client.send(request)?;
         let effective_url = response
             .effective_url()
             .map(ToString::to_string)
@@ -2816,7 +2876,7 @@ impl CdpSession {
         html: &str,
         history_length: usize,
         history_state_json: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), CdpSessionError> {
         self.install_document_with_csp(url, html, history_length, history_state_json, &[], None)
     }
 
@@ -2828,7 +2888,7 @@ impl CdpSession {
         history_state_json: &str,
         csp_headers: &[String],
         form_state: Option<&FormStateSnapshot>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CdpSessionError> {
         let document = TreeBuilder::parse(html).document();
         let mut runtime = JsRuntime::with_document_url_and_storage(
             document,
@@ -2836,7 +2896,7 @@ impl CdpSession {
             self.storage_manager.clone(),
             self.storage_session_id,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(CdpSessionError::JavaScript)?;
         if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
             runtime.set_error_reporter(reporter, surface);
         }
@@ -2847,21 +2907,21 @@ impl CdpSession {
         runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
         runtime
             .set_pointer_lock_focus(self.pointer_lock_focused)
-            .map_err(js_error_message)?;
+            .map_err(CdpSessionError::JavaScript)?;
         runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
-        Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
+        Self::install_runtime_helpers_on(&mut runtime).map_err(CdpSessionError::JavaScript)?;
         runtime.install_csp_policy(csp_headers);
         if let Some(state) = form_state {
             runtime
                 .restore_form_state(state, FormStateRestoreMode::Restore)
-                .map_err(js_error_message)?;
+                .map_err(CdpSessionError::JavaScript)?;
         }
         runtime
             .eval(&format!(
                 "__omoikane_sync_history({history_length}, {history_state_json:?})"
             ))
             .and_then(|_| runtime.run_jobs())
-            .map_err(js_error_message)?;
+            .map_err(CdpSessionError::JavaScript)?;
 
         // The response and replacement Runtime are ready, so the active
         // Document can now leave without risking an unload followed by a
@@ -2882,8 +2942,8 @@ impl CdpSession {
         }
         runtime
             .wire_inline_event_handlers()
-            .map_err(js_error_message)?;
-        runtime.fire_load().map_err(js_error_message)?;
+            .map_err(CdpSessionError::JavaScript)?;
+        runtime.fire_load().map_err(CdpSessionError::JavaScript)?;
 
         self.runtime = runtime;
         self.mouse_pressed_target = None;
@@ -2910,7 +2970,7 @@ impl CdpSession {
         history_state_json: &str,
         csp_headers: &[String],
         form_state: Option<&FormStateSnapshot>,
-    ) -> Result<(OwnedPageTask, PendingDocumentCommit), String> {
+    ) -> Result<(OwnedPageTask, PendingDocumentCommit), CdpSessionError> {
         let document = TreeBuilder::parse(html).document();
         let mut runtime = JsRuntime::with_document_url_and_storage(
             document,
@@ -2918,7 +2978,7 @@ impl CdpSession {
             self.storage_manager.clone(),
             self.storage_session_id,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(CdpSessionError::JavaScript)?;
         if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
             runtime.set_error_reporter(reporter, surface);
         }
@@ -2929,21 +2989,21 @@ impl CdpSession {
         runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
         runtime
             .set_pointer_lock_focus(self.pointer_lock_focused)
-            .map_err(js_error_message)?;
+            .map_err(CdpSessionError::JavaScript)?;
         runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
-        Self::install_runtime_helpers_on(&mut runtime).map_err(js_error_message)?;
+        Self::install_runtime_helpers_on(&mut runtime).map_err(CdpSessionError::JavaScript)?;
         runtime.install_csp_policy(csp_headers);
         if let Some(state) = form_state {
             runtime
                 .restore_form_state(state, FormStateRestoreMode::Restore)
-                .map_err(js_error_message)?;
+                .map_err(CdpSessionError::JavaScript)?;
         }
         runtime
             .eval(&format!(
                 "__omoikane_sync_history({history_length}, {history_state_json:?})"
             ))
             .and_then(|_| runtime.run_jobs())
-            .map_err(js_error_message)?;
+            .map_err(CdpSessionError::JavaScript)?;
 
         let generation = self.document_generation.saturating_add(1);
         let base_url = url.parse::<crate::http::Url>().ok();
@@ -2968,21 +3028,21 @@ impl CdpSession {
         &mut self,
         mut completed: CompletedPageTask,
         pending: PendingDocumentCommit,
-    ) -> Result<(), String> {
+    ) -> Result<(), CdpSessionError> {
         if completed.generation != pending.generation
             || pending.generation != self.document_generation.saturating_add(1)
         {
             self.report_cdp_failure(CdpFailure::PageTask);
-            return Err("stale page startup task completion".to_string());
+            return Err(CdpSessionError::StalePageTaskCompletion);
         }
         match &completed.result {
             Err(PageTaskError::Cancelled) => {
                 self.report_cdp_failure(CdpFailure::PageTask);
-                return Err("page startup task was cancelled".to_string());
+                return Err(CdpSessionError::PageTaskCancelled);
             }
             Err(PageTaskError::TimedOut) => {
                 self.report_cdp_failure(CdpFailure::PageTask);
-                return Err("page startup task exceeded its wall-clock timeout".to_string());
+                return Err(CdpSessionError::PageTaskTimedOut);
             }
             Ok(_) => {}
         }
@@ -3469,14 +3529,14 @@ impl BrowserSessionState {
                     let result = self
                         .session
                         .as_mut()
-                        .ok_or_else(|| "Browser session is unavailable".to_string())
+                        .ok_or(CdpSessionError::Unavailable)
                         .and_then(|session| {
                             session.commit_document_page_task(completed, pending.commit)
                         })
                         .map(|()| pending.response)
-                        .map_err(|message| JsonRpcError {
+                        .map_err(|error| JsonRpcError {
                             code: -32000,
-                            message,
+                            message: error.to_string(),
                         });
                     self.actions
                         .push(BrowserSessionAction::Complete(pending.token, result));
@@ -3651,7 +3711,7 @@ pub struct BrowserSession {
 }
 
 impl BrowserSession {
-    pub fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self, CdpSessionError> {
         let state = Rc::new(RefCell::new(BrowserSessionState {
             session: Some(CdpSession::new()?),
             pending: None,
@@ -3978,10 +4038,6 @@ fn js_error(error: boa_engine::JsError) -> JsonRpcError {
     }
 }
 
-fn js_error_message(error: boa_engine::JsError) -> String {
-    error.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3991,6 +4047,27 @@ mod tests {
     use std::net::TcpListener;
     use std::rc::Rc;
     use std::thread;
+
+    #[test]
+    fn typed_session_errors_preserve_json_rpc_messages_and_sources() {
+        let mut session = CdpSession::new().unwrap();
+        let error = session
+            .load_page_request("not-a-url", Method::Get, None, None)
+            .unwrap_err();
+        assert!(matches!(error, CdpSessionError::Url(_)));
+        assert_eq!(error.to_string(), "missing '://' in URL");
+        assert!(std::error::Error::source(&error).is_some());
+
+        let rpc_error = session
+            .dispatch("Page.navigate", json!({ "url": "not-a-url" }))
+            .unwrap_err();
+        assert_eq!(rpc_error.code, -32000);
+        assert_eq!(rpc_error.message, "missing '://' in URL");
+
+        let http_error = CdpSessionError::Http(HttpParseError::InvalidHeader);
+        assert_eq!(http_error.to_string(), "invalid HTTP header");
+        assert!(std::error::Error::source(&http_error).is_some());
+    }
 
     #[test]
     fn timed_out_page_task_records_safe_failure_without_committing_document() {
@@ -4019,9 +4096,13 @@ mod tests {
             loader_id: "1".into(),
             status: 200,
         };
+        let error = session
+            .commit_document_page_task(completed, pending)
+            .unwrap_err();
+        assert!(matches!(error, CdpSessionError::PageTaskTimedOut));
         assert_eq!(
-            session.commit_document_page_task(completed, pending),
-            Err("page startup task exceeded its wall-clock timeout".into())
+            error.to_string(),
+            "page startup task exceeded its wall-clock timeout"
         );
         assert_eq!(session.current_url(), previous_url);
         reporter.flush().unwrap();
