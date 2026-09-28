@@ -89,6 +89,8 @@ mod scroll_snap;
 mod text_stream;
 #[cfg(test)]
 mod text_stream_tests;
+#[cfg(test)]
+mod window_named_tests;
 use module_fetch::{ModuleFetch, ModuleFetchPool};
 
 mod csp;
@@ -9659,6 +9661,7 @@ impl JsRuntime {
                     }
                 }
                 if dispatch_load {
+                    self.refresh_window_names_after_iframe_load(node_id, dispatch_document_id);
                     let child_document_id = {
                         let state = self.host_state.borrow();
                         state
@@ -9717,6 +9720,23 @@ impl JsRuntime {
                 self.run_geolocation_delivery(request_id, true)
             }
         }
+    }
+
+    fn refresh_window_names_after_iframe_load(&mut self, node_id: usize, document_id: usize) {
+        let is_iframe = self
+            .host_state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| {
+                node.tag_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("iframe"))
+            });
+        if !is_iframe {
+            return;
+        }
+        let refreshed = self
+            .eval_in_document_realm(document_id, "__omoikane_install_window_named_properties()");
+        self.record_error_from("iframe named properties", refreshed);
     }
 
     /// Dispatches a `DOMContentLoaded` event on the document.
