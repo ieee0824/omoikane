@@ -89,7 +89,7 @@ pub fn parse_data_uri(uri: &str) -> Option<DataUri> {
 }
 
 /// Percent-decodes a string into raw bytes, leaving malformed escapes literal.
-fn percent_decode_bytes(input: &str) -> Vec<u8> {
+pub(crate) fn percent_decode_bytes(input: &str) -> Vec<u8> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0usize;

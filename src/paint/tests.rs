@@ -2664,6 +2664,30 @@ fn parses_percent_encoded_base64_data_uri() {
 }
 
 #[test]
+fn parses_line_wrapped_base64_png_data_uri() {
+    let mut canvas = Canvas::new(1, 1);
+    canvas.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    let encoded = base64::engine::general_purpose::STANDARD.encode(canvas.encode_png());
+    let wrapped = format!("{}%0A{}", &encoded[..20], &encoded[20..]);
+    let parsed = parse_data_uri(&format!("data:image/png;base64,{wrapped}")).unwrap();
+    let DataUri::Binary { data, .. } = parsed else {
+        panic!("expected binary data uri");
+    };
+    assert_eq!(
+        Image::decode_png(&data).unwrap().pixels(),
+        &[255, 0, 0, 255]
+    );
+}
+
+#[test]
 fn decodes_jpeg_image() {
     // Minimal valid JPEG: 1x1 red pixel
     // Created with: convert -size 1x1 xc:red red.jpg && base64 red.jpg

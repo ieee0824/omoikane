@@ -25,6 +25,7 @@ pub use client::Client;
 pub(crate) use connection::is_public_ip;
 pub use connection::{send, send_with_options};
 pub use cookie::{Cookie, CookieJar, SameSite};
+pub(crate) use data_uri::percent_decode_bytes;
 pub use data_uri::{DataUri, parse_data_uri};
 pub use request::{HttpRequest, Method, default_user_agent};
 pub(crate) use request::{is_forbidden_request_header, is_valid_header};
