@@ -24,21 +24,45 @@ extern "C" {
 
 /**
  * Creates a new browser handle.
+ *
+ * # Safety
+ *
+ * This function has no pointer inputs. A non-null result must be used and
+ * freed on the creating thread, without overlapping calls, and freed exactly
+ * once with [`omoikane_free`].
  */
 struct OmoikaneBrowser *omoikane_init(void);
 
 /**
  * Destroys a browser handle previously created by [`omoikane_init`].
+ *
+ * # Safety
+ *
+ * `browser` may be null. Otherwise it must be a live handle returned by
+ * [`omoikane_init`], used on its creating thread without overlapping calls.
+ * Call this at most once for each handle.
  */
 void omoikane_free(struct OmoikaneBrowser *browser);
 
 /**
  * Navigates the active page to `url`.
+ *
+ * # Safety
+ *
+ * A non-null `browser` must be a live handle from [`omoikane_init`], used on
+ * its creating thread without overlapping calls. A non-null `url` must point
+ * to a readable NUL-terminated C string for the duration of this call.
  */
 bool omoikane_navigate(struct OmoikaneBrowser *browser, const char *url);
 
 /**
  * Sets the `User-Agent` used for subsequent navigations.
+ *
+ * # Safety
+ *
+ * A non-null `browser` must be a live handle from [`omoikane_init`], used on
+ * its creating thread without overlapping calls. A non-null `user_agent` must
+ * point to a readable NUL-terminated C string for the duration of this call.
  */
 bool omoikane_set_user_agent(struct OmoikaneBrowser *browser, const char *user_agent);
 
@@ -49,11 +73,23 @@ bool omoikane_set_user_agent(struct OmoikaneBrowser *browser, const char *user_a
  * mismatches are silently accepted.
  *
  * **Security warning**: Only use this in development or testing environments.
+ *
+ * # Safety
+ *
+ * A non-null `browser` must be a live handle from [`omoikane_init`], used on
+ * its creating thread without overlapping calls.
  */
 bool omoikane_set_insecure(struct OmoikaneBrowser *browser, bool insecure);
 
 /**
  * Evaluates JavaScript in the current page and returns a JSON payload string.
+ * Release a non-null result with [`omoikane_string_free`].
+ *
+ * # Safety
+ *
+ * A non-null `browser` must be a live handle from [`omoikane_init`], used on
+ * its creating thread without overlapping calls. A non-null `expression` must
+ * point to a readable NUL-terminated C string for the duration of this call.
  */
 char *omoikane_evaluate(struct OmoikaneBrowser *browser, const char *expression);
 
@@ -65,21 +101,46 @@ char *omoikane_evaluate(struct OmoikaneBrowser *browser, const char *expression)
  * returned string with `omoikane_string_free()`. A null browser handle,
  * invalid action, or missing required query returns null. A non-null handle
  * must be valid. Retrieve errors from it using `omoikane_last_error()`.
+ *
+ * # Safety
+ *
+ * A non-null `browser` must be a live handle from [`omoikane_init`], used on
+ * its creating thread without overlapping calls. A non-null `action` must
+ * point to a readable NUL-terminated C string for this call; `query` has the
+ * same requirement when `action` is `start`.
  */
 char *omoikane_find_in_page(struct OmoikaneBrowser *browser, const char *action, const char *query);
 
 /**
  * Returns the current document serialized as HTML.
+ * Release a non-null result with [`omoikane_string_free`].
+ *
+ * # Safety
+ *
+ * A non-null `browser` must be a live handle from [`omoikane_init`], used on
+ * its creating thread without overlapping calls.
  */
 char *omoikane_get_content(struct OmoikaneBrowser *browser);
 
 /**
  * Captures the current page rendering and returns a base64-encoded PNG string.
+ * Release a non-null result with [`omoikane_string_free`].
+ *
+ * # Safety
+ *
+ * A non-null `browser` must be a live handle from [`omoikane_init`], used on
+ * its creating thread without overlapping calls.
  */
 char *omoikane_screenshot_png(struct OmoikaneBrowser *browser);
 
 /**
  * Captures the current page rendering using an explicit viewport and returns a base64-encoded PNG string.
+ * Release a non-null result with [`omoikane_string_free`].
+ *
+ * # Safety
+ *
+ * A non-null `browser` must be a live handle from [`omoikane_init`], used on
+ * its creating thread without overlapping calls.
  */
 char *omoikane_screenshot_png_with_viewport(struct OmoikaneBrowser *browser,
                                             uint32_t width,
@@ -87,11 +148,22 @@ char *omoikane_screenshot_png_with_viewport(struct OmoikaneBrowser *browser,
 
 /**
  * Returns the last error message for the browser handle, if any.
+ * Release a non-null result with [`omoikane_string_free`].
+ *
+ * # Safety
+ *
+ * A non-null `browser` must be a live handle from [`omoikane_init`], used on
+ * its creating thread without overlapping calls.
  */
 char *omoikane_last_error(const struct OmoikaneBrowser *browser);
 
 /**
  * Frees a string allocated by this library.
+ *
+ * # Safety
+ *
+ * `value` may be null. Otherwise it must be a live string returned by this
+ * library, passed to this function at most once, with no concurrent readers.
  */
 void omoikane_string_free(char *value);
 
