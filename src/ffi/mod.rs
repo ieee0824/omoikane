@@ -1,8 +1,9 @@
-// The exported C ABI validates nullable pointers at each boundary; detailed ownership
-// contracts are also declared in the generated C header.
-#![allow(clippy::missing_safety_doc)]
-
 //! C FFI surface for embedding the browser engine from other languages.
+//!
+//! A non-null browser handle belongs to the thread that created it. Calls using
+//! that handle, including destruction, must stay on that thread and must not
+//! overlap. String results are owned by the caller and are released with
+//! [`omoikane_string_free`]. The generated C header carries the same contracts.
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
@@ -48,6 +49,12 @@ impl OmoikaneBrowserHandle {
 }
 
 /// Creates a new browser handle.
+///
+/// # Safety
+///
+/// This function has no pointer inputs. A non-null result must be used and
+/// freed on the creating thread, without overlapping calls, and freed exactly
+/// once with [`omoikane_free`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_init() -> *mut OmoikaneBrowser {
     match OmoikaneBrowserHandle::new() {
@@ -57,28 +64,43 @@ pub unsafe extern "C" fn omoikane_init() -> *mut OmoikaneBrowser {
 }
 
 /// Destroys a browser handle previously created by [`omoikane_init`].
+///
+/// # Safety
+///
+/// `browser` may be null. Otherwise it must be a live handle returned by
+/// [`omoikane_init`], used on its creating thread without overlapping calls.
+/// Call this at most once for each handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_free(browser: *mut OmoikaneBrowser) {
     if browser.is_null() {
         return;
     }
 
-    // SAFETY: `browser` was created by `Box::into_raw` in `omoikane_init`.
+    // SAFETY: The caller gives back a live, uniquely owned handle from
+    // `Box::into_raw` on its creating thread, exactly once.
     unsafe {
         drop(Box::from_raw(browser as *mut OmoikaneBrowserHandle));
     }
 }
 
 /// Navigates the active page to `url`.
+///
+/// # Safety
+///
+/// A non-null `browser` must be a live handle from [`omoikane_init`], used on
+/// its creating thread without overlapping calls. A non-null `url` must point
+/// to a readable NUL-terminated C string for the duration of this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_navigate(
     browser: *mut OmoikaneBrowser,
     url: *const c_char,
 ) -> bool {
-    let Some(browser) = browser_from_ptr(browser) else {
+    // SAFETY: The FFI caller supplies a live handle on its creating thread.
+    let Some(browser) = (unsafe { browser_from_ptr(browser) }) else {
         return false;
     };
-    let Some(url) = string_from_ptr(url) else {
+    // SAFETY: The FFI caller keeps any non-null C string readable for this call.
+    let Some(url) = (unsafe { string_from_ptr(url) }) else {
         browser.set_error("url must be a valid UTF-8 string");
         return false;
     };
@@ -101,15 +123,23 @@ pub unsafe extern "C" fn omoikane_navigate(
 }
 
 /// Sets the `User-Agent` used for subsequent navigations.
+///
+/// # Safety
+///
+/// A non-null `browser` must be a live handle from [`omoikane_init`], used on
+/// its creating thread without overlapping calls. A non-null `user_agent` must
+/// point to a readable NUL-terminated C string for the duration of this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_set_user_agent(
     browser: *mut OmoikaneBrowser,
     user_agent: *const c_char,
 ) -> bool {
-    let Some(browser) = browser_from_ptr(browser) else {
+    // SAFETY: The FFI caller supplies a live handle on its creating thread.
+    let Some(browser) = (unsafe { browser_from_ptr(browser) }) else {
         return false;
     };
-    let Some(user_agent) = string_from_ptr(user_agent) else {
+    // SAFETY: The FFI caller keeps any non-null C string readable for this call.
+    let Some(user_agent) = (unsafe { string_from_ptr(user_agent) }) else {
         browser.set_error("user_agent must be a valid UTF-8 string");
         return false;
     };
@@ -125,12 +155,18 @@ pub unsafe extern "C" fn omoikane_set_user_agent(
 /// mismatches are silently accepted.
 ///
 /// **Security warning**: Only use this in development or testing environments.
+///
+/// # Safety
+///
+/// A non-null `browser` must be a live handle from [`omoikane_init`], used on
+/// its creating thread without overlapping calls.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_set_insecure(
     browser: *mut OmoikaneBrowser,
     insecure: bool,
 ) -> bool {
-    let Some(browser) = browser_from_ptr(browser) else {
+    // SAFETY: The FFI caller supplies a live handle on its creating thread.
+    let Some(browser) = (unsafe { browser_from_ptr(browser) }) else {
         return false;
     };
 
@@ -140,15 +176,24 @@ pub unsafe extern "C" fn omoikane_set_insecure(
 }
 
 /// Evaluates JavaScript in the current page and returns a JSON payload string.
+/// Release a non-null result with [`omoikane_string_free`].
+///
+/// # Safety
+///
+/// A non-null `browser` must be a live handle from [`omoikane_init`], used on
+/// its creating thread without overlapping calls. A non-null `expression` must
+/// point to a readable NUL-terminated C string for the duration of this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_evaluate(
     browser: *mut OmoikaneBrowser,
     expression: *const c_char,
 ) -> *mut c_char {
-    let Some(browser) = browser_from_ptr(browser) else {
+    // SAFETY: The FFI caller supplies a live handle on its creating thread.
+    let Some(browser) = (unsafe { browser_from_ptr(browser) }) else {
         return std::ptr::null_mut();
     };
-    let Some(expression) = string_from_ptr(expression) else {
+    // SAFETY: The FFI caller keeps any non-null C string readable for this call.
+    let Some(expression) = (unsafe { string_from_ptr(expression) }) else {
         browser.set_error("expression must be a valid UTF-8 string");
         return std::ptr::null_mut();
     };
@@ -185,21 +230,31 @@ pub unsafe extern "C" fn omoikane_evaluate(
 /// returned string with `omoikane_string_free()`. A null browser handle,
 /// invalid action, or missing required query returns null. A non-null handle
 /// must be valid. Retrieve errors from it using `omoikane_last_error()`.
+///
+/// # Safety
+///
+/// A non-null `browser` must be a live handle from [`omoikane_init`], used on
+/// its creating thread without overlapping calls. A non-null `action` must
+/// point to a readable NUL-terminated C string for this call; `query` has the
+/// same requirement when `action` is `start`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_find_in_page(
     browser: *mut OmoikaneBrowser,
     action: *const c_char,
     query: *const c_char,
 ) -> *mut c_char {
-    let Some(browser) = browser_from_ptr(browser) else {
+    // SAFETY: The FFI caller supplies a live handle on its creating thread.
+    let Some(browser) = (unsafe { browser_from_ptr(browser) }) else {
         return std::ptr::null_mut();
     };
-    let Some(action) = string_from_ptr(action) else {
+    // SAFETY: The FFI caller keeps any non-null C string readable for this call.
+    let Some(action) = (unsafe { string_from_ptr(action) }) else {
         browser.set_error("action must be a valid UTF-8 string");
         return std::ptr::null_mut();
     };
     let query = if action == "start" {
-        let Some(query) = string_from_ptr(query) else {
+        // SAFETY: The FFI caller keeps any non-null C string readable for this call.
+        let Some(query) = (unsafe { string_from_ptr(query) }) else {
             browser.set_error("query must be a valid UTF-8 string for start");
             return std::ptr::null_mut();
         };
@@ -232,9 +287,16 @@ pub unsafe extern "C" fn omoikane_find_in_page(
 }
 
 /// Returns the current document serialized as HTML.
+/// Release a non-null result with [`omoikane_string_free`].
+///
+/// # Safety
+///
+/// A non-null `browser` must be a live handle from [`omoikane_init`], used on
+/// its creating thread without overlapping calls.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_get_content(browser: *mut OmoikaneBrowser) -> *mut c_char {
-    let Some(browser) = browser_from_ptr(browser) else {
+    // SAFETY: The FFI caller supplies a live handle on its creating thread.
+    let Some(browser) = (unsafe { browser_from_ptr(browser) }) else {
         return std::ptr::null_mut();
     };
 
@@ -275,8 +337,16 @@ pub unsafe extern "C" fn omoikane_get_content(browser: *mut OmoikaneBrowser) -> 
 }
 
 /// Captures the current page rendering and returns a base64-encoded PNG string.
+/// Release a non-null result with [`omoikane_string_free`].
+///
+/// # Safety
+///
+/// A non-null `browser` must be a live handle from [`omoikane_init`], used on
+/// its creating thread without overlapping calls.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_screenshot_png(browser: *mut OmoikaneBrowser) -> *mut c_char {
+    // SAFETY: The caller satisfies the same browser-handle contract required by
+    // `omoikane_screenshot_png_with_viewport`; only fixed dimensions are added.
     unsafe {
         omoikane_screenshot_png_with_viewport(
             browser,
@@ -287,13 +357,20 @@ pub unsafe extern "C" fn omoikane_screenshot_png(browser: *mut OmoikaneBrowser) 
 }
 
 /// Captures the current page rendering using an explicit viewport and returns a base64-encoded PNG string.
+/// Release a non-null result with [`omoikane_string_free`].
+///
+/// # Safety
+///
+/// A non-null `browser` must be a live handle from [`omoikane_init`], used on
+/// its creating thread without overlapping calls.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_screenshot_png_with_viewport(
     browser: *mut OmoikaneBrowser,
     width: u32,
     height: u32,
 ) -> *mut c_char {
-    let Some(browser) = browser_from_ptr(browser) else {
+    // SAFETY: The FFI caller supplies a live handle on its creating thread.
+    let Some(browser) = (unsafe { browser_from_ptr(browser) }) else {
         return std::ptr::null_mut();
     };
 
@@ -341,9 +418,16 @@ pub unsafe extern "C" fn omoikane_screenshot_png_with_viewport(
 }
 
 /// Returns the last error message for the browser handle, if any.
+/// Release a non-null result with [`omoikane_string_free`].
+///
+/// # Safety
+///
+/// A non-null `browser` must be a live handle from [`omoikane_init`], used on
+/// its creating thread without overlapping calls.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_last_error(browser: *const OmoikaneBrowser) -> *mut c_char {
-    let Some(browser) = browser_from_const_ptr(browser) else {
+    // SAFETY: The FFI caller supplies a live handle on its creating thread.
+    let Some(browser) = (unsafe { browser_from_const_ptr(browser) }) else {
         return std::ptr::null_mut();
     };
 
@@ -354,39 +438,59 @@ pub unsafe extern "C" fn omoikane_last_error(browser: *const OmoikaneBrowser) ->
 }
 
 /// Frees a string allocated by this library.
+///
+/// # Safety
+///
+/// `value` may be null. Otherwise it must be a live string returned by this
+/// library, passed to this function at most once, with no concurrent readers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn omoikane_string_free(value: *mut c_char) {
     if value.is_null() {
         return;
     }
 
-    // SAFETY: `value` must have come from `CString::into_raw` in this module.
+    // SAFETY: The caller gives back a live string from `CString::into_raw` in
+    // this module, with no other users and exactly one release.
     unsafe {
         drop(CString::from_raw(value));
     }
 }
 
-fn browser_from_ptr<'a>(browser: *mut OmoikaneBrowser) -> Option<&'a OmoikaneBrowserHandle> {
+/// # Safety
+///
+/// A non-null pointer must be a live handle from `omoikane_init`, used on its
+/// creating thread without overlapping access for the returned borrow.
+unsafe fn browser_from_ptr<'a>(browser: *mut OmoikaneBrowser) -> Option<&'a OmoikaneBrowserHandle> {
     if browser.is_null() {
         None
     } else {
-        // SAFETY: Caller promises a valid pointer for the duration of the call.
+        // SAFETY: The caller guarantees a live handle on its creating thread,
+        // without overlapping access for the returned borrow.
         Some(unsafe { &*(browser as *mut OmoikaneBrowserHandle) })
     }
 }
 
-fn browser_from_const_ptr<'a>(
+/// # Safety
+///
+/// A non-null pointer must be a live handle from `omoikane_init`, used on its
+/// creating thread without overlapping access for the returned borrow.
+unsafe fn browser_from_const_ptr<'a>(
     browser: *const OmoikaneBrowser,
 ) -> Option<&'a OmoikaneBrowserHandle> {
     if browser.is_null() {
         None
     } else {
-        // SAFETY: Caller promises a valid pointer for the duration of the call.
+        // SAFETY: The caller guarantees a live handle on its creating thread,
+        // without overlapping access for the returned borrow.
         Some(unsafe { &*(browser as *const OmoikaneBrowserHandle) })
     }
 }
 
-fn string_from_ptr(value: *const c_char) -> Option<String> {
+/// # Safety
+///
+/// A non-null pointer must name a readable NUL-terminated C string that stays
+/// valid for the duration of this call.
+unsafe fn string_from_ptr(value: *const c_char) -> Option<String> {
     if value.is_null() {
         return None;
     }
@@ -417,69 +521,95 @@ mod tests {
         CString::new(value).unwrap()
     }
 
+    /// # Safety
+    ///
+    /// `value` must be a non-null, live string returned by this FFI, and this
+    /// call must be its only ownership transfer back to Rust.
     unsafe fn take_string(value: *mut c_char) -> String {
         assert!(!value.is_null());
+        // SAFETY: The caller transfers this non-null FFI-owned string back exactly once.
         let owned = unsafe { CString::from_raw(value) };
         owned.into_string().unwrap()
     }
 
     #[test]
     fn ffi_can_navigate_evaluate_and_read_content() {
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
         let browser = unsafe { omoikane_init() };
         assert!(!browser.is_null());
 
         let url =
             to_c_string("data:text/html,<html><body><main id=\"app\">ffi</main></body></html>");
+        // SAFETY: The handle is live and the URL CString remains readable during this call.
         let ok = unsafe { omoikane_navigate(browser, url.as_ptr()) };
         assert!(ok);
 
         let expression = to_c_string("document.getElementById('app').nodeName");
+        // SAFETY: The handle is live and the expression CString remains readable.
         let evaluated = unsafe { omoikane_evaluate(browser, expression.as_ptr()) };
+        // SAFETY: This non-null FFI result is owned and consumed only once.
         let payload = unsafe { take_string(evaluated) };
         assert!(payload.contains("\"MAIN\""));
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let content = unsafe { omoikane_get_content(browser) };
+        // SAFETY: This non-null FFI result is owned and consumed only once.
         let html = unsafe { take_string(content) };
         assert!(html.contains("<main id=\"app\">ffi</main>"));
 
+        // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
     }
 
     #[test]
     fn ffi_find_in_page_reports_navigation_and_rejects_invalid_input() {
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
         let browser = unsafe { omoikane_init() };
         let url = to_c_string("data:text/html,<p>needle needle</p>");
+        // SAFETY: The handle is live and the URL CString remains readable during this call.
         assert!(unsafe { omoikane_navigate(browser, url.as_ptr()) });
         let start = to_c_string("start");
         let next = to_c_string("next");
         let query = to_c_string("needle");
+        // SAFETY: The handle is live or intentionally null; non-null strings are CStrings.
         let result = unsafe { omoikane_find_in_page(browser, start.as_ptr(), query.as_ptr()) };
         let value: serde_json::Value =
+            // SAFETY: This non-null FFI result is owned and consumed only once.
             serde_json::from_str(&unsafe { take_string(result) }).unwrap();
         assert_eq!(value["matchCount"], 2);
         assert_eq!(value["activeMatchOrdinal"], 1);
+        // SAFETY: The handle is live or intentionally null; non-null strings are CStrings.
         let result = unsafe { omoikane_find_in_page(browser, next.as_ptr(), std::ptr::null()) };
         let value: serde_json::Value =
+            // SAFETY: This non-null FFI result is owned and consumed only once.
             serde_json::from_str(&unsafe { take_string(result) }).unwrap();
         assert_eq!(value["activeMatchOrdinal"], 2);
         let missing = to_c_string("missing");
+        // SAFETY: The handle is live or intentionally null; non-null strings are CStrings.
         let result = unsafe { omoikane_find_in_page(browser, start.as_ptr(), missing.as_ptr()) };
         let value: serde_json::Value =
+            // SAFETY: This non-null FFI result is owned and consumed only once.
             serde_json::from_str(&unsafe { take_string(result) }).unwrap();
         assert_eq!(value["matchCount"], 0);
         let stop = to_c_string("stop");
+        // SAFETY: The handle is live or intentionally null; non-null strings are CStrings.
         let result = unsafe { omoikane_find_in_page(browser, stop.as_ptr(), std::ptr::null()) };
         let value: serde_json::Value =
+            // SAFETY: This non-null FFI result is owned and consumed only once.
             serde_json::from_str(&unsafe { take_string(result) }).unwrap();
         assert_eq!(value["query"], "");
         assert!(
+            // SAFETY: The handle is live or intentionally null; non-null strings are CStrings.
             unsafe { omoikane_find_in_page(browser, start.as_ptr(), std::ptr::null()) }.is_null()
         );
+        // SAFETY: The handle is live; the returned error string is non-null and owned.
         assert!(unsafe { take_string(omoikane_last_error(browser)) }.contains("query must"));
         assert!(
+            // SAFETY: The handle is live or intentionally null; non-null strings are CStrings.
             unsafe { omoikane_find_in_page(std::ptr::null_mut(), start.as_ptr(), query.as_ptr()) }
                 .is_null()
         );
+        // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
     }
 
@@ -516,48 +646,61 @@ mod tests {
             stream.flush().unwrap();
         });
 
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
         let browser = unsafe { omoikane_init() };
         assert!(!browser.is_null());
 
         let user_agent = to_c_string("FFIAgent/1.0");
+        // SAFETY: The handle is live and the user-agent CString remains readable.
         let ok = unsafe { omoikane_set_user_agent(browser, user_agent.as_ptr()) };
         assert!(ok);
 
         let url = to_c_string(&format!("http://127.0.0.1:{port}/"));
+        // SAFETY: The handle is live and the URL CString remains readable during this call.
         let ok = unsafe { omoikane_navigate(browser, url.as_ptr()) };
         assert!(ok);
 
+        // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
     }
 
     #[test]
     fn ffi_exposes_last_error_for_invalid_javascript() {
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
         let browser = unsafe { omoikane_init() };
         assert!(!browser.is_null());
 
         let expression = to_c_string("(()");
+        // SAFETY: The handle is live and the expression CString remains readable.
         let evaluated = unsafe { omoikane_evaluate(browser, expression.as_ptr()) };
         assert!(evaluated.is_null());
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let error = unsafe { omoikane_last_error(browser) };
+        // SAFETY: This non-null FFI result is owned and consumed only once.
         let message = unsafe { take_string(error) };
         assert!(message.contains("SyntaxError"));
 
+        // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
     }
 
     #[test]
     fn ffi_can_capture_base64_png_screenshot() {
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
         let browser = unsafe { omoikane_init() };
         assert!(!browser.is_null());
 
         let url = to_c_string(
             "data:text/html,<html><head><style>html,body{margin:0;background:#123456;}</style></head><body></body></html>",
         );
+        // SAFETY: The handle is live and the URL CString remains readable during this call.
         let ok = unsafe { omoikane_navigate(browser, url.as_ptr()) };
         assert!(ok);
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let screenshot = unsafe { omoikane_screenshot_png(browser) };
+        // SAFETY: This non-null FFI result is owned and consumed only once.
         let payload = unsafe { take_string(screenshot) };
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(payload)
@@ -570,21 +713,26 @@ mod tests {
         assert_eq!(width, 1280);
         assert_eq!(height, 720);
 
+        // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
     }
 
     #[test]
     fn ffi_can_capture_base64_png_screenshot_with_explicit_viewport() {
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
         let browser = unsafe { omoikane_init() };
         assert!(!browser.is_null());
 
         let url = to_c_string(
             "data:text/html,<html><head><style>html,body{margin:0;background:#123456;}</style></head><body></body></html>",
         );
+        // SAFETY: The handle is live and the URL CString remains readable during this call.
         let ok = unsafe { omoikane_navigate(browser, url.as_ptr()) };
         assert!(ok);
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let screenshot = unsafe { omoikane_screenshot_png_with_viewport(browser, 1024, 512) };
+        // SAFETY: This non-null FFI result is owned and consumed only once.
         let payload = unsafe { take_string(screenshot) };
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(payload)
@@ -597,51 +745,67 @@ mod tests {
         assert_eq!(width, 1024);
         assert_eq!(height, 512);
 
+        // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
     }
 
     #[test]
     fn ffi_rejects_invalid_viewport_for_screenshot() {
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
         let browser = unsafe { omoikane_init() };
         assert!(!browser.is_null());
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let screenshot = unsafe { omoikane_screenshot_png_with_viewport(browser, 0, 720) };
         assert!(screenshot.is_null());
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let error = unsafe { omoikane_last_error(browser) };
+        // SAFETY: This non-null FFI result is owned and consumed only once.
         let message = unsafe { take_string(error) };
         assert!(message.contains("viewport width and height must be greater than zero"));
 
+        // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
     }
 
     #[test]
     fn ffi_rejects_oversized_viewport_dimension_for_screenshot() {
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
         let browser = unsafe { omoikane_init() };
         assert!(!browser.is_null());
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let screenshot = unsafe { omoikane_screenshot_png_with_viewport(browser, 20_000, 720) };
         assert!(screenshot.is_null());
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let error = unsafe { omoikane_last_error(browser) };
+        // SAFETY: This non-null FFI result is owned and consumed only once.
         let message = unsafe { take_string(error) };
         assert!(message.contains("viewport width and height must be at most"));
 
+        // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
     }
 
     #[test]
     fn ffi_rejects_oversized_viewport_pixel_budget_for_screenshot() {
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
         let browser = unsafe { omoikane_init() };
         assert!(!browser.is_null());
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let screenshot = unsafe { omoikane_screenshot_png_with_viewport(browser, 16_384, 16_384) };
         assert!(screenshot.is_null());
 
+        // SAFETY: The handle is live and this test uses it on one thread.
         let error = unsafe { omoikane_last_error(browser) };
+        // SAFETY: This non-null FFI result is owned and consumed only once.
         let message = unsafe { take_string(error) };
         assert!(message.contains("viewport area exceeds maximum pixel budget"));
 
+        // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
     }
 
