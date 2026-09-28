@@ -218,6 +218,9 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
     let value_str = parts.next().unwrap_or("").trim();
 
     match feature.as_str() {
+        // A size feature in boolean context is true for a non-zero size.
+        "width" if value_str.is_empty() => return MediaCondition::MinWidthExclusive(0.0),
+        "height" if value_str.is_empty() => return MediaCondition::MinHeightExclusive(0.0),
         "max-width" => {
             if let Some(px) = parse_length_to_px(value_str) {
                 return MediaCondition::MaxWidth(px);

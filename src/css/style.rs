@@ -2856,6 +2856,7 @@ fn resolve_component_css_wide_keywords(
 
 fn contains_at_rule_named(rules: &[Rule], expected: &str) -> bool {
     rules.iter().any(|rule| match rule {
+        Rule::Style(style_rule) => contains_at_rule_named(&style_rule.rules, expected),
         Rule::At(at_rule) => {
             at_rule.name.eq_ignore_ascii_case(expected)
                 || at_rule
@@ -2863,7 +2864,7 @@ fn contains_at_rule_named(rules: &[Rule], expected: &str) -> bool {
                     .as_deref()
                     .is_some_and(|block| contains_at_rule_named(block, expected))
         }
-        _ => false,
+        Rule::FontFace(_) => false,
     })
 }
 
@@ -4704,8 +4705,9 @@ impl StylesheetRuleIndex {
             index.declaration_offsets.push(offset);
             offset += match rule {
                 Rule::Style(rule) => {
-                    index.has_part_selector |= rule.selectors.iter().any(selector_uses_part_pseudo);
-                    rule.declarations.len()
+                    index.has_part_selector |= rule.selectors.iter().any(selector_uses_part_pseudo)
+                        || rules_contain_part_selector(&rule.rules);
+                    rule.declarations.len() + count_declarations(&rule.rules)
                 }
                 Rule::At(rule) => {
                     if let Some(block) = rule.block.as_deref() {
@@ -4720,6 +4722,12 @@ impl StylesheetRuleIndex {
             let Rule::Style(style_rule) = rule else {
                 continue;
             };
+            if !style_rule.rules.is_empty() {
+                // A nested selector can match even when its parent selector
+                // does not match this node (for example `.a { .b {} }`).
+                index.fallback.push(rule_index);
+                continue;
+            }
             let keys: Option<Vec<RuleMatchKey>> = style_rule
                 .selectors
                 .iter()
@@ -4846,7 +4854,10 @@ fn selector_uses_shadow_pseudo(selector: &super::Selector) -> bool {
 
 fn rules_contain_part_selector(rules: &[Rule]) -> bool {
     rules.iter().any(|rule| match rule {
-        Rule::Style(rule) => rule.selectors.iter().any(selector_uses_part_pseudo),
+        Rule::Style(rule) => {
+            rule.selectors.iter().any(selector_uses_part_pseudo)
+                || rules_contain_part_selector(&rule.rules)
+        }
         Rule::At(rule) => rule
             .block
             .as_deref()
@@ -5289,12 +5300,13 @@ fn collect_rule_candidates(
     for rule in rules {
         match rule {
             Rule::Style(style_rule) => {
-                if element_keys.is_some_and(|keys| !style_rule_might_match(style_rule, keys)) {
-                    *source_order += style_rule.declarations.len();
-                    continue;
-                }
+                let parent_might_match =
+                    element_keys.is_none_or(|keys| style_rule_might_match(style_rule, keys));
                 let mut matching = None;
                 for selector in &style_rule.selectors {
+                    if !parent_might_match {
+                        break;
+                    }
                     let selector_specificity = specificity(selector);
                     if let Some(active) = active_scope {
                         for root in &active.roots {
@@ -5371,6 +5383,34 @@ fn collect_rule_candidates(
                     }
                 } else {
                     *source_order += style_rule.declarations.len();
+                }
+                if !style_rule.rules.is_empty() {
+                    collect_rule_candidates(
+                        node,
+                        &style_rule.rules,
+                        origin,
+                        stylesheet_id,
+                        layer_context,
+                        layer_order,
+                        pseudo,
+                        source_order,
+                        out,
+                        viewport_width,
+                        viewport_height,
+                        color_scheme_dark,
+                        media_type,
+                        media_cache,
+                        scope_cache,
+                        container_cache,
+                        container_contexts,
+                        element_keys,
+                        selector_cache,
+                        shadow_scope,
+                        implicit_scope_root,
+                        encapsulation_order,
+                        active_scope,
+                        active_layer,
+                    );
                 }
             }
             Rule::At(at_rule) => {
@@ -5849,7 +5889,7 @@ fn count_declarations(rules: &[Rule]) -> usize {
     rules
         .iter()
         .map(|r| match r {
-            Rule::Style(s) => s.declarations.len(),
+            Rule::Style(s) => s.declarations.len() + count_declarations(&s.rules),
             Rule::At(a) => {
                 a.declarations.len() + a.block.as_deref().map(count_declarations).unwrap_or(0)
             }

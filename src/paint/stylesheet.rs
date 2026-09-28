@@ -911,6 +911,8 @@ pub(crate) fn salvage_style_rule(input: &str) -> Option<crate::css::StyleRule> {
     Some(crate::css::StyleRule {
         selectors: selectors?,
         declarations,
+        rules: Vec::new(),
+        nested_declarations: false,
     })
 }
 
