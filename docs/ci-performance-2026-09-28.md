@@ -23,3 +23,7 @@ macOSの残り10件は、復元したfingerprintよりcheckout直後のソース
 WPT準備は変更前のGate 5で49〜72秒、専用WPT jobで73〜86秒。PR #1110ではGate 5で3.3〜5.5秒、専用jobで5秒だった。旧新のsparse-checkoutパターン239件は一致し、WPTテストも成功した。
 
 PR #1110の通常CI、Browser behavior、Native JIT、CodeQL、Gate 5、`--include-ignored`、Acid3、WPT、Web API、aggregateは成功した。文書だけのPRと連続pushの挙動は別に実行して確認する。
+
+## 文書のみの変更判定
+
+ルートの`AGENTS.md`と`README.md`、`docs/`配下のMarkdownだけを軽量経路の対象にする。workflow、スクリプト、fixture、WPT入力の変更、変更範囲が確定できないイベントは通常の検証を実行する。
