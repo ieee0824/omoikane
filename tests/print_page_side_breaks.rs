@@ -36,3 +36,43 @@ fn forced_right_break_inserts_a_content_empty_page_without_reordering_boxes() {
     );
     assert_eq!(pages[2].pixel(5, 5), Some(Color::rgb(0, 0, 255)));
 }
+
+#[test]
+fn blank_page_rules_change_only_the_inserted_sheet() {
+    let document = TreeBuilder::parse(
+        r#"<!doctype html><html><head><style>
+            body { margin: 0 }
+            @page { size: 100px 100px; margin: 0; background: white }
+            @page :first { background: yellow }
+            @page :left { background: blue }
+            @page :blank { size: 120px 80px; margin: 10px; border: 2px solid red; background: lime }
+            div { width: 20px; height: 20px }
+            #first { background: red }
+            #second { break-before: right; background: blue }
+        </style></head><body>
+            <div id="first"></div><div id="second"></div>
+        </body></html>"#,
+    )
+    .document();
+    let pages = render_document_pages(
+        &document,
+        Rect {
+            width: 100.0,
+            height: 100.0,
+            ..Rect::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(pages.len(), 3);
+    assert_eq!((pages[0].width(), pages[0].height()), (100, 100));
+    assert_eq!(pages[0].pixel(50, 50), Some(Color::rgb(255, 255, 0)));
+    assert_eq!(pages[0].pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+    assert_eq!((pages[1].width(), pages[1].height()), (120, 80));
+    assert_eq!(pages[1].pixel(5, 5), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(pages[1].pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(pages[1].pixel(50, 50), Some(Color::rgb(0, 255, 0)));
+    assert_eq!((pages[2].width(), pages[2].height()), (100, 100));
+    assert_eq!(pages[2].pixel(50, 50), Some(Color::rgb(255, 255, 255)));
+    assert_eq!(pages[2].pixel(5, 5), Some(Color::rgb(0, 0, 255)));
+}
