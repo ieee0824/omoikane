@@ -526,13 +526,18 @@ pub fn layout_paged_tree(
                 if let Some(boundary) = preferred.or(fallback) {
                     end_y = boundary;
                 }
-                for range in &candidates.avoid_ranges {
-                    if range.start > cursor.flow_y + 0.01
-                        && range.start < end_y - 0.01
-                        && range.end > end_y + 0.01
-                    {
-                        end_y = range.start;
-                        break;
+                let first = candidates
+                    .avoid_ranges
+                    .partition_point(|range| range.start <= cursor.flow_y + 0.01);
+                let last = candidates
+                    .avoid_ranges
+                    .partition_point(|range| range.start < end_y - 0.01);
+                if first < last {
+                    for range in &candidates.avoid_ranges[first..last] {
+                        if range.end > end_y + 0.01 {
+                            end_y = range.start;
+                            break;
+                        }
                     }
                 }
             }
