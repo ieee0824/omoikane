@@ -1697,6 +1697,11 @@ impl StyleResolver {
         true
     }
 
+    /// Captures the container sizes used by the current layout pass.
+    pub(crate) fn container_contexts_snapshot(&self) -> HashMap<usize, ContainerContext> {
+        self.container_contexts.clone()
+    }
+
     /// Adds a stylesheet with its origin.
     pub fn add_stylesheet(&mut self, origin: Origin, stylesheet: Stylesheet) {
         let stylesheet_id = self.register_stylesheet_layers(origin, None, &stylesheet);
