@@ -19,11 +19,13 @@ jobs:
     uses: ./.github/workflows/jit-native.yml
     permissions:
       contents: read
+      pull-requests: read
 
   build:
     uses: ./.github/workflows/jit-release-gate.yml
     permissions:
       contents: read
+      pull-requests: read
 
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
