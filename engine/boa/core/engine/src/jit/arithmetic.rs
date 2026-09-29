@@ -397,6 +397,7 @@ impl ArithmeticCode {
 pub(crate) struct ArithmeticRuntime {
     entries: HashMap<(u64, u32), RuntimeEntry>,
     insertion_order: VecDeque<(u64, u32)>,
+    last_unsupported: Option<(u64, u32)>,
     diagnostics: ArithmeticJitDiagnostics,
 }
 
@@ -527,6 +528,14 @@ impl ArithmeticRuntime {
         self.diagnostics
     }
 
+    /// Skips repeated dispatcher setup for a loop site already rejected by
+    /// the arithmetic tier. The entry is cleared when its bounded cache slot
+    /// is evicted, so a later attempt can see updated inline-cache state.
+    #[inline]
+    pub(crate) fn is_recently_unsupported(&self, code_id: u64, pc: u32) -> bool {
+        self.last_unsupported == Some((code_id, pc))
+    }
+
     pub(crate) fn write_debug_snapshot(&self, output: &mut String) {
         let mut entries = self.entries.iter().collect::<Vec<_>>();
         entries.sort_unstable_by_key(|(key, _)| **key);
@@ -557,6 +566,9 @@ impl ArithmeticRuntime {
                     .expect("a full arithmetic cache has an insertion-order entry");
                 let removed = self.entries.remove(&oldest);
                 debug_assert!(removed.is_some());
+                if self.last_unsupported == Some(oldest) {
+                    self.last_unsupported = None;
+                }
                 self.diagnostics.cache_evictions =
                     self.diagnostics.cache_evictions.saturating_add(1);
             }
@@ -616,6 +628,7 @@ impl ArithmeticRuntime {
                     self.diagnostics.compile_rejections =
                         self.diagnostics.compile_rejections.saturating_add(1);
                     *entry = RuntimeEntry::Unsupported;
+                    self.last_unsupported = Some(key);
                     return false;
                 };
                 vm.frame
@@ -630,7 +643,10 @@ impl ArithmeticRuntime {
                     .saturating_add(u64::try_from(code.generated_code_bytes()).unwrap_or(u64::MAX));
                 *entry = RuntimeEntry::Compiled(code);
             }
-            RuntimeEntry::Unsupported => return false,
+            RuntimeEntry::Unsupported => {
+                self.last_unsupported = Some(key);
+                return false;
+            }
             RuntimeEntry::Compiled(code) if code.bytecode_resume != pc => return false,
             RuntimeEntry::Compiled(_) => {}
         }
@@ -1599,17 +1615,47 @@ mod tests {
     #[test]
     fn runtime_cache_evicts_the_oldest_loop_site_at_its_bound() {
         let mut runtime = ArithmeticRuntime::default();
-        for code_id in 0..=ArithmeticRuntime::MAX_CACHE_ENTRIES as u64 {
+        runtime.ensure_entry((0, 1));
+        runtime.entries.insert((0, 1), RuntimeEntry::Unsupported);
+        runtime.last_unsupported = Some((0, 1));
+        for code_id in 1..=ArithmeticRuntime::MAX_CACHE_ENTRIES as u64 {
             runtime.ensure_entry((code_id, 1));
         }
         assert_eq!(runtime.entries.len(), ArithmeticRuntime::MAX_CACHE_ENTRIES);
         assert!(!runtime.entries.contains_key(&(0, 1)));
+        assert!(
+            !runtime.is_recently_unsupported(0, 1),
+            "an evicted unsupported site must be eligible for reevaluation"
+        );
         assert!(
             runtime
                 .entries
                 .contains_key(&(ArithmeticRuntime::MAX_CACHE_ENTRIES as u64, 1))
         );
         assert_eq!(runtime.diagnostics.cache_evictions, 1);
+    }
+
+    #[test]
+    fn rejected_loop_does_not_suppress_a_supported_loop_in_the_same_function() {
+        let mut context = Context::default();
+        let result = Script::parse(
+            Source::from_bytes(
+                "function mixed(n) {\
+                   let slow = 0; for (let i = 0; i < n; i++) slow += Math.abs(i);\
+                   let fast = 0; for (let j = 0; j < n; j++) fast = (fast + j * 3) % 1000003;\
+                   return slow + fast;\
+                 } mixed(200)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_number(), Some(79_600.0));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert!(diagnostics.compile_rejections >= 1, "{diagnostics:?}");
+        assert!(diagnostics.compiled_entries >= 1, "{diagnostics:?}");
     }
 
     #[test]
