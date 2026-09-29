@@ -5,7 +5,7 @@
 //! URL once as [`UrlBarOutcome::Navigate`], and the host decides how to load it.
 //! Caret and selection positions are byte offsets on `char` boundaries.
 
-// BrowserApp starts drawing and routing input to this state in #1137–#1139.
+// BrowserApp starts routing input to this state in #1138–#1139.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::ops::Range;
