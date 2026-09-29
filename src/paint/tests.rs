@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::css::{Origin, StyleResolver, parse_stylesheet};
@@ -9,6 +10,10 @@ use crate::layout::{
     TextControlPaintState, VerticalAlign, layout_paged_tree, layout_tree,
 };
 use crate::paint::*;
+use crate::test_support::http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 
 #[test]
 fn polygon_clip_hit_testing_includes_boundary_but_not_zero_area_shapes() {
@@ -1255,9 +1260,6 @@ fn paints_inline_text_fragments() {
 
 #[test]
 fn renders_relative_image_src_with_base_url() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
     let mut pixel_canvas = Canvas::new(1, 1);
     pixel_canvas.fill_rect(
         Rect {
@@ -1270,20 +1272,11 @@ fn renders_relative_image_src_with_base_url() {
     );
     let png_bytes = pixel_canvas.encode_png();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(&stream);
-        let mut request_line = String::new();
-        reader.read_line(&mut request_line).unwrap();
-        loop {
-            let mut h = String::new();
-            reader.read_line(&mut h).unwrap();
-            if h.trim().is_empty() {
-                break;
-            }
-        }
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n",
             png_bytes.len()
@@ -1309,6 +1302,7 @@ fn renders_relative_image_src_with_base_url() {
         Some(&base_url),
     )
     .unwrap();
+    server.join();
 
     assert!(count_pixels(&canvas, Color::rgb(255, 0, 0)) > 0);
 }
@@ -1403,23 +1397,11 @@ fn img_single_dimension_attribute_preserves_aspect_ratio() {
 
 #[test]
 fn img_uses_alt_text_when_image_fetch_fails() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(&stream);
-        let mut request_line = String::new();
-        reader.read_line(&mut request_line).unwrap();
-        loop {
-            let mut h = String::new();
-            reader.read_line(&mut h).unwrap();
-            if h.trim().is_empty() {
-                break;
-            }
-        }
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let body = b"";
         let resp = format!(
             "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\n\r\n",
@@ -1449,6 +1431,7 @@ fn img_uses_alt_text_when_image_fetch_fails() {
         },
     )
     .unwrap();
+    server.join();
     let mut texts = Vec::new();
     collect_layout_texts_into(&layout, &mut texts);
     assert!(texts.iter().any(|text| text.contains("fallback")));
@@ -2932,34 +2915,27 @@ fn webp_data_uri_fixture_renders_expected_pixels() {
 
 #[test]
 fn image_request_accept_header_only_advertises_supported_formats() {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc;
     let mut encoded = Vec::new();
     image_webp::WebPEncoder::new(&mut encoded)
         .encode(&[1, 2, 3, 255], 1, 1, image_webp::ColorType::Rgba8)
         .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 2048];
-        let size = stream.read(&mut request).unwrap();
-        sender
-            .send(String::from_utf8_lossy(&request[..size]).into_owned())
-            .unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let header = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             encoded.len()
         );
         stream.write_all(header.as_bytes()).unwrap();
         stream.write_all(&encoded).unwrap();
+        request
     });
     let url = format!("http://{address}/asset");
     let image = crate::layout::decode_or_fetch_image_asset(&url, None).unwrap();
     assert_eq!(image.pixels(), &[1, 2, 3, 255]);
-    let request = receiver.recv().unwrap().to_ascii_lowercase();
+    let request = server.join().to_ascii_lowercase();
     assert!(request.contains(
         "accept: image/webp,image/png,image/jpeg,image/gif,image/svg+xml;q=0.9,*/*;q=0.1\r\n"
     ));
@@ -4613,60 +4589,37 @@ fn extract_stylesheets_skips_empty_href() {
     assert!(stylesheets.is_empty());
 }
 
+fn stylesheet_fixture(
+    request_count: usize,
+    mut response_for: impl FnMut(usize, &str) -> String + Send + 'static,
+) -> (u16, FixtureWorker<()>) {
+    let listener = bind_loopback().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = FixtureWorker::spawn(move || {
+        for index in 0..request_count {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let path = request.split_whitespace().nth(1).unwrap_or_default();
+            let response = response_for(index, path);
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (port, server)
+}
+
 #[test]
 fn extract_stylesheets_fetches_relative_urls_with_base() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        // Accept first request for /css/style.css
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(&stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        // Consume headers
-        loop {
-            let mut h = String::new();
-            reader.read_line(&mut h).unwrap();
-            if h.trim().is_empty() {
-                break;
-            }
-        }
-
-        let css_content = "body { margin: 0; }";
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-            css_content.len(),
-            css_content
-        );
-        stream.write_all(resp.as_bytes()).unwrap();
-        stream.flush().unwrap();
-
-        // Accept second request for /other.css
-        let (mut stream2, _) = listener.accept().unwrap();
-        let mut reader2 = BufReader::new(&stream2);
-        let mut line2 = String::new();
-        reader2.read_line(&mut line2).unwrap();
-        // Consume headers
-        loop {
-            let mut h = String::new();
-            reader2.read_line(&mut h).unwrap();
-            if h.trim().is_empty() {
-                break;
-            }
-        }
-
-        let css_content2 = "p { color: red; }";
-        let resp2 = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-            css_content2.len(),
-            css_content2
-        );
-        stream2.write_all(resp2.as_bytes()).unwrap();
-        stream2.flush().unwrap();
+    let (port, server) = stylesheet_fixture(2, |index, _| {
+        let css = if index == 0 {
+            "body { margin: 0; }"
+        } else {
+            "p { color: red; }"
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let html = r#"<html><head>
@@ -4680,6 +4633,7 @@ fn extract_stylesheets_fetches_relative_urls_with_base() {
         .unwrap();
 
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     assert_eq!(stylesheets.len(), 2);
     assert!(stylesheets[0].contains("margin: 0"));
@@ -4688,44 +4642,16 @@ fn extract_stylesheets_fetches_relative_urls_with_base() {
 
 #[test]
 fn extract_stylesheets_expands_import_rules_in_source_order() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            loop {
-                let mut h = String::new();
-                reader.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
-
-            let css_content = match path.as_str() {
-                "/main.css" => r#"@import "nested.css"; body { color: red; }"#,
-                "/nested.css" => "p { color: blue; }",
-                _ => "",
-            };
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                css_content.len(),
-                css_content
-            );
-            stream.write_all(resp.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        }
+    let (port, server) = stylesheet_fixture(2, |_, path| {
+        let css = match path {
+            "/main.css" => r#"@import "nested.css"; body { color: red; }"#,
+            "/nested.css" => "p { color: blue; }",
+            _ => "",
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let html = r#"<html><head>
@@ -4736,6 +4662,7 @@ fn extract_stylesheets_expands_import_rules_in_source_order() {
         .parse::<crate::http::Url>()
         .unwrap();
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     assert_eq!(stylesheets.len(), 2);
     assert!(stylesheets[0].contains("color: blue"));
@@ -4744,42 +4671,19 @@ fn extract_stylesheets_expands_import_rules_in_source_order() {
 
 #[test]
 fn extract_stylesheets_preserves_named_import_layer_order() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-            let path = request_line.split_whitespace().nth(1).unwrap_or_default();
-            loop {
-                let mut header = String::new();
-                reader.read_line(&mut header).unwrap();
-                if header.trim().is_empty() {
-                    break;
-                }
+    let (port, server) = stylesheet_fixture(2, |_, path| {
+        let css = match path {
+            "/main.css" => {
+                "@layer base, overrides; @import 'imported.css' layer(overrides); \
+                 @layer base { #target { color: red; } }"
             }
-            let css = match path {
-                "/main.css" => {
-                    "@layer base, overrides; @import 'imported.css' layer(overrides); \
-                     @layer base { #target { color: red; } }"
-                }
-                "/imported.css" => "div { color: green; }",
-                _ => "",
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: {}\r\n\r\n{}",
-                css.len(),
-                css
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        }
+            "/imported.css" => "div { color: green; }",
+            _ => "",
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let document = TreeBuilder::parse(&format!(
@@ -4791,6 +4695,7 @@ fn extract_stylesheets_preserves_named_import_layer_order() {
         .parse::<crate::http::Url>()
         .unwrap();
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     assert_eq!(stylesheets.len(), 3);
     assert!(stylesheets[0].contains("@layer base, overrides"));
@@ -4939,10 +4844,8 @@ fn conditional_import_layer_order_tracks_color_scheme_changes() {
 #[test]
 fn unsupported_import_condition_skips_fetch_and_layer_registration() {
     use std::io::ErrorKind;
-    use std::net::TcpListener;
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let port = listener.local_addr().unwrap().port();
     let document = TreeBuilder::parse(
         r#"<style>
@@ -4973,48 +4876,20 @@ fn unsupported_import_condition_skips_fetch_and_layer_registration() {
 
 #[test]
 fn extract_stylesheets_limits_recursive_import_depth() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for _ in 0..6 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            loop {
-                let mut h = String::new();
-                reader.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
-
-            let css_content = match path.as_str() {
-                "/main.css" => r#"@import "a1.css"; .main { color: black; }"#,
-                "/a1.css" => r#"@import "a2.css"; .a1 { color: #111; }"#,
-                "/a2.css" => r#"@import "a3.css"; .a2 { color: #222; }"#,
-                "/a3.css" => r#"@import "a4.css"; .a3 { color: #333; }"#,
-                "/a4.css" => r#"@import "a5.css"; .a4 { color: #444; }"#,
-                "/a5.css" => r#"@import "a6.css"; .a5 { color: #555; }"#,
-                _ => "",
-            };
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                css_content.len(),
-                css_content
-            );
-            stream.write_all(resp.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        }
+    let (port, server) = stylesheet_fixture(6, |_, path| {
+        let css = match path {
+            "/main.css" => r#"@import "a1.css"; .main { color: black; }"#,
+            "/a1.css" => r#"@import "a2.css"; .a1 { color: #111; }"#,
+            "/a2.css" => r#"@import "a3.css"; .a2 { color: #222; }"#,
+            "/a3.css" => r#"@import "a4.css"; .a3 { color: #333; }"#,
+            "/a4.css" => r#"@import "a5.css"; .a4 { color: #444; }"#,
+            "/a5.css" => r#"@import "a6.css"; .a5 { color: #555; }"#,
+            _ => "",
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let html = r#"<html><head>
@@ -5025,6 +4900,7 @@ fn extract_stylesheets_limits_recursive_import_depth() {
         .parse::<crate::http::Url>()
         .unwrap();
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     assert_eq!(stylesheets.len(), 6);
     assert!(stylesheets.iter().any(|css| css.contains(".a5")));
@@ -5033,44 +4909,16 @@ fn extract_stylesheets_limits_recursive_import_depth() {
 
 #[test]
 fn extract_stylesheets_follows_imports_even_when_parent_css_is_partially_invalid() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            loop {
-                let mut h = String::new();
-                reader.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
-
-            let css_content = match path.as_str() {
-                "/main.css" => r#"@import "nested.css"; .main { color: black; broken }"#,
-                "/nested.css" => ".nested { color: green; }",
-                _ => "",
-            };
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                css_content.len(),
-                css_content
-            );
-            stream.write_all(resp.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        }
+    let (port, server) = stylesheet_fixture(2, |_, path| {
+        let css = match path {
+            "/main.css" => r#"@import "nested.css"; .main { color: black; broken }"#,
+            "/nested.css" => ".nested { color: green; }",
+            _ => "",
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let html = r#"<html><head>
@@ -5081,6 +4929,7 @@ fn extract_stylesheets_follows_imports_even_when_parent_css_is_partially_invalid
         .parse::<crate::http::Url>()
         .unwrap();
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     assert_eq!(stylesheets.len(), 2);
     assert!(stylesheets[0].contains(".nested"));
@@ -5089,44 +4938,16 @@ fn extract_stylesheets_follows_imports_even_when_parent_css_is_partially_invalid
 
 #[test]
 fn extract_stylesheets_supports_unquoted_url_import() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            loop {
-                let mut h = String::new();
-                reader.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
-
-            let css_content = match path.as_str() {
-                "/main.css" => "@import url(nested.css); .main { color: black; }",
-                "/nested.css" => ".nested { color: green; }",
-                _ => "",
-            };
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                css_content.len(),
-                css_content
-            );
-            stream.write_all(resp.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        }
+    let (port, server) = stylesheet_fixture(2, |_, path| {
+        let css = match path {
+            "/main.css" => "@import url(nested.css); .main { color: black; }",
+            "/nested.css" => ".nested { color: green; }",
+            _ => "",
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let html = r#"<html><head>
@@ -5137,6 +4958,7 @@ fn extract_stylesheets_supports_unquoted_url_import() {
         .parse::<crate::http::Url>()
         .unwrap();
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     assert_eq!(stylesheets.len(), 2);
     assert!(stylesheets[0].contains(".nested"));
@@ -5145,44 +4967,16 @@ fn extract_stylesheets_supports_unquoted_url_import() {
 
 #[test]
 fn extract_stylesheets_preserves_import_with_media_condition() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            loop {
-                let mut h = String::new();
-                reader.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
-
-            let css_content = match path.as_str() {
-                "/main.css" => r#"@import "print.css" print; .main { color: black; }"#,
-                "/print.css" => ".print { color: red; }",
-                _ => "",
-            };
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                css_content.len(),
-                css_content
-            );
-            stream.write_all(resp.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        }
+    let (port, server) = stylesheet_fixture(2, |_, path| {
+        let css = match path {
+            "/main.css" => r#"@import "print.css" print; .main { color: black; }"#,
+            "/print.css" => ".print { color: red; }",
+            _ => "",
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let html = r#"<html><head>
@@ -5193,6 +4987,7 @@ fn extract_stylesheets_preserves_import_with_media_condition() {
         .parse::<crate::http::Url>()
         .unwrap();
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     assert_eq!(stylesheets.len(), 2);
     assert!(stylesheets[0].contains("@media print"));
@@ -5202,45 +4997,17 @@ fn extract_stylesheets_preserves_import_with_media_condition() {
 
 #[test]
 fn extract_stylesheets_handles_import_cycles_without_looping() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for _ in 0..3 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            loop {
-                let mut h = String::new();
-                reader.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
-
-            let css_content = match path.as_str() {
-                "/main.css" => r#"@import "a.css"; .main { color: black; }"#,
-                "/a.css" => r#"@import "b.css"; .a { color: #111; }"#,
-                "/b.css" => r#"@import "a.css"; .b { color: #222; }"#,
-                _ => "",
-            };
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                css_content.len(),
-                css_content
-            );
-            stream.write_all(resp.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        }
+    let (port, server) = stylesheet_fixture(3, |_, path| {
+        let css = match path {
+            "/main.css" => r#"@import "a.css"; .main { color: black; }"#,
+            "/a.css" => r#"@import "b.css"; .a { color: #111; }"#,
+            "/b.css" => r#"@import "a.css"; .b { color: #222; }"#,
+            _ => "",
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let html = r#"<html><head>
@@ -5251,6 +5018,7 @@ fn extract_stylesheets_handles_import_cycles_without_looping() {
         .parse::<crate::http::Url>()
         .unwrap();
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     assert_eq!(stylesheets.len(), 3);
     assert!(stylesheets[0].contains(".b"));
@@ -5260,48 +5028,19 @@ fn extract_stylesheets_handles_import_cycles_without_looping() {
 
 #[test]
 fn extract_stylesheets_skips_failed_import_fetch() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            loop {
-                let mut h = String::new();
-                reader.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
-
-            let (status, css_content) = match path.as_str() {
-                "/main.css" => (
-                    "200 OK",
-                    r#"@import "missing.css"; .main { color: black; }"#,
-                ),
-                "/missing.css" => ("404 Not Found", ""),
-                _ => ("404 Not Found", ""),
-            };
-            let resp = format!(
-                "HTTP/1.1 {}\r\nContent-Length: {}\r\n\r\n{}",
-                status,
-                css_content.len(),
-                css_content
-            );
-            stream.write_all(resp.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        }
+    let (port, server) = stylesheet_fixture(2, |_, path| {
+        let (status, css) = match path {
+            "/main.css" => (
+                "200 OK",
+                r#"@import "missing.css"; .main { color: black; }"#,
+            ),
+            "/missing.css" => ("404 Not Found", ""),
+            _ => ("404 Not Found", ""),
+        };
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let html = r#"<html><head>
@@ -5312,6 +5051,7 @@ fn extract_stylesheets_skips_failed_import_fetch() {
         .parse::<crate::http::Url>()
         .unwrap();
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     assert_eq!(stylesheets.len(), 1);
     assert!(stylesheets[0].contains(".main"));
@@ -5495,59 +5235,16 @@ fn resolve_url_rejects_non_http_schemes() {
 
 #[test]
 fn extract_stylesheets_respects_css_size_limit() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        // Large CSS (exceeds 4 MiB limit)
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(&stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        // Consume headers
-        loop {
-            let mut h = String::new();
-            reader.read_line(&mut h).unwrap();
-            if h.trim().is_empty() {
-                break;
-            }
-        }
-
-        // Create a response with oversized CSS
-        let large_css = "body { color: red; }".repeat(250_000); // ~5 MiB
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-            large_css.len(),
-            large_css
-        );
-        stream.write_all(resp.as_bytes()).unwrap();
-        stream.flush().unwrap();
-
-        // Small CSS (under limit)
-        let (mut stream2, _) = listener.accept().unwrap();
-        let mut reader2 = BufReader::new(&stream2);
-        let mut line2 = String::new();
-        reader2.read_line(&mut line2).unwrap();
-        // Consume headers
-        loop {
-            let mut h = String::new();
-            reader2.read_line(&mut h).unwrap();
-            if h.trim().is_empty() {
-                break;
-            }
-        }
-
-        let css = "p { color: green; }";
-        let resp2 = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-            css.len(),
-            css
-        );
-        stream2.write_all(resp2.as_bytes()).unwrap();
-        stream2.flush().unwrap();
+    let (port, server) = stylesheet_fixture(2, |index, _| {
+        let css = if index == 0 {
+            "body { color: red; }".repeat(250_000) // ~5 MiB, exceeds the 4 MiB limit
+        } else {
+            "p { color: green; }".to_string()
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{css}",
+            css.len()
+        )
     });
 
     let html = r#"<html><head>
@@ -5561,6 +5258,7 @@ fn extract_stylesheets_respects_css_size_limit() {
         .unwrap();
 
     let stylesheets = extract_author_stylesheets(&document, Some(&base_url)).unwrap();
+    server.join();
 
     // Large CSS should be skipped, only small CSS should be included
     assert_eq!(stylesheets.len(), 1);

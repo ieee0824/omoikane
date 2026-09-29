@@ -25,6 +25,9 @@ delayed-request regression from Issue #983. Its accepted sockets are explicitly
 returned to blocking mode before bounded header reads.
 `src/screenshot/mod.rs` uses it for three frameset fixture servers; their
 responses and path assertions are unchanged, and the file retains 11 unit tests.
+`src/paint/tests.rs` uses it for image and stylesheet servers. The local
+stylesheet responder keeps each test's original response bytes and request
+count while sharing bounded accepts, header reads, and worker joins.
 
 Issue #885 first migrates `document_cookie_bridge.rs` and
 `fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,
