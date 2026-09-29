@@ -16,6 +16,7 @@ servers remain tracked by Issue #1089.
 and assertions.
 `browser_journeys.rs`, `page_visibility.rs`, and `pointer_lock.rs` also use it;
 their 45 test cases retain their responses and assertions.
+`wpt_smoke/server.rs` also uses it for bounded request handling and worker join.
 
 Issue #885 first migrates `document_cookie_bridge.rs` and
 `fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,
@@ -24,7 +25,6 @@ files still use local server logic and have not been migrated:
 
 - `acid3_common/harness.rs`
 - `subresource_cookie_store.rs`
-- `wpt_smoke/server.rs`
 
 Future migrations should be separate, reviewable changes. In particular,
 `subresource_cookie_store.rs` has a separate macOS timeout investigation in
