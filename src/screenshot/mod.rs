@@ -525,10 +525,12 @@ mod tests {
         ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, EventStore, ExecutionSurface,
         RawEvent, ReporterConfig, RetentionPolicy,
     };
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
-    use std::thread;
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers,
+    };
+    use std::io::Write;
+    use std::sync::Arc;
 
     #[test]
     fn typed_screenshot_errors_keep_visible_messages_and_sources() {
@@ -732,18 +734,11 @@ mod tests {
 
     #[test]
     fn nested_frameset_with_oversized_tracks_renders_within_viewport() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line.trim().is_empty() {
-                    break;
-                }
-            }
+        let server = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let body = "<html><body bgcolor='ff0000'></body></html>";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
@@ -770,7 +765,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        server.join().unwrap();
+        server.join();
         assert_eq!((canvas.width(), canvas.height()), (32, 24));
         assert_eq!(canvas.pixels().len(), 32 * 24 * 4);
     }
@@ -817,32 +812,15 @@ mod tests {
 
     #[test]
     fn session_screenshot_fetches_all_referenced_frames_for_columns_frameset() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
-        let requested_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let requested_paths_for_thread = Arc::clone(&requested_paths);
-        thread::spawn(move || {
+        let server = FixtureWorker::spawn(move || {
+            let mut requested_paths = Vec::new();
             for _ in 0..3 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(&stream);
-                let mut request_line = String::new();
-                reader.read_line(&mut request_line).unwrap();
-                let path = request_line
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("/")
-                    .to_string();
-                requested_paths_for_thread
-                    .lock()
-                    .unwrap()
-                    .push(path.clone());
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    if line.trim().is_empty() {
-                        break;
-                    }
-                }
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                requested_paths.push(path.clone());
 
                 let body = if path == "/index.html" {
                     r#"<html><frameset cols="18,82"><frame src="/left.htm" name="left"><frame src="/right.htm" name="right"></frameset></html>"#.to_string()
@@ -859,6 +837,7 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
                 stream.flush().unwrap();
             }
+            requested_paths
         });
 
         let mut session = CdpSession::new().unwrap();
@@ -876,7 +855,7 @@ mod tests {
             height: 720.0,
         };
         let _png = capture_session_screenshot_png(&mut session, viewport).unwrap();
-        let paths = requested_paths.lock().unwrap().clone();
+        let paths = server.join();
         assert!(paths.contains(&"/index.html".to_string()));
         assert!(paths.contains(&"/left.htm".to_string()));
         assert!(paths.contains(&"/right.htm".to_string()));
@@ -884,32 +863,15 @@ mod tests {
 
     #[test]
     fn session_screenshot_fetches_all_referenced_frames_for_rows_frameset() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
-        let requested_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let requested_paths_for_thread = Arc::clone(&requested_paths);
-        thread::spawn(move || {
+        let server = FixtureWorker::spawn(move || {
+            let mut requested_paths = Vec::new();
             for _ in 0..3 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(&stream);
-                let mut request_line = String::new();
-                reader.read_line(&mut request_line).unwrap();
-                let path = request_line
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("/")
-                    .to_string();
-                requested_paths_for_thread
-                    .lock()
-                    .unwrap()
-                    .push(path.clone());
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    if line.trim().is_empty() {
-                        break;
-                    }
-                }
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                requested_paths.push(path.clone());
 
                 let body = if path == "/index.html" {
                     r#"<html><frameset rows="30,70"><frame src="/top.htm" name="top"><frame src="/bottom.htm" name="bottom"></frameset></html>"#.to_string()
@@ -926,6 +888,7 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
                 stream.flush().unwrap();
             }
+            requested_paths
         });
 
         let mut session = CdpSession::new().unwrap();
@@ -943,7 +906,7 @@ mod tests {
             height: 720.0,
         };
         let _png = capture_session_screenshot_png(&mut session, viewport).unwrap();
-        let paths = requested_paths.lock().unwrap().clone();
+        let paths = server.join();
         assert!(paths.contains(&"/index.html".to_string()));
         assert!(paths.contains(&"/top.htm".to_string()));
         assert!(paths.contains(&"/bottom.htm".to_string()));
