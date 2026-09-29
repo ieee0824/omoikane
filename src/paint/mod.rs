@@ -133,7 +133,7 @@ use base64::Engine;
 
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, MediaType, Origin, PageMarginBox, PseudoElement,
-    StyleResolver, Value,
+    StyleResolver, Value, split_top_level_whitespace,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
@@ -5247,32 +5247,6 @@ fn parse_clip_path_inset_rect_geometry(value: &str, border_box: Rect) -> Option<
         height: border_box.height - top - bottom,
     };
     Some(rect)
-}
-
-fn split_top_level_whitespace(value: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = None;
-    for (index, ch) in value.char_indices() {
-        if ch.is_ascii_whitespace() && depth == 0 {
-            if let Some(part_start) = start.take() {
-                parts.push(&value[part_start..index]);
-            }
-            continue;
-        }
-        if start.is_none() {
-            start = Some(index);
-        }
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    if let Some(part_start) = start {
-        parts.push(&value[part_start..]);
-    }
-    parts
 }
 
 fn parse_clip_path_inset_length(value: &str) -> Option<ClipPathInsetLength> {

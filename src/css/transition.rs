@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::paint::color::{Color, parse_color};
 
-use super::{ComputedValue, Declaration, LengthPercentageMath, Value};
+use super::{
+    ComputedValue, Declaration, LengthPercentageMath, Value, is_css_wide_keyword,
+    split_top_level_whitespace_strict as split_top_level_whitespace,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 struct TransitionDescriptor {
@@ -1006,39 +1009,6 @@ fn split_top_level(input: &str, separator: char) -> Option<Vec<&str>> {
     Some(values)
 }
 
-fn split_top_level_whitespace(input: &str) -> Option<Vec<&str>> {
-    let mut values = Vec::new();
-    let mut depth = 0usize;
-    let mut start = None;
-    for (index, ch) in input.char_indices() {
-        match ch {
-            '(' => {
-                depth = depth.checked_add(1)?;
-                start.get_or_insert(index);
-            }
-            ')' => {
-                depth = depth.checked_sub(1)?;
-                start.get_or_insert(index);
-            }
-            _ if ch.is_whitespace() && depth == 0 => {
-                if let Some(component_start) = start.take() {
-                    values.push(input[component_start..index].trim());
-                }
-            }
-            _ => {
-                start.get_or_insert(index);
-            }
-        }
-    }
-    if depth != 0 {
-        return None;
-    }
-    if let Some(component_start) = start {
-        values.push(input[component_start..].trim());
-    }
-    Some(values)
-}
-
 fn normalize_time(input: &str, allow_negative: bool) -> Option<String> {
     let lower = input.trim().to_ascii_lowercase();
     let (number, unit) = if let Some(number) = lower.strip_suffix("ms") {
@@ -1154,13 +1124,6 @@ fn normalize_property_name(input: &str) -> Option<String> {
     } else {
         Some(input.to_string())
     }
-}
-
-fn is_css_wide_keyword(input: &str) -> bool {
-    matches!(
-        input,
-        "inherit" | "initial" | "unset" | "revert" | "revert-layer"
-    )
 }
 
 fn format_number(value: f32) -> String {

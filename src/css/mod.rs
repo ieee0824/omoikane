@@ -92,6 +92,81 @@ pub(crate) fn split_top_level_commas(value: &str) -> Vec<&str> {
     values
 }
 
+/// Splits at ASCII whitespace outside parentheses, retaining the historical
+/// lenient handling of unmatched parentheses used by shape and paint values.
+pub(crate) fn split_top_level_whitespace(value: &str) -> Vec<&str> {
+    split_top_level_whitespace_impl(value, false).expect("lenient splitting cannot fail")
+}
+
+/// Splits transition components at Unicode whitespace and rejects unbalanced
+/// parentheses, as required by the transition value grammar.
+pub(crate) fn split_top_level_whitespace_strict(value: &str) -> Option<Vec<&str>> {
+    split_top_level_whitespace_impl(value, true)
+}
+
+fn split_top_level_whitespace_impl(value: &str, strict: bool) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (index, ch) in value.char_indices() {
+        if (if strict {
+            ch.is_whitespace()
+        } else {
+            ch.is_ascii_whitespace()
+        }) && depth == 0
+        {
+            if let Some(part_start) = start.take() {
+                let part = &value[part_start..index];
+                parts.push(if strict { part.trim() } else { part });
+            }
+            continue;
+        }
+        start.get_or_insert(index);
+        match ch {
+            '(' if strict => depth = depth.checked_add(1)?,
+            '(' => depth += 1,
+            ')' if strict => depth = depth.checked_sub(1)?,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    if strict && depth != 0 {
+        return None;
+    }
+    if let Some(part_start) = start {
+        let part = &value[part_start..];
+        parts.push(if strict { part.trim() } else { part });
+    }
+    Some(parts)
+}
+
+/// Tests an already-lowercased CSS-wide keyword used by transforms and transitions.
+pub(crate) fn is_css_wide_keyword(lowercased: &str) -> bool {
+    matches!(
+        lowercased,
+        "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+    )
+}
+
+/// Includes the internal `revert-rule` value used by the cascade.
+pub(crate) fn is_css_wide_keyword_with_revert_rule(lowercased: &str) -> bool {
+    is_css_wide_keyword(lowercased) || lowercased == "revert-rule"
+}
+
+/// Preserves the transform parser's case-insensitive keyword handling.
+pub(crate) fn is_css_wide_keyword_case_insensitive(value: &str) -> bool {
+    is_css_wide_keyword(&value.to_ascii_lowercase())
+}
+
+/// Advances a token index over whitespace and reports whether any was consumed.
+pub(crate) fn skip_css_whitespace(tokens: &[CssToken], index: &mut usize) -> bool {
+    let start = *index;
+    while matches!(tokens.get(*index), Some(CssToken::Whitespace)) {
+        *index += 1;
+    }
+    *index != start
+}
+
 /// Parses a comma-separated list of dot-separated cascade layer names.
 ///
 /// Whitespace around a dot and CSS-wide keywords are invalid in a layer name.
@@ -469,6 +544,42 @@ impl std::error::Error for CssParseError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whitespace_splitting_preserves_lenient_and_strict_grammars() {
+        assert_eq!(
+            split_top_level_whitespace("calc(1px + 2px)  red"),
+            vec!["calc(1px + 2px)", "red"]
+        );
+        assert_eq!(split_top_level_whitespace("a\u{2003}b"), vec!["a\u{2003}b"]);
+        assert_eq!(split_top_level_whitespace("a) b("), vec!["a)", "b("]);
+        assert_eq!(
+            split_top_level_whitespace_strict("calc(1px + 2px)\u{2003}red"),
+            Some(vec!["calc(1px + 2px)", "red"])
+        );
+        assert_eq!(split_top_level_whitespace_strict("a) b"), None);
+        assert_eq!(split_top_level_whitespace_strict("a (b"), None);
+    }
+
+    #[test]
+    fn css_wide_keyword_variants_preserve_callers() {
+        assert!(is_css_wide_keyword("inherit"));
+        assert!(!is_css_wide_keyword("INHERIT"));
+        assert!(!is_css_wide_keyword("revert-rule"));
+        assert!(is_css_wide_keyword_with_revert_rule("revert-rule"));
+        assert!(is_css_wide_keyword_case_insensitive("InHeRiT"));
+        assert!(!is_css_wide_keyword_case_insensitive("revert-rule"));
+    }
+
+    #[test]
+    fn token_whitespace_cursor_stops_at_first_non_whitespace() {
+        let tokens = [CssToken::Whitespace, CssToken::Whitespace, CssToken::Comma];
+        let mut index = 0;
+        assert!(skip_css_whitespace(&tokens, &mut index));
+        assert_eq!(index, 2);
+        assert!(!skip_css_whitespace(&tokens, &mut index));
+        assert_eq!(index, 2);
+    }
 
     #[test]
     fn tokenizes_basic_css() {
