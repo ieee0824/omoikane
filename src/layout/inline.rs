@@ -22,7 +22,7 @@ use super::{
     IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE, IMAGE_COOKIE_CONTEXT, InlineFragment,
     InlineFragmentContent, LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState,
     TextOverflowPaint, VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length,
-    is_border_box, is_display_none, is_non_rendered_html_element,
+    is_border_box, is_non_rendered_html_element,
 };
 
 mod boxes;
@@ -914,7 +914,7 @@ fn collect_element_inline_segments(
         return;
     }
     let style = resolver.computed_style(node);
-    if is_display_none(&style) {
+    if style.is_display_none() {
         return;
     }
 
@@ -1204,7 +1204,7 @@ fn find_descendant_inline_image(
             continue;
         }
         let child_style = resolver.computed_style(&child);
-        if is_display_none(&child_style) {
+        if child_style.is_display_none() {
             continue;
         }
         if let Some(image) = element_inline_image_with_style(&child, &child_style) {
@@ -1415,7 +1415,7 @@ fn collect_rendered_text(node: &NodeHandle, resolver: &mut StyleResolver) -> Str
                     continue;
                 }
                 let style = resolver.computed_style(&child);
-                if is_display_none(&style) {
+                if style.is_display_none() {
                     continue;
                 }
                 text.push_str(&collect_rendered_text(&child, resolver));
@@ -1460,7 +1460,7 @@ fn collect_option_entries(
             continue;
         }
         let style = resolver.computed_style(&child);
-        if is_display_none(&style) {
+        if style.is_display_none() {
             continue;
         }
         if child.has_tag_name("option") {
@@ -1511,7 +1511,7 @@ pub(super) fn generated_inline_segments(
     let Some(style) = resolver.computed_pseudo_style(node, pseudo) else {
         return Vec::new();
     };
-    if is_display_none(&style) {
+    if style.is_display_none() {
         return Vec::new();
     }
 

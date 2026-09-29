@@ -210,7 +210,9 @@ pub(super) fn layout_children(
             continue;
         }
         let cs = source.style(resolver);
-        if cs.as_ref().is_some_and(is_display_none) || is_non_rendered_html_element(&child) {
+        if cs.as_ref().is_some_and(ComputedStyle::is_display_none)
+            || is_non_rendered_html_element(&child)
+        {
             continue;
         }
         if matches!(&source, LayoutSource::Node(_)) && is_inline_child(&child, resolver) {
