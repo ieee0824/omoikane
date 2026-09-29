@@ -12,6 +12,10 @@ use crate::paint::{
 use std::time::Instant;
 
 const MAX_FRAMESET_DEPTH: usize = 4;
+/// Maximum width or height accepted by the screenshot path.
+pub(crate) const MAX_SCREENSHOT_DIMENSION: u32 = 16_384;
+/// Maximum pixel count accepted by the screenshot path.
+pub(crate) const MAX_SCREENSHOT_PIXELS: u64 = 67_108_864;
 
 /// Failures while preparing or rendering a screenshot.
 #[derive(Debug)]
@@ -30,6 +34,10 @@ pub(crate) enum ScreenshotError {
     FrameImage(PaintError),
     /// Painting a frame document failed.
     FramePaint(PaintError),
+    /// The requested viewport cannot be represented as a nonempty canvas.
+    InvalidViewport,
+    /// The canvas or its PNG representation exceeds the screenshot budget.
+    CanvasBudgetExceeded,
 }
 
 impl std::fmt::Display for ScreenshotError {
@@ -42,6 +50,8 @@ impl std::fmt::Display for ScreenshotError {
             Self::Http(error) => write!(f, "{error}"),
             Self::FrameImage(error) => write!(f, "failed to materialize frame image: {error:?}"),
             Self::FramePaint(error) => write!(f, "failed to render frame document: {error:?}"),
+            Self::InvalidViewport => write!(f, "screenshot viewport must be finite and positive"),
+            Self::CanvasBudgetExceeded => write!(f, "screenshot canvas exceeds resource budget"),
         }
     }
 }
@@ -73,6 +83,7 @@ pub(crate) fn capture_session_screenshot_png(
     session: &mut CdpSession,
     viewport: Rect,
 ) -> Result<Vec<u8>, ScreenshotError> {
+    validate_screenshot_viewport(viewport)?;
     clear_render_timings();
     session.set_viewport(viewport.width as u32, viewport.height as u32);
     let settle_timings = session
@@ -109,7 +120,7 @@ pub(crate) fn capture_session_screenshot_png(
                 session.report_paint_failure("SCREENSHOT_PAINT_FAILED");
                 ScreenshotError::Paint(error)
             })?;
-            Ok(encode_screenshot_canvas(canvas))
+            encode_screenshot_canvas(canvas)
         }
     }
 }
@@ -123,10 +134,14 @@ fn render_frameset_screenshot_png(
     let Some(canvas) = render_frameset_canvas(document, base_url, viewport, 0, client)? else {
         return Ok(None);
     };
-    Ok(Some(encode_screenshot_canvas(canvas)))
+    Ok(Some(encode_screenshot_canvas(canvas)?))
 }
 
-fn encode_screenshot_canvas(mut canvas: Canvas) -> Vec<u8> {
+fn encode_screenshot_canvas(mut canvas: Canvas) -> Result<Vec<u8>, ScreenshotError> {
+    let expected_rgba_bytes = validate_canvas_dimensions(canvas.width(), canvas.height())?;
+    if canvas.pixels().len() != expected_rgba_bytes {
+        return Err(ScreenshotError::Paint(PaintError::InvalidImageBuffer));
+    }
     canvas.composite_over(Color::rgb(255, 255, 255));
     let encode_start = Instant::now();
     let png = canvas.encode_png();
@@ -134,7 +149,61 @@ fn encode_screenshot_canvas(mut canvas: Canvas) -> Vec<u8> {
         png_encode: encode_start.elapsed(),
         ..RenderTimings::default()
     });
-    png
+    Ok(png)
+}
+
+fn validate_screenshot_viewport(viewport: Rect) -> Result<(), ScreenshotError> {
+    if !viewport.width.is_finite()
+        || !viewport.height.is_finite()
+        || viewport.width <= 0.0
+        || viewport.height <= 0.0
+    {
+        return Err(ScreenshotError::InvalidViewport);
+    }
+    if viewport.width > MAX_SCREENSHOT_DIMENSION as f32
+        || viewport.height > MAX_SCREENSHOT_DIMENSION as f32
+    {
+        return Err(ScreenshotError::CanvasBudgetExceeded);
+    }
+    validate_canvas_dimensions(viewport.width.ceil() as u32, viewport.height.ceil() as u32)?;
+    Ok(())
+}
+
+fn validate_canvas_dimensions(width: u32, height: u32) -> Result<usize, ScreenshotError> {
+    if width == 0 || height == 0 {
+        return Err(ScreenshotError::InvalidViewport);
+    }
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or(ScreenshotError::CanvasBudgetExceeded)?;
+    if width > MAX_SCREENSHOT_DIMENSION
+        || height > MAX_SCREENSHOT_DIMENSION
+        || pixels > MAX_SCREENSHOT_PIXELS
+    {
+        return Err(ScreenshotError::CanvasBudgetExceeded);
+    }
+    let rgba_bytes = usize::try_from(pixels)
+        .ok()
+        .and_then(|count| count.checked_mul(4))
+        .ok_or(ScreenshotError::CanvasBudgetExceeded)?;
+    let raw_bytes = rgba_bytes
+        .checked_add(height as usize)
+        .ok_or(ScreenshotError::CanvasBudgetExceeded)?;
+    let blocks = raw_bytes
+        .checked_add(u16::MAX as usize - 1)
+        .map(|bytes| bytes / u16::MAX as usize)
+        .ok_or(ScreenshotError::CanvasBudgetExceeded)?;
+    let compressed_bytes = blocks
+        .checked_mul(5)
+        .and_then(|overhead| raw_bytes.checked_add(overhead))
+        .and_then(|bytes| bytes.checked_add(6))
+        .ok_or(ScreenshotError::CanvasBudgetExceeded)?;
+    u32::try_from(compressed_bytes).map_err(|_| ScreenshotError::CanvasBudgetExceeded)?;
+    // PNG signature, IHDR chunk, IDAT chunk header/CRC, and IEND chunk.
+    compressed_bytes
+        .checked_add(8 + 25 + 12 + 12)
+        .ok_or(ScreenshotError::CanvasBudgetExceeded)?;
+    Ok(rgba_bytes)
 }
 
 fn render_frameset_canvas(
@@ -158,6 +227,7 @@ fn render_frameset_canvas(
 
     let total_width = viewport.width.max(1.0).round() as u32;
     let total_height = viewport.height.max(1.0).round() as u32;
+    validate_canvas_dimensions(total_width, total_height)?;
     let attrs = frameset.attributes().unwrap_or_default();
     let cols_attr = attrs.get("cols").cloned();
     let rows_attr = attrs.get("rows").cloned();
@@ -227,12 +297,10 @@ fn render_frameset_canvas(
             )?
         };
 
-        let frame_image = Image::new(
-            child_canvas.width(),
-            child_canvas.height(),
-            child_canvas.pixels().to_vec(),
-        )
-        .map_err(ScreenshotError::FrameImage)?;
+        let child_width = child_canvas.width();
+        let child_height = child_canvas.height();
+        let frame_image = Image::new(child_width, child_height, child_canvas.into_pixels())
+            .map_err(ScreenshotError::FrameImage)?;
         if use_rows {
             composed.draw_image(&frame_image, 0.0, offset as f32);
         } else {
@@ -366,7 +434,7 @@ fn parse_frameset_track_sizes(spec: Option<&str>, frame_count: usize, total_size
                 .max(0.0) as u32;
             widths[index] = widths[index].saturating_add(width);
         }
-        let consumed: u32 = widths.iter().sum();
+        let consumed = widths.iter().copied().fold(0u32, u32::saturating_add);
         if consumed < total_size {
             let delta = total_size - consumed;
             if let Some(last) = widths.last_mut() {
@@ -389,6 +457,11 @@ fn parse_frameset_track_sizes(spec: Option<&str>, frame_count: usize, total_size
         return out;
     }
 
+    let mut available = total_size;
+    for width in &mut widths {
+        *width = (*width).min(available);
+        available -= *width;
+    }
     widths
 }
 
@@ -610,6 +683,96 @@ mod tests {
     fn parses_frameset_rows_as_percentage_when_sum_is_100() {
         let heights = parse_frameset_track_sizes(Some("30,70"), 2, 1000);
         assert_eq!(heights, vec![300, 700]);
+    }
+
+    #[test]
+    fn frameset_tracks_never_exceed_the_visible_viewport() {
+        assert_eq!(
+            parse_frameset_track_sizes(Some("10000,20"), 2, 800),
+            [800, 0]
+        );
+        assert_eq!(parse_frameset_track_sizes(Some("200%,*"), 2, 800), [800, 0]);
+        assert_eq!(
+            parse_frameset_track_sizes(Some("80%,80%,*"), 3, 800),
+            [640, 160, 0]
+        );
+        assert_eq!(parse_frameset_track_sizes(Some("*,*,*"), 3, 2), [1, 1, 0]);
+    }
+
+    #[test]
+    fn screenshot_budget_rejects_invalid_or_oversized_viewports_before_paint() {
+        for width in [0.0, f32::NAN, f32::INFINITY] {
+            let viewport = Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: 32.0,
+            };
+            assert!(matches!(
+                validate_screenshot_viewport(viewport),
+                Err(ScreenshotError::InvalidViewport)
+            ));
+        }
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 16_384.0,
+            height: 16_384.0,
+        };
+        assert!(matches!(
+            validate_screenshot_viewport(viewport),
+            Err(ScreenshotError::CanvasBudgetExceeded)
+        ));
+        assert_eq!(validate_canvas_dimensions(32, 24).unwrap(), 32 * 24 * 4);
+        assert!(matches!(
+            validate_canvas_dimensions(u32::MAX, u32::MAX),
+            Err(ScreenshotError::CanvasBudgetExceeded)
+        ));
+    }
+
+    #[test]
+    fn nested_frameset_with_oversized_tracks_renders_within_viewport() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            let body = "<html><body bgcolor='ff0000'></body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let html = format!(
+            "<html><frameset cols='10000'><frameset rows='10000'><frame src='http://127.0.0.1:{port}/leaf'></frameset></frameset></html>"
+        );
+        let document = TreeBuilder::parse(&html).document();
+        let canvas = render_frameset_canvas(
+            &document,
+            None,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 32.0,
+                height: 24.0,
+            },
+            0,
+            &mut Client::new(),
+        )
+        .unwrap()
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!((canvas.width(), canvas.height()), (32, 24));
+        assert_eq!(canvas.pixels().len(), 32 * 24 * 4);
     }
 
     #[test]

@@ -13,12 +13,12 @@ use serde_json::json;
 
 use crate::cdp::CdpSession;
 use crate::layout::Rect;
-use crate::screenshot::capture_session_screenshot_png;
+use crate::screenshot::{
+    MAX_SCREENSHOT_DIMENSION, MAX_SCREENSHOT_PIXELS, capture_session_screenshot_png,
+};
 
 const DEFAULT_SCREENSHOT_WIDTH: u32 = 1280;
 const DEFAULT_SCREENSHOT_HEIGHT: u32 = 720;
-const MAX_SCREENSHOT_DIMENSION: u32 = 16_384;
-const MAX_SCREENSHOT_PIXELS: u64 = 67_108_864;
 
 /// Opaque browser handle for the C ABI.
 #[repr(C)]
