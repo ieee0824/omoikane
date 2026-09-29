@@ -1,5 +1,5 @@
 use super::{join_module_workers, read_module_request};
-use crate::test_support::http_fixture::bind_loopback;
+use crate::test_support::http_fixture::{accept_with_timeout, bind_loopback};
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
@@ -10,7 +10,9 @@ use std::time::Duration;
 fn accepted_nonblocking_socket_waits_for_complete_request_headers() {
     let listener = bind_loopback().unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut accepted, _) = listener.accept().unwrap();
+    // The shared listener is nonblocking, so wait for the queued connection
+    // instead of racing the handshake with a single accept().
+    let mut accepted = accept_with_timeout(&listener, Duration::from_secs(5)).unwrap();
     // Model BSD's inherited socket mode on every host. Before the fix the
     // handler's first read fails immediately while the client has sent no data.
     accepted.set_nonblocking(true).unwrap();
