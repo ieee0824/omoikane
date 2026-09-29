@@ -1,55 +1,48 @@
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::Write;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::thread;
 use std::time::Duration;
+
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback, read_request_headers,
+};
 
 struct ModuleServer {
     url: String,
     stop: Arc<AtomicBool>,
-    worker: Option<thread::JoinHandle<Vec<String>>>,
+    worker: Option<FixtureWorker<Vec<String>>>,
 }
 
 impl ModuleServer {
     fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let url = format!("http://{}/index.html", listener.local_addr().unwrap());
-        listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
-        let worker = thread::spawn(move || {
+        let worker = FixtureWorker::spawn(move || {
             let mut requests = Vec::new();
             while !worker_stop.load(Ordering::Relaxed) {
-                let (mut stream, _) = match listener.accept() {
-                    Ok(connection) => connection,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
+                let mut stream = match accept_with_timeout(&listener, Duration::from_millis(50)) {
+                    Ok(stream) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
                     Err(error) => panic!("accept: {error}"),
                 };
-                // Accepted sockets can inherit nonblocking mode on BSD.
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = String::new();
-                let mut reader = BufReader::new(&mut stream);
-                reader.read_line(&mut request).unwrap();
-                loop {
-                    let mut header = String::new();
-                    reader.read_line(&mut header).unwrap();
-                    if header == "\r\n" {
-                        break;
-                    }
-                    assert!(!header.is_empty(), "incomplete request headers");
-                }
-                let path = request.split_whitespace().nth(1).unwrap().to_owned();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let path = request
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .to_owned();
                 let body = match path.as_str() {
                     "/singleton.js" => {
                         "globalThis.executions = (globalThis.executions || 0) + 1; export const token = {};"
@@ -71,7 +64,7 @@ impl ModuleServer {
 
     fn finish(&mut self) -> Vec<String> {
         self.stop.store(true, Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap()
+        self.worker.take().unwrap().join()
     }
 }
 

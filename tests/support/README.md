@@ -11,6 +11,9 @@ Unit tests in `src/` import the same helper through `src/test_support/mod.rs`.
 servers remain tracked by Issue #1089.
 `print_page_margin_content.rs` also uses the shared fixture for its image request.
 `location_pseudo_target.rs` also uses the shared fixture for its iframe requests.
+`cookie_samesite.rs`, `error_reporting_http.rs`, `form_target.rs`, and
+`module_identity.rs` also use it; their 24 test cases retain their responses
+and assertions.
 
 Issue #885 first migrates `document_cookie_bridge.rs` and
 `fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,
@@ -19,10 +22,6 @@ files still use local server logic and have not been migrated:
 
 - `acid3_common/harness.rs`
 - `browser_journeys.rs`
-- `cookie_samesite.rs`
-- `error_reporting_http.rs`
-- `form_target.rs`
-- `module_identity.rs`
 - `page_visibility.rs`
 - `pointer_lock.rs`
 - `subresource_cookie_store.rs`
