@@ -524,10 +524,53 @@ impl Default for GcConfig {
             // fill immediately triggers a major collection. 4 MiB caused 37/11
             // majors in those same shapes; 8 and 16 MiB caused none. Choose the
             // smaller bound so long-lived garbage cannot grow for no measured gain.
-            threshold: 8 * 1_048_576,
-            nursery_threshold: 4 * 1_048_576,
+            threshold: env_threshold_override("BOA_GC_MAJOR_THRESHOLD_BYTES")
+                .unwrap_or(8 * 1_048_576),
+            nursery_threshold: env_threshold_override("BOA_GC_NURSERY_THRESHOLD_BYTES")
+                .unwrap_or(4 * 1_048_576),
             used_space_percentage: 70,
         }
+    }
+}
+
+/// Reads a collection-threshold override from the environment.
+///
+/// Gated behind `gc-profile` so ordinary embedders never pay for an environment
+/// lookup, and so this cannot silently change collection timing outside the
+/// stress/differential test configurations that already read `gc-profile`
+/// diagnostics. Investigating allocation-timing-sensitive bugs (e.g. one whose
+/// symptoms only appear at specific nursery sizes, see omoikane#858) benefits
+/// from varying these thresholds without a rebuild.
+#[cfg(feature = "gc-profile")]
+fn env_threshold_override(name: &str) -> Option<usize> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
+#[cfg(not(feature = "gc-profile"))]
+const fn env_threshold_override(_name: &str) -> Option<usize> {
+    None
+}
+
+#[cfg(all(test, feature = "gc-profile"))]
+mod env_threshold_override_tests {
+    use super::env_threshold_override;
+
+    // SAFETY: this test is the only place in the crate that touches this
+    // variable name, so concurrent test threads cannot observe a torn value.
+    #[test]
+    fn parses_a_valid_override_and_falls_back_on_missing_or_invalid_values() {
+        const VAR: &str = "BOA_GC_TEST_ENV_THRESHOLD_OVERRIDE";
+
+        unsafe { std::env::remove_var(VAR) };
+        assert_eq!(env_threshold_override(VAR), None);
+
+        unsafe { std::env::set_var(VAR, "12345") };
+        assert_eq!(env_threshold_override(VAR), Some(12345));
+
+        unsafe { std::env::set_var(VAR, "not-a-number") };
+        assert_eq!(env_threshold_override(VAR), None);
+
+        unsafe { std::env::remove_var(VAR) };
     }
 }
 
