@@ -2179,10 +2179,7 @@ impl StyleResolver {
         // `rem` units in descendant elements resolve correctly even without an explicit
         // set_root_font_size() call. Skip if the caller already provided an explicit value.
         let is_root = node.node_type() == NodeType::Element
-            && node
-                .tag_name()
-                .as_deref()
-                .is_some_and(|tag| tag.eq_ignore_ascii_case("html"))
+            && node.with_tag_name(|tag| tag.is_some_and(|tag| tag.eq_ignore_ascii_case("html")))
             && node
                 .parent_node()
                 .is_some_and(|parent| parent.node_type() == NodeType::Document);
@@ -8907,34 +8904,27 @@ fn is_svg_element_for_presentational_hints(node: &NodeHandle) -> bool {
     if node.namespace_uri().as_deref() == Some("http://www.w3.org/2000/svg") {
         return true;
     }
-    let Some(tag) = node.tag_name().map(|name| name.to_ascii_lowercase()) else {
-        return false;
-    };
-    if !matches!(
-        tag.as_str(),
-        "svg"
-            | "g"
-            | "rect"
-            | "circle"
-            | "ellipse"
-            | "line"
-            | "polyline"
-            | "polygon"
-            | "path"
-            | "text"
-            | "tspan"
-            | "textpath"
-            | "use"
-    ) {
+    let is_svg_tag = node.with_tag_name(|tag| {
+        tag.is_some_and(|tag| {
+            [
+                "svg", "g", "rect", "circle", "ellipse", "line", "polyline", "polygon", "path",
+                "text", "tspan", "textpath", "use",
+            ]
+            .iter()
+            .any(|expected| tag.eq_ignore_ascii_case(expected))
+        })
+    });
+    if !is_svg_tag {
         return false;
     }
     let mut current = Some(node.clone());
     while let Some(candidate) = current {
-        let tag = candidate.tag_name().map(|name| name.to_ascii_lowercase());
-        if tag.as_deref() == Some("foreignobject") {
+        if candidate
+            .with_tag_name(|tag| tag.is_some_and(|tag| tag.eq_ignore_ascii_case("foreignobject")))
+        {
             return false;
         }
-        if tag.as_deref() == Some("svg") {
+        if candidate.with_tag_name(|tag| tag.is_some_and(|tag| tag.eq_ignore_ascii_case("svg"))) {
             return true;
         }
         current = candidate.parent_node();
@@ -8951,8 +8941,18 @@ fn apply_presentational_hints(
         return;
     }
 
-    let attributes = node.attributes().unwrap_or_default();
+    node.with_attributes(|attributes| {
+        if let Some(attributes) = attributes {
+            apply_presentational_hints_from_attributes(node, attributes, properties);
+        }
+    });
+}
 
+fn apply_presentational_hints_from_attributes(
+    node: &NodeHandle,
+    attributes: &BTreeMap<String, String>,
+    properties: &mut BTreeMap<String, ComputedValue>,
+) {
     // SVG presentation attributes participate in the CSS cascade below author
     // declarations. Expose pointer-events through computed style so hit
     // testing can distinguish a local attribute from an inherited value and
@@ -9001,10 +9001,7 @@ fn apply_presentational_hints(
     }
 
     if !properties.contains_key("color")
-        && node
-            .tag_name()
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case("body"))
+        && node.with_tag_name(|name| name.is_some_and(|name| name.eq_ignore_ascii_case("body")))
         && let Some(color) = attributes
             .get("text")
             .and_then(|value| parse_legacy_color_hint(value))
@@ -9025,11 +9022,13 @@ fn apply_presentational_hints(
         }
         // For block/table elements, align="center" means auto margins (structural centering)
         if align == "center" {
-            let is_table_or_block = node.tag_name().as_deref().is_some_and(|tag| {
-                matches!(
-                    tag.to_ascii_lowercase().as_str(),
-                    "table" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p"
-                )
+            let is_table_or_block = node.with_tag_name(|tag| {
+                tag.is_some_and(|tag| {
+                    matches!(
+                        tag.to_ascii_lowercase().as_str(),
+                        "table" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p"
+                    )
+                })
             });
             if is_table_or_block {
                 if !properties.contains_key("margin-left") {

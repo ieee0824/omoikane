@@ -449,21 +449,18 @@ fn matches_simple_selector(
     allow_scope_ancestor_escape: bool,
 ) -> bool {
     match simple {
-        SimpleSelector::Type(name) => node
-            .tag_name()
-            .map(|tag_name| tag_name.eq_ignore_ascii_case(name))
-            .unwrap_or(false),
+        SimpleSelector::Type(name) => node.with_tag_name(|tag_name| {
+            tag_name.is_some_and(|tag_name| tag_name.eq_ignore_ascii_case(name))
+        }),
         SimpleSelector::Universal => node.node_type() == NodeType::Element,
-        SimpleSelector::Class(class_name) => get_attribute(node, "class")
-            .map(|class_attr| {
+        SimpleSelector::Class(class_name) => node.with_attribute("class", |class_attr| {
+            class_attr.is_some_and(|class_attr| {
                 class_attr
                     .split_ascii_whitespace()
                     .any(|class| class == class_name)
             })
-            .unwrap_or(false),
-        SimpleSelector::Id(id) => get_attribute(node, "id")
-            .map(|actual| actual == *id)
-            .unwrap_or(false),
+        }),
+        SimpleSelector::Id(id) => node.attribute_eq("id", id),
         SimpleSelector::Attribute {
             name,
             operator,
@@ -653,32 +650,34 @@ fn matches_attribute_selector(
     operator: Option<AttributeOperator>,
     value: Option<&str>,
 ) -> bool {
-    let Some(actual) = get_attribute(node, name) else {
-        return false;
-    };
+    node.with_attribute(name, |actual| {
+        let Some(actual) = actual else {
+            return false;
+        };
 
-    match operator {
-        None => true,
-        Some(AttributeOperator::Equals) => value.is_some_and(|expected| actual == expected),
-        Some(AttributeOperator::Includes) => value.is_some_and(|expected| {
-            actual
-                .split_ascii_whitespace()
-                .any(|token| token == expected)
-        }),
-        Some(AttributeOperator::StartsWith) => {
-            value.is_some_and(|expected| actual.starts_with(expected))
+        match operator {
+            None => true,
+            Some(AttributeOperator::Equals) => value.is_some_and(|expected| actual == expected),
+            Some(AttributeOperator::Includes) => value.is_some_and(|expected| {
+                actual
+                    .split_ascii_whitespace()
+                    .any(|token| token == expected)
+            }),
+            Some(AttributeOperator::StartsWith) => {
+                value.is_some_and(|expected| actual.starts_with(expected))
+            }
+            Some(AttributeOperator::EndsWith) => {
+                value.is_some_and(|expected| actual.ends_with(expected))
+            }
+            Some(AttributeOperator::Contains) => {
+                value.is_some_and(|expected| actual.contains(expected))
+            }
+            Some(AttributeOperator::DashMatch) => value.is_some_and(|expected| {
+                !expected.is_empty()
+                    && (actual == expected || actual.starts_with(&format!("{expected}-")))
+            }),
         }
-        Some(AttributeOperator::EndsWith) => {
-            value.is_some_and(|expected| actual.ends_with(expected))
-        }
-        Some(AttributeOperator::Contains) => {
-            value.is_some_and(|expected| actual.contains(expected))
-        }
-        Some(AttributeOperator::DashMatch) => value.is_some_and(|expected| {
-            !expected.is_empty()
-                && (actual == expected || actual.starts_with(&format!("{expected}-")))
-        }),
-    }
+    })
 }
 
 fn matches_pseudo_class(
@@ -758,17 +757,19 @@ fn matches_pseudo_class(
 
 fn is_html_hyperlink(node: &NodeHandle) -> bool {
     node.is_html_element()
-        && matches!(node.tag_name().as_deref(), Some("a" | "area"))
-        && node.get_attribute("href").is_some()
+        && (node.has_tag_name("a") || node.has_tag_name("area"))
+        && node.has_attribute("href")
 }
 
 fn is_form_control(node: &NodeHandle) -> bool {
     node.is_form_associated_custom()
-        || node.tag_name().is_some_and(|tag| {
-            matches!(
-                tag.as_str(),
-                "button" | "input" | "select" | "textarea" | "option" | "optgroup" | "fieldset"
-            )
+        || node.with_tag_name(|tag| {
+            tag.is_some_and(|tag| {
+                matches!(
+                    tag,
+                    "button" | "input" | "select" | "textarea" | "option" | "optgroup" | "fieldset"
+                )
+            })
         })
 }
 
@@ -779,12 +780,16 @@ fn matches_language(node: &NodeHandle, range: &str) -> bool {
     }
     let mut current = Some(node.clone());
     while let Some(element) = current {
-        if let Some(language) = get_attribute(&element, "lang") {
-            return language.eq_ignore_ascii_case(range)
-                || language
-                    .get(..range.len())
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(range))
-                    && language.as_bytes().get(range.len()) == Some(&b'-');
+        if let Some(matches) = element.with_attribute("lang", |language| {
+            language.map(|language| {
+                language.eq_ignore_ascii_case(range)
+                    || language
+                        .get(..range.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(range))
+                        && language.as_bytes().get(range.len()) == Some(&b'-')
+            })
+        }) {
+            return matches;
         }
         current = element.parent_node();
     }
@@ -874,10 +879,6 @@ pub(super) fn parse_an_plus_b(expression: &str) -> Option<AnPlusB> {
         remainder.parse::<i64>().ok()?
     };
     Some(AnPlusB { a, b })
-}
-
-fn get_attribute(node: &NodeHandle, name: &str) -> Option<String> {
-    node.get_attribute(name)
 }
 
 fn previous_element_sibling(
