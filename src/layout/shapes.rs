@@ -1,6 +1,6 @@
 //! CSS Shapes geometry used by float line wrapping.
 
-use crate::css::{ComputedStyle, ComputedValue};
+use crate::css::{ComputedStyle, ComputedValue, split_top_level_whitespace};
 use crate::paint::{ClipPathShape, basic_shape_from_value};
 
 use super::{BoxDimensions, Rect, resolved_length};
@@ -421,28 +421,4 @@ fn polygon_column_bounds(
     min_y
         .is_finite()
         .then_some((min_y - margin, max_y + margin))
-}
-
-fn split_top_level_whitespace(value: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = None;
-    for (index, ch) in value.char_indices() {
-        if ch.is_ascii_whitespace() && depth == 0 {
-            if let Some(part_start) = start.take() {
-                parts.push(&value[part_start..index]);
-            }
-            continue;
-        }
-        start.get_or_insert(index);
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    if let Some(part_start) = start {
-        parts.push(&value[part_start..]);
-    }
-    parts
 }

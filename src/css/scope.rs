@@ -1,7 +1,9 @@
 //! Parsing for CSS Scoping `@scope` rule preludes.
 
 use super::tokenizer::render_tokens;
-use super::{CssToken, Selector, SimpleSelector, parse_selector_list, tokenize};
+use super::{
+    CssToken, Selector, SimpleSelector, parse_selector_list, skip_css_whitespace, tokenize,
+};
 
 /// Parsed start and end boundaries for an `@scope` rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,9 +146,7 @@ impl<'a> TokenCursor<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self.peek() == Some(&CssToken::Whitespace) {
-            self.index += 1;
-        }
+        skip_css_whitespace(self.tokens, &mut self.index);
     }
 }
 

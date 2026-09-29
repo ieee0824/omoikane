@@ -1310,12 +1310,7 @@ impl Parser {
     }
 
     fn consume_whitespace(&mut self) -> bool {
-        let mut consumed = false;
-        while matches!(self.peek(), Some(CssToken::Whitespace)) {
-            consumed = true;
-            self.next();
-        }
-        consumed
+        super::skip_css_whitespace(&self.tokens, &mut self.index)
     }
 
     fn skip_whitespace(&mut self) {

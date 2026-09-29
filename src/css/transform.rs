@@ -2,6 +2,8 @@
 
 use std::f32::consts::PI;
 
+use super::is_css_wide_keyword_case_insensitive as is_css_wide_keyword;
+
 /// A two-dimensional transform using the CSS `matrix(a,b,c,d,e,f)` convention.
 ///
 /// The final row (`g`, `h`, `i`) is normally `0, 0, 1`.  Keeping it here lets
@@ -1111,13 +1113,6 @@ fn is_vertical_keyword(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
         "top" | "center" | "bottom"
-    )
-}
-
-fn is_css_wide_keyword(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "initial" | "inherit" | "unset" | "revert" | "revert-layer"
     )
 }
 
