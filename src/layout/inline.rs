@@ -2011,6 +2011,11 @@ fn decode_blob_url_image(url: &str) -> Option<Image> {
 }
 
 fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
+    let base_url = super::current_image_base_url();
+    decode_or_fetch_image_with_base(url_like, base_url.as_ref())
+}
+
+fn decode_or_fetch_image_with_base(url_like: &str, base_url: Option<&Url>) -> Option<Image> {
     let url_like = url_like.trim();
     if url_like.is_empty() {
         return None;
@@ -2033,15 +2038,20 @@ fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
     {
         return decode_blob_url_image(url_like);
     }
-    let resolved = resolve_image_url(url_like)?;
+    let resolved = resolve_image_url(url_like, base_url)?;
     fetch_image(&resolved)
 }
 
-pub(crate) fn decode_or_fetch_image_asset(url_like: &str) -> Option<Image> {
-    decode_or_fetch_image(url_like)
+/// Decodes an image reference using the caller's explicit base URL.
+pub(crate) fn decode_or_fetch_image_asset(url_like: &str, base_url: Option<&Url>) -> Option<Image> {
+    decode_or_fetch_image_with_base(url_like, base_url)
 }
 
-pub(crate) fn canonical_image_asset_reference(url_like: &str) -> Option<String> {
+/// Produces a stable identity for a referenced image without reading ambient URL state.
+pub(crate) fn canonical_image_asset_reference(
+    url_like: &str,
+    base_url: Option<&Url>,
+) -> Option<String> {
     let url_like = url_like.trim();
     if url_like.is_empty() {
         return None;
@@ -2058,10 +2068,10 @@ pub(crate) fn canonical_image_asset_reference(url_like: &str) -> Option<String> 
     {
         return Some(format!("blob:{}", &url_like[5..]));
     }
-    resolve_image_url(url_like)
+    resolve_image_url(url_like, base_url)
 }
 
-fn resolve_image_url(url_like: &str) -> Option<String> {
+fn resolve_image_url(url_like: &str, base_url: Option<&Url>) -> Option<String> {
     let is_http = url_like.split_once("://").is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
     });
@@ -2071,12 +2081,9 @@ fn resolve_image_url(url_like: &str) -> Option<String> {
     if url_like.contains("://") || url_like.starts_with("//") {
         return None;
     }
-    IMAGE_BASE_URL.with(|cell| {
-        let base = cell.borrow().clone()?;
-        resolve_url(&base, url_like)
-            .ok()
-            .and_then(normalize_image_url)
-    })
+    resolve_url(base_url?, url_like)
+        .ok()
+        .and_then(normalize_image_url)
 }
 
 fn normalize_image_url(url: Url) -> Option<String> {
@@ -3720,4 +3727,70 @@ fn measure_text_width_with_fallback(
     }
 
     width
+}
+
+#[cfg(test)]
+mod image_url_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_reference_uses_only_the_explicit_base() {
+        let first: Url = "https://example.test/assets/document.svg".parse().unwrap();
+        let second: Url = "https://other.test/another/document.svg".parse().unwrap();
+        let first_result = Some("https://example.test/assets/self.svg".to_string());
+        let second_result = Some("https://other.test/another/self.svg".to_string());
+
+        assert_eq!(canonical_image_asset_reference("self.svg", None), None);
+        assert_eq!(
+            canonical_image_asset_reference("self.svg", Some(&first)),
+            first_result
+        );
+        assert_eq!(
+            canonical_image_asset_reference("self.svg", Some(&second)),
+            second_result
+        );
+
+        super::super::with_image_base_url(Some(second.clone()), || {
+            assert_eq!(canonical_image_asset_reference("self.svg", None), None);
+            assert_eq!(
+                canonical_image_asset_reference("self.svg", Some(&first)),
+                first_result
+            );
+            super::super::with_image_base_url(None, || {
+                assert_eq!(canonical_image_asset_reference("self.svg", None), None);
+                assert_eq!(
+                    canonical_image_asset_reference("self.svg", Some(&first)),
+                    first_result
+                );
+            });
+            assert_eq!(
+                canonical_image_asset_reference("self.svg", Some(&first)),
+                first_result
+            );
+        });
+    }
+
+    #[test]
+    fn absolute_data_and_blob_references_ignore_the_base() {
+        let base: Url = "https://example.test/assets/document.svg".parse().unwrap();
+        for source in [
+            "HTTPS://EXAMPLE.TEST:443/assets/./self.svg",
+            "DATA:image/png,bytes",
+            "BLOB:https://example.test/image-id",
+        ] {
+            assert_eq!(
+                canonical_image_asset_reference(source, Some(&base)),
+                canonical_image_asset_reference(source, None),
+                "source: {source}"
+            );
+        }
+        assert_eq!(
+            canonical_image_asset_reference("DATA:image/png,bytes", None),
+            Some("data:image/png,bytes".to_string())
+        );
+        assert_eq!(
+            canonical_image_asset_reference("BLOB:https://example.test/image-id", None),
+            Some("blob:https://example.test/image-id".to_string())
+        );
+    }
 }

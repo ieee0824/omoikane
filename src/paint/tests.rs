@@ -1717,7 +1717,7 @@ fn image_sources_shorter_than_a_scheme_or_starting_mid_character_resolve_to_noth
     // index the string by byte range.
     for source in ["日本語です", "日本", "b", "", "   ", "blo"] {
         assert!(
-            crate::layout::decode_or_fetch_image_asset(source).is_none(),
+            crate::layout::decode_or_fetch_image_asset(source, None).is_none(),
             "unexpected image for {source:?}"
         );
     }
@@ -1743,7 +1743,7 @@ fn a_new_global_forgets_images_decoded_from_object_urls() {
         "image/png".to_string(),
     );
     assert!(
-        crate::layout::decode_or_fetch_image_asset(url).is_some(),
+        crate::layout::decode_or_fetch_image_asset(url, None).is_some(),
         "the blob URL should decode while it is registered"
     );
 
@@ -1753,7 +1753,7 @@ fn a_new_global_forgets_images_decoded_from_object_urls() {
 
     assert_eq!(crate::data::blob_url_count(), 0);
     assert!(
-        crate::layout::decode_or_fetch_image_asset(url).is_none(),
+        crate::layout::decode_or_fetch_image_asset(url, None).is_none(),
         "a cached blob URL image must not outlive the Document that minted it"
     );
 }
@@ -1777,7 +1777,7 @@ fn blob_url_scheme_detection_is_case_insensitive() {
         "image/png".to_string(),
     );
 
-    let image = crate::layout::decode_or_fetch_image_asset("BLOB:http://example.test/upper")
+    let image = crate::layout::decode_or_fetch_image_asset("BLOB:http://example.test/upper", None)
         .expect("blob URL image");
 
     assert_eq!((image.width, image.height), (1, 1));
@@ -2929,7 +2929,7 @@ fn image_request_accept_header_only_advertises_supported_formats() {
         stream.write_all(&encoded).unwrap();
     });
     let url = format!("http://{address}/asset");
-    let image = crate::layout::decode_or_fetch_image_asset(&url).unwrap();
+    let image = crate::layout::decode_or_fetch_image_asset(&url, None).unwrap();
     assert_eq!(image.pixels(), &[1, 2, 3, 255]);
     let request = receiver.recv().unwrap().to_ascii_lowercase();
     assert!(request.contains(

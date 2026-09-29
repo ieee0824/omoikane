@@ -460,6 +460,11 @@ pub fn with_image_base_url<T>(base_url: Option<Url>, f: impl FnOnce() -> T) -> T
     })
 }
 
+/// Captures the current image base URL at an effect boundary for explicit URL resolution.
+pub(crate) fn current_image_base_url() -> Option<Url> {
+    IMAGE_BASE_URL.with(|cell| cell.borrow().clone())
+}
+
 /// Runs image resolution with the browsing session's Cookie store and site.
 /// Cached responses are scoped to the Document that selected those cookies.
 pub(crate) fn with_image_cookie_store<T>(
