@@ -70,7 +70,6 @@ mod form_state;
 mod form_submission;
 mod geolocation;
 pub use geolocation::GeolocationPositionData;
-use geolocation::GeolocationRequest;
 mod form_validation;
 #[cfg(test)]
 mod fullscreen_tests;
@@ -1525,14 +1524,7 @@ struct HostState {
     clipboard: HostClipboard,
     clipboard_permission_granted: bool,
     notification_permission: String,
-    /// Permission and deterministic provider state for the Window geolocation
-    /// environment.  The provider is intentionally opt-in: an embedder can
-    /// inject a fixed position for tests, while an unset provider reports
-    /// `POSITION_UNAVAILABLE` rather than consulting host-global state.
-    geolocation_permission_granted: bool,
-    geolocation_position: Option<GeolocationPositionData>,
-    next_geolocation_request_id: u64,
-    geolocation_requests: HashMap<u64, GeolocationRequest>,
+    geolocation: geolocation::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
     cookie_store: Arc<Mutex<crate::http::CookieJar>>,
@@ -1803,12 +1795,7 @@ unsafe impl Trace for HostState {
         for owner in self.worker_owner_objects.values() {
             unsafe { owner.trace(tracer) };
         }
-        for request in self.geolocation_requests.values() {
-            unsafe { request.success.trace(tracer) };
-            if let Some(error) = &request.error {
-                unsafe { error.trace(tracer) };
-            }
-        }
+        unsafe { self.geolocation.trace(tracer) };
         if let Some(dialog) = &self.pending_javascript_dialog {
             unsafe { dialog.suspension.trace(tracer) };
         }
@@ -2179,10 +2166,7 @@ impl HostState {
             clipboard: host_clipboard(),
             clipboard_permission_granted: true,
             notification_permission: "default".to_string(),
-            geolocation_permission_granted: true,
-            geolocation_position: None,
-            next_geolocation_request_id: 1,
-            geolocation_requests: HashMap::new(),
+            geolocation: geolocation::State::default(),
             compression_streams: compression_stream::Store::new(),
             http_client,
             cookie_store,

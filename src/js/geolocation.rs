@@ -41,10 +41,44 @@ impl GeolocationPositionData {
     }
 }
 
+/// Permission and deterministic provider state for the Window geolocation
+/// environment.  The provider is intentionally opt-in: an embedder can
+/// inject a fixed position for tests, while an unset provider reports
+/// `POSITION_UNAVAILABLE` rather than consulting host-global state.
+pub(super) struct State {
+    permission_granted: bool,
+    position: Option<GeolocationPositionData>,
+    next_request_id: u64,
+    requests: HashMap<u64, GeolocationRequest>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            permission_granted: true,
+            position: None,
+            next_request_id: 1,
+            requests: HashMap::new(),
+        }
+    }
+}
+
+impl State {
+    /// Traces the page callbacks retained by pending requests and watches.
+    pub(super) unsafe fn trace(&self, tracer: &mut Tracer) {
+        for request in self.requests.values() {
+            unsafe { request.success.trace(tracer) };
+            if let Some(error) = &request.error {
+                unsafe { error.trace(tracer) };
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
-pub(super) struct GeolocationRequest {
-    pub(super) success: JsValue,
-    pub(super) error: Option<JsValue>,
+struct GeolocationRequest {
+    success: JsValue,
+    error: Option<JsValue>,
     /// `Some(id)` for `watchPosition`; `None` for one-shot requests.
     watch_id: Option<u32>,
     /// `None` represents the default infinite timeout.
@@ -94,7 +128,7 @@ fn geolocation_permission_native(
     _args: &[JsValue],
     _context: &mut Context,
 ) -> JsResult<JsValue> {
-    with_host_state(|state| Ok(JsValue::from(state.borrow().geolocation_permission_granted)))
+    with_host_state(|state| Ok(JsValue::from(state.borrow().geolocation.permission_granted)))
 }
 
 fn geolocation_duration_argument(
@@ -122,7 +156,7 @@ fn geolocation_duration_argument(
 /// an unavailable provider waits for its finite timeout, while the default
 /// infinite timeout deterministically reports POSITION_UNAVAILABLE.
 fn geolocation_position_age_ms(state: &HostState) -> Option<u64> {
-    let position = state.geolocation_position.as_ref()?;
+    let position = state.geolocation.position.as_ref()?;
     let now = state.performance_time_origin + state.event_loop.now_ms() as f64;
     if !position.timestamp_ms.is_finite() || now <= position.timestamp_ms {
         return Some(0);
@@ -132,12 +166,13 @@ fn geolocation_position_age_ms(state: &HostState) -> Option<u64> {
 
 fn wake_geolocation_request(state: &mut HostState, request_id: u64) {
     let timeout_timer_id = state
-        .geolocation_requests
+        .geolocation
+        .requests
         .get(&request_id)
         .and_then(|request| request.timeout_timer_id);
     if let Some(timer_id) = timeout_timer_id {
         state.event_loop.clear_timer(timer_id);
-        if let Some(request) = state.geolocation_requests.get_mut(&request_id) {
+        if let Some(request) = state.geolocation.requests.get_mut(&request_id) {
             request.timeout_timer_id = None;
             request.pending = false;
         }
@@ -146,7 +181,8 @@ fn wake_geolocation_request(state: &mut HostState, request_id: u64) {
 
 fn schedule_geolocation_request(state: &mut HostState, request_id: u64) {
     let Some((pending, maximum_age_ms, timeout_ms)) = state
-        .geolocation_requests
+        .geolocation
+        .requests
         .get(&request_id)
         .map(|request| (request.pending, request.maximum_age_ms, request.timeout_ms))
     else {
@@ -158,11 +194,11 @@ fn schedule_geolocation_request(state: &mut HostState, request_id: u64) {
 
     let fresh_position = geolocation_position_age_ms(state)
         .is_some_and(|age| maximum_age_ms.is_none_or(|maximum_age| age <= maximum_age));
-    let immediate = !state.geolocation_permission_granted
+    let immediate = !state.geolocation.permission_granted
         || fresh_position
         || timeout_ms.is_none()
         || timeout_ms == Some(0);
-    if let Some(request) = state.geolocation_requests.get_mut(&request_id) {
+    if let Some(request) = state.geolocation.requests.get_mut(&request_id) {
         request.pending = true;
     } else {
         return;
@@ -178,7 +214,7 @@ fn schedule_geolocation_request(state: &mut HostState, request_id: u64) {
         false,
         None,
     );
-    if let Some(request) = state.geolocation_requests.get_mut(&request_id) {
+    if let Some(request) = state.geolocation.requests.get_mut(&request_id) {
         request.timeout_timer_id = Some(timer_id);
     } else {
         state.event_loop.clear_timer(timer_id);
@@ -214,9 +250,9 @@ fn geolocation_request_native(
 
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let request_id = state.next_geolocation_request_id;
-        state.next_geolocation_request_id = state.next_geolocation_request_id.saturating_add(1);
-        state.geolocation_requests.insert(
+        let request_id = state.geolocation.next_request_id;
+        state.geolocation.next_request_id = state.geolocation.next_request_id.saturating_add(1);
+        state.geolocation.requests.insert(
             request_id,
             GeolocationRequest {
                 success,
@@ -250,14 +286,15 @@ fn geolocation_clear_watch_native(
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         let request_ids: Vec<_> = state
-            .geolocation_requests
+            .geolocation
+            .requests
             .iter()
             .filter_map(|(request_id, request)| {
                 (request.watch_id == Some(watch_id)).then_some(*request_id)
             })
             .collect();
         for request_id in request_ids {
-            if let Some(request) = state.geolocation_requests.remove(&request_id)
+            if let Some(request) = state.geolocation.requests.remove(&request_id)
                 && let Some(timer_id) = request.timeout_timer_id
             {
                 state.event_loop.clear_timer(timer_id);
@@ -304,16 +341,17 @@ impl JsRuntime {
             || !position.accuracy.is_finite()
             || position.accuracy < 0.0
         {
-            state.geolocation_position = None;
+            state.geolocation.position = None;
             return;
         }
         if !position.timestamp_ms.is_finite() || position.timestamp_ms < 0.0 {
             position.timestamp_ms =
                 state.performance_time_origin + state.event_loop.now_ms() as f64;
         }
-        state.geolocation_position = Some(position);
+        state.geolocation.position = Some(position);
         let request_ids: Vec<_> = state
-            .geolocation_requests
+            .geolocation
+            .requests
             .iter()
             .filter_map(|(request_id, request)| {
                 (!request.pending || request.timeout_timer_id.is_some()).then_some(*request_id)
@@ -329,7 +367,7 @@ impl JsRuntime {
     /// and report `POSITION_UNAVAILABLE` (or timeout) on their next request.
     pub fn clear_geolocation_position(&mut self) {
         let mut state = self.host_state.borrow_mut();
-        state.geolocation_position = None;
+        state.geolocation.position = None;
     }
 
     /// Sets the permission result used by future and active geolocation
@@ -338,10 +376,11 @@ impl JsRuntime {
     pub fn set_geolocation_permission(&mut self, granted: bool) {
         let changed = {
             let mut state = self.host_state.borrow_mut();
-            let changed = state.geolocation_permission_granted != granted;
-            state.geolocation_permission_granted = granted;
+            let changed = state.geolocation.permission_granted != granted;
+            state.geolocation.permission_granted = granted;
             let request_ids: Vec<_> = state
-                .geolocation_requests
+                .geolocation
+                .requests
                 .iter()
                 .filter_map(|(request_id, request)| {
                     (!request.pending || request.timeout_timer_id.is_some()).then_some(*request_id)
@@ -368,7 +407,7 @@ impl JsRuntime {
     ) -> JsResult<()> {
         let (success, error, watch_id, maximum_age_ms, timeout_ms, pending) = {
             let state = self.host_state.borrow();
-            let Some(request) = state.geolocation_requests.get(&request_id) else {
+            let Some(request) = state.geolocation.requests.get(&request_id) else {
                 return Ok(());
             };
             (
@@ -387,14 +426,14 @@ impl JsRuntime {
             let mut state = self.host_state.borrow_mut();
             let fresh_position = geolocation_position_age_ms(&state)
                 .is_some_and(|age| maximum_age_ms.is_none_or(|maximum_age| age <= maximum_age));
-            let outcome = if !state.geolocation_permission_granted {
+            let outcome = if !state.geolocation.permission_granted {
                 GeolocationOutcome::Error {
                     code: 1,
                     message: "User denied Geolocation.".to_string(),
                 }
             } else if fresh_position {
                 GeolocationOutcome::Success(
-                    state.geolocation_position.clone().expect("fresh position"),
+                    state.geolocation.position.clone().expect("fresh position"),
                 )
             } else if timed_out || timeout_ms == Some(0) {
                 GeolocationOutcome::Error {
@@ -409,14 +448,15 @@ impl JsRuntime {
             };
             let timeout_timer_id =
                 state
-                    .geolocation_requests
+                    .geolocation
+                    .requests
                     .get_mut(&request_id)
                     .and_then(|request| {
                         request.pending = false;
                         request.timeout_timer_id.take()
                     });
             if watch_id.is_none() {
-                state.geolocation_requests.remove(&request_id);
+                state.geolocation.requests.remove(&request_id);
             }
             (outcome, timeout_timer_id)
         };
