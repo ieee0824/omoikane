@@ -315,9 +315,9 @@ pub(super) fn layout_multicol_children(
                     top: first.rect.y,
                     height: (last.rect.y + last.rect.height - first.rect.y).max(0.0),
                     break_before: group_index == 0
-                        && forces_column_break(child_style.get("break-before")),
+                        && forces_column_break(child_style.break_before()),
                     break_after: group_index == last_group
-                        && forces_column_break(child_style.get("break-after")),
+                        && forces_column_break(child_style.break_after()),
                     fragmentable: false,
                     clone: None,
                 });
@@ -348,8 +348,8 @@ pub(super) fn layout_multicol_children(
             },
             top: outer_top,
             height: child.total_height().max(0.0),
-            break_before: forces_column_break(child_style.get("break-before")),
-            break_after: forces_column_break(child_style.get("break-after")),
+            break_before: forces_column_break(child_style.break_before()),
+            break_after: forces_column_break(child_style.break_after()),
             fragmentable,
             clone,
         });
@@ -840,8 +840,8 @@ fn layout_vertical_multicol_children(
             item: FlowItem::Child(index),
             top: progress(outer_left, child.total_width()),
             height: child.total_width().max(0.0),
-            break_before: forces_column_break(child_style.get("break-before")),
-            break_after: forces_column_break(child_style.get("break-after")),
+            break_before: forces_column_break(child_style.break_before()),
+            break_after: forces_column_break(child_style.break_after()),
             fragmentable: false,
             clone: None,
         });
@@ -970,11 +970,8 @@ fn layout_vertical_multicol_children(
     result
 }
 
-fn forces_column_break(value: Option<&ComputedValue>) -> bool {
-    matches!(
-        value,
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("column")
-    )
+fn forces_column_break(value: Option<crate::css::ComputedBreak<'_>>) -> bool {
+    value == Some(crate::css::ComputedBreak::Column)
 }
 
 fn avoids_column_break(value: Option<&ComputedValue>) -> bool {

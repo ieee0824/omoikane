@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, HashMap};
 use crate::css::style::ContainerContext;
 use crate::css::style::counter_pairs;
 use crate::css::{
-    ComputedStyle, ComputedValue, MediaType, PageBoxGeometry, PageMarginBox, PageMarginContent,
-    PageSelectorContext, PageSide, ResolvedPageStyle, StyleResolver, Value,
+    ComputedBreak, ComputedDisplay, ComputedFloat, ComputedPosition, ComputedStyle, ComputedValue,
+    MediaType, PageBoxGeometry, PageMarginBox, PageMarginContent, PageSelectorContext, PageSide,
+    ResolvedPageStyle, StyleResolver, Value,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 
@@ -282,18 +283,12 @@ impl ForcedPageBreak {
     }
 }
 
-fn forced_page_break(value: Option<&ComputedValue>) -> Option<ForcedPageBreak> {
-    let Some(ComputedValue::Keyword(value)) = value else {
-        return None;
-    };
-    if value.eq_ignore_ascii_case("page") {
-        Some(ForcedPageBreak::Page)
-    } else if value.eq_ignore_ascii_case("left") {
-        Some(ForcedPageBreak::Side(PageSide::Left))
-    } else if value.eq_ignore_ascii_case("right") {
-        Some(ForcedPageBreak::Side(PageSide::Right))
-    } else {
-        None
+fn forced_page_break(value: Option<ComputedBreak<'_>>) -> Option<ForcedPageBreak> {
+    match value {
+        Some(ComputedBreak::Page) => Some(ForcedPageBreak::Page),
+        Some(ComputedBreak::Left) => Some(ForcedPageBreak::Side(PageSide::Left)),
+        Some(ComputedBreak::Right) => Some(ForcedPageBreak::Side(PageSide::Right)),
+        _ => None,
     }
 }
 
@@ -1238,18 +1233,16 @@ fn first_body_break_side(document: &NodeHandle, resolver: &mut StyleResolver) ->
                 _ => continue,
             }
             let style = resolver.computed_style(&child);
-            if matches!(
-                style.get("display"),
-                Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
-            ) || matches!(
-                style.get("position"),
-                Some(ComputedValue::Keyword(value))
-                    if value.eq_ignore_ascii_case("absolute") || value.eq_ignore_ascii_case("fixed")
-            ) {
+            if style.is_display_none()
+                || matches!(
+                    style.position(),
+                    Some(ComputedPosition::Absolute | ComputedPosition::Fixed)
+                )
+            {
                 continue;
             }
             if let Some(side) =
-                forced_page_break(style.get("break-before")).and_then(ForcedPageBreak::side)
+                forced_page_break(style.break_before()).and_then(ForcedPageBreak::side)
             {
                 return Some(side);
             }
@@ -1325,18 +1318,18 @@ fn can_fragment_descendants(layout: &LayoutBox, resolver: &mut StyleResolver) ->
 
 fn can_fragment_style_descendants(style: &ComputedStyle) -> bool {
     let unsupported_display = matches!(
-        style.get("display"),
-        Some(ComputedValue::Keyword(value))
-            if matches!(
-                value.to_ascii_lowercase().as_str(),
-                "inline-table" | "table-row" | "table-cell"
-                    | "flex" | "inline-flex" | "grid" | "inline-grid"
-            )
+        style.display(),
+        Some(
+            ComputedDisplay::InlineTable
+                | ComputedDisplay::TableRow
+                | ComputedDisplay::TableCell
+                | ComputedDisplay::Flex
+                | ComputedDisplay::InlineFlex
+                | ComputedDisplay::Grid
+                | ComputedDisplay::InlineGrid
+        )
     );
-    let floating = matches!(
-        style.get("float"),
-        Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none")
-    );
+    let floating = matches!(style.float(), Some(value) if value != ComputedFloat::None);
     !unsupported_display && !floating
 }
 
@@ -1476,11 +1469,14 @@ fn page_break_candidates(
             }
             let block = child.node.tag_name().is_some_and(|_| {
                 let style = resolver.computed_style(&child.node);
-                let display = match style.get("display") {
-                    Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
-                    _ => String::new(),
-                };
-                matches!(display.as_str(), "block" | "flow-root" | "list-item")
+                matches!(
+                    style.display(),
+                    Some(
+                        ComputedDisplay::Block
+                            | ComputedDisplay::FlowRoot
+                            | ComputedDisplay::ListItem
+                    )
+                )
             });
             if include_nested_children && block && seen_block {
                 let boundary = child.dimensions.border_box().y - child.dimensions.margin.top;
@@ -1636,8 +1632,8 @@ fn flow_sections(
             }
             _ => inherited_name.clone(),
         };
-        let before = forced_page_break(style.get("break-before"));
-        let after = forced_page_break(style.get("break-after"));
+        let before = forced_page_break(style.break_before());
+        let after = forced_page_break(style.break_after());
         let border = box_.dimensions.border_box();
         boundaries.push(FlowBoundary {
             name: name.clone(),
