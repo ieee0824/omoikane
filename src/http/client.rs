@@ -539,7 +539,7 @@ mod tests {
         ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
         read_request_headers,
     };
-    use std::io::Write;
+    use std::io::{Read, Write};
 
     #[test]
     fn client_follows_redirect() {
@@ -853,6 +853,10 @@ mod tests {
         let source_thread = FixtureWorker::spawn(move || {
             let mut stream = accept_with_timeout(&redirect, ACCEPT_TIMEOUT).unwrap();
             read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            // Drain the POST body before closing the socket; otherwise macOS
+            // can reset the connection before the client reads the redirect.
+            let mut body = [0; 4];
+            stream.read_exact(&mut body).unwrap();
             write!(stream, "HTTP/1.1 303 See Other\r\nLocation: http://127.0.0.1:{destination_port}/next\r\nContent-Length: 0\r\n\r\n").unwrap();
         });
         let destination_thread = FixtureWorker::spawn(move || {
