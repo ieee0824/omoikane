@@ -26,7 +26,8 @@ use rusqlite::{Connection, params};
 use super::{
     Combinator, CssToken, Declaration, MediaQuery, MediaType, PseudoElement, Rule, Selector,
     SelectorPart, SimpleSelector, Specificity, Stylesheet, Value, evaluate_media_query_for_type,
-    parse_media_query_list, specificity,
+    is_css_wide_keyword_with_revert_rule as is_css_wide_keyword, parse_media_query_list,
+    specificity,
 };
 
 /// CSS origin.
@@ -4702,16 +4703,6 @@ fn is_position_offset_property(name: &str) -> bool {
             | "inset-inline-end"
             | "inset-block-start"
             | "inset-block-end"
-    )
-}
-
-/// A CSS-wide keyword (CSS Cascade). These are valid for every property and are
-/// resolved (or left as-is) by later passes, so property grammars must never
-/// reject them.
-fn is_css_wide_keyword(lowercased: &str) -> bool {
-    matches!(
-        lowercased,
-        "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "revert-rule"
     )
 }
 

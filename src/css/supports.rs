@@ -1,7 +1,7 @@
 //! CSS Conditional Rules `@supports` condition parsing and evaluation.
 
 use super::tokenizer::render_tokens;
-use super::{CssToken, parse_selector_list, supports_declaration, tokenize};
+use super::{CssToken, parse_selector_list, skip_css_whitespace, supports_declaration, tokenize};
 
 /// Evaluates a CSS supports condition using the same declaration and selector
 /// parsers as the cascade and DOM APIs.
@@ -153,11 +153,7 @@ impl SupportsConditionParser {
     }
 
     fn consume_whitespace(&mut self) -> bool {
-        let start = self.index;
-        while matches!(self.tokens.get(self.index), Some(CssToken::Whitespace)) {
-            self.index += 1;
-        }
-        self.index != start
+        skip_css_whitespace(&self.tokens, &mut self.index)
     }
 }
 
