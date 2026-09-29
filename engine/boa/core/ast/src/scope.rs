@@ -899,7 +899,7 @@ mod tests {
     fn indexed_bindings_resolve_through_outer_scopes_and_track_escapes() {
         let outer = Scope::new(Scope::new_global(), true);
         for index in 0..LINEAR_BINDING_LOOKUP_LIMIT * 2 {
-            outer.create_mutable_binding(name(index), false);
+            let _locator = outer.create_mutable_binding(name(index), false);
         }
         let strict = JsString::from("strictConstant");
         outer.create_immutable_binding(strict.clone(), true);

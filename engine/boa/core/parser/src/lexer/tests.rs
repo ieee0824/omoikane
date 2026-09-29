@@ -1231,3 +1231,40 @@ mod carriage_return {
         expect_tokens_with_lines(3, "-\r\n\n\r3");
     }
 }
+
+#[test]
+fn ascii_identifier_fast_path_matches_unicode_properties() {
+    use icu_properties::CodePointSetData;
+    use icu_properties::props::{IdContinue, IdStart};
+
+    let id_start = CodePointSetData::new::<IdStart>();
+    let id_continue = CodePointSetData::new::<IdContinue>();
+    for ch in 0..0x80u32 {
+        let dollar_or_underscore = matches!(ch, 0x24 | 0x5F);
+        assert_eq!(
+            crate::lexer::identifier::Identifier::is_identifier_start(ch),
+            dollar_or_underscore || id_start.contains32(ch),
+            "IdentifierStart U+{ch:04X}"
+        );
+        assert_eq!(
+            crate::lexer::identifier::Identifier::is_identifier_part(ch),
+            dollar_or_underscore || id_continue.contains32(ch),
+            "IdentifierPart U+{ch:04X}"
+        );
+    }
+    // Non-ASCII code points still use the Unicode tables and ZWNJ/ZWJ.
+    for ch in [
+        0x00AA, 0x00B7, 0x0660, 0x200C, 0x200D, 0x2118, 0x3042, 0x1D400,
+    ] {
+        assert_eq!(
+            crate::lexer::identifier::Identifier::is_identifier_part(ch),
+            matches!(ch, 0x200C | 0x200D) || id_continue.contains32(ch),
+            "IdentifierPart U+{ch:04X}"
+        );
+        assert_eq!(
+            crate::lexer::identifier::Identifier::is_identifier_start(ch),
+            id_start.contains32(ch),
+            "IdentifierStart U+{ch:04X}"
+        );
+    }
+}

@@ -13,11 +13,21 @@
 
 use std::cell::Cell;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
+
+#[path = "../support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback, read_request_headers,
+};
 
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
@@ -83,10 +93,11 @@ fn load_manifest(dir: &Path) -> Manifest {
 /// declared in `manifest.json`. The root path (`/`) maps to `acid3.html`, just
 /// like the canonical origin.
 ///
-/// The worker thread is detached and lives until the process exits, matching
-/// the pattern used by the existing HTTP client tests.
+/// The worker is joined when this server is dropped.
 pub struct FixtureServer {
     port: u16,
+    stop: Arc<AtomicBool>,
+    worker: Option<FixtureWorker<()>>,
 }
 
 impl FixtureServer {
@@ -98,25 +109,30 @@ impl FixtureServer {
     /// Starts the server serving `dir`.
     pub fn start_in(dir: PathBuf) -> Self {
         let manifest = Arc::new(load_manifest(&dir));
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let listener = bind_loopback().expect("bind ephemeral port");
         let port = listener.local_addr().unwrap().port();
         let dir = Arc::new(dir);
 
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = FixtureWorker::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                match accept_with_timeout(&listener, Duration::from_millis(50)) {
                     Ok(stream) => {
-                        let manifest = Arc::clone(&manifest);
-                        let dir = Arc::clone(&dir);
                         // Handle sequentially; the engine fetches serially anyway.
                         let _ = handle_connection(stream, &manifest, &dir);
                     }
-                    Err(_) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+                    Err(error) => panic!("Acid3 fixture accept: {error}"),
                 }
             }
         });
 
-        FixtureServer { port }
+        FixtureServer {
+            port,
+            stop,
+            worker: Some(worker),
+        }
     }
 
     /// Base URL, e.g. `http://127.0.0.1:54321`.
@@ -131,6 +147,13 @@ impl FixtureServer {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+}
+
+impl Drop for FixtureServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        drop(self.worker.take());
     }
 }
 
@@ -173,23 +196,8 @@ fn handle_connection(
     manifest: &Manifest,
     dir: &Path,
 ) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
-
-    // Request line.
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
-        return Ok(());
-    }
-    // Drain headers.
-    loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header)? == 0 {
-            break;
-        }
-        if header.trim().is_empty() {
-            break;
-        }
-    }
+    let headers = read_request_headers(&mut stream, READ_TIMEOUT)?;
+    let request_line = headers.lines().next().unwrap_or_default();
 
     let raw_path = request_line
         .split_whitespace()

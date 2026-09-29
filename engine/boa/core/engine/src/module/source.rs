@@ -10,7 +10,7 @@ use boa_ast::{
     },
     operations::{
         ContainsSymbol, LexicallyScopedDeclaration, bound_names, contains,
-        lexically_scoped_declarations, var_scoped_declarations,
+        lexically_scoped_declarations, var_scoped_declaration_refs,
     },
     scope::BindingLocator,
 };
@@ -1603,7 +1603,7 @@ impl SourceTextModule {
 
             // 18. Let code be module.[[ECMAScriptCode]].
             // 19. Let varDeclarations be the VarScopedDeclarations of code.
-            let var_declarations = var_scoped_declarations(&self.code.source);
+            let var_declarations = var_scoped_declaration_refs(&self.code.source);
             // 20. Let declaredVarNames be a new empty List.
             let mut declared_var_names = Vec::new();
             // 21. For each element d of varDeclarations, do
