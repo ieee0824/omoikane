@@ -17,6 +17,7 @@ mod supports;
 mod tokenizer;
 mod transform;
 mod transition;
+mod typed;
 
 pub(crate) use container::{ContainerQuery, ContainerUnitContext, parse_container_query};
 pub(crate) use filter::{
@@ -46,6 +47,10 @@ pub(crate) use supports::{supports_condition_matches, supports_condition_result}
 pub(crate) use transition::{
     computed_transition_longhand, computed_transition_shorthand, expand_transition_shorthand,
     normalize_transition_longhand, normalize_transition_shorthand,
+};
+pub use typed::{
+    ComputedBreak, ComputedDirection, ComputedDisplay, ComputedFloat, ComputedPosition,
+    ComputedWritingMode, CssWideKeyword,
 };
 
 pub(crate) fn serialize_specified_value(value: &Value) -> String {

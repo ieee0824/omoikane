@@ -69,7 +69,7 @@ impl Processor<'_> {
         };
         let mut own = inherit_counters(counter_source, value_source, target);
         let style = self.resolver.computed_style(node);
-        let hidden = ancestor_hidden || display_none(&style);
+        let hidden = ancestor_hidden || style.is_display_none();
         if !hidden {
             apply_counter_properties(&mut own, target, &style);
         }
@@ -111,7 +111,7 @@ impl Processor<'_> {
         value_source: &CounterSet,
     ) -> Option<CounterSet> {
         let style = self.resolver.computed_pseudo_style(node, pseudo)?;
-        if display_none(&style) || !generates_pseudo_box(&style) {
+        if style.is_display_none() || !generates_pseudo_box(&style) {
             return None;
         }
         let target = Target {
@@ -251,10 +251,6 @@ fn collect_counter_names(value: &Value, names: &mut Vec<String>) {
         }
         _ => {}
     }
-}
-
-fn display_none(style: &ComputedStyle) -> bool {
-    matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none"))
 }
 
 fn generates_pseudo_box(style: &ComputedStyle) -> bool {

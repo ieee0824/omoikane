@@ -1,11 +1,11 @@
 //! Flex layout: `display: flex` container layout.
 
-use crate::css::{AffineTransform, ComputedStyle, ComputedValue, StyleResolver};
+use crate::css::{AffineTransform, ComputedDisplay, ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 
 use super::{
     AlignItems, BoxDimensions, EdgeSizes, FlexDirection, FlexWrap, JustifyContent, LayoutBox, Rect,
-    edge_sizes, explicit_length, intrinsic_width, is_display_none, is_out_of_flow_positioned,
+    edge_sizes, explicit_length, intrinsic_width, is_out_of_flow_positioned,
     layout_positioned_child, overflow, resolved_length, sort_children_by_z_index,
     translate_layout_box_to_outer, visibility, z_index,
 };
@@ -84,7 +84,7 @@ pub(super) fn layout_flex_container(
             continue;
         }
         let child_style = resolver.computed_style(&child);
-        if is_display_none(&child_style) {
+        if child_style.is_display_none() {
             continue;
         }
         anonymous::append(
@@ -484,10 +484,7 @@ pub(super) fn layout_flex_container(
 }
 
 pub(super) fn is_flex_container(style: &ComputedStyle) -> bool {
-    matches!(
-        style.get("display"),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex")
-    )
+    style.display() == Some(ComputedDisplay::Flex)
 }
 
 pub(super) fn flex_direction(style: &ComputedStyle) -> FlexDirection {
@@ -726,7 +723,7 @@ pub(super) fn intrinsic_content_width(
             continue;
         }
         let child_style = resolver.computed_style(&child);
-        if is_display_none(&child_style) {
+        if child_style.is_display_none() {
             continue;
         }
         if let Some(text) = anonymous::take_text(&mut pending) {
