@@ -156,7 +156,8 @@ struct BrowserApp {
 
 impl BrowserApp {
     fn new(url: &str) -> Result<Self, Box<dyn Error>> {
-        let mut session = CdpSession::new().map_err(std::io::Error::other)?;
+        let mut session =
+            CdpSession::new().map_err(|error| std::io::Error::other(error.to_string()))?;
         session.set_pointer_lock_deferred(true);
         session.dispatch("Page.navigate", json!({ "url": url }))?;
         let started_at = Instant::now();

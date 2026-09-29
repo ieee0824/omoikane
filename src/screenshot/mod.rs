@@ -1,24 +1,83 @@
-use crate::cdp::CdpSession;
+use crate::cdp::{CdpSession, JsonRpcError};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::html::{TreeBuilder, decode_html_response};
-use crate::http::Client;
+use crate::http::url::UrlParseError;
 use crate::http::url::resolve_url;
+use crate::http::{Client, HttpParseError};
 use crate::layout::Rect;
 use crate::paint::{
-    Canvas, Color, Image, RenderTimings, clear_render_timings, record_render_timings,
+    Canvas, Color, Image, PaintError, RenderTimings, clear_render_timings, record_render_timings,
     render_document_with_url,
 };
 use std::time::Instant;
 
 const MAX_FRAMESET_DEPTH: usize = 4;
 
+/// Failures while preparing or rendering a screenshot.
+#[derive(Debug)]
+pub(crate) enum ScreenshotError {
+    /// The page could not settle before painting.
+    Settle(JsonRpcError),
+    /// Painting the active document failed.
+    Paint(PaintError),
+    /// A frameset child has no source URL.
+    MissingFrameSource,
+    /// A frame source URL could not be resolved.
+    Url(UrlParseError),
+    /// Fetching a frame document failed.
+    Http(HttpParseError),
+    /// A rendered frame could not be materialized as an image.
+    FrameImage(PaintError),
+    /// Painting a frame document failed.
+    FramePaint(PaintError),
+}
+
+impl std::fmt::Display for ScreenshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Settle(error) => write!(f, "{}", error.message),
+            Self::Paint(error) => write!(f, "{error:?}"),
+            Self::MissingFrameSource => write!(f, "frame src is missing"),
+            Self::Url(error) => write!(f, "{error}"),
+            Self::Http(error) => write!(f, "{error}"),
+            Self::FrameImage(error) => write!(f, "failed to materialize frame image: {error:?}"),
+            Self::FramePaint(error) => write!(f, "failed to render frame document: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ScreenshotError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Settle(error) => Some(error),
+            Self::Url(error) => Some(error),
+            Self::Http(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<UrlParseError> for ScreenshotError {
+    fn from(error: UrlParseError) -> Self {
+        Self::Url(error)
+    }
+}
+
+impl From<HttpParseError> for ScreenshotError {
+    fn from(error: HttpParseError) -> Self {
+        Self::Http(error)
+    }
+}
+
 pub(crate) fn capture_session_screenshot_png(
     session: &mut CdpSession,
     viewport: Rect,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, ScreenshotError> {
     clear_render_timings();
     session.set_viewport(viewport.width as u32, viewport.height as u32);
-    let settle_timings = session.settle_for_render().map_err(|error| error.message)?;
+    let settle_timings = session
+        .settle_for_render()
+        .map_err(ScreenshotError::Settle)?;
     record_render_timings(&RenderTimings {
         timers: settle_timings.timers,
         animation_frames: settle_timings.animation_frames,
@@ -48,7 +107,7 @@ pub(crate) fn capture_session_screenshot_png(
             }
             .map_err(|error| {
                 session.report_paint_failure("SCREENSHOT_PAINT_FAILED");
-                format!("{error:?}")
+                ScreenshotError::Paint(error)
             })?;
             Ok(encode_screenshot_canvas(canvas))
         }
@@ -60,7 +119,7 @@ fn render_frameset_screenshot_png(
     base_url: Option<&crate::http::Url>,
     viewport: Rect,
     client: &mut Client,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<Vec<u8>>, ScreenshotError> {
     let Some(canvas) = render_frameset_canvas(document, base_url, viewport, 0, client)? else {
         return Ok(None);
     };
@@ -84,7 +143,7 @@ fn render_frameset_canvas(
     viewport: Rect,
     depth: usize,
     client: &mut Client,
-) -> Result<Option<Canvas>, String> {
+) -> Result<Option<Canvas>, ScreenshotError> {
     if depth > MAX_FRAMESET_DEPTH {
         return Ok(None);
     }
@@ -151,16 +210,12 @@ fn render_frameset_canvas(
                 .and_then(|attrs| attrs.get("src").cloned())
                 .map(|src| src.trim().to_string())
                 .filter(|src| !src.is_empty())
-                .ok_or_else(|| "frame src is missing".to_string())?;
+                .ok_or(ScreenshotError::MissingFrameSource)?;
             let resolved = match base_url {
-                Some(base) => resolve_url(base, &src).map_err(|error| error.to_string())?,
-                None => src
-                    .parse::<crate::http::Url>()
-                    .map_err(|error| error.to_string())?,
+                Some(base) => resolve_url(base, &src)?,
+                None => src.parse::<crate::http::Url>()?,
             };
-            let response = client
-                .get(&resolved.to_string())
-                .map_err(|error| error.to_string())?;
+            let response = client.get(&resolved.to_string())?;
             let html = decode_html_response(&response);
             let frame_document = TreeBuilder::parse(&html).document();
             render_document_or_frameset_canvas(
@@ -177,7 +232,7 @@ fn render_frameset_canvas(
             child_canvas.height(),
             child_canvas.pixels().to_vec(),
         )
-        .map_err(|error| format!("failed to materialize frame image: {error:?}"))?;
+        .map_err(ScreenshotError::FrameImage)?;
         if use_rows {
             composed.draw_image(&frame_image, 0.0, offset as f32);
         } else {
@@ -195,12 +250,11 @@ fn render_document_or_frameset_canvas(
     viewport: Rect,
     depth: usize,
     client: &mut Client,
-) -> Result<Canvas, String> {
+) -> Result<Canvas, ScreenshotError> {
     if let Some(canvas) = render_frameset_canvas(document, base_url, viewport, depth, client)? {
         return Ok(canvas);
     }
-    render_document_with_url(document, viewport, base_url)
-        .map_err(|error| format!("failed to render frame document: {error:?}"))
+    render_document_with_url(document, viewport, base_url).map_err(ScreenshotError::FramePaint)
 }
 
 fn collect_frameset_layout_children(frameset: &NodeHandle) -> Vec<NodeHandle> {
@@ -341,7 +395,7 @@ fn parse_frameset_track_sizes(spec: Option<&str>, frame_count: usize, total_size
 fn resolve_frameset_render_document(
     document: &NodeHandle,
     base_url: Option<&crate::http::Url>,
-) -> Result<(NodeHandle, Option<crate::http::Url>), String> {
+) -> Result<(NodeHandle, Option<crate::http::Url>), ScreenshotError> {
     if document.query_selector("frameset").is_none() {
         return Ok((document.clone(), base_url.cloned()));
     }
@@ -362,14 +416,10 @@ fn resolve_frameset_render_document(
     };
 
     let resolved = match base_url {
-        Some(base) => resolve_url(base, &src).map_err(|error| error.to_string())?,
-        None => src
-            .parse::<crate::http::Url>()
-            .map_err(|error| error.to_string())?,
+        Some(base) => resolve_url(base, &src)?,
+        None => src.parse::<crate::http::Url>()?,
     };
-    let response = Client::new()
-        .get(&resolved.to_string())
-        .map_err(|error| error.to_string())?;
+    let response = Client::new().get(&resolved.to_string())?;
     let html = decode_html_response(&response);
     let frame_document = TreeBuilder::parse(&html).document();
     Ok((frame_document, Some(resolved)))
@@ -406,6 +456,29 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    #[test]
+    fn typed_screenshot_errors_keep_visible_messages_and_sources() {
+        let missing = ScreenshotError::MissingFrameSource;
+        assert_eq!(missing.to_string(), "frame src is missing");
+
+        let url = ScreenshotError::Url(UrlParseError::EmptyHost);
+        assert_eq!(url.to_string(), "empty host in URL");
+        assert!(std::error::Error::source(&url).is_some());
+
+        let frame = ScreenshotError::FramePaint(PaintError::InvalidImageBuffer);
+        assert_eq!(
+            frame.to_string(),
+            "failed to render frame document: InvalidImageBuffer"
+        );
+
+        let settle = ScreenshotError::Settle(JsonRpcError {
+            code: -32000,
+            message: "page did not settle".to_string(),
+        });
+        assert_eq!(settle.to_string(), "page did not settle");
+        assert!(std::error::Error::source(&settle).is_some());
+    }
 
     #[test]
     fn screenshot_records_recoverable_layout_image_decode_failure() {

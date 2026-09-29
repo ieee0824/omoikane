@@ -79,7 +79,8 @@ impl Store {
             ("decompress", "deflate") => Codec::ZlibDecoder(ZlibDecoder::new(Vec::new())),
             _ => return Err("unsupported compression format".to_string()),
         };
-        let id = take_monotonic_id(&mut self.next_id, "compression stream")?;
+        let id = take_monotonic_id(&mut self.next_id, "compression stream")
+            .map_err(|error| error.to_string())?;
         self.codecs.insert(id, codec);
         Ok(id)
     }

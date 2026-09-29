@@ -421,7 +421,9 @@ impl JsRuntime {
             });
             result
                 .map(|_| ())
-                .map_err(|message| JsError::from(JsNativeError::error().with_message(message)))
+                .map_err(|error| {
+                    JsError::from(JsNativeError::error().with_message(error.to_string()))
+                })
                 .and(dispatched)
         } else {
             let url = prepared.src.clone().unwrap_or_default();

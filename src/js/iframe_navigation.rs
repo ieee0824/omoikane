@@ -84,7 +84,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                     // operation from the departing Document to its replacement.
                     let active = state
                         .iframe_content_document(&node)
-                        .map_err(|error| JsNativeError::typ().with_message(error))?;
+                        .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
                     if active.identity() != document {
                         return Err(JsNativeError::typ()
                             .with_message("Document is no longer active")

@@ -140,7 +140,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                     }
                     let document = state
                         .iframe_content_document(&frame)
-                        .map_err(|error| JsNativeError::typ().with_message(error))?;
+                        .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
                     let actual_url = &state
                         .iframe_documents
                         .get(&id)

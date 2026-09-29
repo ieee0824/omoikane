@@ -29,6 +29,6 @@ pub(crate) use data_uri::percent_decode_bytes;
 pub use data_uri::{DataUri, parse_data_uri};
 pub use request::{HttpRequest, Method, default_user_agent};
 pub(crate) use request::{is_forbidden_request_header, is_valid_header};
-pub use response::HttpResponse;
+pub use response::{HttpParseError, HttpResponse};
 pub(crate) use site::SchemefulSite;
 pub use url::Url;
