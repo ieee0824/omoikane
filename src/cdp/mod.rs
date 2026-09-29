@@ -3357,6 +3357,52 @@ fn deadline_after(timeout: Duration) -> Instant {
     now.checked_add(timeout).unwrap_or(now)
 }
 
+fn session_evaluation(
+    mut session: CdpSession,
+    expression: String,
+    return_by_value: bool,
+    cancelled: Rc<Cell<bool>>,
+    timeout_deadline: Instant,
+) -> SessionEvaluation {
+    Box::pin(async move {
+        let result = {
+            let mut evaluation =
+                Box::pin(session.evaluate_expression_async(&expression, return_by_value));
+            std::future::poll_fn(|context| {
+                if cancelled.get() {
+                    return Poll::Ready(Err(JsonRpcError {
+                        code: -32000,
+                        message: "JavaScript evaluation cancelled by page teardown".to_string(),
+                    }));
+                }
+                // The request deadline is created before this future is first
+                // polled. The runtime starts its own clock later, so relying
+                // on it alone can leave a suspended request pending when
+                // wait_for_outgoing wakes at the earlier request deadline.
+                if Instant::now() >= timeout_deadline {
+                    return Poll::Ready(Err(evaluation_timeout_error()));
+                }
+                let result = evaluation.as_mut().poll(context);
+                if Instant::now() >= timeout_deadline {
+                    Poll::Ready(Err(evaluation_timeout_error()))
+                } else {
+                    result
+                }
+            })
+            .await
+        };
+        (session, result)
+    })
+}
+
+fn evaluation_timeout_error() -> JsonRpcError {
+    js_error(
+        boa_engine::JsNativeError::runtime_limit()
+            .with_message(boa_engine::vm::WALL_CLOCK_TIMEOUT_MESSAGE)
+            .into(),
+    )
+}
+
 fn page_task_script_error_lines(result: &Result<Vec<String>, PageTaskError>) -> Vec<String> {
     result
         .as_ref()
@@ -3413,7 +3459,7 @@ impl BrowserSessionState {
             .get("returnByValue")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let mut session = self.session.take().ok_or(JsonRpcError {
+        let session = self.session.take().ok_or(JsonRpcError {
             code: -32000,
             message: "Browser session is busy".to_string(),
         })?;
@@ -3425,24 +3471,13 @@ impl BrowserSessionState {
         let page_url = session.current_url.clone();
         let timeout_deadline = deadline_after(session.runtime_timeout());
         let cancelled = Rc::new(Cell::new(false));
-        let evaluation_cancelled = Rc::clone(&cancelled);
-        let future = Box::pin(async move {
-            let result = {
-                let mut evaluation =
-                    Box::pin(session.evaluate_expression_async(&expression, return_by_value));
-                std::future::poll_fn(|context| {
-                    if evaluation_cancelled.get() {
-                        return Poll::Ready(Err(JsonRpcError {
-                            code: -32000,
-                            message: "JavaScript evaluation cancelled by page teardown".to_string(),
-                        }));
-                    }
-                    evaluation.as_mut().poll(context)
-                })
-                .await
-            };
-            (session, result)
-        });
+        let future = session_evaluation(
+            session,
+            expression,
+            return_by_value,
+            Rc::clone(&cancelled),
+            timeout_deadline,
+        );
         self.pending = Some(PendingSessionEvaluation {
             token,
             controller,
@@ -4503,6 +4538,75 @@ mod tests {
         assert_eq!(completed[2]["id"], "eval");
         assert_eq!(completed[2]["result"]["result"]["value"], false);
         assert_eq!(session.pending_response_count(), 0);
+    }
+
+    #[test]
+    fn session_evaluation_expires_before_its_first_poll() {
+        let session = CdpSession::new().unwrap();
+        let controller = session.runtime.javascript_dialog_controller();
+        let mut evaluation = session_evaluation(
+            session,
+            "globalThis.expiredRequestRan = true; alert('late')".to_string(),
+            true,
+            Rc::new(Cell::new(false)),
+            Instant::now(),
+        );
+        let mut context = TaskContext::from_waker(Waker::noop());
+        let Poll::Ready((mut session, result)) = evaluation.as_mut().poll(&mut context) else {
+            panic!("an expired request must complete on its first poll");
+        };
+        assert!(result.unwrap_err().message.contains("wall-clock timeout"));
+        assert!(controller.pending().is_none());
+        assert_eq!(
+            session
+                .runtime
+                .eval("typeof expiredRequestRan")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "undefined"
+        );
+    }
+
+    #[test]
+    fn session_evaluation_expires_at_request_deadline_while_suspended() {
+        let session = CdpSession::new().unwrap();
+        let controller = session.runtime.javascript_dialog_controller();
+        // Queueing can consume part of the request budget before the runtime
+        // starts its own evaluator. Keep the request deadline earlier than the
+        // runtime's deadline to reproduce that difference without a busy loop.
+        let deadline = deadline_after(Duration::from_secs(1));
+        let mut evaluation = session_evaluation(
+            session,
+            "alert('suspended'); globalThis.expiredRequestRan = true".to_string(),
+            true,
+            Rc::new(Cell::new(false)),
+            deadline,
+        );
+        let mut context = TaskContext::from_waker(Waker::noop());
+        assert!(evaluation.as_mut().poll(&mut context).is_pending());
+        assert!(controller.pending().is_some());
+        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        let Poll::Ready((mut session, result)) = evaluation.as_mut().poll(&mut context) else {
+            panic!("a suspended evaluation must expire at the request deadline");
+        };
+        assert!(result.unwrap_err().message.contains("wall-clock timeout"));
+        assert!(controller.pending().is_none());
+        assert_eq!(
+            session.runtime.eval("21 * 2").unwrap().as_number(),
+            Some(42.0)
+        );
+        assert_eq!(
+            session
+                .runtime
+                .eval("typeof expiredRequestRan")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "undefined"
+        );
     }
 
     #[test]
