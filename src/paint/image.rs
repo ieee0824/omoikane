@@ -445,7 +445,8 @@ pub(crate) fn parse_background_image_value(value: &str) -> Option<Image> {
         .trim_end_matches("\\\"")
         .trim_start_matches("\\'")
         .trim_end_matches("\\'");
-    crate::layout::decode_or_fetch_image_asset(url).or_else(|| {
+    let base_url = crate::layout::current_image_base_url();
+    crate::layout::decode_or_fetch_image_asset(url, base_url.as_ref()).or_else(|| {
         let data_uri = parse_data_uri(url).ok()?;
         match data_uri {
             DataUri::Binary { mime_type, data } if mime_type.eq_ignore_ascii_case("image/png") => {
