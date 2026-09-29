@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-use crate::css::{AffineTransform, ComputedStyle, ComputedValue, StyleResolver};
+use crate::css::{AffineTransform, ComputedDisplay, ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{NodeHandle, NodeType};
 
 use super::{
-    BoxDimensions, EdgeSizes, LayoutBox, Rect, edge_sizes, intrinsic_width, is_display_none,
+    BoxDimensions, EdgeSizes, LayoutBox, Rect, edge_sizes, intrinsic_width,
     is_out_of_flow_positioned, layout_positioned_child, normalized_min_max_lengths, overflow,
     resolved_length, sort_children_by_z_index, translate_layout_box_to_outer, visibility, z_index,
 };
@@ -133,8 +133,10 @@ enum Alignment {
 }
 
 pub(super) fn is_grid_container(style: &ComputedStyle) -> bool {
-    matches!(style.get("display"), Some(ComputedValue::Keyword(value))
-        if value.eq_ignore_ascii_case("grid") || value.eq_ignore_ascii_case("inline-grid"))
+    matches!(
+        style.display(),
+        Some(ComputedDisplay::Grid | ComputedDisplay::InlineGrid)
+    )
 }
 
 pub(super) fn layout_grid_container(
@@ -161,7 +163,7 @@ pub(super) fn layout_grid_container(
             continue;
         }
         let child_style = resolver.computed_style(&child);
-        if is_display_none(&child_style) {
+        if child_style.is_display_none() {
             continue;
         }
         if is_out_of_flow_positioned(&child_style) {

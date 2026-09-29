@@ -9,7 +9,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::css::{
-    AffineTransform, ComputedStyle, ComputedValue, ContainerContext, PseudoElement, StyleResolver,
+    AffineTransform, ComputedDirection, ComputedFloat, ComputedPosition, ComputedStyle,
+    ComputedValue, ComputedWritingMode, ContainerContext, PseudoElement, StyleResolver,
     TransformReferenceBox, parse_perspective_with_origin, parse_transform_with_origin,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
@@ -894,17 +895,11 @@ enum WritingMode {
 }
 
 fn writing_mode(style: &ComputedStyle) -> WritingMode {
-    match style.get("writing-mode") {
-        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
-            if value.eq_ignore_ascii_case("vertical-rl")
-                || value.eq_ignore_ascii_case("sideways-rl") =>
-        {
+    match style.writing_mode() {
+        Some(ComputedWritingMode::VerticalRl | ComputedWritingMode::SidewaysRl) => {
             WritingMode::VerticalRl
         }
-        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
-            if value.eq_ignore_ascii_case("vertical-lr")
-                || value.eq_ignore_ascii_case("sideways-lr") =>
-        {
+        Some(ComputedWritingMode::VerticalLr | ComputedWritingMode::SidewaysLr) => {
             WritingMode::VerticalLr
         }
         _ => WritingMode::HorizontalTb,
@@ -920,11 +915,7 @@ fn is_vertical_rl(style: &ComputedStyle) -> bool {
 }
 
 fn direction_is_rtl(style: &ComputedStyle) -> bool {
-    matches!(
-        style.get("direction"),
-        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
-            if value.eq_ignore_ascii_case("rtl")
-    )
+    style.direction() == Some(ComputedDirection::Rtl)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2500,7 +2491,7 @@ fn generated_inline_pseudo_exists(
     resolver
         .computed_pseudo_style(node, pseudo)
         .is_some_and(|style| {
-            !is_display_none(&style)
+            !style.is_display_none()
                 && pseudo_generates_content(&style)
                 && !is_out_of_flow_positioned(&style)
                 && float_side(&style) == FloatSide::None
@@ -2519,7 +2510,7 @@ fn generated_pseudo_style(
     pseudo: PseudoElement,
 ) -> Option<ComputedStyle> {
     let style = resolver.computed_pseudo_style(node, pseudo)?;
-    if is_display_none(&style) || !pseudo_generates_content(&style) {
+    if style.is_display_none() || !pseudo_generates_content(&style) {
         return None;
     }
     Some(style)
@@ -2634,7 +2625,7 @@ fn layout_element_with_cell(
     }
 
     let style = resolver.computed_style(node);
-    if is_display_none(&style) {
+    if style.is_display_none() {
         return None;
     }
 
@@ -4228,31 +4219,19 @@ pub(crate) fn establishes_fixed_containing_block(style: &ComputedStyle) -> bool 
 }
 
 pub(super) fn position_scheme(style: &ComputedStyle) -> PositionScheme {
-    match style.get("position") {
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("relative") => {
-            PositionScheme::Relative
-        }
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("sticky") => {
-            PositionScheme::Sticky
-        }
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute") => {
-            PositionScheme::Absolute
-        }
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed") => {
-            PositionScheme::Fixed
-        }
+    match style.position() {
+        Some(ComputedPosition::Relative) => PositionScheme::Relative,
+        Some(ComputedPosition::Sticky) => PositionScheme::Sticky,
+        Some(ComputedPosition::Absolute) => PositionScheme::Absolute,
+        Some(ComputedPosition::Fixed) => PositionScheme::Fixed,
         _ => PositionScheme::Static,
     }
 }
 
 fn float_side(style: &ComputedStyle) -> FloatSide {
-    match style.get("float") {
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("left") => {
-            FloatSide::Left
-        }
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("right") => {
-            FloatSide::Right
-        }
+    match style.float() {
+        Some(ComputedFloat::Left) => FloatSide::Left,
+        Some(ComputedFloat::Right) => FloatSide::Right,
         _ => FloatSide::None,
     }
 }
@@ -4418,7 +4397,7 @@ fn minimum_content_width_inner(
             .unwrap_or(0.0),
         NodeType::Element => {
             let style = resolver.computed_style(node);
-            if is_display_none(&style) || is_non_rendered_html_element(node) {
+            if style.is_display_none() || is_non_rendered_html_element(node) {
                 return 0.0;
             }
             let padding = edge_sizes(&style, "padding");
@@ -4491,7 +4470,7 @@ fn intrinsic_width_inner(
             .unwrap_or(0.0),
         NodeType::Element => {
             let style = resolver.computed_style(node);
-            if is_display_none(&style) || is_non_rendered_html_element(node) {
+            if style.is_display_none() || is_non_rendered_html_element(node) {
                 return 0.0;
             }
             let padding = edge_sizes(&style, "padding");
@@ -5150,13 +5129,6 @@ fn is_non_rendered_html_element(node: &NodeHandle) -> bool {
             Some("head" | "title" | "meta" | "style" | "script" | "link" | "noscript" | "source")
         )
     })
-}
-
-fn is_display_none(style: &ComputedStyle) -> bool {
-    matches!(
-        style.get("display"),
-        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("none")
-    )
 }
 
 fn visibility(style: &ComputedStyle) -> Visibility {
