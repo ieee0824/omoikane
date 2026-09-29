@@ -1,0 +1,29 @@
+name: Issue 1142 deadline evidence
+on:
+  push:
+    branches: [ci/issue1142-deadline-evidence]
+    paths: [.github/workflows/issue1142-evidence.yml]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: issue1142-deadlines
+      - name: Compare request and runtime deadlines before and after the fix
+        run: python3 scripts/issue1142-deadline-evidence.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue1142-x86-deadlines
+          path: .artifacts/issue1142/
+          if-no-files-found: error
