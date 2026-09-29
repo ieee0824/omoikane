@@ -192,7 +192,12 @@ try:
     xtst.XTestFakeRelativeMotionEvent(d,5000,-4000,0); x.XFlush(d)
     move=wait_for('unbounded relative motion',state,lambda s:s.get('dx',0)>=5000 and s.get('dy',0)<=-4000)
     assert (move['moves'],move['dx'],move['dy']) == (1,5000,-4000), move
-    assert (move['x'],move['y']) == (150,200), move
+    # The browser toolbar sits above the page, so the page sees the cursor
+    # shifted up by the window height the page viewport does not cover.
+    toolbar_height=bounds['HEIGHT']-move['viewportHeight']
+    assert 0 <= toolbar_height < 200, (bounds, move)
+    assert (move['x'],move['y']) == (150,200-toolbar_height), move
+    evidence.append({'toolbar_height':toolbar_height})
     position=geometry(command('xdotool','getmouselocation','--shell'))
     assert bounds['X'] <= position['X'] < bounds['X']+bounds['WIDTH'], (bounds,position)
     assert bounds['Y'] <= position['Y'] < bounds['Y']+bounds['HEIGHT'], (bounds,position)

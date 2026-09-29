@@ -16,6 +16,7 @@ const target = document.getElementById('target');
 const state = { locked: false, moves: 0, dx: 0, dy: 0, x: 0, y: 0,
   down: 0, wheel: 0, changes: 0, resolved: 0, error: '', keys: [] };
 function report() {
+  state.viewportHeight = innerHeight;
   const text = JSON.stringify(state);
   document.title = 'PLTEST:' + text;
   document.getElementById('state').textContent = text;

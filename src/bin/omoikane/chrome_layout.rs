@@ -6,10 +6,6 @@
 //! toolbar offset is applied exactly once. Pointer Lock's relative motion is
 //! a delta, not a position, and does not pass through this mapping.
 
-// BrowserApp starts painting and routing input through this layout in
-// #1137–#1138.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::device_scale::DeviceScale;
 
 /// Toolbar height in logical pixels (CSS pixels of the browser UI).
@@ -25,6 +21,8 @@ pub(super) struct PhysicalRect {
 }
 
 impl PhysicalRect {
+    // Input routing by region starts in #1138.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn contains(self, x: f64, y: f64) -> bool {
         x >= f64::from(self.x)
             && y >= f64::from(self.y)
@@ -34,6 +32,8 @@ impl PhysicalRect {
 }
 
 /// The window region under a physical position.
+// Input routing by region starts in #1138.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum WindowRegion {
     /// Inside the toolbar, in logical pixels from the toolbar's top-left.
@@ -88,6 +88,11 @@ impl ChromeLayout {
         }
     }
 
+    /// Returns the scale used by every mapping of this layout.
+    pub(super) fn scale(&self) -> DeviceScale {
+        self.scale
+    }
+
     /// Returns the toolbar area; its height is zero when hidden.
     pub(super) fn toolbar(&self) -> PhysicalRect {
         self.toolbar
@@ -114,7 +119,19 @@ impl ChromeLayout {
         )
     }
 
+    /// Maps a page position in CSS pixels back to window logical pixels, the
+    /// unit the windowing library uses to place the native cursor.
+    pub(super) fn window_logical_point(&self, page_x: f64, page_y: f64) -> (f64, f64) {
+        let factor = self.scale.factor();
+        (
+            page_x + f64::from(self.page.x) / factor,
+            page_y + f64::from(self.page.y) / factor,
+        )
+    }
+
     /// Returns the region under a physical window position.
+    // Input routing by region starts in #1138.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn region_at(&self, physical_x: f64, physical_y: f64) -> WindowRegion {
         let factor = self.scale.factor();
         if self.toolbar.contains(physical_x, physical_y) {
@@ -255,6 +272,19 @@ mod tests {
         let layout = layout(1280, 720, 1.0);
         assert_eq!(layout.page_point(-5.0, 0.0), (-5.0, -40.0));
         assert_eq!(layout.page_point(1300.0, 800.0), (1300.0, 760.0));
+    }
+
+    #[test]
+    fn window_logical_point_inverts_page_point() {
+        for factor in [1.0, 1.5, 2.0] {
+            let layout = layout(1920, 1080, factor);
+            let (page_x, page_y) = layout.page_point(301.0, 420.0);
+            assert_eq!(
+                layout.window_logical_point(page_x, page_y),
+                (301.0 / factor, 420.0 / factor),
+                "{factor}"
+            );
+        }
     }
 
     #[test]

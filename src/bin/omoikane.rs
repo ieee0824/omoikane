@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::error::Error;
 use std::num::NonZeroU32;
@@ -5,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrome_layout::ChromeLayout;
 use device_scale::{DeviceScale, blit_scaled};
 use omoikane::cdp::CdpSession;
 use omoikane::dom::NodeHandle;
@@ -12,7 +14,8 @@ use omoikane::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
     ReporterConfig, RetentionPolicy, install_panic_reporter,
 };
-use omoikane::frame::{PlatformFrameScheduler, render_browser_frame};
+use omoikane::font::{Font, load_system_font};
+use omoikane::frame::{BrowserFrame, PlatformFrameScheduler, render_browser_frame};
 use omoikane::js::{FindInPageResult, FullscreenTransition, PointerLockTransition};
 use omoikane::platform_input::{
     InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
@@ -20,6 +23,8 @@ use omoikane::platform_input::{
 };
 use serde_json::json;
 use softbuffer::{Context, Surface};
+use toolbar_paint::paint_toolbar;
+use url_bar::UrlBar;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{
@@ -36,6 +41,8 @@ mod chrome_layout;
 mod device_scale;
 #[path = "omoikane/pointer_lock_host.rs"]
 mod pointer_lock_host;
+#[path = "omoikane/toolbar_paint.rs"]
+mod toolbar_paint;
 #[path = "omoikane/url_bar.rs"]
 mod url_bar;
 
@@ -156,9 +163,12 @@ struct BrowserApp {
     native_fullscreen: bool,
     native_pointer_lock: bool,
     native_pointer_lock_raw_buttons: bool,
+    /// Window logical position to restore the cursor to after Pointer Lock.
     pointer_restore: (f64, f64),
     trace_input: bool,
     input_trace_sequence: u64,
+    url_bar: UrlBar,
+    toolbar_font: OnceCell<Option<Font>>,
 }
 
 impl BrowserApp {
@@ -188,6 +198,8 @@ impl BrowserApp {
             pointer_restore: (0.0, 0.0),
             trace_input: std::env::var_os("OMOIKANE_TRACE_INPUT").is_some(),
             input_trace_sequence: 0,
+            url_bar: UrlBar::new(url),
+            toolbar_font: OnceCell::new(),
         })
     }
 
@@ -250,7 +262,8 @@ impl BrowserApp {
                         !unadjusted_movement && pointer_lock_host::set_grab(window, true).is_ok();
                     if accepted {
                         if !self.native_pointer_lock {
-                            self.pointer_restore = self.input.cursor_position();
+                            let (x, y) = self.input.cursor_position();
+                            self.pointer_restore = self.chrome_layout().window_logical_point(x, y);
                         }
                         window.set_cursor_visible(false);
                         self.native_pointer_lock = true;
@@ -280,18 +293,26 @@ impl BrowserApp {
             return Ok(());
         };
         let size = window.inner_size();
-        let (Some(width), Some(height)) =
-            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-        else {
+        if size.width == 0 || size.height == 0 {
             return Ok(());
+        }
+        let layout = self.chrome_layout();
+        // A window no taller than the toolbar has no page area to paint.
+        let frame = match layout.page_viewport() {
+            (0, _) | (_, 0) => None,
+            (width, height) => Some(
+                render_browser_frame(&mut self.session, width, height, elapsed_ms).map_err(
+                    |error| {
+                        report_gui_failure(
+                            self.error_reporter.as_deref(),
+                            GuiFailure::Frame,
+                            &error,
+                        );
+                        error
+                    },
+                )?,
+            ),
         };
-        let scale = DeviceScale::new(window.scale_factor());
-        let (page_width, page_height) = scale.page_viewport(size.width, size.height);
-        let frame = render_browser_frame(&mut self.session, page_width, page_height, elapsed_ms)
-            .map_err(|error| {
-                report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
-                error
-            })?;
         self.sync_find_document();
         let title = find_window_title(
             document_window_title(&mut self.session).map_err(|error| {
@@ -303,7 +324,22 @@ impl BrowserApp {
         if let Some(title) = changed_window_title(&mut self.window_title, title) {
             window.set_title(&title);
         }
+        self.present(&layout, frame.as_ref())
+    }
 
+    /// Composites the page frame below the toolbar and shows the result.
+    fn present(
+        &mut self,
+        layout: &ChromeLayout,
+        frame: Option<&BrowserFrame>,
+    ) -> Result<(), Box<dyn Error>> {
+        let (toolbar, page) = (layout.toolbar(), layout.page());
+        let (Some(width), Some(height)) = (
+            NonZeroU32::new(page.width),
+            NonZeroU32::new(toolbar.height + page.height),
+        ) else {
+            return Ok(());
+        };
         let Some(surface) = &mut self.surface else {
             return Ok(());
         };
@@ -323,12 +359,25 @@ impl BrowserApp {
             );
             error
         })?;
-        blit_scaled(
-            frame.pixels(),
-            (frame.width(), frame.height()),
+        if let Some(frame) = frame {
+            // The page spans whole surface rows, so its rows are contiguous.
+            let rows = page.y as usize * page.width as usize
+                ..(page.y + page.height) as usize * page.width as usize;
+            blit_scaled(
+                frame.pixels(),
+                (frame.width(), frame.height()),
+                &mut target[rows],
+                (page.width, page.height),
+                layout.scale(),
+            );
+        }
+        paint_toolbar(
             &mut target,
-            (size.width, size.height),
-            scale,
+            page.width,
+            toolbar,
+            layout.scale(),
+            &self.url_bar,
+            self.toolbar_font.get_or_init(load_toolbar_font).as_ref(),
         );
         target.present().map_err(|error| {
             report_gui_failure(
@@ -339,6 +388,21 @@ impl BrowserApp {
             error
         })?;
         Ok(())
+    }
+
+    /// Returns the toolbar and page areas of the current window. The toolbar
+    /// is hidden while the page is fullscreen.
+    fn chrome_layout(&self) -> ChromeLayout {
+        let size = self
+            .window
+            .as_ref()
+            .map_or_else(Default::default, |window| window.inner_size());
+        ChromeLayout::new(
+            size.width,
+            size.height,
+            self.device_scale(),
+            !self.native_fullscreen,
+        )
     }
 
     /// Returns the scale shared by painting and pointer input.
@@ -491,7 +555,7 @@ impl BrowserApp {
         let scale_factor = self.device_scale().factor();
         let result = match event {
             WindowEvent::CursorMoved { position, .. } => {
-                let (x, y) = physical_position_css_pixels(position, scale_factor);
+                let (x, y) = self.chrome_layout().page_point(position.x, position.y);
                 self.input.cursor_moved(&mut self.session, x, y)
             }
             WindowEvent::CursorLeft { .. } => {
@@ -522,7 +586,9 @@ impl BrowserApp {
                 self.input.wheel(&mut self.session, delta_x, delta_y)
             }
             WindowEvent::Touch(touch) => {
-                let (x, y) = physical_position_css_pixels(touch.location, scale_factor);
+                let (x, y) = self
+                    .chrome_layout()
+                    .page_point(touch.location.x, touch.location.y);
                 let phase = match touch.phase {
                     TouchPhase::Started => PlatformTouchPhase::Started,
                     TouchPhase::Moved => PlatformTouchPhase::Moved,
@@ -593,6 +659,24 @@ impl BrowserApp {
         self.sync_pointer_lock();
         true
     }
+}
+
+/// Loads the URL field's font, trying common families before drawing the
+/// field without text.
+fn load_toolbar_font() -> Option<Font> {
+    let font = [
+        "sans-serif",
+        "DejaVu Sans",
+        "Liberation Sans",
+        "Helvetica",
+        "Arial",
+    ]
+    .into_iter()
+    .find_map(|family| load_system_font(family).ok());
+    if font.is_none() {
+        eprintln!("toolbar font unavailable; drawing the URL field without text");
+    }
+    font
 }
 
 fn platform_ime_event(event: Ime) -> PlatformImeEvent {
