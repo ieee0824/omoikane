@@ -398,8 +398,21 @@
     "transform-style", "backface-visibility", "mix-blend-mode", "isolation",
     "text-overflow",
     "width", "height", "min-width", "min-height", "max-width", "max-height",
+    "inline-size", "block-size", "min-inline-size", "min-block-size",
+    "max-inline-size", "max-block-size",
     "top", "right", "bottom", "left",
+    "inset", "inset-inline", "inset-block",
     "inset-inline-start", "inset-inline-end", "inset-block-start", "inset-block-end",
+    "border-inline-start-width", "border-inline-end-width", "border-block-start-width",
+    "border-block-end-width", "border-inline-width", "border-block-width",
+    "border-inline", "border-block", "border-inline-start", "border-inline-end",
+    "border-block-start", "border-block-end",
+    "border-inline-start-style", "border-inline-end-style", "border-block-start-style",
+    "border-block-end-style", "border-inline-style", "border-block-style",
+    "border-inline-start-color", "border-inline-end-color", "border-block-start-color",
+    "border-block-end-color", "border-inline-color", "border-block-color",
+    "border-start-start-radius", "border-start-end-radius",
+    "border-end-start-radius", "border-end-end-radius",
     "object-position",
     "content-visibility", "contain-intrinsic-size", "contain-intrinsic-width",
     "contain-intrinsic-height", "contain-intrinsic-inline-size",
@@ -418,6 +431,27 @@
     "scroll-margin-block-start", "scroll-margin-block-end",
   ]);
   const styleShorthandLonghands = Object.freeze({
+    "inset": ["top", "right", "bottom", "left"],
+    "inset-inline": ["inset-inline-start", "inset-inline-end"],
+    "inset-block": ["inset-block-start", "inset-block-end"],
+    "border-inline-width": ["border-inline-start-width", "border-inline-end-width"],
+    "border-inline-style": ["border-inline-start-style", "border-inline-end-style"],
+    "border-inline-color": ["border-inline-start-color", "border-inline-end-color"],
+    "border-block-width": ["border-block-start-width", "border-block-end-width"],
+    "border-block-style": ["border-block-start-style", "border-block-end-style"],
+    "border-block-color": ["border-block-start-color", "border-block-end-color"],
+    "border-inline-start": ["border-inline-start-width", "border-inline-start-style", "border-inline-start-color"],
+    "border-inline-end": ["border-inline-end-width", "border-inline-end-style", "border-inline-end-color"],
+    "border-block-start": ["border-block-start-width", "border-block-start-style", "border-block-start-color"],
+    "border-block-end": ["border-block-end-width", "border-block-end-style", "border-block-end-color"],
+    "border-inline": [
+      "border-inline-start-width", "border-inline-start-style", "border-inline-start-color",
+      "border-inline-end-width", "border-inline-end-style", "border-inline-end-color",
+    ],
+    "border-block": [
+      "border-block-start-width", "border-block-start-style", "border-block-start-color",
+      "border-block-end-width", "border-block-end-style", "border-block-end-color",
+    ],
     "columns": ["column-width", "column-count"],
     "column-rule": ["column-rule-width", "column-rule-style", "column-rule-color"],
     "contain-intrinsic-size": ["contain-intrinsic-width", "contain-intrinsic-height"],
@@ -429,6 +463,58 @@
     "scroll-margin-inline": ["scroll-margin-inline-start", "scroll-margin-inline-end"],
     "scroll-margin-block": ["scroll-margin-block-start", "scroll-margin-block-end"],
   });
+
+  function logicalShorthandValue(kebab, declarations) {
+    const longhands = styleShorthandLonghands[kebab];
+    if (!longhands) return null;
+    const values = new Map();
+    for (const declaration of declarations) {
+      if (declaration.name === kebab) {
+        try {
+          for (const [name, value] of JSON.parse(__omoikane_expand_style_shorthand(
+            kebab, declaration.value
+          ))) values.set(name, value);
+        } catch (_) {}
+      } else if (longhands.includes(declaration.name)) {
+        values.set(declaration.name, declaration.value);
+      }
+    }
+    const parts = longhands.map(name => values.get(name));
+    if (kebab === "border-inline" || kebab === "border-block") {
+      return parts.slice(0, 3).every((value, index) => value === parts[index + 3])
+        ? parts.slice(0, 3).filter(Boolean).join(" ") : "";
+    }
+    if (kebab === "border-inline-start" || kebab === "border-inline-end" ||
+        kebab === "border-block-start" || kebab === "border-block-end") {
+      return parts.filter(Boolean).join(" ");
+    }
+    if (parts.some(value => !value)) return "";
+    if (kebab === "inset") {
+      const [top, right, bottom, left] = parts;
+      if (top === right && top === bottom && top === left) return top;
+      if (top === bottom && right === left) return top + " " + right;
+      if (right === left) return top + " " + right + " " + bottom;
+      return parts.join(" ");
+    }
+    if (longhands.length === 2) return parts[0] === parts[1] ? parts[0] : parts.join(" ");
+    if (longhands.length === 3) return parts.join(" ");
+    return null;
+  }
+
+  function computedLogicalShorthand(map, kebab) {
+    if (kebab !== "inset" && kebab !== "inset-inline" && kebab !== "inset-block" &&
+        kebab !== "border-inline" && kebab !== "border-block" &&
+        !kebab.startsWith("border-inline-") && !kebab.startsWith("border-block-")) {
+      return null;
+    }
+    const longhands = styleShorthandLonghands[kebab];
+    if (!longhands) return null;
+    const declarations = longhands.map(name => ({
+      name,
+      value: Object.prototype.hasOwnProperty.call(map, name) ? map[name] : "auto",
+    }));
+    return logicalShorthandValue(kebab, declarations);
+  }
 
   // CSSOM serializes the two physical contain-intrinsic-size axes back through
   // their shorthand. Walk declarations in order so cssText assignments and
@@ -2960,6 +3046,12 @@
       // Later declarations win, matching the inline cascade.
       const getValue = (kebab) => {
         const decls = parseDecls();
+        if (kebab === "inset" || kebab.startsWith("inset-") ||
+            kebab === "border-inline" || kebab.startsWith("border-inline-") ||
+            kebab === "border-block" || kebab.startsWith("border-block-")) {
+          const shorthand = logicalShorthandValue(kebab, decls);
+          if (shorthand !== null) return shorthand;
+        }
         if (kebab === "contain-intrinsic-size") {
           return containIntrinsicSizeShorthand(decls);
         }
@@ -16182,7 +16274,7 @@
         const map = readMap();
         const key = __styleNameToCss(name).toLowerCase();
         return Object.prototype.hasOwnProperty.call(map, key) ? map[key] :
-          (key === "z-index" ? "auto" : "");
+          (computedLogicalShorthand(map, key) ?? (key === "z-index" ? "auto" : ""));
       },
       getPropertyPriority() { return ""; },
       get length() { return Object.keys(readMap()).length; },
@@ -16201,7 +16293,7 @@
         if (indexed !== null) return indexed;
         const key = __styleNameToCss(prop);
         return Object.prototype.hasOwnProperty.call(map, key) ? map[key] :
-          (key === "z-index" ? "auto" : "");
+          (computedLogicalShorthand(map, key) ?? (key === "z-index" ? "auto" : ""));
       },
       has(target, prop) {
         // Symbols (e.g. `Symbol.iterator in getComputedStyle(el)`) must never be
@@ -16212,7 +16304,9 @@
         const map = readMap();
         const indexed = indexedName(map, prop);
         if (indexed !== null) return indexed !== "";
-        return Object.prototype.hasOwnProperty.call(map, __styleNameToCss(prop));
+        const key = __styleNameToCss(prop);
+        return Object.prototype.hasOwnProperty.call(map, key) ||
+          computedLogicalShorthand(map, key) !== null;
       },
       set() {
         // getComputedStyle returns a read-only CSSStyleDeclaration: its

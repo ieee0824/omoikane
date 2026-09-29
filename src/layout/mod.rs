@@ -4061,57 +4061,15 @@ pub(crate) fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
         .or_else(|| explicit_length(style, &format!("{prefix}-{side}")))
     };
 
-    // Logical properties are resolved against the element's own writing mode,
-    // not the horizontal defaults used by the CSS cascade's physical aliases.
-    // Prefer them for vertical boxes so `padding-inline-start` maps to the
-    // inline (top/bottom) axis and `padding-block-start` maps to the column
-    // (left/right) axis.  Horizontal boxes retain the historical physical
-    // precedence, which also preserves the CSS cascade tests for a later
-    // `padding-left` overriding an earlier logical declaration.
-    if is_vertical_writing(style) {
-        let inline_start = logical_side_length(style, prefix, "inline", true);
-        let inline_end = logical_side_length(style, prefix, "inline", false);
-        let block_start = logical_side_length(style, prefix, "block", true);
-        let block_end = logical_side_length(style, prefix, "block", false);
-        let rtl = direction_is_rtl(style);
-        let top = if rtl { inline_end } else { inline_start };
-        let bottom = if rtl { inline_start } else { inline_end };
-        let (left, right) = if matches!(writing_mode(style), WritingMode::VerticalRl) {
-            (block_end, block_start)
-        } else {
-            (block_start, block_end)
-        };
-        return EdgeSizes {
-            top: top.or_else(|| physical("top")).unwrap_or(shorthand),
-            right: right.or_else(|| physical("right")).unwrap_or(shorthand),
-            bottom: bottom.or_else(|| physical("bottom")).unwrap_or(shorthand),
-            left: left.or_else(|| physical("left")).unwrap_or(shorthand),
-        };
-    }
-
-    let rtl = direction_is_rtl(style);
-    let inline_start = logical_side_length(style, prefix, "inline", true);
-    let inline_end = logical_side_length(style, prefix, "inline", false);
-    let block_start = logical_side_length(style, prefix, "block", true);
-    let block_end = logical_side_length(style, prefix, "block", false);
-    let left_logical = if rtl { inline_end } else { inline_start };
-    let right_logical = if rtl { inline_start } else { inline_end };
+    // The cascade already mapped logical declarations to physical sides in
+    // priority order. Re-reading their logical spellings here would let an
+    // earlier declaration override a later physical declaration.
     EdgeSizes {
-        top: physical("top").or(block_start).unwrap_or(shorthand),
-        right: physical("right").or(right_logical).unwrap_or(shorthand),
-        bottom: physical("bottom").or(block_end).unwrap_or(shorthand),
-        left: physical("left").or(left_logical).unwrap_or(shorthand),
+        top: physical("top").unwrap_or(shorthand),
+        right: physical("right").unwrap_or(shorthand),
+        bottom: physical("bottom").unwrap_or(shorthand),
+        left: physical("left").unwrap_or(shorthand),
     }
-}
-
-fn logical_side_length(
-    style: &ComputedStyle,
-    prefix: &str,
-    axis: &str,
-    start: bool,
-) -> Option<f32> {
-    let side = if start { "start" } else { "end" };
-    explicit_length(style, &format!("{prefix}-{axis}-{side}"))
 }
 
 fn explicit_length(style: &ComputedStyle, property: &str) -> Option<f32> {
@@ -4163,19 +4121,11 @@ fn is_auto(value: Option<&ComputedValue>) -> bool {
 }
 
 fn margin_start_is_auto(style: &ComputedStyle) -> bool {
-    if is_vertical_writing(style) {
-        is_auto(style.get("margin-left")) || is_auto(style.get("margin-block-start"))
-    } else {
-        is_auto(style.get("margin-left")) || is_auto(style.get("margin-inline-start"))
-    }
+    is_auto(style.get("margin-left"))
 }
 
 fn margin_end_is_auto(style: &ComputedStyle) -> bool {
-    if is_vertical_writing(style) {
-        is_auto(style.get("margin-right")) || is_auto(style.get("margin-block-end"))
-    } else {
-        is_auto(style.get("margin-right")) || is_auto(style.get("margin-inline-end"))
-    }
+    is_auto(style.get("margin-right"))
 }
 
 // ── Margin collapsing ───────────────────────────────────────────────────────
@@ -4713,46 +4663,58 @@ fn positioned_insets(
     style: &ComputedStyle,
     origin: Rect,
 ) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
-    let rtl = direction_is_rtl(style);
-    let (left_logical, right_logical, top_logical, bottom_logical) = if is_vertical_writing(style) {
-        // In vertical writing the inline axis is physical y.  Direction
-        // reverses inline start/end, while writing-mode chooses the physical
-        // block start/end edge for the x axis.
-        let inline_start = resolved_length(style, "inset-inline-start", origin.height);
-        let inline_end = resolved_length(style, "inset-inline-end", origin.height);
-        let block_start = resolved_length(style, "inset-block-start", origin.width);
-        let block_end = resolved_length(style, "inset-block-end", origin.width);
-        let (top, bottom) = if rtl {
-            (inline_end, inline_start)
-        } else {
-            (inline_start, inline_end)
-        };
-        let (left, right) = if matches!(writing_mode(style), WritingMode::VerticalRl) {
-            (block_end, block_start)
-        } else {
-            (block_start, block_end)
-        };
-        (left, right, top, bottom)
-    } else {
-        let inline_start = resolved_length(style, "inset-inline-start", origin.width);
-        let inline_end = resolved_length(style, "inset-inline-end", origin.width);
-        let (left, right) = if rtl {
-            (inline_end, inline_start)
-        } else {
-            (inline_start, inline_end)
-        };
-        (
-            left,
-            right,
-            resolved_length(style, "inset-block-start", origin.height),
-            resolved_length(style, "inset-block-end", origin.height),
-        )
-    };
-    let left = resolved_length(style, "left", origin.width).or(left_logical);
-    let right = resolved_length(style, "right", origin.width).or(right_logical);
-    let top = resolved_length(style, "top", origin.height).or(top_logical);
-    let bottom = resolved_length(style, "bottom", origin.height).or(bottom_logical);
-    (left, right, top, bottom)
+    (
+        resolved_length(style, "left", origin.width),
+        resolved_length(style, "right", origin.width),
+        resolved_length(style, "top", origin.height),
+        resolved_length(style, "bottom", origin.height),
+    )
+}
+
+fn positioned_auto_content_width(
+    child: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    layout: &LayoutBox,
+    available_width: f32,
+) -> f32 {
+    let mut width = auto_width_from_layout(layout, child, resolver, available_width);
+    if style.get("min-width").is_none() && style.get("max-width").is_none() {
+        return width;
+    }
+    let decorations =
+        layout.dimensions.padding.horizontal() + layout.dimensions.border.horizontal();
+    let stretch = (available_width - decorations - layout.dimensions.margin.horizontal()).max(0.0);
+    let mut intrinsic = IntrinsicContentWidths::default();
+    let minimum = resolved_content_width(
+        child,
+        resolver,
+        style,
+        "min-width",
+        available_width,
+        layout.dimensions.padding,
+        layout.dimensions.border,
+        stretch,
+        &mut intrinsic,
+    );
+    let maximum = resolved_content_width(
+        child,
+        resolver,
+        style,
+        "max-width",
+        available_width,
+        layout.dimensions.padding,
+        layout.dimensions.border,
+        stretch,
+        &mut intrinsic,
+    );
+    if let Some(minimum) = minimum {
+        width = width.max(minimum);
+    }
+    if let Some(maximum) = maximum {
+        width = width.min(maximum.max(minimum.unwrap_or(0.0)));
+    }
+    width
 }
 
 fn layout_positioned_child_mode(
@@ -4807,7 +4769,8 @@ fn layout_positioned_child_mode(
         )?
     };
     if specified_width.is_none() {
-        let auto_width = auto_width_from_layout(&layout_child, child, resolver, origin.width);
+        let auto_width =
+            positioned_auto_content_width(child, resolver, style, &layout_child, origin.width);
         if (auto_width - layout_child.dimensions.content.width).abs() > 0.5 {
             let outside_width = if is_vertical_writing(style) {
                 layout_child.dimensions.padding.horizontal()
@@ -4841,7 +4804,7 @@ fn layout_positioned_child_mode(
             };
         }
         layout_child.dimensions.content.width =
-            auto_width_from_layout(&layout_child, child, resolver, origin.width);
+            positioned_auto_content_width(child, resolver, style, &layout_child, origin.width);
     }
     let outer_width = layout_child.total_width();
     let outer_height = layout_child.total_height();

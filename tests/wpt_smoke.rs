@@ -68,8 +68,10 @@ fn selected_wpt_testharness_cases_match_expectations() {
         );
         return;
     }
+    let manifest_path =
+        std::env::var("WPT_MANIFEST").unwrap_or_else(|_| "tests/wpt/manifest.json".to_string());
     let manifest: Manifest =
-        serde_json::from_slice(&fs::read("tests/wpt/manifest.json").expect("read WPT manifest"))
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read WPT manifest"))
             .expect("parse WPT manifest");
     if let Err(errors) = validate_manifest(&manifest) {
         panic!("invalid WPT manifest:\n{}", errors.join("\n"));
