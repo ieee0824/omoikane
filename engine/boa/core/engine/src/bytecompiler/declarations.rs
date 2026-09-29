@@ -9,9 +9,9 @@ use boa_ast::{
     declaration::Binding,
     function::{FormalParameterList, FunctionBody},
     operations::{
-        LexicallyScopedDeclaration, VarScopedDeclaration, all_private_identifiers_valid,
+        LexicallyScopedDeclaration, VarScopedDeclarationRef, all_private_identifiers_valid,
         bound_names, lexically_declared_names, lexically_scoped_declarations, var_declared_names,
-        var_scoped_declarations,
+        var_scoped_declaration_refs,
     },
     scope::{FunctionScopes, Scope},
     scope_analyzer::EvalDeclarationBindings,
@@ -66,7 +66,7 @@ pub(crate) fn global_declaration_instantiation_context(
 
     // 5. Let varDeclarations be the VarScopedDeclarations of script.
     // Note: VarScopedDeclarations for a Script node is TopLevelVarScopedDeclarations.
-    let var_declarations = var_scoped_declarations(script);
+    let var_declarations = var_scoped_declaration_refs(script);
 
     // SKIP: 6. Let functionsToInitialize be a new empty List.
 
@@ -80,11 +80,11 @@ pub(crate) fn global_declaration_instantiation_context(
         // a.ii. NOTE: If there are multiple function declarations for the same name, the last declaration is used.
         // a.iii. Let fn be the sole element of the BoundNames of d.
         let name = match declaration {
-            VarScopedDeclaration::FunctionDeclaration(f) => f.name(),
-            VarScopedDeclaration::GeneratorDeclaration(f) => f.name(),
-            VarScopedDeclaration::AsyncFunctionDeclaration(f) => f.name(),
-            VarScopedDeclaration::AsyncGeneratorDeclaration(f) => f.name(),
-            VarScopedDeclaration::VariableDeclaration(_) => continue,
+            VarScopedDeclarationRef::FunctionDeclaration(f) => f.name(),
+            VarScopedDeclarationRef::GeneratorDeclaration(f) => f.name(),
+            VarScopedDeclarationRef::AsyncFunctionDeclaration(f) => f.name(),
+            VarScopedDeclarationRef::AsyncGeneratorDeclaration(f) => f.name(),
+            VarScopedDeclarationRef::VariableDeclaration(_) => continue,
         };
 
         // a.iv. If declaredFunctionNames does not contain fn, then
@@ -104,12 +104,12 @@ pub(crate) fn global_declaration_instantiation_context(
     // 10. For each element d of varDeclarations, do
     //     a. If d is either a VariableDeclaration, a ForBinding, or a BindingIdentifier, then
     for declaration in var_declarations {
-        let VarScopedDeclaration::VariableDeclaration(declaration) = declaration else {
+        let VarScopedDeclarationRef::VariableDeclaration(declaration) = declaration else {
             continue;
         };
 
         // i. For each String vn of the BoundNames of d, do
-        for name in bound_names(&declaration) {
+        for name in bound_names(declaration) {
             // 1. If declaredFunctionNames does not contain vn, then
             if !declared_function_names.contains(&name) {
                 // SKIP: a. Let vnDefinable be ? env.CanDeclareGlobalVar(vn).
@@ -234,7 +234,7 @@ pub(crate) fn eval_declaration_instantiation_context(
 
     // 2. Let varDeclarations be the VarScopedDeclarations of body.
     #[cfg(feature = "annex-b")]
-    let var_declarations = var_scoped_declarations(body);
+    let var_declarations = var_scoped_declaration_refs(body);
 
     // SKIP: 8. Let functionsToInitialize be a new empty List.
 
@@ -250,11 +250,11 @@ pub(crate) fn eval_declaration_instantiation_context(
         // a.ii. NOTE: If there are multiple function declarations for the same name, the last declaration is used.
         // a.iii. Let fn be the sole element of the BoundNames of d.
         let name = match &declaration {
-            VarScopedDeclaration::FunctionDeclaration(f) => f.name(),
-            VarScopedDeclaration::GeneratorDeclaration(f) => f.name(),
-            VarScopedDeclaration::AsyncFunctionDeclaration(f) => f.name(),
-            VarScopedDeclaration::AsyncGeneratorDeclaration(f) => f.name(),
-            VarScopedDeclaration::VariableDeclaration(_) => continue,
+            VarScopedDeclarationRef::FunctionDeclaration(f) => f.name(),
+            VarScopedDeclarationRef::GeneratorDeclaration(f) => f.name(),
+            VarScopedDeclarationRef::AsyncFunctionDeclaration(f) => f.name(),
+            VarScopedDeclarationRef::AsyncGeneratorDeclaration(f) => f.name(),
+            VarScopedDeclarationRef::VariableDeclaration(_) => continue,
         };
 
         // a.iv. If declaredFunctionNames does not contain fn, then
@@ -403,7 +403,7 @@ impl ByteCompiler<'_> {
 
         // 5. Let varDeclarations be the VarScopedDeclarations of script.
         // Note: VarScopedDeclarations for a Script node is TopLevelVarScopedDeclarations.
-        let var_declarations = var_scoped_declarations(script);
+        let var_declarations = var_scoped_declaration_refs(script);
 
         // 6. Let functionsToInitialize be a new empty List.
         let mut functions_to_initialize = Vec::new();
@@ -418,11 +418,11 @@ impl ByteCompiler<'_> {
             // a.ii. NOTE: If there are multiple function declarations for the same name, the last declaration is used.
             // a.iii. Let fn be the sole element of the BoundNames of d.
             let name = match declaration {
-                VarScopedDeclaration::FunctionDeclaration(f) => f.name(),
-                VarScopedDeclaration::GeneratorDeclaration(f) => f.name(),
-                VarScopedDeclaration::AsyncFunctionDeclaration(f) => f.name(),
-                VarScopedDeclaration::AsyncGeneratorDeclaration(f) => f.name(),
-                VarScopedDeclaration::VariableDeclaration(_) => continue,
+                VarScopedDeclarationRef::FunctionDeclaration(f) => f.name(),
+                VarScopedDeclarationRef::GeneratorDeclaration(f) => f.name(),
+                VarScopedDeclarationRef::AsyncFunctionDeclaration(f) => f.name(),
+                VarScopedDeclarationRef::AsyncGeneratorDeclaration(f) => f.name(),
+                VarScopedDeclarationRef::VariableDeclaration(_) => continue,
             };
 
             // a.iv. If declaredFunctionNames does not contain fn, then
@@ -455,12 +455,12 @@ impl ByteCompiler<'_> {
         // 10. For each element d of varDeclarations, do
         //     a. If d is either a VariableDeclaration, a ForBinding, or a BindingIdentifier, then
         for declaration in var_declarations {
-            let VarScopedDeclaration::VariableDeclaration(declaration) = declaration else {
+            let VarScopedDeclarationRef::VariableDeclaration(declaration) = declaration else {
                 continue;
             };
 
             // i. For each String vn of the BoundNames of d, do
-            for name in bound_names(&declaration) {
+            for name in bound_names(declaration) {
                 // 1. If declaredFunctionNames does not contain vn, then
                 if !declared_function_names.contains(&name) {
                     // a. Let vnDefinable be ? env.CanDeclareGlobalVar(vn).
@@ -489,7 +489,7 @@ impl ByteCompiler<'_> {
             // a. Let fn be the sole element of the BoundNames of f.
             let (name, generator, r#async, parameters, body, scopes, contains_direct_eval) =
                 match &function {
-                    VarScopedDeclaration::FunctionDeclaration(f) => (
+                    VarScopedDeclarationRef::FunctionDeclaration(f) => (
                         f.name(),
                         false,
                         false,
@@ -498,7 +498,7 @@ impl ByteCompiler<'_> {
                         f.scopes().clone(),
                         f.contains_direct_eval(),
                     ),
-                    VarScopedDeclaration::GeneratorDeclaration(f) => (
+                    VarScopedDeclarationRef::GeneratorDeclaration(f) => (
                         f.name(),
                         true,
                         false,
@@ -507,7 +507,7 @@ impl ByteCompiler<'_> {
                         f.scopes().clone(),
                         f.contains_direct_eval(),
                     ),
-                    VarScopedDeclaration::AsyncFunctionDeclaration(f) => (
+                    VarScopedDeclarationRef::AsyncFunctionDeclaration(f) => (
                         f.name(),
                         false,
                         true,
@@ -516,7 +516,7 @@ impl ByteCompiler<'_> {
                         f.scopes().clone(),
                         f.contains_direct_eval(),
                     ),
-                    VarScopedDeclaration::AsyncGeneratorDeclaration(f) => (
+                    VarScopedDeclarationRef::AsyncGeneratorDeclaration(f) => (
                         f.name(),
                         true,
                         true,
@@ -525,7 +525,7 @@ impl ByteCompiler<'_> {
                         f.scopes().clone(),
                         f.contains_direct_eval(),
                     ),
-                    VarScopedDeclaration::VariableDeclaration(_) => continue,
+                    VarScopedDeclarationRef::VariableDeclaration(_) => continue,
                 };
 
             let func_span = function.linear_span();
@@ -640,7 +640,7 @@ impl ByteCompiler<'_> {
         bindings: EvalDeclarationBindings,
     ) {
         // 2. Let varDeclarations be the VarScopedDeclarations of body.
-        let var_declarations = var_scoped_declarations(body);
+        let var_declarations = var_scoped_declaration_refs(body);
 
         // SKIP: 3. If strict is false, then
 
@@ -669,11 +669,11 @@ impl ByteCompiler<'_> {
             // a.ii. NOTE: If there are multiple function declarations for the same name, the last declaration is used.
             // a.iii. Let fn be the sole element of the BoundNames of d.
             let name = match &declaration {
-                VarScopedDeclaration::FunctionDeclaration(f) => f.name(),
-                VarScopedDeclaration::GeneratorDeclaration(f) => f.name(),
-                VarScopedDeclaration::AsyncFunctionDeclaration(f) => f.name(),
-                VarScopedDeclaration::AsyncGeneratorDeclaration(f) => f.name(),
-                VarScopedDeclaration::VariableDeclaration(_) => continue,
+                VarScopedDeclarationRef::FunctionDeclaration(f) => f.name(),
+                VarScopedDeclarationRef::GeneratorDeclaration(f) => f.name(),
+                VarScopedDeclarationRef::AsyncFunctionDeclaration(f) => f.name(),
+                VarScopedDeclarationRef::AsyncGeneratorDeclaration(f) => f.name(),
+                VarScopedDeclarationRef::VariableDeclaration(_) => continue,
             };
             // a.iv. If declaredFunctionNames does not contain fn, then
             if !declared_function_names.contains(&name.sym()) {
@@ -729,12 +729,12 @@ impl ByteCompiler<'_> {
         // 13. For each element d of varDeclarations, do
         for declaration in var_declarations {
             // a. If d is either a VariableDeclaration, a ForBinding, or a BindingIdentifier, then
-            let VarScopedDeclaration::VariableDeclaration(declaration) = declaration else {
+            let VarScopedDeclarationRef::VariableDeclaration(declaration) = declaration else {
                 continue;
             };
 
             // a.i. For each String vn of the BoundNames of d, do
-            for name in bound_names(&declaration) {
+            for name in bound_names(declaration) {
                 // 1. If declaredFunctionNames does not contain vn, then
                 if !declared_function_names.contains(&name) {
                     // a. If varEnv is a Global Environment Record, then
@@ -772,7 +772,7 @@ impl ByteCompiler<'_> {
             // a. Let fn be the sole element of the BoundNames of f.
             let (name, generator, r#async, parameters, body, scopes, contains_direct_eval) =
                 match &function {
-                    VarScopedDeclaration::FunctionDeclaration(f) => (
+                    VarScopedDeclarationRef::FunctionDeclaration(f) => (
                         f.name(),
                         false,
                         false,
@@ -781,7 +781,7 @@ impl ByteCompiler<'_> {
                         f.scopes().clone(),
                         f.contains_direct_eval(),
                     ),
-                    VarScopedDeclaration::GeneratorDeclaration(f) => (
+                    VarScopedDeclarationRef::GeneratorDeclaration(f) => (
                         f.name(),
                         true,
                         false,
@@ -790,7 +790,7 @@ impl ByteCompiler<'_> {
                         f.scopes().clone(),
                         f.contains_direct_eval(),
                     ),
-                    VarScopedDeclaration::AsyncFunctionDeclaration(f) => (
+                    VarScopedDeclarationRef::AsyncFunctionDeclaration(f) => (
                         f.name(),
                         false,
                         true,
@@ -799,7 +799,7 @@ impl ByteCompiler<'_> {
                         f.scopes().clone(),
                         f.contains_direct_eval(),
                     ),
-                    VarScopedDeclaration::AsyncGeneratorDeclaration(f) => (
+                    VarScopedDeclarationRef::AsyncGeneratorDeclaration(f) => (
                         f.name(),
                         true,
                         true,
@@ -808,7 +808,7 @@ impl ByteCompiler<'_> {
                         f.scopes().clone(),
                         f.contains_direct_eval(),
                     ),
-                    VarScopedDeclaration::VariableDeclaration(_) => {
+                    VarScopedDeclarationRef::VariableDeclaration(_) => {
                         continue;
                     }
                 };
@@ -934,7 +934,7 @@ impl ByteCompiler<'_> {
         let var_names = var_declared_names(body);
 
         // 10. Let varDeclarations be the VarScopedDeclarations of code.
-        let var_declarations = var_scoped_declarations(body);
+        let var_declarations = var_scoped_declaration_refs(body);
 
         // 11. Let lexicalNames be the LexicallyDeclaredNames of code.
         let lexical_names = lexically_declared_names(body);
@@ -951,15 +951,19 @@ impl ByteCompiler<'_> {
             // a.i. Assert: d is either a FunctionDeclaration, a GeneratorDeclaration, an AsyncFunctionDeclaration, or an AsyncGeneratorDeclaration.
             // a.ii. Let fn be the sole element of the BoundNames of d.
             let (name, function) = match declaration {
-                VarScopedDeclaration::FunctionDeclaration(f) => (f.name(), FunctionSpec::from(f)),
-                VarScopedDeclaration::GeneratorDeclaration(f) => (f.name(), FunctionSpec::from(f)),
-                VarScopedDeclaration::AsyncFunctionDeclaration(f) => {
-                    (f.name(), FunctionSpec::from(f))
+                VarScopedDeclarationRef::FunctionDeclaration(f) => {
+                    (f.name(), FunctionSpec::from(*f))
                 }
-                VarScopedDeclaration::AsyncGeneratorDeclaration(f) => {
-                    (f.name(), FunctionSpec::from(f))
+                VarScopedDeclarationRef::GeneratorDeclaration(f) => {
+                    (f.name(), FunctionSpec::from(*f))
                 }
-                VarScopedDeclaration::VariableDeclaration(_) => continue,
+                VarScopedDeclarationRef::AsyncFunctionDeclaration(f) => {
+                    (f.name(), FunctionSpec::from(*f))
+                }
+                VarScopedDeclarationRef::AsyncGeneratorDeclaration(f) => {
+                    (f.name(), FunctionSpec::from(*f))
+                }
+                VarScopedDeclarationRef::VariableDeclaration(_) => continue,
             };
 
             // a.iii. If functionNames does not contain fn, then
