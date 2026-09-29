@@ -30,6 +30,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
 
+#[path = "omoikane/chrome_layout.rs"]
+mod chrome_layout;
 #[path = "omoikane/device_scale.rs"]
 mod device_scale;
 #[path = "omoikane/pointer_lock_host.rs"]
