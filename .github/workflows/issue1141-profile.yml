@@ -1,0 +1,41 @@
+name: Issue 1141 Acid3 test26 profile
+
+on:
+  push:
+    branches: [ci/issue1141-acid3-profile]
+    paths: [.github/workflows/issue1141-profile.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    name: Acid3 profile (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-apple-darwin
+            os: macos-14
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: issue1141-profile-${{ matrix.target }}
+      - name: Measure Acid3 test26 in both execution modes
+        run: python3 scripts/issue1141-profile.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue1141-profile-${{ matrix.target }}
+          path: .artifacts/issue1141-profile/
+          if-no-files-found: error

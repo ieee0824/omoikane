@@ -1,0 +1,203 @@
+diff --git a/src/js/mod.rs b/src/js/mod.rs
+index a33ddec9..789b780c 100644
+--- a/src/js/mod.rs
++++ b/src/js/mod.rs
+@@ -53,0 +54,111 @@ use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
++// Temporary measurements for #1141. This diagnostic branch is not merged.
++#[cfg(feature = "jit-stress")]
++mod acid3_profile {
++    use std::cell::RefCell;
++    use std::time::Instant;
++
++    const LABELS: [&str; 9] = [
++        "get_element_by_id",
++        "create_element",
++        "append_child",
++        "insert_before",
++        "remove_child",
++        "get_attribute",
++        "set_attribute",
++        "create_text_node",
++        "node_to_js_value",
++    ];
++
++    #[derive(Clone, Copy, Default)]
++    struct Stat {
++        calls: u64,
++        nanoseconds: u64,
++    }
++
++    struct State {
++        active: bool,
++        stats: [Stat; LABELS.len()],
++    }
++
++    thread_local! {
++        static STATE: RefCell<State> = const { RefCell::new(State {
++            active: false,
++            stats: [Stat { calls: 0, nanoseconds: 0 }; LABELS.len()],
++        }) };
++    }
++
++    pub(super) struct Timer {
++        index: usize,
++        started: Option<Instant>,
++    }
++
++    impl Timer {
++        pub(super) fn new(index: usize) -> Self {
++            let active = STATE.with(|state| state.borrow().active);
++            Self {
++                index,
++                started: active.then(Instant::now),
++            }
++        }
++    }
++
++    impl Drop for Timer {
++        fn drop(&mut self) {
++            let Some(started) = self.started else { return };
++            let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
++            STATE.with(|state| {
++                let mut state = state.borrow_mut();
++                let stat = &mut state.stats[self.index];
++                stat.calls = stat.calls.saturating_add(1);
++                stat.nanoseconds = stat.nanoseconds.saturating_add(elapsed);
++            });
++        }
++    }
++
++    pub(super) fn begin() {
++        STATE.with(|state| {
++            let mut state = state.borrow_mut();
++            state.stats = [Stat::default(); LABELS.len()];
++            state.active = true;
++        });
++    }
++
++    pub(super) fn finish() -> serde_json::Value {
++        let stats = STATE.with(|state| {
++            let mut state = state.borrow_mut();
++            state.active = false;
++            state.stats
++        });
++        serde_json::Value::Object(
++            LABELS
++                .iter()
++                .enumerate()
++                .map(|(index, label)| {
++                    let stat = stats[index];
++                    (
++                        (*label).to_string(),
++                        serde_json::json!({
++                            "calls": stat.calls,
++                            "nanoseconds": stat.nanoseconds,
++                        }),
++                    )
++                })
++                .collect(),
++        )
++    }
++}
++
++/// Starts temporary native-call timings for the Acid3 test26 investigation.
++#[cfg(feature = "jit-stress")]
++#[doc(hidden)]
++pub fn acid3_native_profile_begin() {
++    acid3_profile::begin();
++}
++
++/// Finishes temporary native-call timings for the Acid3 test26 investigation.
++#[cfg(feature = "jit-stress")]
++#[doc(hidden)]
++pub fn acid3_native_profile_finish() -> serde_json::Value {
++    acid3_profile::finish()
++}
++
+@@ -12318,0 +12430,2 @@ fn node_to_js_value(node: Option<NodeHandle>) -> JsValue {
++    #[cfg(feature = "jit-stress")]
++    let _acid3_timer = acid3_profile::Timer::new(8);
+@@ -15215,0 +15329,2 @@ fn get_element_by_id_native(
++    #[cfg(feature = "jit-stress")]
++    let _acid3_timer = acid3_profile::Timer::new(0);
+@@ -15489,0 +15605,2 @@ fn create_element_native(
++    #[cfg(feature = "jit-stress")]
++    let _acid3_timer = acid3_profile::Timer::new(1);
+@@ -15591,0 +15709,2 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
++    #[cfg(feature = "jit-stress")]
++    let _acid3_timer = acid3_profile::Timer::new(2);
+@@ -16212,0 +16332,2 @@ fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
++    #[cfg(feature = "jit-stress")]
++    let _acid3_timer = acid3_profile::Timer::new(5);
+@@ -16837,0 +16959,2 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
++    #[cfg(feature = "jit-stress")]
++    let _acid3_timer = acid3_profile::Timer::new(6);
+@@ -20183,0 +20307,2 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
++    #[cfg(feature = "jit-stress")]
++    let _acid3_timer = acid3_profile::Timer::new(4);
+@@ -20226,0 +20352,2 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
++    #[cfg(feature = "jit-stress")]
++    let _acid3_timer = acid3_profile::Timer::new(3);
+@@ -20801,0 +20929,2 @@ fn create_text_node_native(
++    #[cfg(feature = "jit-stress")]
++    let _acid3_timer = acid3_profile::Timer::new(7);
+diff --git a/tests/acid3_common/harness.rs b/tests/acid3_common/harness.rs
+index f904e4de..badf0c36 100644
+--- a/tests/acid3_common/harness.rs
++++ b/tests/acid3_common/harness.rs
+@@ -44,0 +45,32 @@ thread_local! {
++#[cfg(feature = "jit-stress")]
++fn begin_test26_profile(runtime: &JsRuntime) -> omoikane::js::BaselineJitDiagnostics {
++    boa_gc::reset_profile();
++    omoikane::js::acid3_native_profile_begin();
++    runtime.baseline_jit_diagnostics()
++}
++
++#[cfg(feature = "jit-stress")]
++fn finish_test26_profile(
++    runtime: &JsRuntime,
++    mode: DriveMode,
++    jit_before: omoikane::js::BaselineJitDiagnostics,
++    wall_ms: f64,
++) {
++    let gc = boa_gc::profile();
++    eprintln!(
++        "ACID3_PROFILE {}",
++        serde_json::json!({
++            "mode": format!("{mode:?}"),
++            "jit_enabled": std::env::var_os("OMOIKANE_ACID3_DISABLE_JIT").is_none(),
++            "wall_ms": wall_ms,
++            "gc_minor_count": gc.minor.collections,
++            "gc_minor_ms": gc.minor.total.as_secs_f64() * 1000.0,
++            "gc_major_count": gc.major.collections,
++            "gc_major_ms": gc.major.total.as_secs_f64() * 1000.0,
++            "jit_before": jit_before,
++            "jit_after": runtime.baseline_jit_diagnostics(),
++            "native": omoikane::js::acid3_native_profile_finish(),
++        })
++    );
++}
++
+@@ -357,0 +390,4 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
++    #[cfg(feature = "jit-stress")]
++    if std::env::var_os("OMOIKANE_ACID3_DISABLE_JIT").is_some() {
++        runtime.set_baseline_jit_enabled(false);
++    }
+@@ -399,0 +436,3 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
++                #[cfg(feature = "jit-stress")]
++                let test26_profile_before =
++                    (last_index == 26).then(|| begin_test26_profile(&runtime));
+@@ -404,0 +444,4 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
++                #[cfg(feature = "jit-stress")]
++                if let Some(before) = test26_profile_before {
++                    finish_test26_profile(&runtime, mode, before, test26_step_wall_ms.unwrap());
++                }
+@@ -467,0 +511,3 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
++                #[cfg(feature = "jit-stress")]
++                let test26_profile_before =
++                    (last_index == 26).then(|| begin_test26_profile(&runtime));
+@@ -473,0 +520,4 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
++                #[cfg(feature = "jit-stress")]
++                if let Some(before) = test26_profile_before {
++                    finish_test26_profile(&runtime, mode, before, test26_step_wall_ms.unwrap());
++                }
