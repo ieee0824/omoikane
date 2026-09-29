@@ -3,25 +3,56 @@
 
 use super::*;
 
+/// Worklet state held by a page global and by the WorkletGlobalScope it owns.
+pub(super) struct State {
+    /// One isolated WorkletGlobalScope shared by Worklet instances in this
+    /// browsing context (including `CSS.paintWorklet`). The runtime is lazily
+    /// constructed on the first `addModule()` call.
+    runtime: Option<WorkletRuntimeHandle>,
+    next_id: u64,
+    /// Worklet globals point back to their owning page only through this
+    /// control-plane handle. It is cleared during teardown so the cycle does
+    /// not keep a navigated page alive.
+    owner: Option<Rc<RefCell<HostState>>>,
+    id: Option<u64>,
+    terminated: bool,
+    modules: HashSet<String>,
+    registrations: HashSet<String>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            runtime: None,
+            next_id: 1,
+            owner: None,
+            id: None,
+            terminated: false,
+            modules: HashSet::new(),
+            registrations: HashSet::new(),
+        }
+    }
+}
+
 /// The deterministic Worklet runtime owned by a page global. Worklet modules
 /// execute in a separate Boa realm; only module metadata crosses back to the
 /// page, so no `JsValue` from the isolated global can leak into the Window.
-pub(super) type WorkletRuntimeHandle = Rc<RefCell<JsRuntime>>;
+type WorkletRuntimeHandle = Rc<RefCell<JsRuntime>>;
 
 /// Tears down the isolated WorkletGlobalScope owned by `state`. Taking the
 /// handle before borrowing the child realm breaks the owner/child cycle even
 /// when navigation drops the page while a module task is pending.
 pub(super) fn terminate_worklet_runtime(state: &Rc<RefCell<HostState>>) {
-    let runtime = state.borrow_mut().worklet_runtime.take();
+    let runtime = state.borrow_mut().worklet.runtime.take();
     let Some(runtime) = runtime else {
         return;
     };
     let child_state = Rc::clone(&runtime.borrow().host_state);
     let mut child_state = child_state.borrow_mut();
-    child_state.worklet_terminated = true;
-    child_state.worklet_owner = None;
-    child_state.worklet_modules.clear();
-    child_state.worklet_registrations.clear();
+    child_state.worklet.terminated = true;
+    child_state.worklet.owner = None;
+    child_state.worklet.modules.clear();
+    child_state.worklet.registrations.clear();
 }
 
 fn worklet_status(ok: bool, name: &str, message: &str, duplicate: bool) -> JsValue {
@@ -62,8 +93,8 @@ fn worklet_error_name(error: &str) -> &'static str {
 fn create_worklet_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     let id = with_host_state(|state| {
         let mut state = state.borrow_mut();
-        let id = state.next_worklet_id;
-        state.next_worklet_id = state.next_worklet_id.saturating_add(1);
+        let id = state.worklet.next_id;
+        state.worklet.next_id = state.worklet.next_id.saturating_add(1);
         Ok(id.to_string())
     })?;
     Ok(js_string!(id).into())
@@ -118,10 +149,10 @@ fn worklet_add_module_native(
         // do not refetch a resource that has already executed successfully.
         // This also ensures a repeated `addModule()` call cannot observe a
         // changing network response after the first successful registration.
-        if let Some(runtime) = owner_state.borrow().worklet_runtime.clone() {
+        if let Some(runtime) = owner_state.borrow().worklet.runtime.clone() {
             let runtime_ref = runtime.borrow();
             let worklet_state = runtime_ref.host_state.borrow();
-            if worklet_state.worklet_terminated {
+            if worklet_state.worklet.terminated {
                 return Ok(worklet_status(
                     false,
                     "InvalidStateError",
@@ -129,7 +160,7 @@ fn worklet_add_module_native(
                     false,
                 ));
             }
-            if worklet_state.worklet_modules.contains(&resolved_url) {
+            if worklet_state.worklet.modules.contains(&resolved_url) {
                 return Ok(worklet_status(true, "", "", true));
             }
         }
@@ -190,7 +221,7 @@ fn worklet_add_module_native(
             }
         }
 
-        let runtime_handle = if let Some(runtime) = owner_state.borrow().worklet_runtime.clone() {
+        let runtime_handle = if let Some(runtime) = owner_state.borrow().worklet.runtime.clone() {
             runtime
         } else {
             let mut runtime = match JsRuntime::with_document_url_and_storage(
@@ -213,9 +244,9 @@ fn worklet_add_module_native(
             let worklet_state = Rc::clone(&runtime.host_state);
             {
                 let mut state = worklet_state.borrow_mut();
-                state.worklet_owner = Some(Rc::clone(owner_state));
-                state.worklet_id = Some(id);
-                state.worklet_terminated = false;
+                state.worklet.owner = Some(Rc::clone(owner_state));
+                state.worklet.id = Some(id);
+                state.worklet.terminated = false;
             }
             if let Err(error) = runtime.eval(&format!(
                 "__omoikane_install_worklet_global({effective_url:?}, {id:?})"
@@ -228,14 +259,14 @@ fn worklet_add_module_native(
                 ));
             }
             let runtime = Rc::new(RefCell::new(runtime));
-            owner_state.borrow_mut().worklet_runtime = Some(Rc::clone(&runtime));
+            owner_state.borrow_mut().worklet.runtime = Some(Rc::clone(&runtime));
             runtime
         };
 
         {
             let runtime = runtime_handle.borrow();
             let state = runtime.host_state.borrow();
-            if state.worklet_terminated {
+            if state.worklet.terminated {
                 return Ok(worklet_status(
                     false,
                     "InvalidStateError",
@@ -243,7 +274,7 @@ fn worklet_add_module_native(
                     false,
                 ));
             }
-            if state.worklet_modules.contains(&resolved_url) {
+            if state.worklet.modules.contains(&resolved_url) {
                 return Ok(worklet_status(true, "", "", true));
             }
         }
@@ -267,7 +298,8 @@ fn worklet_add_module_native(
             .borrow()
             .host_state
             .borrow_mut()
-            .worklet_modules
+            .worklet
+            .modules
             .insert(resolved_url);
         Ok(worklet_status(true, "", "", false))
     })
@@ -282,10 +314,10 @@ fn worklet_register_native(
     let name = string_argument(args.get(1), "", context)?;
     with_host_state(|state| {
         let mut state = state.borrow_mut();
-        if state.worklet_id != Some(id) || state.worklet_terminated {
+        if state.worklet.id != Some(id) || state.worklet.terminated {
             return Ok(JsValue::from(false));
         }
-        state.worklet_registrations.insert(name);
+        state.worklet.registrations.insert(name);
         Ok(JsValue::from(true))
     })
 }
@@ -297,16 +329,16 @@ fn worklet_registered_names_native(
 ) -> JsResult<JsValue> {
     let id = worker_id_argument(args, context)?;
     with_host_state(|owner_state| {
-        let runtime = owner_state.borrow().worklet_runtime.clone();
+        let runtime = owner_state.borrow().worklet.runtime.clone();
         let Some(runtime) = runtime else {
             return Ok(js_string!("[]").into());
         };
         let runtime_ref = runtime.borrow();
         let state = runtime_ref.host_state.borrow();
-        if state.worklet_id != Some(id) || state.worklet_terminated {
+        if state.worklet.id != Some(id) || state.worklet.terminated {
             return Ok(js_string!("[]").into());
         }
-        let mut names: Vec<_> = state.worklet_registrations.iter().cloned().collect();
+        let mut names: Vec<_> = state.worklet.registrations.iter().cloned().collect();
         names.sort();
         let json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
         Ok(js_string!(json).into())
@@ -320,16 +352,16 @@ fn worklet_module_count_native(
 ) -> JsResult<JsValue> {
     let id = worker_id_argument(args, context)?;
     with_host_state(|owner_state| {
-        let runtime = owner_state.borrow().worklet_runtime.clone();
+        let runtime = owner_state.borrow().worklet.runtime.clone();
         let Some(runtime) = runtime else {
             return Ok(JsValue::from(0));
         };
         let runtime_ref = runtime.borrow();
         let state = runtime_ref.host_state.borrow();
-        if state.worklet_id != Some(id) || state.worklet_terminated {
+        if state.worklet.id != Some(id) || state.worklet.terminated {
             return Ok(JsValue::from(0));
         }
-        Ok(JsValue::from(state.worklet_modules.len() as u32))
+        Ok(JsValue::from(state.worklet.modules.len() as u32))
     })
 }
 
@@ -342,11 +374,11 @@ fn worklet_teardown_native(
     with_host_state(|owner_state| {
         let runtime = {
             let mut state = owner_state.borrow_mut();
-            let Some(runtime) = state.worklet_runtime.take() else {
+            let Some(runtime) = state.worklet.runtime.take() else {
                 return Ok(JsValue::from(false));
             };
-            if runtime.borrow().host_state.borrow().worklet_id != Some(id) {
-                state.worklet_runtime = Some(runtime);
+            if runtime.borrow().host_state.borrow().worklet.id != Some(id) {
+                state.worklet.runtime = Some(runtime);
                 return Ok(JsValue::from(false));
             }
             runtime
@@ -354,10 +386,10 @@ fn worklet_teardown_native(
         {
             let worklet_state = Rc::clone(&runtime.borrow().host_state);
             let mut state = worklet_state.borrow_mut();
-            state.worklet_terminated = true;
-            state.worklet_owner = None;
-            state.worklet_modules.clear();
-            state.worklet_registrations.clear();
+            state.worklet.terminated = true;
+            state.worklet.owner = None;
+            state.worklet.modules.clear();
+            state.worklet.registrations.clear();
         }
         Ok(JsValue::from(true))
     })
@@ -404,10 +436,10 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
 
 impl JsRuntime {
     pub(super) fn advance_worklet_clocks(&mut self, elapsed_ms: u64) {
-        let Some(runtime) = self.host_state.borrow().worklet_runtime.clone() else {
+        let Some(runtime) = self.host_state.borrow().worklet.runtime.clone() else {
             return;
         };
-        if runtime.borrow().host_state.borrow().worklet_terminated {
+        if runtime.borrow().host_state.borrow().worklet.terminated {
             return;
         }
         runtime
@@ -422,20 +454,20 @@ impl JsRuntime {
     /// timers and posted microtasks stay in the isolated realm, but their
     /// deterministic clock advances with the owner page's clock.
     pub(super) fn run_worklet_background_tasks(&mut self) {
-        if self.host_state.borrow().worklet_id.is_some() {
+        if self.host_state.borrow().worklet.id.is_some() {
             return;
         }
-        let Some(runtime) = self.host_state.borrow().worklet_runtime.clone() else {
+        let Some(runtime) = self.host_state.borrow().worklet.runtime.clone() else {
             return;
         };
         let (result, errors, terminated) = {
             let mut runtime = runtime.borrow_mut();
-            if runtime.host_state.borrow().worklet_terminated {
+            if runtime.host_state.borrow().worklet.terminated {
                 return;
             }
             let result = runtime.run_until_idle();
             let errors = runtime.take_task_errors();
-            let terminated = runtime.host_state.borrow().worklet_terminated;
+            let terminated = runtime.host_state.borrow().worklet.terminated;
             (result, errors, terminated)
         };
         if let Err(error) = result {

@@ -99,7 +99,7 @@ mod worklet;
 use web_locks::{
     flush_web_lock_notifications, register_web_lock_client, unregister_web_lock_client,
 };
-use worklet::{WorkletRuntimeHandle, terminate_worklet_runtime};
+use worklet::terminate_worklet_runtime;
 #[cfg(test)]
 mod text_stream_tests;
 #[cfg(test)]
@@ -1677,19 +1677,7 @@ struct HostState {
     /// realm; native delivery only retains it until the port is closed.
     shared_worker_ports: HashMap<u64, JsValue>,
     broadcast_channel: broadcast_channel::State,
-    /// One isolated WorkletGlobalScope shared by Worklet instances in this
-    /// browsing context (including `CSS.paintWorklet`). The runtime is lazily
-    /// constructed on the first `addModule()` call.
-    worklet_runtime: Option<WorkletRuntimeHandle>,
-    next_worklet_id: u64,
-    /// Worklet globals point back to their owning page only through this
-    /// control-plane handle. It is cleared during teardown so the cycle does
-    /// not keep a navigated page alive.
-    worklet_owner: Option<Rc<RefCell<HostState>>>,
-    worklet_id: Option<u64>,
-    worklet_terminated: bool,
-    worklet_modules: HashSet<String>,
-    worklet_registrations: HashSet<String>,
+    worklet: worklet::State,
     /// Constructable stylesheets adopted by a Document or ShadowRoot. The
     /// JavaScript wrapper keeps stylesheet objects; this native snapshot lets
     /// the synchronous style resolver include their parsed text without
@@ -2189,13 +2177,7 @@ impl HostState {
             shared_worker_id: None,
             shared_worker_ports: HashMap::new(),
             broadcast_channel: broadcast_channel::State::default(),
-            worklet_runtime: None,
-            next_worklet_id: 1,
-            worklet_owner: None,
-            worklet_id: None,
-            worklet_terminated: false,
-            worklet_modules: HashSet::new(),
-            worklet_registrations: HashSet::new(),
+            worklet: worklet::State::default(),
             adopted_stylesheets: HashMap::new(),
         };
         state.register_tree(&document);
