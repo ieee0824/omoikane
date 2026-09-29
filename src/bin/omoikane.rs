@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use device_scale::{DeviceScale, blit_scaled};
 use omoikane::cdp::CdpSession;
 use omoikane::dom::NodeHandle;
 use omoikane::error_reporting::{
@@ -29,6 +30,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
 
+#[path = "omoikane/device_scale.rs"]
+mod device_scale;
 #[path = "omoikane/pointer_lock_host.rs"]
 mod pointer_lock_host;
 
@@ -278,7 +281,9 @@ impl BrowserApp {
         else {
             return Ok(());
         };
-        let frame = render_browser_frame(&mut self.session, size.width, size.height, elapsed_ms)
+        let scale = DeviceScale::new(window.scale_factor());
+        let (page_width, page_height) = scale.page_viewport(size.width, size.height);
+        let frame = render_browser_frame(&mut self.session, page_width, page_height, elapsed_ms)
             .map_err(|error| {
                 report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
                 error
@@ -314,10 +319,13 @@ impl BrowserApp {
             );
             error
         })?;
-        for (destination, source) in target.iter_mut().zip(frame.pixels().chunks_exact(4)) {
-            *destination =
-                u32::from(source[0]) << 16 | u32::from(source[1]) << 8 | u32::from(source[2]);
-        }
+        blit_scaled(
+            frame.pixels(),
+            (frame.width(), frame.height()),
+            &mut target,
+            (size.width, size.height),
+            scale,
+        );
         target.present().map_err(|error| {
             report_gui_failure(
                 self.error_reporter.as_deref(),
@@ -327,6 +335,15 @@ impl BrowserApp {
             error
         })?;
         Ok(())
+    }
+
+    /// Returns the scale shared by painting and pointer input.
+    fn device_scale(&self) -> DeviceScale {
+        DeviceScale::new(
+            self.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor()),
+        )
     }
 
     fn trace_input_event(&mut self, event: &WindowEvent) {
@@ -467,10 +484,7 @@ impl BrowserApp {
 
     fn dispatch_input(&mut self, event: WindowEvent) -> bool {
         self.trace_input_event(&event);
-        let scale_factor = self
-            .window
-            .as_ref()
-            .map_or(1.0, |window| window.scale_factor());
+        let scale_factor = self.device_scale().factor();
         let result = match event {
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = physical_position_css_pixels(position, scale_factor);
@@ -770,6 +784,10 @@ impl ApplicationHandler for BrowserApp {
                 self.frame_scheduler
                     .request_rendering_opportunity(Instant::now());
             }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.frame_scheduler
+                    .request_rendering_opportunity(Instant::now());
+            }
             WindowEvent::RedrawRequested => {
                 let elapsed_ms = self.frame_scheduler.begin_frame(Instant::now());
                 if let Err(error) = self.draw(elapsed_ms) {
@@ -833,10 +851,7 @@ impl ApplicationHandler for BrowserApp {
                 self.input.mouse_button(&mut self.session, button, pressed)
             }
             DeviceEvent::MouseWheel { delta } if self.native_pointer_lock_raw_buttons => {
-                let scale = self
-                    .window
-                    .as_ref()
-                    .map_or(1.0, |window| window.scale_factor());
+                let scale = self.device_scale().factor();
                 let (dx, dy) = wheel_delta_css_pixels(delta, scale);
                 self.input.wheel(&mut self.session, dx, dy)
             }
@@ -930,6 +945,32 @@ mod tests {
             ),
             (1.25, -3.5)
         );
+    }
+
+    #[test]
+    fn pointer_positions_hit_the_css_pixel_painted_under_them() {
+        for factor in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            let scale = DeviceScale::new(factor);
+            let physical = (97, 1);
+            let (css_width, css_height) = scale.page_viewport(physical.0, physical.1);
+            // Encode each CSS column in the red and green channels.
+            let source: Vec<u8> = (0..css_width)
+                .flat_map(|x| [(x >> 8) as u8, x as u8, 0, 255])
+                .collect();
+            let mut target = vec![0; physical.0 as usize];
+            blit_scaled(
+                &source,
+                (css_width, css_height),
+                &mut target,
+                physical,
+                scale,
+            );
+            for (x, pixel) in target.iter().enumerate() {
+                let (css_x, _) =
+                    physical_position_css_pixels(PhysicalPosition::new(x as f64, 0.0), factor);
+                assert_eq!(pixel >> 8, css_x.floor() as u32, "{factor}: {x}");
+            }
+        }
     }
 
     #[test]
