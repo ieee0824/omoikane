@@ -1,36 +1,21 @@
 //! Subresources must use the browsing session's Cookie store.
 use omoikane::{cdp::CdpSession, frame::render_browser_frame, html::TreeBuilder, js::JsRuntime};
 use serde_json::json;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::time::{Duration, Instant};
+use std::io::Write;
+use std::net::TcpStream;
+use std::time::Duration;
 
-fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                // macOS can preserve the listener's nonblocking mode on an
-                // accepted socket, before the client has sent its request.
-                stream.set_nonblocking(false).unwrap();
-                return stream;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out waiting for resource request"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("accept failed: {error}"),
-        }
-    }
-}
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 
 #[test]
 fn accepted_stream_waits_for_a_delayed_request() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
     let client = std::thread::spawn(move || {
         let mut stream = TcpStream::connect(address).unwrap();
@@ -39,46 +24,37 @@ fn accepted_stream_waits_for_a_delayed_request() {
             .write_all(b"GET /delayed HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
     });
-    let stream = accept_with_timeout(&listener);
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    assert_eq!(read_request(&stream), ("/delayed".to_string(), None));
+    let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+    assert_eq!(read_request(&mut stream), ("/delayed".to_string(), None));
     client.join().unwrap();
 }
 
-fn read_request(stream: &TcpStream) -> (String, Option<String>) {
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    let path = line.split_whitespace().nth(1).unwrap().to_string();
-    let mut cookie = None;
-    loop {
-        line.clear();
-        reader.read_line(&mut line).unwrap();
-        if line == "\r\n" {
-            break;
-        }
-        if let Some(value) = line.strip_prefix("Cookie: ") {
-            cookie = Some(value.trim().to_string());
-        }
-    }
+fn read_request(stream: &mut TcpStream) -> (String, Option<String>) {
+    let headers = read_request_headers(stream, READ_TIMEOUT).unwrap();
+    let path = headers
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let cookie = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Cookie: ").map(str::trim))
+        .map(str::to_string);
     (path, cookie)
 }
 
 #[test]
 fn stylesheet_shares_navigation_and_document_cookies() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         let mut requests = Vec::new();
         for _ in 0..2 {
-            let mut stream = accept_with_timeout(&listener);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let (path, cookie) = read_request(&stream);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let (path, cookie) = read_request(&mut stream);
             let (body, extra) = match path.as_str() {
                 "/page" => (
                     "<html><head><link rel='stylesheet' href='/style.css'></head><body>hello</body></html>",
@@ -116,7 +92,7 @@ fn stylesheet_shares_navigation_and_document_cookies() {
             json!({"expression": "getComputedStyle(document.body).color + '|' + document.cookie"}),
         )
         .unwrap();
-    let requests = server.join().unwrap();
+    let requests = server.join();
     assert_eq!(requests[0], ("/page".to_string(), None));
     assert_eq!(
         requests[1],
@@ -127,8 +103,7 @@ fn stylesheet_shares_navigation_and_document_cookies() {
 
 #[test]
 fn image_shares_navigation_and_document_cookies() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
     let mut png = Vec::new();
     {
@@ -141,14 +116,11 @@ fn image_shares_navigation_and_document_cookies() {
             .write_image_data(&[255, 0, 0, 255])
             .unwrap();
     }
-    let server = std::thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         let mut requests = Vec::new();
         for _ in 0..2 {
-            let mut stream = accept_with_timeout(&listener);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let (path, cookie) = read_request(&stream);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let (path, cookie) = read_request(&mut stream);
             match path.as_str() {
                 "/page" => {
                     let body = "<html><body><img src='/image.png'></body></html>";
@@ -186,7 +158,7 @@ fn image_shares_navigation_and_document_cookies() {
     let cookies = session
         .dispatch("Runtime.evaluate", json!({"expression": "document.cookie"}))
         .unwrap();
-    let requests = server.join().unwrap();
+    let requests = server.join();
     assert_eq!(requests[0], ("/page".to_string(), None));
     assert_eq!(
         requests[1],
@@ -197,15 +169,11 @@ fn image_shares_navigation_and_document_cookies() {
 
 #[test]
 fn module_shares_document_cookies_in_both_directions() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let mut stream = accept_with_timeout(&listener);
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let request = read_request(&stream);
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let request = read_request(&mut stream);
         let body = "globalThis.moduleCookie = document.cookie;";
         write!(
             stream,
@@ -226,7 +194,7 @@ fn module_shares_document_cookies_in_both_directions() {
     let errors = runtime.execute_document_scripts(Some(&url.parse().unwrap()));
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(
-        server.join().unwrap(),
+        server.join(),
         ("/module.js".to_string(), Some("page=1".to_string()))
     );
     assert_eq!(
@@ -240,8 +208,7 @@ fn module_shares_document_cookies_in_both_directions() {
 
 #[test]
 fn image_cache_does_not_cross_browsing_sessions() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
     let mut png = Vec::new();
     {
@@ -254,15 +221,12 @@ fn image_cache_does_not_cross_browsing_sessions() {
             .write_image_data(&[255, 0, 0, 255])
             .unwrap();
     }
-    let server = std::thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         let mut requests = Vec::new();
         for session_number in 1..=2 {
             for _ in 0..2 {
-                let mut stream = accept_with_timeout(&listener);
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let request = read_request(&stream);
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request(&mut stream);
                 match request.0.as_str() {
                     "/page" => {
                         let body = "<html><body><img src='/image.png'></body></html>";
@@ -289,7 +253,7 @@ fn image_cache_does_not_cross_browsing_sessions() {
             .unwrap();
         render_browser_frame(&mut session, 100, 100, 16).unwrap();
     }
-    let requests = server.join().unwrap();
+    let requests = server.join();
     assert_eq!(requests[0], ("/page".to_string(), None));
     assert_eq!(
         requests[1],
@@ -304,17 +268,13 @@ fn image_cache_does_not_cross_browsing_sessions() {
 
 #[test]
 fn fetch_and_navigation_share_response_cookies() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         let mut requests = Vec::new();
         for path in ["/page", "/fetch", "/after"] {
-            let mut stream = accept_with_timeout(&listener);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let request = read_request(&stream);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request(&mut stream);
             assert_eq!(request.0, path);
             let extra = match path {
                 "/page" => "Set-Cookie: page=1; Path=/\r\n",
@@ -347,7 +307,7 @@ fn fetch_and_navigation_share_response_cookies() {
             json!({"url": format!("http://{address}/after")}),
         )
         .unwrap();
-    let requests = server.join().unwrap();
+    let requests = server.join();
     assert_eq!(requests[0], ("/page".to_string(), None));
     assert_eq!(
         requests[1],
@@ -361,8 +321,7 @@ fn fetch_and_navigation_share_response_cookies() {
 
 #[test]
 fn cross_site_iframe_and_image_exclude_strict_and_lax_but_top_navigation_sends_lax() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
     let mut png = Vec::new();
     {
@@ -375,14 +334,11 @@ fn cross_site_iframe_and_image_exclude_strict_and_lax_but_top_navigation_sends_l
             .write_image_data(&[255, 0, 0, 255])
             .unwrap();
     }
-    let server = std::thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         let mut requests = Vec::new();
         for _ in 0..6 {
-            let mut stream = accept_with_timeout(&listener);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let request = read_request(&stream);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request(&mut stream);
             let (body, extra) = match request.0.as_str() {
                 "/seed" => (b"<html><body><img src='/image.png'></body></html>".as_slice(), "Set-Cookie: strict=1; SameSite=Strict; Path=/\r\nSet-Cookie: lax=2; SameSite=Lax; Path=/\r\nContent-Type: text/html\r\n"),
                 "/parent" => (b"<html><body><iframe src='http://127.0.0.1:PORT/child'></iframe><img src='http://127.0.0.1:PORT/image.png'></body></html>".as_slice(), "Content-Type: text/html\r\n"),
@@ -439,7 +395,7 @@ fn cross_site_iframe_and_image_exclude_strict_and_lax_but_top_navigation_sends_l
             json!({"url": format!("http://{address}/final")}),
         )
         .unwrap();
-    let requests = server.join().unwrap();
+    let requests = server.join();
     assert_eq!(requests.len(), 6, "{requests:?}");
     assert_eq!(requests[0], ("/seed".to_string(), None));
     assert_eq!(
