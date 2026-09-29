@@ -699,7 +699,8 @@ fn polygon_hit_geometry(
                 <= stroke_width / 2.0;
         }
     }
-    let fill = closed && point_in_polygon(point, points);
+    let fill = closed
+        && crate::geometry::point_in_polygon(point, points, crate::geometry::PolygonUse::SvgFill);
     let bounding_box = point_in_rect(point, rect_for_points(points));
     SvgHitGeometry {
         fill,
@@ -841,25 +842,6 @@ fn point_segment_distance(point: (f32, f32), start: (f32, f32), end: (f32, f32))
     let t = (((point.0 - start.0) * dx + (point.1 - start.1) * dy) / length_sq).clamp(0.0, 1.0);
     let projection = (start.0 + t * dx, start.1 + t * dy);
     ((point.0 - projection.0).powi(2) + (point.1 - projection.1).powi(2)).sqrt()
-}
-
-fn point_in_polygon(point: (f32, f32), points: &[(f32, f32)]) -> bool {
-    let mut inside = false;
-    for index in 0..points.len() {
-        let previous = if index == 0 {
-            points.len() - 1
-        } else {
-            index - 1
-        };
-        let (x0, y0) = points[index];
-        let (x1, y1) = points[previous];
-        let crosses = (y0 > point.1) != (y1 > point.1)
-            && point.0 < (x1 - x0) * (point.1 - y0) / (y1 - y0) + x0;
-        if crosses {
-            inside = !inside;
-        }
-    }
-    inside
 }
 
 #[derive(Clone)]
@@ -3143,6 +3125,35 @@ mod tests {
     use super::*;
     use crate::dom::{Node, NodeHandle};
     use crate::html::TreeBuilder;
+
+    #[test]
+    fn polygon_fill_hit_testing_includes_edges_vertices_and_degenerate_path() {
+        let square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        for point in [
+            (5.0, 5.0),
+            (5.0, 0.0),
+            (10.0, 5.0),
+            (5.0, 10.0),
+            (0.0, 5.0),
+            (0.0, 0.0),
+            (10.0, 10.0),
+        ] {
+            assert!(
+                polygon_hit_geometry(&square, true, point, 0.0).fill,
+                "{point:?}"
+            );
+        }
+        for point in [(-0.000001, 5.0), (10.000001, 5.0), (5.0, -0.000001)] {
+            assert!(
+                !polygon_hit_geometry(&square, true, point, 0.0).fill,
+                "{point:?}"
+            );
+        }
+        let line = [(0.0, 5.0), (5.0, 5.0), (10.0, 5.0)];
+        assert!(polygon_hit_geometry(&line, true, (5.0, 5.0), 0.0).fill);
+        assert!(!polygon_hit_geometry(&line, true, (5.0, 5.0001), 0.0).fill);
+        assert!(!polygon_hit_geometry(&line, false, (5.0, 5.0), 0.0).fill);
+    }
 
     fn find_svg(node: &NodeHandle) -> Option<NodeHandle> {
         if node.tag_name().as_deref() == Some("svg") {
