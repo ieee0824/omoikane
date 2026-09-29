@@ -182,11 +182,19 @@ impl<R: ReadChar> Cursor<R> {
         }
     }
 
+    /// Drops the first peeked character and moves the rest forward.
+    ///
+    /// This runs for most source characters, so it avoids the generic
+    /// `slice::rotate_left` on the four-element buffer.
+    fn shift_peeked(&mut self) {
+        let [_, second, third, fourth] = self.peeked;
+        self.peeked = [second, third, fourth, None];
+    }
+
     /// Retrieves the next UTF-8 character.
     pub(crate) fn next_char(&mut self) -> Result<Option<u32>, Error> {
         let ch = if let Some(c) = self.peeked[0] {
-            self.peeked[0] = None;
-            self.peeked.rotate_left(1);
+            self.shift_peeked();
             Some(c)
         } else {
             self.iter.next_char()?
@@ -201,8 +209,7 @@ impl<R: ReadChar> Cursor<R> {
                 // Try to take a newline if it's next, for windows "\r\n" newlines
                 // Otherwise, treat as a Mac OS9 bare '\r' newline
                 if self.peek_char()? == Some(0xA) {
-                    self.peeked[0] = None;
-                    self.peeked.rotate_left(1);
+                    self.shift_peeked();
                     self.source_collector.collect_code_point(0xA);
                 }
                 self.next_line();
