@@ -978,7 +978,7 @@ fn collect_element_inline_segments(
         return;
     }
 
-    if node.tag_name().as_deref() == Some("img")
+    if node.has_tag_name("img")
         && let Some(alt_text) = image_alt_fallback_text(node, &style)
     {
         out.push(InlineSegment {
@@ -1000,7 +1000,7 @@ fn collect_element_inline_segments(
         return;
     }
 
-    let inline_frame = node.tag_name().as_deref() == Some("iframe")
+    let inline_frame = node.has_tag_name("iframe")
         && matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("inline"));
     if context.allow_atomic_boxes
         && (inline_frame
@@ -1231,7 +1231,6 @@ fn collect_textarea_segment(
     resolver: &mut StyleResolver,
     out: &mut Vec<InlineSegment>,
 ) {
-    let attributes = node.attributes().unwrap_or_default();
     let metrics = font_metrics(style);
     let value = node
         .text_control_state()
@@ -1240,17 +1239,19 @@ fn collect_textarea_segment(
             strip_textarea_leading_newline(&collect_rendered_text(node, resolver)).to_string()
         });
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
-        let cols = attributes
-            .get("cols")
-            .and_then(|value| value.trim().parse::<usize>().ok())
+        let cols = node
+            .with_attribute("cols", |value| {
+                value.and_then(|value| value.trim().parse::<usize>().ok())
+            })
             .unwrap_or(20)
             .clamp(1, 1000);
         metrics.average_advance * cols as f32
     });
     let content_height = explicit_length(style, "height").unwrap_or_else(|| {
-        let rows = attributes
-            .get("rows")
-            .and_then(|value| value.trim().parse::<usize>().ok())
+        let rows = node
+            .with_attribute("rows", |value| {
+                value.and_then(|value| value.trim().parse::<usize>().ok())
+            })
             .unwrap_or(2)
             .clamp(1, 1000);
         line_height(style) * rows as f32
@@ -1462,9 +1463,9 @@ fn collect_option_entries(
         if is_display_none(&style) {
             continue;
         }
-        if child.tag_name().as_deref() == Some("option") {
+        if child.has_tag_name("option") {
             let label = normalize_inline_whitespace(&collect_rendered_text(&child, resolver));
-            let selected = child.get_attribute("selected").is_some();
+            let selected = child.has_attribute("selected");
             out.push((label, selected));
         } else {
             collect_option_entries(&child, resolver, out);
@@ -1765,16 +1766,15 @@ fn element_inline_image_with_current_color(
     current_color: Option<crate::paint::color::Color>,
 ) -> Option<(NodeHandle, Image)> {
     let tag_name = node.tag_name()?;
-    let attributes = node.attributes().unwrap_or_default();
     match tag_name.as_str() {
         "canvas" => crate::canvas::image(node.identity()).map(|image| (node.clone(), image)),
         "img" => {
-            let src = attributes.get("src")?;
-            decode_or_fetch_image(src).map(|image| (node.clone(), image))
+            let src = node.get_attribute("src")?;
+            decode_or_fetch_image(&src).map(|image| (node.clone(), image))
         }
         "video" => {
-            let poster = attributes.get("poster")?;
-            decode_or_fetch_image(poster).map(|image| (node.clone(), image))
+            let poster = node.get_attribute("poster")?;
+            decode_or_fetch_image(&poster).map(|image| (node.clone(), image))
         }
         "picture" => node
             .layout_child_nodes()
@@ -1788,8 +1788,8 @@ fn element_inline_image_with_current_color(
             Some((node.clone(), image))
         }
         "object" => {
-            if let Some(data) = attributes.get("data")
-                && let Some(image) = decode_or_fetch_image(data)
+            if let Some(data) = node.get_attribute("data")
+                && let Some(image) = decode_or_fetch_image(&data)
             {
                 return Some((node.clone(), image));
             }
@@ -1853,7 +1853,7 @@ fn decode_svg_text(text: &str) -> Option<Image> {
     let doc = TreeBuilder::parse(text).document();
     // Find the <svg> element in the parsed document
     fn find_svg(node: &NodeHandle) -> Option<NodeHandle> {
-        if node.tag_name().as_deref() == Some("svg") {
+        if node.has_tag_name("svg") {
             return Some(node.clone());
         }
         for child in node.child_nodes() {
@@ -2097,9 +2097,9 @@ fn normalize_image_url(url: Url) -> Option<String> {
 }
 
 pub(super) fn image_alt_fallback_text(node: &NodeHandle, style: &ComputedStyle) -> Option<String> {
-    let attributes = node.attributes().unwrap_or_default();
-    let alt = attributes.get("alt")?;
-    let normalized = normalize_text(alt, white_space(style));
+    let normalized = node.with_attribute("alt", |alt| {
+        alt.map(|alt| normalize_text(alt, white_space(style)))
+    })?;
     if normalized.is_empty() {
         None
     } else {
@@ -2108,17 +2108,10 @@ pub(super) fn image_alt_fallback_text(node: &NodeHandle, style: &ComputedStyle) 
 }
 
 fn html_image_dimension_attribute(node: &NodeHandle, name: &str) -> Option<f32> {
-    let attributes = node.attributes().unwrap_or_default();
-    let raw = attributes.get(name)?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let parsed = raw.parse::<f32>().ok()?;
-    if parsed.is_finite() && parsed > 0.0 {
-        Some(parsed)
-    } else {
-        None
-    }
+    node.with_attribute(name, |raw| {
+        let parsed = raw?.trim().parse::<f32>().ok()?;
+        (parsed.is_finite() && parsed > 0.0).then_some(parsed)
+    })
 }
 
 /// Returns the preferred aspect ratio (width / height) a replaced element should

@@ -2742,13 +2742,14 @@ fn layout_element_with_cell(
     // paint their image payload. Previously only inline formatting collected
     // image fragments, so `display: block` SVGs (a common Tailwind reset) had
     // a box but rendered none of their graphics.
-    let is_positioned_img =
-        node.tag_name().as_deref() == Some("img") && is_out_of_flow_positioned(&style);
+    let is_positioned_img = node.has_tag_name("img") && is_out_of_flow_positioned(&style);
     if !is_positioned_img
-        && matches!(
-            node.tag_name().as_deref(),
-            Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
-        )
+        && node.with_tag_name(|tag| {
+            matches!(
+                tag,
+                Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
+            )
+        })
     {
         let mut lines = layout_inline_nodes(
             std::slice::from_ref(node),
@@ -2850,10 +2851,12 @@ fn layout_element_with_cell(
 
     // Blockification must retain a form control's value/selection fragment,
     // even when the parent's inline formatting context never visits it.
-    if matches!(
-        node.tag_name().as_deref(),
-        Some("input" | "textarea" | "select" | "button" | "progress" | "meter")
-    ) {
+    if node.with_tag_name(|tag| {
+        matches!(
+            tag,
+            Some("input" | "textarea" | "select" | "button" | "progress" | "meter")
+        )
+    }) {
         let mut lines = layout_inline_nodes(
             std::slice::from_ref(node),
             resolver,
@@ -3524,7 +3527,7 @@ fn resolve_content_height(
     let pb_vertical = padding.vertical() + border.vertical();
     let auto_height = if has_block_size_containment(style) {
         contain_intrinsic_axis_size(node, style, "contain-intrinsic-height", 1)
-    } else if node.tag_name().as_deref() == Some("iframe") {
+    } else if node.has_tag_name("iframe") {
         150.0
     } else {
         (cursor_y - y).max(0.0)
@@ -3740,7 +3743,7 @@ fn compute_width(
             margin.right = 0.0;
         }
 
-        if node.tag_name().as_deref() == Some("iframe") {
+        if node.has_tag_name("iframe") {
             300.0
         } else {
             (containing_width - pb_horizontal - margin.horizontal()).max(0.0)
@@ -4436,7 +4439,7 @@ fn minimum_content_width_inner(
                     + border.horizontal()
                     + margin;
             }
-            if node.tag_name().as_deref() == Some("iframe") {
+            if node.has_tag_name("iframe") {
                 return 300.0 + padding.horizontal() + border.horizontal();
             }
             // For images, use rendered size.
@@ -4508,7 +4511,7 @@ fn intrinsic_width_inner(
                     + border.horizontal()
                     + margin;
             }
-            if node.tag_name().as_deref() == Some("iframe") {
+            if node.has_tag_name("iframe") {
                 return 300.0 + padding.horizontal() + border.horizontal();
             }
             if let Some((image_node, image)) = element_inline_image(node) {
@@ -5141,10 +5144,12 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
 // ── Display / visibility / overflow ─────────────────────────────────────────
 
 fn is_non_rendered_html_element(node: &NodeHandle) -> bool {
-    matches!(
-        node.tag_name().as_deref(),
-        Some("head" | "title" | "meta" | "style" | "script" | "link" | "noscript" | "source")
-    )
+    node.with_tag_name(|tag| {
+        matches!(
+            tag,
+            Some("head" | "title" | "meta" | "style" | "script" | "link" | "noscript" | "source")
+        )
+    })
 }
 
 fn is_display_none(style: &ComputedStyle) -> bool {
