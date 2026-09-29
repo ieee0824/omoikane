@@ -1664,13 +1664,7 @@ struct HostState {
     /// this when queueing messages back to an iframe owner.
     worker_owner_realm: Option<Realm>,
     worker_startup_outgoing: VecDeque<String>,
-    /// Shared-worker globals identify themselves so the event-loop pump does
-    /// not recursively execute the registry entry currently being serviced.
-    shared_worker_id: Option<u64>,
-    /// Page-owned `SharedWorkerPort` endpoint references keyed by a
-    /// process-local connection id.  The endpoint remains in its own Boa
-    /// realm; native delivery only retains it until the port is closed.
-    shared_worker_ports: HashMap<u64, JsValue>,
+    shared_worker: shared_worker::State,
     broadcast_channel: broadcast_channel::State,
     worklet: worklet::State,
     /// Constructable stylesheets adopted by a Document or ShadowRoot. The
@@ -1720,9 +1714,7 @@ unsafe impl Trace for HostState {
             unsafe { dialog.suspension.trace(tracer) };
         }
         unsafe { self.broadcast_channel.trace(tracer) };
-        for port in self.shared_worker_ports.values() {
-            unsafe { port.trace(tracer) };
-        }
+        unsafe { self.shared_worker.trace(tracer) };
     }
 
     fn run_finalizer(&self) {}
@@ -2132,8 +2124,7 @@ impl HostState {
             worker_owner_object: None,
             worker_owner_realm: None,
             worker_startup_outgoing: VecDeque::new(),
-            shared_worker_id: None,
-            shared_worker_ports: HashMap::new(),
+            shared_worker: shared_worker::State::default(),
             broadcast_channel: broadcast_channel::State::default(),
             worklet: worklet::State::default(),
             adopted_stylesheets: HashMap::new(),

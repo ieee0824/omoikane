@@ -13,6 +13,27 @@ thread_local! {
     static NEXT_SHARED_WORKER_CONNECTION_ID: Cell<u64> = const { Cell::new(1) };
 }
 
+/// SharedWorker endpoints and identity held by one global.
+#[derive(Default)]
+pub(super) struct State {
+    /// Shared-worker globals identify themselves so the event-loop pump does
+    /// not recursively execute the registry entry currently being serviced.
+    id: Option<u64>,
+    /// Page-owned `SharedWorkerPort` endpoint references keyed by a
+    /// process-local connection id.  The endpoint remains in its own Boa
+    /// realm; native delivery only retains it until the port is closed.
+    ports: HashMap<u64, JsValue>,
+}
+
+impl State {
+    /// Traces the page-owned port endpoints retained for delivery.
+    pub(super) unsafe fn trace(&self, tracer: &mut Tracer) {
+        for port in self.ports.values() {
+            unsafe { port.trace(tracer) };
+        }
+    }
+}
+
 /// The key used by the same-thread `SharedWorker` registry.  A worker is
 /// shared only when its resolved script URL, name, and origin all match.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -115,7 +136,7 @@ fn shared_worker_entry_for_key(key: &SharedWorkerKey) -> Option<Rc<RefCell<Share
 }
 
 pub(super) fn terminate_shared_worker_connections(state: &Rc<RefCell<HostState>>) {
-    let connection_ids: Vec<_> = state.borrow().shared_worker_ports.keys().copied().collect();
+    let connection_ids: Vec<_> = state.borrow().shared_worker.ports.keys().copied().collect();
     for connection_id in connection_ids {
         if let Some(entry) = shared_worker_entry_for_connection(connection_id) {
             if let Some(connection) = entry.borrow_mut().connections.get_mut(&connection_id) {
@@ -125,7 +146,7 @@ pub(super) fn terminate_shared_worker_connections(state: &Rc<RefCell<HostState>>
             }
         }
     }
-    state.borrow_mut().shared_worker_ports.clear();
+    state.borrow_mut().shared_worker.ports.clear();
 }
 
 fn shared_worker_connect_native(
@@ -136,7 +157,7 @@ fn shared_worker_connect_native(
     let requested_url = string_argument(args.first(), "", context)?;
     let name = string_argument(args.get(1), "", context)?;
     with_host_state(|state| {
-        if state.borrow().shared_worker_id.is_some() {
+        if state.borrow().shared_worker.id.is_some() {
             return Err(JsNativeError::error()
                 .with_message("SharedWorker construction from a SharedWorker is unsupported")
                 .into());
@@ -190,7 +211,8 @@ fn shared_worker_bind_port_native(
         };
         state
             .borrow_mut()
-            .shared_worker_ports
+            .shared_worker
+            .ports
             .insert(connection_id, port.clone());
         for data in pending {
             owner_state
@@ -234,7 +256,7 @@ fn shared_worker_port_post_native(
         let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
             return Ok(JsValue::undefined());
         };
-        if state.borrow().shared_worker_id.is_some() {
+        if state.borrow().shared_worker.id.is_some() {
             // The call originated in the shared-worker realm.  Route it to
             // the page endpoint, retaining the wire until the page port has
             // been bound (the constructor binds immediately after connect).
@@ -304,7 +326,8 @@ fn shared_worker_port_close_native(
         let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
             state
                 .borrow_mut()
-                .shared_worker_ports
+                .shared_worker
+                .ports
                 .remove(&connection_id);
             return Ok(JsValue::undefined());
         };
@@ -312,11 +335,12 @@ fn shared_worker_port_close_native(
         let Some(connection) = shared.connections.get_mut(&connection_id) else {
             state
                 .borrow_mut()
-                .shared_worker_ports
+                .shared_worker
+                .ports
                 .remove(&connection_id);
             return Ok(JsValue::undefined());
         };
-        if state.borrow().shared_worker_id.is_none()
+        if state.borrow().shared_worker.id.is_none()
             && connection
                 .owner_state
                 .upgrade()
@@ -329,7 +353,8 @@ fn shared_worker_port_close_native(
         connection.pending_to_owner.clear();
         state
             .borrow_mut()
-            .shared_worker_ports
+            .shared_worker
+            .ports
             .remove(&connection_id);
         Ok(JsValue::undefined())
     })
@@ -385,7 +410,7 @@ fn create_shared_worker_for_owner_state(
             session_id,
         )?;
         runtime.set_user_agent(user_agent);
-        runtime.host_state.borrow_mut().shared_worker_id = Some(shared_id);
+        runtime.host_state.borrow_mut().shared_worker.id = Some(shared_id);
         runtime.eval(&format!(
             "__omoikane_install_shared_worker_global({worker_url:?}, {shared_id:?})"
         ))?;
@@ -479,7 +504,7 @@ impl JsRuntime {
     /// page's event-loop queues directly; running it between page tasks keeps
     /// cross-realm messages deterministic while avoiding a background thread.
     pub(super) fn run_shared_worker_background_tasks(&mut self) {
-        if self.host_state.borrow().shared_worker_id.is_some() {
+        if self.host_state.borrow().shared_worker.id.is_some() {
             return;
         }
         let entries = SHARED_WORKER_REGISTRY.with(|registry| {
@@ -526,7 +551,7 @@ impl JsRuntime {
         connection_id: u64,
         data: String,
     ) -> JsResult<()> {
-        if self.host_state.borrow().shared_worker_id.is_none() {
+        if self.host_state.borrow().shared_worker.id.is_none() {
             return Ok(());
         }
         let global = self.context.global_object();
@@ -571,7 +596,8 @@ impl JsRuntime {
         if !self
             .host_state
             .borrow()
-            .shared_worker_ports
+            .shared_worker
+            .ports
             .contains_key(&connection_id)
         {
             return Ok(());
