@@ -5,13 +5,16 @@
 //! and proxies remain outside this core.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use base64::Engine as _;
 
 use crate::cdp::{WebSocketFrame, WebSocketOpcode, websocket_accept_key};
 use crate::http::url::UrlParseError;
+
+/// Bounds connection establishment as well as each handshake read and write.
+const WEBSOCKET_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Errors produced by the WebSocket client or its wire protocol.
 #[derive(Debug)]
@@ -22,6 +25,12 @@ pub enum RealtimeError {
     Url(UrlParseError),
     /// A socket operation failed.
     Io(std::io::Error),
+    /// A requested subprotocol is not an HTTP token, or was requested twice.
+    InvalidProtocol,
+    /// The `Origin` value cannot be serialized as a single header field.
+    InvalidOrigin,
+    /// The host resolved only to addresses excluded by the address policy.
+    NoPermittedAddress,
     /// A client nonce or frame mask could not be generated.
     Random(getrandom::Error),
     /// The server sent more than the allowed handshake header size.
@@ -62,6 +71,11 @@ impl std::fmt::Display for RealtimeError {
             Self::UnsupportedUrlScheme => write!(f, "only ws: WebSocket URLs are supported"),
             Self::Url(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
+            Self::InvalidProtocol => write!(f, "invalid WebSocket subprotocol"),
+            Self::InvalidOrigin => write!(f, "invalid WebSocket origin"),
+            Self::NoPermittedAddress => {
+                write!(f, "no permitted address for WebSocket connection")
+            }
             Self::Random(error) => write!(f, "{error}"),
             Self::HandshakeTooLarge => write!(f, "WebSocket handshake is too large"),
             Self::InvalidHandshakeEncoding(_) => write!(f, "invalid handshake encoding"),
@@ -117,6 +131,60 @@ pub enum WebSocketMessage {
     Close { code: u16, reason: String },
 }
 
+/// Which resolved peer addresses a WebSocket connection may use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebSocketAddressPolicy {
+    /// Any resolved address, including loopback and private networks.
+    Any,
+    /// Only addresses accepted by [`crate::http::is_public_ip`].
+    PublicOnly,
+}
+
+/// Converts a `ws:` URL into the equivalent `http:` URL used for the handshake.
+pub(crate) fn websocket_http_url(url: &str) -> Result<crate::http::Url, RealtimeError> {
+    let http_url = url
+        .strip_prefix("ws://")
+        .map(|rest| format!("http://{rest}"))
+        .ok_or(RealtimeError::UnsupportedUrlScheme)?;
+    Ok(http_url.parse::<crate::http::Url>()?)
+}
+
+/// Rejects subprotocol lists that are not unique RFC 6455 tokens, so no value
+/// can terminate or extend the `Sec-WebSocket-Protocol` field.
+fn validate_protocols(protocols: &[String]) -> Result<(), RealtimeError> {
+    for (index, protocol) in protocols.iter().enumerate() {
+        if !crate::http::is_http_token(protocol) || protocols[..index].contains(protocol) {
+            return Err(RealtimeError::InvalidProtocol);
+        }
+    }
+    Ok(())
+}
+
+/// Resolves `url` and connects to the first address allowed by `policy`.
+fn connect_stream(
+    url: &crate::http::Url,
+    policy: WebSocketAddressPolicy,
+) -> Result<TcpStream, RealtimeError> {
+    let addresses: Vec<SocketAddr> = (url.host(), url.port())
+        .to_socket_addrs()?
+        .filter(|address| {
+            policy == WebSocketAddressPolicy::Any || crate::http::is_public_ip(address.ip())
+        })
+        .collect();
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, WEBSOCKET_IO_TIMEOUT) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(WEBSOCKET_IO_TIMEOUT))?;
+                stream.set_write_timeout(Some(WEBSOCKET_IO_TIMEOUT))?;
+                return Ok(stream);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.map_or(RealtimeError::NoPermittedAddress, RealtimeError::Io))
+}
+
 /// A connected RFC 6455 client using masked client frames.
 #[derive(Debug)]
 pub struct WebSocketClient {
@@ -127,18 +195,32 @@ pub struct WebSocketClient {
 
 impl WebSocketClient {
     /// Connects to a `ws:` URL and validates the server handshake.
+    ///
+    /// Each subprotocol must be a unique HTTP token and `origin` must be a
+    /// valid header value; otherwise no connection is attempted. Any resolved
+    /// address may be used, and connecting, reading, and writing are bounded
+    /// by a fixed timeout.
     pub fn connect(
         url: &str,
         protocols: &[String],
         origin: Option<&str>,
     ) -> Result<Self, RealtimeError> {
-        let http_url = url
-            .strip_prefix("ws://")
-            .map(|rest| format!("http://{rest}"))
-            .ok_or(RealtimeError::UnsupportedUrlScheme)?;
-        let parsed = http_url.parse::<crate::http::Url>()?;
-        let mut stream = TcpStream::connect((parsed.host(), parsed.port()))?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        Self::connect_with_policy(url, protocols, origin, WebSocketAddressPolicy::Any)
+    }
+
+    /// Like [`Self::connect`], but only connects to addresses allowed by `policy`.
+    pub(crate) fn connect_with_policy(
+        url: &str,
+        protocols: &[String],
+        origin: Option<&str>,
+        policy: WebSocketAddressPolicy,
+    ) -> Result<Self, RealtimeError> {
+        let parsed = websocket_http_url(url)?;
+        validate_protocols(protocols)?;
+        if origin.is_some_and(|origin| !crate::http::is_valid_header("Origin", origin)) {
+            return Err(RealtimeError::InvalidOrigin);
+        }
+        let mut stream = connect_stream(&parsed, policy)?;
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).map_err(RealtimeError::Random)?;
         let key = base64::engine::general_purpose::STANDARD.encode(nonce);
@@ -489,6 +571,66 @@ mod tests {
             RealtimeError::InvalidTextFrame(String::from_utf8(vec![0xff]).unwrap_err());
         assert_eq!(invalid_text.to_string(), "invalid UTF-8 text frame");
         assert!(std::error::Error::source(&invalid_text).is_some());
+    }
+
+    /// Binds a listener that must never see a connection during the test.
+    fn untouched_listener() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("ws://{}/socket", listener.local_addr().unwrap());
+        (listener, url)
+    }
+
+    fn assert_no_connection(listener: &TcpListener) {
+        let error = listener.accept().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn invalid_subprotocols_are_rejected_before_connecting() {
+        let (listener, url) = untouched_listener();
+        for protocols in [
+            vec!["chat\r\nX-Injected: 1".to_string()],
+            vec!["chat\nX-Injected: 1".to_string()],
+            vec!["two words".to_string()],
+            vec!["a,b".to_string()],
+            vec![String::new()],
+            vec!["chat".to_string(), "chat".to_string()],
+        ] {
+            let error = WebSocketClient::connect(&url, &protocols, None).unwrap_err();
+            assert!(
+                matches!(error, RealtimeError::InvalidProtocol),
+                "{protocols:?}: {error}"
+            );
+        }
+        assert_no_connection(&listener);
+    }
+
+    #[test]
+    fn invalid_origin_is_rejected_before_connecting() {
+        let (listener, url) = untouched_listener();
+        let error = WebSocketClient::connect(&url, &[], Some("http://a.test\r\nX-Injected: 1"))
+            .unwrap_err();
+        assert!(matches!(error, RealtimeError::InvalidOrigin));
+        assert_no_connection(&listener);
+    }
+
+    #[test]
+    fn public_only_policy_rejects_loopback_before_connecting() {
+        let (listener, url) = untouched_listener();
+        let error = WebSocketClient::connect_with_policy(
+            &url,
+            &[],
+            None,
+            WebSocketAddressPolicy::PublicOnly,
+        )
+        .unwrap_err();
+        assert!(matches!(error, RealtimeError::NoPermittedAddress));
+        assert_eq!(
+            error.to_string(),
+            "no permitted address for WebSocket connection"
+        );
+        assert_no_connection(&listener);
     }
 
     fn read_frame(stream: &mut TcpStream) -> (WebSocketFrame, Vec<u8>) {

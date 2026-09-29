@@ -24090,6 +24090,7 @@
       this.url = String(url);
       const list = protocols === undefined ? [] : (Array.isArray(protocols) ? protocols.map(String) : [String(protocols)]);
       if (new Set(list).size !== list.length) throw new DOMException("Duplicate subprotocol", "SyntaxError");
+      if (!list.every(isHttpHeaderName)) throw new DOMException("Invalid subprotocol", "SyntaxError");
       this.readyState = WebSocket.CONNECTING;
       this.bufferedAmount = 0;
       this.extensions = "";
