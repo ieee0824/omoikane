@@ -2,6 +2,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
 #[path = "wpt_smoke/case_runner.rs"]
 mod case_runner;
 #[path = "wpt_smoke/classification.rs"]
