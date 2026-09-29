@@ -34,3 +34,10 @@ servers are tracked by Issue #1089 and should be migrated in reviewable changes.
 `src/ffi/mod.rs` and `src/platform_browser.rs` use the shared fixture for their
 navigation and download server tests. The platform browser's closed-port error
 test still binds and closes a listener deliberately.
+
+`src/js/document_write_tests.rs`, `src/js/module_loading_tests.rs`, and
+`src/js/font_loading_tests.rs` use it for their fixture servers. The module
+server still owns its concurrent request handlers and shutdown logic, while
+the shared helper bounds accepts and request-header reads. The dedicated
+nonblocking-socket test in `src/js/module_server_tests.rs` also uses the shared
+loopback bind and retains its socket-mode assertions.

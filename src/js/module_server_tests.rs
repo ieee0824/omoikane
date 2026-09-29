@@ -1,13 +1,14 @@
 use super::{join_module_workers, read_module_request};
+use crate::test_support::http_fixture::bind_loopback;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 #[test]
 fn accepted_nonblocking_socket_waits_for_complete_request_headers() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (mut accepted, _) = listener.accept().unwrap();
     // Model BSD's inherited socket mode on every host. Before the fix the
