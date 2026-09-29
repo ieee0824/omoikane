@@ -39,6 +39,29 @@ fn window_named_properties_follow_connected_dom_mutations() {
 }
 
 #[test]
+fn window_named_properties_follow_nested_fragment_insertions_and_removals() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const fragment = document.createDocumentFragment();
+                const outer = document.createElement('section');
+                const inner = document.createElement('div');
+                inner.id = 'fragmentDescendant';
+                outer.appendChild(inner);
+                fragment.appendChild(outer);
+                const detached = !('fragmentDescendant' in window);
+                document.body.appendChild(fragment);
+                const inserted = window.fragmentDescendant === inner;
+                outer.remove();
+                return detached && inserted && !('fragmentDescendant' in window);
+            })()"#,
+        )
+        .unwrap();
+    assert_eq!(result.as_boolean(), Some(true));
+}
+
+#[test]
 fn window_named_properties_include_selected_name_attributes_and_same_origin_frames() {
     let mut runtime = JsRuntime::new().unwrap();
     let result = runtime

@@ -15255,17 +15255,8 @@
     return undefined;
   };
   const subtreeHasWindowName = node => {
-    const nodeType = internalNodeType(node);
-    if (nodeType !== 1 && nodeType !== 9 && nodeType !== 11) return false;
-    if (nodeType === 1) {
-      const tag = internalNodeLocalName(node) || "";
-      if (windowNameAttribute(node, "id") || tag === "iframe" ||
-          ((tag === "embed" || tag === "form" || tag === "img" || tag === "object") &&
-           windowNameAttribute(node, "name"))) {
-        return true;
-      }
-    }
-    return windowNameChildren(node).some(subtreeHasWindowName);
+    const id = internalNodeId(node);
+    return id !== undefined && __omoikane_subtree_has_window_name(id);
   };
   const refreshWindowNamedProperties = function() {
     if (!globalThis.document) return;
@@ -17876,6 +17867,7 @@
   globalThis.sessionStorage = storageForDocument("session", document, globalThis);
 
   const mutationObservers = [];
+  let hasLayoutObservers = false;
   let xpathMutationHook = null;
   globalThis.__omoikane_install_xpath_mutation_hook = hook => {
     xpathMutationHook = hook;
@@ -17937,7 +17929,8 @@
       observer._records.push(new MutationRecord(type, target, recordInit));
       observer._schedule();
     }
-    if (typeof globalThis.__omoikane_layout_observers_changed === "function") {
+    if (hasLayoutObservers &&
+        typeof globalThis.__omoikane_layout_observers_changed === "function") {
       globalThis.__omoikane_layout_observers_changed();
     }
   }
@@ -25778,15 +25771,18 @@
       const previous = this._targets.get(target);
       this._targets.set(target, { box, size: previous && previous.box === box ? previous.size : null });
       activeResizeObservers.add(this);
+      hasLayoutObservers = true;
       this.__queueCheck();
     }
     unobserve(target) {
       this._targets.delete(target);
       if (this._targets.size === 0) activeResizeObservers.delete(this);
+      hasLayoutObservers = activeResizeObservers.size > 0 || activeIntersectionObservers.size > 0;
     }
     disconnect() {
       this._targets.clear();
       activeResizeObservers.delete(this);
+      hasLayoutObservers = activeResizeObservers.size > 0 || activeIntersectionObservers.size > 0;
     }
     __queueCheck() {
       if (this._scheduled || this._targets.size === 0) return;
@@ -25937,17 +25933,20 @@
       if (this._targets.has(target)) return;
       this._targets.set(target, null);
       activeIntersectionObservers.add(this);
+      hasLayoutObservers = true;
       this.__queueCheck();
     }
     unobserve(target) {
       this._targets.delete(target);
       this._records = this._records.filter(entry => entry.target !== target);
       if (this._targets.size === 0) activeIntersectionObservers.delete(this);
+      hasLayoutObservers = activeResizeObservers.size > 0 || activeIntersectionObservers.size > 0;
     }
     disconnect() {
       this._targets.clear();
       this._records = [];
       activeIntersectionObservers.delete(this);
+      hasLayoutObservers = activeResizeObservers.size > 0 || activeIntersectionObservers.size > 0;
     }
     takeRecords() {
       const records = this._records;
