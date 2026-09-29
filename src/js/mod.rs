@@ -19123,6 +19123,21 @@ fn canvas_image_source_native(
     })
 }
 
+/// Cross-origin WebSockets may reach only public addresses, like other
+/// cross-origin subresources. The `ws:` URL is compared with the calling
+/// document as its `http:` equivalent, so a page may still reach its own host.
+fn websocket_address_policy(
+    url: &str,
+    document_url: Option<&crate::http::Url>,
+) -> crate::realtime::WebSocketAddressPolicy {
+    match crate::realtime::websocket_http_url(url) {
+        Ok(http_url) if !requires_public_fetch(&http_url, document_url) => {
+            crate::realtime::WebSocketAddressPolicy::Any
+        }
+        _ => crate::realtime::WebSocketAddressPolicy::PublicOnly,
+    }
+}
+
 fn websocket_connect_native(
     _: &JsValue,
     args: &[JsValue],
@@ -19149,10 +19164,17 @@ fn websocket_connect_native(
             .base_url
             .as_ref()
             .map(|url| format!("{}://{}", url.scheme(), url.authority()));
-        let client = crate::realtime::WebSocketClient::connect(&url, &protocols, origin.as_deref())
-            .map_err(|error| {
-                JsError::from(JsNativeError::error().with_message(error.to_string()))
-            })?;
+        let address_policy = websocket_address_policy(
+            &url,
+            state.base_url_for_document(document.identity()).as_ref(),
+        );
+        let client = crate::realtime::WebSocketClient::connect_with_policy(
+            &url,
+            &protocols,
+            origin.as_deref(),
+            address_policy,
+        )
+        .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
         let protocol = client.protocol().to_string();
         let mut reader = client.try_clone().map_err(|error| {
             JsError::from(JsNativeError::error().with_message(error.to_string()))
@@ -24915,6 +24937,7 @@ mod tests {
             }
         });
         let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/page").parse().unwrap());
         runtime.eval(&format!(r#"
             globalThis.realtimeLog = [];
             const socket = new WebSocket("ws://{address}/echo");
@@ -24934,6 +24957,89 @@ mod tests {
             format!("ws://{address}")
         );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn websocket_rejects_non_token_subprotocols_without_connecting() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url(format!("http://{address}/page").parse().unwrap());
+        let result = eval_str(
+            &mut runtime,
+            &format!(
+                r#"(() => ["chat\r\nX-Injected: 1", "two words", "a,b", ""].map(protocol => {{
+                    try {{
+                        new WebSocket("ws://{address}/socket", [protocol]);
+                        return "opened";
+                    }} catch (error) {{
+                        return error.name;
+                    }}
+                }}).join("|"))()"#
+            ),
+        );
+        assert_eq!(result, "SyntaxError|SyntaxError|SyntaxError|SyntaxError");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn cross_origin_websocket_cannot_reach_loopback() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_base_url("http://example.test/page".parse().unwrap());
+        runtime
+            .eval(&format!(
+                r#"
+            globalThis.realtimeLog = [];
+            globalThis.socket = new WebSocket("ws://{address}/socket");
+            socket.onopen = () => realtimeLog.push("open");
+            socket.onerror = () => realtimeLog.push("error");
+            socket.onclose = event => realtimeLog.push("close:" + event.code);
+        "#
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "realtimeLog.join('|')"),
+            "error|close:1006"
+        );
+        assert_eq!(eval_str(&mut runtime, "String(socket.readyState)"), "3");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn websocket_address_policy_allows_only_the_documents_own_host_privately() {
+        use crate::realtime::WebSocketAddressPolicy::{Any, PublicOnly};
+        let document: crate::http::Url = "http://127.0.0.1:8000/page".parse().unwrap();
+        assert_eq!(
+            websocket_address_policy("ws://127.0.0.1:8000/socket", Some(&document)),
+            Any
+        );
+        assert_eq!(
+            websocket_address_policy("ws://127.0.0.1:8001/socket", Some(&document)),
+            PublicOnly
+        );
+        assert_eq!(
+            websocket_address_policy("ws://localhost:8000/socket", Some(&document)),
+            PublicOnly
+        );
+        assert_eq!(
+            websocket_address_policy("ws://127.0.0.1:8000/socket", None),
+            PublicOnly
+        );
+        assert_eq!(
+            websocket_address_policy("wss://example.test/", None),
+            PublicOnly
+        );
     }
 
     #[test]

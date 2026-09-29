@@ -260,8 +260,16 @@ impl HttpRequest {
 
 /// Validates an HTTP field before it can be serialized into a request.
 pub(crate) fn is_valid_header(name: &str, value: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
+    is_http_token(name)
+        && value
+            .bytes()
+            .all(|byte| byte == b'\t' || byte >= b' ' && byte != 0x7f)
+}
+
+/// Returns whether `value` is an RFC 9110 `token` (one or more `tchar`s).
+pub(crate) fn is_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
                 || matches!(
                     byte,
@@ -281,9 +289,6 @@ pub(crate) fn is_valid_header(name: &str, value: &str) -> bool {
                         | b'~'
                 )
         })
-        && value
-            .bytes()
-            .all(|byte| byte == b'\t' || byte >= b' ' && byte != 0x7f)
 }
 
 /// Returns whether script is forbidden to set this request field.
