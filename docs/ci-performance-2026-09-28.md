@@ -38,7 +38,9 @@ v3の初回にLinux ARM64 385 MB、macOS ARM64 298 MBのsuite用Rustキャッシ
 | Linux x86_64 | 1085.9秒 | 1317.9秒 | — | 245→10 |
 | macOS ARM64 | 1492.6秒 | 1402.8秒 | 1322.8秒 | 242→10→10 |
 
-x86_64のcoldは中止した初回で保存できず、表のcold値は2回目、warm値は3回目。x86_64のwarmでは再コンパイルが減った一方、この2runのsuite時間は232.0秒長くなった。2回目のGate 5全体は26分44秒、3回目は23分35秒で3分09秒短かった。runner負荷の変動も含む観測値として扱う。
+x86_64のcoldは中止した初回で保存できず、表のcold値は2回目、warm値は3回目。x86_64のwarmでは再コンパイルが減った一方、この2runのsuite時間は232.0秒長くなった。2回目のGate 5全体は26分44秒、3回目は23分35秒で3分09秒短かった。成功jobの実行時間合計は82分51秒から87分39秒に増えた。この合計は課金時間ではなく、runner負荷の変動も含む観測値として扱う。
+
+PR #1127のマージ後、mainの[手動Release run #36504229719](https://github.com/ieee0824/omoikane/actions/runs/36504229719)でNative JIT、Gate 5の全suite/package、aggregateが成功した。main参照のv3 suite用RustキャッシュはLinux x86_64 400 MB、Linux ARM64 386 MB、macOS ARM64 298 MB。package用はそれぞれ278 MB、273 MB、271 MBで、GitHubの圧縮キャッシュ表示容量を十進MBへ丸めた値である。
 
 ## 文書のみの変更判定
 
