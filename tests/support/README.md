@@ -23,6 +23,8 @@ and the CLI example; its worker is joined when the server is dropped.
 `subresource_cookie_store.rs` also uses it for all seven tests, including the
 delayed-request regression from Issue #983. Its accepted sockets are explicitly
 returned to blocking mode before bounded header reads.
+`src/screenshot/mod.rs` uses it for three frameset fixture servers; their
+responses and path assertions are unchanged, and the file retains 11 unit tests.
 
 Issue #885 first migrates `document_cookie_bridge.rs` and
 `fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,
