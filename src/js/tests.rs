@@ -1,3 +1,4 @@
+use super::broadcast_channel::broadcast_channel_post_native;
 use super::*;
 use boa_engine::native_function::NativeCallSuspension;
 use boa_gc::{Gc, GcRefCell};

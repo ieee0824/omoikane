@@ -51,6 +51,8 @@ use crate::http::cors::{
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
+mod broadcast_channel;
+mod cache_storage;
 mod compression_stream;
 #[cfg(test)]
 mod compression_stream_tests;
@@ -68,6 +70,8 @@ mod font_loading;
 mod font_loading_tests;
 mod form_state;
 mod form_submission;
+mod geolocation;
+pub use geolocation::GeolocationPositionData;
 mod form_validation;
 #[cfg(test)]
 mod fullscreen_tests;
@@ -89,7 +93,15 @@ mod popover_tests;
 #[cfg(test)]
 mod query_tests;
 mod scroll_snap;
+mod shared_worker;
+use shared_worker::terminate_shared_worker_connections;
 mod text_stream;
+mod web_locks;
+mod worklet;
+use web_locks::{
+    flush_web_lock_notifications, register_web_lock_client, unregister_web_lock_client,
+};
+use worklet::terminate_worklet_runtime;
 #[cfg(test)]
 mod text_stream_tests;
 #[cfg(test)]
@@ -240,77 +252,6 @@ thread_local! {
     static TEST_FETCH_RESPONSE_OVERRIDE: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
     static ACTIVE_MODULE_DOCUMENT: Cell<Option<ActiveModuleDocument>> = const { Cell::new(None) };
-    /// Same-thread registry for page-owned BroadcastChannel endpoints.
-    ///
-    /// JavaScript runtimes are intentionally !Send and all host callbacks run
-    /// on their owning thread, so a thread-local registry lets independent
-    /// runtimes exchange context-independent clone wires without ever moving a
-    /// Boa `JsValue` across realms (or introducing a global lock into the hot
-    /// posted-message path).
-    static BROADCAST_CHANNEL_REGISTRY: RefCell<Vec<BroadcastChannelRegistration>> =
-        const { RefCell::new(Vec::new()) };
-    /// Same-thread registry for classic `SharedWorker` runtimes.  Shared
-    /// workers are deliberately kept on the owning Boa thread: only
-    /// structured-clone wires cross the registry, never a `JsValue`.
-    static SHARED_WORKER_REGISTRY: RefCell<Vec<Rc<RefCell<SharedWorkerRuntime>>>> =
-        const { RefCell::new(Vec::new()) };
-    static NEXT_SHARED_WORKER_ID: Cell<u64> = const { Cell::new(1) };
-    static NEXT_SHARED_WORKER_CONNECTION_ID: Cell<u64> = const { Cell::new(1) };
-    static WEB_LOCK_CLIENT_REGISTRY: RefCell<HashMap<u64, (Weak<RefCell<HostState>>, usize)>> =
-        RefCell::new(HashMap::new());
-    static PENDING_WEB_LOCK_NOTIFICATIONS: RefCell<Vec<WebLockNotification>> =
-        const { RefCell::new(Vec::new()) };
-}
-
-fn register_web_lock_client(
-    host_state: &Rc<RefCell<HostState>>,
-    document_id: usize,
-    client_id: u64,
-) {
-    let _ = WEB_LOCK_CLIENT_REGISTRY.try_with(|registry| {
-        registry
-            .borrow_mut()
-            .insert(client_id, (Rc::downgrade(host_state), document_id));
-    });
-}
-
-fn queue_web_lock_notifications(notifications: Vec<WebLockNotification>) {
-    let _ = PENDING_WEB_LOCK_NOTIFICATIONS
-        .try_with(|pending| pending.borrow_mut().extend(notifications));
-}
-
-fn flush_web_lock_notifications() {
-    let Ok(notifications) = PENDING_WEB_LOCK_NOTIFICATIONS
-        .try_with(|pending| std::mem::take(&mut *pending.borrow_mut()))
-    else {
-        return;
-    };
-    let mut retry = Vec::new();
-    for notification in notifications {
-        let registration = WEB_LOCK_CLIENT_REGISTRY
-            .try_with(|registry| registry.borrow().get(&notification.client_id).cloned())
-            .ok()
-            .flatten();
-        let Some((host, document_id)) = registration else {
-            continue;
-        };
-        let Some(host) = host.upgrade() else {
-            continue;
-        };
-        let Ok(mut state) = host.try_borrow_mut() else {
-            retry.push(notification);
-            continue;
-        };
-        state.event_loop.enqueue_web_lock(
-            document_id,
-            notification.request_id,
-            notification.kind == WebLockNotificationKind::Stolen,
-        );
-    }
-    if !retry.is_empty() {
-        let _ =
-            PENDING_WEB_LOCK_NOTIFICATIONS.try_with(|pending| pending.borrow_mut().extend(retry));
-    }
 }
 
 /// Host clipboard storage shared by all page runtimes in this process.
@@ -1522,14 +1463,7 @@ struct HostState {
     clipboard: HostClipboard,
     clipboard_permission_granted: bool,
     notification_permission: String,
-    /// Permission and deterministic provider state for the Window geolocation
-    /// environment.  The provider is intentionally opt-in: an embedder can
-    /// inject a fixed position for tests, while an unset provider reports
-    /// `POSITION_UNAVAILABLE` rather than consulting host-global state.
-    geolocation_permission_granted: bool,
-    geolocation_position: Option<GeolocationPositionData>,
-    next_geolocation_request_id: u64,
-    geolocation_requests: HashMap<u64, GeolocationRequest>,
+    geolocation: geolocation::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
     cookie_store: Arc<Mutex<crate::http::CookieJar>>,
@@ -1730,34 +1664,9 @@ struct HostState {
     /// this when queueing messages back to an iframe owner.
     worker_owner_realm: Option<Realm>,
     worker_startup_outgoing: VecDeque<String>,
-    /// Shared-worker globals identify themselves so the event-loop pump does
-    /// not recursively execute the registry entry currently being serviced.
-    shared_worker_id: Option<u64>,
-    /// Page-owned `SharedWorkerPort` endpoint references keyed by a
-    /// process-local connection id.  The endpoint remains in its own Boa
-    /// realm; native delivery only retains it until the port is closed.
-    shared_worker_ports: HashMap<u64, JsValue>,
-    /// `BroadcastChannel` endpoint references owned by this realm, keyed by a
-    /// per-realm numeric id.  Modern realms store a `WeakRef` here so native
-    /// registration does not keep an otherwise unreachable channel alive;
-    /// legacy realms may store the endpoint itself as a compatibility
-    /// fallback.  Delivery dereferences the value in the target realm.
-    broadcast_channels: HashMap<u64, JsValue>,
-    broadcast_channel_metadata: HashMap<u64, BroadcastChannelMetadata>,
-    next_broadcast_channel_id: u64,
-    /// One isolated WorkletGlobalScope shared by Worklet instances in this
-    /// browsing context (including `CSS.paintWorklet`). The runtime is lazily
-    /// constructed on the first `addModule()` call.
-    worklet_runtime: Option<WorkletRuntimeHandle>,
-    next_worklet_id: u64,
-    /// Worklet globals point back to their owning page only through this
-    /// control-plane handle. It is cleared during teardown so the cycle does
-    /// not keep a navigated page alive.
-    worklet_owner: Option<Rc<RefCell<HostState>>>,
-    worklet_id: Option<u64>,
-    worklet_terminated: bool,
-    worklet_modules: HashSet<String>,
-    worklet_registrations: HashSet<String>,
+    shared_worker: shared_worker::State,
+    broadcast_channel: broadcast_channel::State,
+    worklet: worklet::State,
     /// Constructable stylesheets adopted by a Document or ShadowRoot. The
     /// JavaScript wrapper keeps stylesheet objects; this native snapshot lets
     /// the synchronous style resolver include their parsed text without
@@ -1800,21 +1709,12 @@ unsafe impl Trace for HostState {
         for owner in self.worker_owner_objects.values() {
             unsafe { owner.trace(tracer) };
         }
-        for request in self.geolocation_requests.values() {
-            unsafe { request.success.trace(tracer) };
-            if let Some(error) = &request.error {
-                unsafe { error.trace(tracer) };
-            }
-        }
+        unsafe { self.geolocation.trace(tracer) };
         if let Some(dialog) = &self.pending_javascript_dialog {
             unsafe { dialog.suspension.trace(tracer) };
         }
-        for channel in self.broadcast_channels.values() {
-            unsafe { channel.trace(tracer) };
-        }
-        for port in self.shared_worker_ports.values() {
-            unsafe { port.trace(tracer) };
-        }
+        unsafe { self.broadcast_channel.trace(tracer) };
+        unsafe { self.shared_worker.trace(tracer) };
     }
 
     fn run_finalizer(&self) {}
@@ -1843,110 +1743,6 @@ fn host_clipboard() -> HostClipboard {
     HOST_CLIPBOARD.get_or_init(HostClipboard::default).clone()
 }
 
-/// A deterministic position supplied by an embedder or a regression test.
-///
-/// The JavaScript API exposes the corresponding read-only fields through a
-/// `GeolocationPosition` object.  Optional values use `None` to model the
-/// nullable WebIDL members (`altitude`, `altitudeAccuracy`, `heading`, and
-/// `speed`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct GeolocationPositionData {
-    pub latitude: f64,
-    pub longitude: f64,
-    pub accuracy: f64,
-    pub altitude: Option<f64>,
-    pub altitude_accuracy: Option<f64>,
-    pub heading: Option<f64>,
-    pub speed: Option<f64>,
-    /// Unix epoch milliseconds reported as `GeolocationPosition.timestamp`.
-    /// A non-finite value is replaced with the runtime's current epoch time.
-    pub timestamp_ms: f64,
-}
-
-impl GeolocationPositionData {
-    /// Creates a position with only the required coordinates and accuracy.
-    /// Optional members default to `null`; timestamp is filled by the runtime
-    /// when the position is installed.
-    pub fn new(latitude: f64, longitude: f64, accuracy: f64) -> Self {
-        Self {
-            latitude,
-            longitude,
-            accuracy,
-            altitude: None,
-            altitude_accuracy: None,
-            heading: None,
-            speed: None,
-            timestamp_ms: f64::NAN,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct GeolocationRequest {
-    success: JsValue,
-    error: Option<JsValue>,
-    /// `Some(id)` for `watchPosition`; `None` for one-shot requests.
-    watch_id: Option<u32>,
-    /// `None` represents the default infinite timeout.
-    timeout_ms: Option<u64>,
-    /// `None` represents an infinite maximum age.
-    maximum_age_ms: Option<u64>,
-    pending: bool,
-    timeout_timer_id: Option<u64>,
-}
-
-#[derive(Debug)]
-enum GeolocationOutcome {
-    Success(GeolocationPositionData),
-    Error { code: u32, message: String },
-}
-
-fn geolocation_json_number(value: f64) -> String {
-    if value.is_finite() {
-        value.to_string()
-    } else {
-        "null".to_string()
-    }
-}
-
-fn geolocation_json_optional(value: Option<f64>) -> String {
-    value
-        .map(geolocation_json_number)
-        .unwrap_or_else(|| "null".to_string())
-}
-
-fn geolocation_position_json(position: &GeolocationPositionData) -> String {
-    format!(
-        "{{\"coords\":{{\"latitude\":{},\"longitude\":{},\"accuracy\":{},\"altitude\":{},\"altitudeAccuracy\":{},\"heading\":{},\"speed\":{}}},\"timestamp\":{}}}",
-        geolocation_json_number(position.latitude),
-        geolocation_json_number(position.longitude),
-        geolocation_json_number(position.accuracy),
-        geolocation_json_optional(position.altitude),
-        geolocation_json_optional(position.altitude_accuracy),
-        geolocation_json_optional(position.heading),
-        geolocation_json_optional(position.speed),
-        geolocation_json_number(position.timestamp_ms),
-    )
-}
-
-#[derive(Debug, Clone)]
-struct BroadcastChannelMetadata {
-    name: String,
-    origin: Option<StorageOrigin>,
-    /// Serialized origin used for `MessageEvent.origin`.  This is captured at
-    /// construction, matching the environment settings object that created
-    /// the channel even if the host later updates its base URL.
-    origin_text: String,
-}
-
-#[derive(Debug)]
-struct BroadcastChannelRegistration {
-    host_state: Weak<RefCell<HostState>>,
-    channel_id: u64,
-    name: String,
-    origin: StorageOrigin,
-}
-
 #[derive(Debug)]
 enum WebSocketReadResult {
     Message(crate::realtime::WebSocketMessage),
@@ -1970,48 +1766,6 @@ struct WorkerRuntime {
     startup_error: Option<String>,
     terminated: bool,
 }
-
-/// The key used by the same-thread `SharedWorker` registry.  A worker is
-/// shared only when its resolved script URL, name, and origin all match.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SharedWorkerKey {
-    /// Shared workers are only constructible for an eligible tuple origin;
-    /// opaque/no-origin callers are rejected before a key is created.
-    origin: StorageOrigin,
-    url: String,
-    name: String,
-}
-
-/// One page-to-shared-worker connection.  The page endpoint is retained only
-/// in the page's realm; the shared runtime receives the numeric id and clone
-/// wire through its event loop.
-struct SharedWorkerConnection {
-    owner_state: Weak<RefCell<HostState>>,
-    owner_port: Option<JsValue>,
-    owner_origin: String,
-    pending_to_owner: VecDeque<String>,
-    /// A startup failure is delivered once the page binds its `SharedWorker`
-    /// object.  Keeping it on the connection lets every caller observe the
-    /// same failed shared runtime without exposing a native error directly
-    /// from the constructor.
-    startup_error: Option<String>,
-    closed: bool,
-}
-
-/// State for one classic shared worker.  Its `JsRuntime` is independent of
-/// every connecting page and remains in the thread-local registry while at
-/// least one connection is alive.
-struct SharedWorkerRuntime {
-    key: SharedWorkerKey,
-    runtime: Rc<RefCell<JsRuntime>>,
-    startup_error: Option<String>,
-    connections: HashMap<u64, SharedWorkerConnection>,
-}
-
-/// The deterministic Worklet runtime owned by a page global. Worklet modules
-/// execute in a separate Boa realm; only module metadata crosses back to the
-/// page, so no `JsValue` from the isolated global can leak into the Window.
-type WorkletRuntimeHandle = Rc<RefCell<JsRuntime>>;
 
 /// A loaded sub-browsing-context document owned by an `<iframe>` element.
 #[derive(Debug)]
@@ -2262,10 +2016,7 @@ impl HostState {
             clipboard: host_clipboard(),
             clipboard_permission_granted: true,
             notification_permission: "default".to_string(),
-            geolocation_permission_granted: true,
-            geolocation_position: None,
-            next_geolocation_request_id: 1,
-            geolocation_requests: HashMap::new(),
+            geolocation: geolocation::State::default(),
             compression_streams: compression_stream::Store::new(),
             http_client,
             cookie_store,
@@ -2373,18 +2124,9 @@ impl HostState {
             worker_owner_object: None,
             worker_owner_realm: None,
             worker_startup_outgoing: VecDeque::new(),
-            shared_worker_id: None,
-            shared_worker_ports: HashMap::new(),
-            broadcast_channels: HashMap::new(),
-            broadcast_channel_metadata: HashMap::new(),
-            next_broadcast_channel_id: 1,
-            worklet_runtime: None,
-            next_worklet_id: 1,
-            worklet_owner: None,
-            worklet_id: None,
-            worklet_terminated: false,
-            worklet_modules: HashSet::new(),
-            worklet_registrations: HashSet::new(),
+            shared_worker: shared_worker::State::default(),
+            broadcast_channel: broadcast_channel::State::default(),
+            worklet: worklet::State::default(),
             adopted_stylesheets: HashMap::new(),
         };
         state.register_tree(&document);
@@ -3317,10 +3059,7 @@ impl HostState {
         self.parser_inserted_scripts
             .retain(|id| !tree_ids.contains(id));
         if let Some(client_id) = self.web_lock_clients.remove(&document_id) {
-            let _ = WEB_LOCK_CLIENT_REGISTRY.try_with(|registry| {
-                registry.borrow_mut().remove(&client_id);
-            });
-            queue_web_lock_notifications(self.storage_manager.remove_web_lock_client(client_id));
+            unregister_web_lock_client(&self.storage_manager, client_id);
         }
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
@@ -3418,10 +3157,7 @@ impl HostState {
         self.parser_inserted_scripts
             .retain(|id| !tree_ids.contains(id));
         if let Some(client_id) = self.web_lock_clients.remove(&document_id) {
-            let _ = WEB_LOCK_CLIENT_REGISTRY.try_with(|registry| {
-                registry.borrow_mut().remove(&client_id);
-            });
-            queue_web_lock_notifications(self.storage_manager.remove_web_lock_client(client_id));
+            unregister_web_lock_client(&self.storage_manager, client_id);
         }
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
@@ -5894,21 +5630,6 @@ impl JsRuntime {
         }
     }
 
-    fn advance_worklet_clocks(&mut self, elapsed_ms: u64) {
-        let Some(runtime) = self.host_state.borrow().worklet_runtime.clone() else {
-            return;
-        };
-        if runtime.borrow().host_state.borrow().worklet_terminated {
-            return;
-        }
-        runtime
-            .borrow_mut()
-            .host_state
-            .borrow_mut()
-            .event_loop
-            .advance(elapsed_ms);
-    }
-
     fn run_worker_background_tasks(&mut self) {
         let worker_ids: Vec<_> = self.host_state.borrow().workers.keys().copied().collect();
         for worker_id in worker_ids {
@@ -5981,84 +5702,6 @@ impl JsRuntime {
                 );
             }
         }
-    }
-
-    /// Pumps the page-owned WorkletGlobalScope between page tasks. Worklet
-    /// timers and posted microtasks stay in the isolated realm, but their
-    /// deterministic clock advances with the owner page's clock.
-    fn run_worklet_background_tasks(&mut self) {
-        if self.host_state.borrow().worklet_id.is_some() {
-            return;
-        }
-        let Some(runtime) = self.host_state.borrow().worklet_runtime.clone() else {
-            return;
-        };
-        let (result, errors, terminated) = {
-            let mut runtime = runtime.borrow_mut();
-            if runtime.host_state.borrow().worklet_terminated {
-                return;
-            }
-            let result = runtime.run_until_idle();
-            let errors = runtime.take_task_errors();
-            let terminated = runtime.host_state.borrow().worklet_terminated;
-            (result, errors, terminated)
-        };
-        if let Err(error) = result {
-            self.record_task_error(format!("[worklet] {error}"));
-        }
-        for error in errors {
-            self.record_task_error(format!("[worklet] {error}"));
-        }
-        if terminated {
-            terminate_worklet_runtime(&self.host_state);
-        }
-    }
-
-    /// Pumps every live shared worker owned by this Boa thread.  A shared
-    /// worker has its own runtime and therefore cannot be serviced by the
-    /// page's event-loop queues directly; running it between page tasks keeps
-    /// cross-realm messages deterministic while avoiding a background thread.
-    fn run_shared_worker_background_tasks(&mut self) {
-        if self.host_state.borrow().shared_worker_id.is_some() {
-            return;
-        }
-        let entries = SHARED_WORKER_REGISTRY.with(|registry| {
-            let mut registry = registry.borrow_mut();
-            prune_shared_worker_registry(&mut registry);
-            registry.iter().cloned().collect::<Vec<_>>()
-        });
-        for entry in entries {
-            let same_runtime = {
-                let shared = entry.borrow();
-                Rc::ptr_eq(&shared.runtime.borrow().host_state, &self.host_state)
-            };
-            if same_runtime {
-                continue;
-            }
-            let (runtime, has_connections) = {
-                let shared = entry.borrow();
-                (Rc::clone(&shared.runtime), !shared.connections.is_empty())
-            };
-            if !has_connections {
-                continue;
-            }
-            // Shared-worker failures are isolated from the owner page just as
-            // Dedicated Worker failures are.  The connection remains usable
-            // for subsequent tasks unless the worker explicitly closes.
-            let mut runtime = runtime.borrow_mut();
-            let result = runtime.run_until_idle();
-            let errors = runtime.take_task_errors();
-            for _ in 0..usize::from(result.is_err()) + errors.len() {
-                report_safe_worker_or_module_failure(
-                    self.host_state.borrow().error_reporter.clone(),
-                    ErrorCategory::Worker,
-                    "SHARED_WORKER_RUNTIME_FAILED",
-                    "execute",
-                );
-            }
-        }
-        SHARED_WORKER_REGISTRY
-            .with(|registry| prune_shared_worker_registry(&mut registry.borrow_mut()));
     }
 
     /// Returns the top-level Window scroll offset in CSS pixels.
@@ -7210,75 +6853,6 @@ impl JsRuntime {
         }
     }
 
-    /// Sets or replaces the deterministic geolocation provider position.
-    ///
-    /// A position is delivered asynchronously to all active watches.  The
-    /// position remains cached for `maximumAge` checks on subsequent requests;
-    /// calling this method again refreshes that cache age.
-    pub fn set_geolocation_position(&mut self, mut position: GeolocationPositionData) {
-        let mut state = self.host_state.borrow_mut();
-        if !position.latitude.is_finite()
-            || !position.longitude.is_finite()
-            || !position.accuracy.is_finite()
-            || position.accuracy < 0.0
-        {
-            state.geolocation_position = None;
-            return;
-        }
-        if !position.timestamp_ms.is_finite() || position.timestamp_ms < 0.0 {
-            position.timestamp_ms =
-                state.performance_time_origin + state.event_loop.now_ms() as f64;
-        }
-        state.geolocation_position = Some(position);
-        let request_ids: Vec<_> = state
-            .geolocation_requests
-            .iter()
-            .filter_map(|(request_id, request)| {
-                (!request.pending || request.timeout_timer_id.is_some()).then_some(*request_id)
-            })
-            .collect();
-        for request_id in request_ids {
-            wake_geolocation_request(&mut state, request_id);
-            schedule_geolocation_request(&mut state, request_id);
-        }
-    }
-
-    /// Removes the deterministic provider position. Active watches stay alive
-    /// and report `POSITION_UNAVAILABLE` (or timeout) on their next request.
-    pub fn clear_geolocation_position(&mut self) {
-        let mut state = self.host_state.borrow_mut();
-        state.geolocation_position = None;
-    }
-
-    /// Sets the permission result used by future and active geolocation
-    /// requests.  A denied state is delivered through the normal geolocation
-    /// task source, never synchronously from the setter.
-    pub fn set_geolocation_permission(&mut self, granted: bool) {
-        let changed = {
-            let mut state = self.host_state.borrow_mut();
-            let changed = state.geolocation_permission_granted != granted;
-            state.geolocation_permission_granted = granted;
-            let request_ids: Vec<_> = state
-                .geolocation_requests
-                .iter()
-                .filter_map(|(request_id, request)| {
-                    (!request.pending || request.timeout_timer_id.is_some()).then_some(*request_id)
-                })
-                .collect();
-            for request_id in request_ids {
-                wake_geolocation_request(&mut state, request_id);
-                schedule_geolocation_request(&mut state, request_id);
-            }
-            changed
-        };
-        if changed {
-            self.notify_permission_change(
-                "geolocation",
-                if granted { "granted" } else { "denied" },
-            );
-        }
-    }
-
     /// Advances the event loop clock and runs due macrotasks and pending jobs.
     ///
     /// Due timers fire in fire-time order (ties broken by registration order).
@@ -7823,127 +7397,6 @@ impl JsRuntime {
         );
         port_result?;
         data_result?;
-        Ok(())
-    }
-
-    fn run_broadcast_channel_message(
-        &mut self,
-        channel_id: u64,
-        data: String,
-        origin: String,
-    ) -> JsResult<()> {
-        let channel = self
-            .host_state
-            .borrow()
-            .broadcast_channels
-            .get(&channel_id)
-            .cloned();
-        let Some(channel) = channel else {
-            // The endpoint was closed (or the runtime was torn down) after
-            // the task was queued.  Closing drops queued messages silently.
-            return Ok(());
-        };
-        if let Err(error) = self.install_broadcast_channel_values(channel, channel_id, data, origin)
-        {
-            self.record_task_error(format!("[broadcast channel setup] {error}"));
-            let cleanup_result = self.clear_broadcast_channel_values();
-            self.record_error_from("broadcast channel cleanup", cleanup_result);
-            return Ok(());
-        }
-        let result = self.eval(
-            "const __omoikane_broadcast_channel_ref_value = __omoikane_broadcast_channel_ref; const __omoikane_broadcast_channel_target = (__omoikane_broadcast_channel_ref_value && typeof __omoikane_broadcast_channel_ref_value.deref === 'function') ? __omoikane_broadcast_channel_ref_value.deref() : __omoikane_broadcast_channel_ref_value; if (__omoikane_broadcast_channel_target && !__omoikane_broadcast_channel_target._closed) { \
-             let __omoikane_broadcast_channel_decoded; \
-             let __omoikane_broadcast_channel_decoded_ok = false; \
-             try { __omoikane_broadcast_channel_decoded = __omoikane_decode_worker_message(__omoikane_broadcast_channel_wire); __omoikane_broadcast_channel_decoded_ok = true; } \
-             catch (error) { \
-               __omoikane_broadcast_channel_target.dispatchEvent(new MessageEvent('messageerror', { \
-                 data: null, origin: __omoikane_broadcast_channel_origin, source: null, ports: [] \
-               })); \
-             } \
-             if (__omoikane_broadcast_channel_decoded_ok) { \
-               __omoikane_broadcast_channel_target.dispatchEvent(new MessageEvent('message', { \
-                 data: __omoikane_broadcast_channel_decoded, origin: __omoikane_broadcast_channel_origin, source: null, ports: [] \
-               })); \
-             } \
-             } !__omoikane_broadcast_channel_target",
-        );
-        if result.as_ref().ok().and_then(JsValue::as_boolean) == Some(true) {
-            unregister_broadcast_channel(&self.host_state, channel_id);
-            let mut state = self.host_state.borrow_mut();
-            state.broadcast_channels.remove(&channel_id);
-            state.broadcast_channel_metadata.remove(&channel_id);
-        }
-        let cleanup_result = self.clear_broadcast_channel_values();
-        self.record_error_from("broadcast channel cleanup", cleanup_result);
-        self.record_error_from("broadcast channel", result);
-        Ok(())
-    }
-
-    fn install_broadcast_channel_values(
-        &mut self,
-        channel: JsValue,
-        channel_id: u64,
-        data: String,
-        origin: String,
-    ) -> JsResult<()> {
-        let global = self.context.global_object();
-        global.set(
-            js_string!("__omoikane_broadcast_channel_ref"),
-            channel,
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_broadcast_channel_id"),
-            JsValue::from(js_string!(channel_id.to_string())),
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_broadcast_channel_wire"),
-            JsValue::from(js_string!(data)),
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_broadcast_channel_origin"),
-            JsValue::from(js_string!(origin)),
-            true,
-            &mut self.context,
-        )?;
-        Ok(())
-    }
-
-    fn clear_broadcast_channel_values(&mut self) -> JsResult<()> {
-        let global = self.context.global_object();
-        let target_result = global.set(
-            js_string!("__omoikane_broadcast_channel_ref"),
-            JsValue::undefined(),
-            true,
-            &mut self.context,
-        );
-        let wire_result = global.set(
-            js_string!("__omoikane_broadcast_channel_wire"),
-            JsValue::undefined(),
-            true,
-            &mut self.context,
-        );
-        let id_result = global.set(
-            js_string!("__omoikane_broadcast_channel_id"),
-            JsValue::undefined(),
-            true,
-            &mut self.context,
-        );
-        let origin_result = global.set(
-            js_string!("__omoikane_broadcast_channel_origin"),
-            JsValue::undefined(),
-            true,
-            &mut self.context,
-        );
-        target_result?;
-        id_result?;
-        wire_result?;
-        origin_result?;
         Ok(())
     }
 
@@ -8823,133 +8276,6 @@ impl JsRuntime {
         }
     }
 
-    fn run_geolocation_delivery(&mut self, request_id: u64, timed_out: bool) -> JsResult<()> {
-        let (success, error, watch_id, maximum_age_ms, timeout_ms, pending) = {
-            let state = self.host_state.borrow();
-            let Some(request) = state.geolocation_requests.get(&request_id) else {
-                return Ok(());
-            };
-            (
-                request.success.clone(),
-                request.error.clone(),
-                request.watch_id,
-                request.maximum_age_ms,
-                request.timeout_ms,
-                request.pending,
-            )
-        };
-        if !pending {
-            return Ok(());
-        }
-        let (outcome, timeout_timer_id) = {
-            let mut state = self.host_state.borrow_mut();
-            let fresh_position = geolocation_position_age_ms(&state)
-                .is_some_and(|age| maximum_age_ms.is_none_or(|maximum_age| age <= maximum_age));
-            let outcome = if !state.geolocation_permission_granted {
-                GeolocationOutcome::Error {
-                    code: 1,
-                    message: "User denied Geolocation.".to_string(),
-                }
-            } else if fresh_position {
-                GeolocationOutcome::Success(
-                    state.geolocation_position.clone().expect("fresh position"),
-                )
-            } else if timed_out || timeout_ms == Some(0) {
-                GeolocationOutcome::Error {
-                    code: 3,
-                    message: "The location request timed out.".to_string(),
-                }
-            } else {
-                GeolocationOutcome::Error {
-                    code: 2,
-                    message: "Unable to determine the user's location.".to_string(),
-                }
-            };
-            let timeout_timer_id =
-                state
-                    .geolocation_requests
-                    .get_mut(&request_id)
-                    .and_then(|request| {
-                        request.pending = false;
-                        request.timeout_timer_id.take()
-                    });
-            if watch_id.is_none() {
-                state.geolocation_requests.remove(&request_id);
-            }
-            (outcome, timeout_timer_id)
-        };
-
-        if let Some(timer_id) = timeout_timer_id {
-            self.host_state
-                .borrow_mut()
-                .event_loop
-                .clear_timer(timer_id);
-        }
-        let payload = match &outcome {
-            GeolocationOutcome::Success(position) => geolocation_position_json(position),
-            GeolocationOutcome::Error { .. } => "null".to_string(),
-        };
-        let (status, code, message) = match outcome {
-            GeolocationOutcome::Success(_) => ("success", 0_u32, String::new()),
-            GeolocationOutcome::Error { code, message } => ("error", code, message),
-        };
-        let global = self.context.global_object();
-        global.set(
-            js_string!("__omoikane_geolocation_callback"),
-            success,
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_geolocation_error_callback"),
-            error.unwrap_or_else(JsValue::undefined),
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_geolocation_status"),
-            JsValue::from(js_string!(status)),
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_geolocation_payload"),
-            JsValue::from(js_string!(payload)),
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_geolocation_error_code"),
-            JsValue::from(code as f64),
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_geolocation_error_message"),
-            JsValue::from(js_string!(message)),
-            true,
-            &mut self.context,
-        )?;
-        let result = self.eval("__omoikane_dispatch_geolocation_task()");
-        for name in [
-            "__omoikane_geolocation_callback",
-            "__omoikane_geolocation_error_callback",
-            "__omoikane_geolocation_status",
-            "__omoikane_geolocation_payload",
-            "__omoikane_geolocation_error_code",
-            "__omoikane_geolocation_error_message",
-        ] {
-            let _ = global.set(
-                js_string!(name),
-                JsValue::undefined(),
-                true,
-                &mut self.context,
-            );
-        }
-        self.record_error_from("geolocation", result);
-        Ok(())
-    }
-
     fn run_worker_message(&mut self, worker_id: u64, data: String) -> JsResult<()> {
         let owner_origin = host_state_origin(&self.host_state.borrow());
         let entry = self.host_state.borrow_mut().workers.remove(&worker_id);
@@ -9098,95 +8424,6 @@ impl JsRuntime {
         if let Some(old_realm) = old_realm {
             self.context.enter_realm(old_realm);
         }
-        Ok(())
-    }
-
-    fn run_shared_worker_message(&mut self, connection_id: u64, data: String) -> JsResult<()> {
-        if self.host_state.borrow().shared_worker_id.is_none() {
-            return Ok(());
-        }
-        let global = self.context.global_object();
-        global.set(
-            js_string!("__omoikane_shared_worker_message_connection"),
-            JsValue::from(js_string!(connection_id.to_string())),
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_shared_worker_message_wire"),
-            JsValue::from(js_string!(data)),
-            true,
-            &mut self.context,
-        )?;
-        let result = self.eval(
-            "var __omoikane_shared_worker_message_port = __omoikane_get_shared_worker_port(__omoikane_shared_worker_message_connection); if (__omoikane_shared_worker_message_port && !__omoikane_shared_worker_message_port._closed) { try { __omoikane_shared_worker_message_port._queueMessage(__omoikane_decode_worker_message(__omoikane_shared_worker_message_wire)); } catch (error) { __omoikane_shared_worker_message_port.dispatchEvent(new MessageEvent('messageerror', { data: null, origin: location.origin, source: null, ports: [] })); } }",
-        );
-        let _ = global.set(
-            js_string!("__omoikane_shared_worker_message_connection"),
-            JsValue::undefined(),
-            true,
-            &mut self.context,
-        );
-        let _ = global.set(
-            js_string!("__omoikane_shared_worker_message_wire"),
-            JsValue::undefined(),
-            true,
-            &mut self.context,
-        );
-        self.record_error_from("shared worker message", result);
-        Ok(())
-    }
-
-    fn run_shared_worker_owner_message(
-        &mut self,
-        connection_id: u64,
-        port: JsValue,
-        data: String,
-        origin: String,
-    ) -> JsResult<()> {
-        if !self
-            .host_state
-            .borrow()
-            .shared_worker_ports
-            .contains_key(&connection_id)
-        {
-            return Ok(());
-        }
-        let global = self.context.global_object();
-        global.set(
-            js_string!("__omoikane_shared_worker_owner_port"),
-            port,
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_shared_worker_owner_wire"),
-            JsValue::from(js_string!(data)),
-            true,
-            &mut self.context,
-        )?;
-        global.set(
-            js_string!("__omoikane_shared_worker_owner_origin"),
-            JsValue::from(js_string!(origin)),
-            true,
-            &mut self.context,
-        )?;
-        let result = self.eval(
-            "var __omoikane_shared_worker_owner_target = __omoikane_shared_worker_owner_port; if (__omoikane_shared_worker_owner_target && !__omoikane_shared_worker_owner_target._closed) { try { __omoikane_shared_worker_owner_target._queueMessage(__omoikane_decode_worker_message(__omoikane_shared_worker_owner_wire)); } catch (error) { __omoikane_shared_worker_owner_target.dispatchEvent(new MessageEvent('messageerror', { data: null, origin: __omoikane_shared_worker_owner_origin, source: null, ports: [] })); } }",
-        );
-        for name in [
-            "__omoikane_shared_worker_owner_port",
-            "__omoikane_shared_worker_owner_wire",
-            "__omoikane_shared_worker_owner_origin",
-        ] {
-            let _ = global.set(
-                js_string!(name),
-                JsValue::undefined(),
-                true,
-                &mut self.context,
-            );
-        }
-        self.record_error_from("shared worker owner message", result);
         Ok(())
     }
 
@@ -10149,10 +9386,7 @@ impl Drop for JsRuntime {
             )
         };
         for client_id in clients {
-            let _ = WEB_LOCK_CLIENT_REGISTRY.try_with(|registry| {
-                registry.borrow_mut().remove(&client_id);
-            });
-            queue_web_lock_notifications(storage_manager.remove_web_lock_client(client_id));
+            unregister_web_lock_client(&storage_manager, client_id);
         }
         flush_web_lock_notifications();
 
@@ -10358,193 +9592,6 @@ fn host_state_origin(state: &HostState) -> String {
         .as_ref()
         .map(|url| format!("{}://{}", url.scheme(), url.authority()))
         .unwrap_or_default()
-}
-
-/// Returns the tuple origin captured by a newly-created BroadcastChannel.
-///
-/// Opaque/non-HTTP locations have no `StorageOrigin` and therefore cannot
-/// participate in a same-origin broadcast group.  The channel itself still
-/// constructs successfully; its messages simply have no eligible recipients.
-fn broadcast_channel_origin(state: &HostState) -> Option<StorageOrigin> {
-    state
-        .base_url
-        .as_ref()
-        .and_then(|url| StorageOrigin::from_url(&url.to_string()))
-}
-
-fn prune_broadcast_channel_registry(registry: &mut Vec<BroadcastChannelRegistration>) {
-    registry.retain(|entry| entry.host_state.strong_count() > 0);
-}
-
-fn unregister_broadcast_channel(state: &Rc<RefCell<HostState>>, channel_id: u64) {
-    BROADCAST_CHANNEL_REGISTRY.with(|registry| {
-        let mut registry = registry.borrow_mut();
-        registry.retain(|entry| {
-            if entry.channel_id != channel_id {
-                return true;
-            }
-            entry
-                .host_state
-                .upgrade()
-                .is_none_or(|registered| !Rc::ptr_eq(&registered, state))
-        });
-        prune_broadcast_channel_registry(&mut registry);
-    });
-}
-
-fn register_broadcast_channel(
-    state: &Rc<RefCell<HostState>>,
-    channel_id: u64,
-    metadata: &BroadcastChannelMetadata,
-) {
-    let Some(origin) = metadata.origin.clone() else {
-        return;
-    };
-    BROADCAST_CHANNEL_REGISTRY.with(|registry| {
-        let mut registry = registry.borrow_mut();
-        prune_broadcast_channel_registry(&mut registry);
-        registry.push(BroadcastChannelRegistration {
-            host_state: Rc::downgrade(state),
-            channel_id,
-            name: metadata.name.clone(),
-            origin,
-        });
-    });
-}
-
-/// Enqueues a context-independent clone wire for every eligible channel in
-/// the sender's same-origin/name group.  The sender endpoint itself is
-/// deliberately excluded, while another endpoint in the same runtime still
-/// receives the message just like an endpoint in another runtime.
-fn post_broadcast_channel(sender_state: &Rc<RefCell<HostState>>, channel_id: u64, data: String) {
-    let Some(metadata) = sender_state
-        .borrow()
-        .broadcast_channel_metadata
-        .get(&channel_id)
-        .cloned()
-    else {
-        return;
-    };
-    let Some(origin) = metadata.origin.clone() else {
-        return;
-    };
-    let sender_origin = metadata.origin_text;
-    let destinations = BROADCAST_CHANNEL_REGISTRY.with(|registry| {
-        let mut registry = registry.borrow_mut();
-        prune_broadcast_channel_registry(&mut registry);
-        registry
-            .iter()
-            .filter(|entry| entry.name == metadata.name && entry.origin == origin)
-            .filter_map(|entry| {
-                let target = entry.host_state.upgrade()?;
-                if entry.channel_id == channel_id && Rc::ptr_eq(&target, sender_state) {
-                    return None;
-                }
-                Some((target, entry.channel_id))
-            })
-            .collect::<Vec<_>>()
-    });
-
-    for (target, target_id) in destinations {
-        target
-            .borrow_mut()
-            .event_loop
-            .enqueue_broadcast_channel_message(target_id, data.clone(), sender_origin.clone());
-    }
-}
-
-fn next_shared_worker_id() -> u64 {
-    NEXT_SHARED_WORKER_ID.with(|next| {
-        let id = next.get();
-        next.set(id.saturating_add(1));
-        id
-    })
-}
-
-fn next_shared_worker_connection_id() -> u64 {
-    NEXT_SHARED_WORKER_CONNECTION_ID.with(|next| {
-        let id = next.get();
-        next.set(id.saturating_add(1));
-        id
-    })
-}
-
-fn shared_worker_origin(state: &HostState) -> Option<StorageOrigin> {
-    state
-        .base_url
-        .as_ref()
-        .and_then(|url| StorageOrigin::from_url(&url.to_string()))
-}
-
-fn prune_shared_worker_registry(registry: &mut Vec<Rc<RefCell<SharedWorkerRuntime>>>) {
-    for entry in registry.iter() {
-        let mut shared = entry.borrow_mut();
-        shared.connections.retain(|_, connection| {
-            !connection.closed && connection.owner_state.strong_count() > 0
-        });
-    }
-    registry.retain(|entry| {
-        let shared = entry.borrow();
-        !shared.connections.is_empty()
-            && !shared
-                .runtime
-                .borrow()
-                .host_state
-                .borrow()
-                .worker_terminated
-    });
-}
-
-fn shared_worker_entry_for_connection(
-    connection_id: u64,
-) -> Option<Rc<RefCell<SharedWorkerRuntime>>> {
-    SHARED_WORKER_REGISTRY.with(|registry| {
-        registry
-            .borrow()
-            .iter()
-            .find(|entry| entry.borrow().connections.contains_key(&connection_id))
-            .cloned()
-    })
-}
-
-fn shared_worker_entry_for_key(key: &SharedWorkerKey) -> Option<Rc<RefCell<SharedWorkerRuntime>>> {
-    SHARED_WORKER_REGISTRY.with(|registry| {
-        registry
-            .borrow()
-            .iter()
-            .find(|entry| entry.borrow().key == *key)
-            .cloned()
-    })
-}
-
-fn terminate_shared_worker_connections(state: &Rc<RefCell<HostState>>) {
-    let connection_ids: Vec<_> = state.borrow().shared_worker_ports.keys().copied().collect();
-    for connection_id in connection_ids {
-        if let Some(entry) = shared_worker_entry_for_connection(connection_id) {
-            if let Some(connection) = entry.borrow_mut().connections.get_mut(&connection_id) {
-                connection.closed = true;
-                connection.owner_port = None;
-                connection.pending_to_owner.clear();
-            }
-        }
-    }
-    state.borrow_mut().shared_worker_ports.clear();
-}
-
-/// Tears down the isolated WorkletGlobalScope owned by `state`. Taking the
-/// handle before borrowing the child realm breaks the owner/child cycle even
-/// when navigation drops the page while a module task is pending.
-fn terminate_worklet_runtime(state: &Rc<RefCell<HostState>>) {
-    let runtime = state.borrow_mut().worklet_runtime.take();
-    let Some(runtime) = runtime else {
-        return;
-    };
-    let child_state = Rc::clone(&runtime.borrow().host_state);
-    let mut child_state = child_state.borrow_mut();
-    child_state.worklet_terminated = true;
-    child_state.worklet_owner = None;
-    child_state.worklet_modules.clear();
-    child_state.worklet_registrations.clear();
 }
 
 fn resolve_worker_url(
@@ -11073,6 +10120,12 @@ fn register_host_bindings(
     iframe_navigation::register(context, &mut bindings)?;
     form_validation::register(context, &mut bindings)?;
     form_submission::register(context, &mut bindings)?;
+    geolocation::register(context, &mut bindings)?;
+    broadcast_channel::register(context, &mut bindings)?;
+    web_locks::register(context, &mut bindings)?;
+    cache_storage::register(context, &mut bindings)?;
+    worklet::register(context, &mut bindings)?;
+    shared_worker::register(context, &mut bindings)?;
     let state = host_state.borrow();
     register_private_property(
         context,
@@ -11159,11 +10212,6 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(notification_request_permission_native),
         ),
         (
-            js_string!("__omoikane_geolocation_permission"),
-            0,
-            NativeFunction::from_copy_closure(geolocation_permission_native),
-        ),
-        (
             js_string!("__omoikane_crypto_random"),
             1,
             NativeFunction::from_copy_closure(crypto_random_native),
@@ -11234,16 +10282,6 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(clipboard_permission_native),
         ),
         (
-            js_string!("__omoikane_geolocation_request"),
-            5,
-            NativeFunction::from_copy_closure(geolocation_request_native),
-        ),
-        (
-            js_string!("__omoikane_geolocation_clear_watch"),
-            1,
-            NativeFunction::from_copy_closure(geolocation_clear_watch_native),
-        ),
-        (
             js_string!("__omoikane_storage_origin"),
             1,
             NativeFunction::from_copy_closure(storage_origin_native),
@@ -11297,16 +10335,6 @@ fn register_host_bindings(
             js_string!("__omoikane_storage_manager"),
             2,
             NativeFunction::from_copy_closure(storage_manager_native),
-        ),
-        (
-            js_string!("__omoikane_web_locks"),
-            5,
-            NativeFunction::from_copy_closure(web_locks_native),
-        ),
-        (
-            js_string!("__omoikane_cache_storage"),
-            3,
-            NativeFunction::from_copy_closure(cache_storage_native),
         ),
         (
             js_string!("__omoikane_get_element_by_id"),
@@ -11649,21 +10677,6 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(navigate_auxiliary_window_native),
         ),
         (
-            js_string!("__omoikane_broadcast_channel_register"),
-            2,
-            NativeFunction::from_copy_closure(broadcast_channel_register_native),
-        ),
-        (
-            js_string!("__omoikane_broadcast_channel_post"),
-            2,
-            NativeFunction::from_copy_closure(broadcast_channel_post_native),
-        ),
-        (
-            js_string!("__omoikane_broadcast_channel_close"),
-            1,
-            NativeFunction::from_copy_closure(broadcast_channel_close_native),
-        ),
-        (
             js_string!("__omoikane_create_worker"),
             1,
             NativeFunction::from_copy_closure(create_worker_native),
@@ -11692,56 +10705,6 @@ fn register_host_bindings(
             js_string!("__omoikane_worker_close"),
             0,
             NativeFunction::from_copy_closure(worker_close_native),
-        ),
-        (
-            js_string!("__omoikane_create_worklet"),
-            0,
-            NativeFunction::from_copy_closure(create_worklet_native),
-        ),
-        (
-            js_string!("__omoikane_worklet_add_module"),
-            2,
-            NativeFunction::from_copy_closure(worklet_add_module_native),
-        ),
-        (
-            js_string!("__omoikane_worklet_register"),
-            2,
-            NativeFunction::from_copy_closure(worklet_register_native),
-        ),
-        (
-            js_string!("__omoikane_worklet_registered_names"),
-            1,
-            NativeFunction::from_copy_closure(worklet_registered_names_native),
-        ),
-        (
-            js_string!("__omoikane_worklet_module_count"),
-            1,
-            NativeFunction::from_copy_closure(worklet_module_count_native),
-        ),
-        (
-            js_string!("__omoikane_worklet_teardown"),
-            1,
-            NativeFunction::from_copy_closure(worklet_teardown_native),
-        ),
-        (
-            js_string!("__omoikane_shared_worker_connect"),
-            2,
-            NativeFunction::from_copy_closure(shared_worker_connect_native),
-        ),
-        (
-            js_string!("__omoikane_shared_worker_bind_port"),
-            3,
-            NativeFunction::from_copy_closure(shared_worker_bind_port_native),
-        ),
-        (
-            js_string!("__omoikane_shared_worker_port_post"),
-            2,
-            NativeFunction::from_copy_closure(shared_worker_port_post_native),
-        ),
-        (
-            js_string!("__omoikane_shared_worker_port_close"),
-            1,
-            NativeFunction::from_copy_closure(shared_worker_port_close_native),
         ),
         (
             js_string!("__omoikane_canvas_commit"),
@@ -12559,14 +11522,6 @@ fn notification_request_permission_native(
     Ok(js_string!(permission).into())
 }
 
-fn geolocation_permission_native(
-    _this: &JsValue,
-    _args: &[JsValue],
-    _context: &mut Context,
-) -> JsResult<JsValue> {
-    with_host_state(|state| Ok(JsValue::from(state.borrow().geolocation_permission_granted)))
-}
-
 fn is_secure_context_url(url: &str) -> bool {
     let lower_url = url.to_ascii_lowercase();
     // Fragments are not part of an origin.  Strip them before the IPv6
@@ -12684,176 +11639,6 @@ fn clipboard_write_text_native(
         }
         state.clipboard.write_text(text);
         Ok(JsValue::from(true))
-    })
-}
-
-fn geolocation_duration_argument(
-    value: Option<&JsValue>,
-    default: Option<u64>,
-    context: &mut Context,
-) -> JsResult<Option<u64>> {
-    let Some(value) = value else {
-        return Ok(default);
-    };
-    let value = value.to_number(context)?;
-    if value.is_nan() || value < 0.0 {
-        return Err(JsNativeError::range()
-            .with_message("geolocation timeout and maximumAge must be non-negative")
-            .into());
-    }
-    if !value.is_finite() {
-        return Ok(None);
-    }
-    Ok(Some(value.floor().min(u64::MAX as f64) as u64))
-}
-
-/// Queues a Geolocation request according to the current permission/provider
-/// snapshot.  A request with a fresh cached position is delivered immediately;
-/// an unavailable provider waits for its finite timeout, while the default
-/// infinite timeout deterministically reports POSITION_UNAVAILABLE.
-fn geolocation_position_age_ms(state: &HostState) -> Option<u64> {
-    let position = state.geolocation_position.as_ref()?;
-    let now = state.performance_time_origin + state.event_loop.now_ms() as f64;
-    if !position.timestamp_ms.is_finite() || now <= position.timestamp_ms {
-        return Some(0);
-    }
-    Some((now - position.timestamp_ms).min(u64::MAX as f64) as u64)
-}
-
-fn wake_geolocation_request(state: &mut HostState, request_id: u64) {
-    let timeout_timer_id = state
-        .geolocation_requests
-        .get(&request_id)
-        .and_then(|request| request.timeout_timer_id);
-    if let Some(timer_id) = timeout_timer_id {
-        state.event_loop.clear_timer(timer_id);
-        if let Some(request) = state.geolocation_requests.get_mut(&request_id) {
-            request.timeout_timer_id = None;
-            request.pending = false;
-        }
-    }
-}
-
-fn schedule_geolocation_request(state: &mut HostState, request_id: u64) {
-    let Some((pending, maximum_age_ms, timeout_ms)) = state
-        .geolocation_requests
-        .get(&request_id)
-        .map(|request| (request.pending, request.maximum_age_ms, request.timeout_ms))
-    else {
-        return;
-    };
-    if pending {
-        return;
-    }
-
-    let fresh_position = geolocation_position_age_ms(state)
-        .is_some_and(|age| maximum_age_ms.is_none_or(|maximum_age| age <= maximum_age));
-    let immediate = !state.geolocation_permission_granted
-        || fresh_position
-        || timeout_ms.is_none()
-        || timeout_ms == Some(0);
-    if let Some(request) = state.geolocation_requests.get_mut(&request_id) {
-        request.pending = true;
-    } else {
-        return;
-    }
-    if immediate {
-        state.event_loop.enqueue_geolocation(request_id);
-        return;
-    }
-    let timeout = timeout_ms.unwrap_or(0);
-    let timer_id = state.event_loop.schedule_timer(
-        TimerPayload::GeolocationTimeout { request_id },
-        timeout,
-        false,
-        None,
-    );
-    if let Some(request) = state.geolocation_requests.get_mut(&request_id) {
-        request.timeout_timer_id = Some(timer_id);
-    } else {
-        state.event_loop.clear_timer(timer_id);
-    }
-}
-
-fn geolocation_request_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let success = args.first().cloned().unwrap_or_default();
-    if !success.is_callable() {
-        return Err(JsNativeError::typ()
-            .with_message("Geolocation success callback must be callable")
-            .into());
-    }
-    let error = args.get(1).cloned().filter(|value| value.is_callable());
-    let watch_id = args
-        .get(2)
-        .cloned()
-        .unwrap_or_else(|| JsValue::from(-1))
-        .to_number(context)?;
-    let watch_id = if watch_id.is_finite() && watch_id >= 0.0 {
-        Some(watch_id.min(u32::MAX as f64) as u32)
-    } else {
-        None
-    };
-    // JavaScript normalizes the options, but parse again at the native boundary
-    // so embedders cannot bypass range validation by calling the private hook.
-    let timeout_ms = geolocation_duration_argument(args.get(3), None, context)?;
-    let maximum_age_ms = geolocation_duration_argument(args.get(4), Some(0), context)?;
-
-    with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let request_id = state.next_geolocation_request_id;
-        state.next_geolocation_request_id = state.next_geolocation_request_id.saturating_add(1);
-        state.geolocation_requests.insert(
-            request_id,
-            GeolocationRequest {
-                success,
-                error,
-                watch_id,
-                timeout_ms,
-                maximum_age_ms,
-                pending: false,
-                timeout_timer_id: None,
-            },
-        );
-        schedule_geolocation_request(&mut state, request_id);
-        Ok(JsValue::from(request_id as f64))
-    })
-}
-
-fn geolocation_clear_watch_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let watch_id = args
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .to_number(context)?;
-    if !watch_id.is_finite() || watch_id < 0.0 {
-        return Ok(JsValue::undefined());
-    }
-    let watch_id = watch_id.min(u32::MAX as f64) as u32;
-    with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let request_ids: Vec<_> = state
-            .geolocation_requests
-            .iter()
-            .filter_map(|(request_id, request)| {
-                (request.watch_id == Some(watch_id)).then_some(*request_id)
-            })
-            .collect();
-        for request_id in request_ids {
-            if let Some(request) = state.geolocation_requests.remove(&request_id)
-                && let Some(timer_id) = request.timeout_timer_id
-            {
-                state.event_loop.clear_timer(timer_id);
-            }
-        }
-        Ok(JsValue::undefined())
     })
 }
 
@@ -13278,264 +12063,6 @@ fn storage_manager_native(
                 .with_message(format!("unknown StorageManager operation: {operation}"))
                 .into()),
         }
-    })
-}
-
-fn web_lock_context(context: &Context) -> JsResult<(usize, u64, StorageManager, StorageOrigin)> {
-    with_host_state(|host| {
-        let document_id = {
-            let state = host.borrow();
-            context_document_id(context, &state)
-        };
-        let (client_id, created, manager, origin) = {
-            let mut state = host.borrow_mut();
-            if !document_is_secure_context(&state, document_id) {
-                return Err(JsNativeError::error()
-                    .with_message("Web Locks requires a secure context")
-                    .into());
-            }
-            let origin = state
-                .document_origins
-                .get(&document_id)
-                .cloned()
-                .flatten()
-                .ok_or_else(|| {
-                    JsError::from(
-                        JsNativeError::error().with_message("Web Locks requires a tuple origin"),
-                    )
-                })?;
-            let manager = state.storage_manager.clone();
-            let (client_id, created) = match state.web_lock_clients.get(&document_id).copied() {
-                Some(client_id) => (client_id, false),
-                None => {
-                    let client_id = manager.create_web_lock_client();
-                    state.web_lock_clients.insert(document_id, client_id);
-                    (client_id, true)
-                }
-            };
-            (client_id, created, manager, origin)
-        };
-        if created {
-            register_web_lock_client(host, document_id, client_id);
-        }
-        Ok((document_id, client_id, manager, origin))
-    })
-}
-
-fn web_locks_native(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let operation = string_argument(args.first(), "", context)?;
-    if operation == "available" {
-        return with_host_state(|host| {
-            let state = host.borrow();
-            let document_id = context_document_id(context, &state);
-            Ok(JsValue::from(
-                document_is_secure_context(&state, document_id)
-                    && state
-                        .document_origins
-                        .get(&document_id)
-                        .is_some_and(Option::is_some),
-            ))
-        });
-    }
-
-    let (_, client_id, manager, origin) = web_lock_context(context)?;
-    let request_id = |value: Option<&JsValue>, context: &mut Context| -> JsResult<u64> {
-        string_argument(value, "", context)?
-            .parse::<u64>()
-            .map_err(|_| {
-                JsNativeError::typ()
-                    .with_message("invalid Web Lock request id")
-                    .into()
-            })
-    };
-    match operation.as_str() {
-        "request" => {
-            let name = string_argument(args.get(1), "", context)?;
-            let mode = match string_argument(args.get(2), "exclusive", context)?.as_str() {
-                "shared" => WebLockMode::Shared,
-                "exclusive" => WebLockMode::Exclusive,
-                _ => {
-                    return Err(JsNativeError::typ()
-                        .with_message("invalid Web Lock mode")
-                        .into());
-                }
-            };
-            let if_available = args.get(3).is_some_and(JsValue::to_boolean);
-            let steal = args.get(4).is_some_and(JsValue::to_boolean);
-            let (result, notifications) =
-                manager.request_web_lock(&origin, client_id, name, mode, if_available, steal);
-            queue_web_lock_notifications(notifications);
-            flush_web_lock_notifications();
-            let (status, id) = match result {
-                WebLockRequestResult::Granted(id) => ("granted", Some(id)),
-                WebLockRequestResult::Pending(id) => ("pending", Some(id)),
-                WebLockRequestResult::Unavailable => ("unavailable", None),
-            };
-            Ok(js_string!(
-                serde_json::json!({"status": status, "id": id.map(|id| id.to_string())})
-                    .to_string()
-            )
-            .into())
-        }
-        "start" => {
-            let status = match manager.start_web_lock(request_id(args.get(1), context)?) {
-                WebLockStartResult::Held => "held",
-                WebLockStartResult::Pending => "pending",
-                WebLockStartResult::Stolen => "stolen",
-                WebLockStartResult::Missing => "missing",
-            };
-            Ok(js_string!(status).into())
-        }
-        "release" => {
-            let notifications = manager.release_web_lock(request_id(args.get(1), context)?);
-            queue_web_lock_notifications(notifications);
-            flush_web_lock_notifications();
-            Ok(JsValue::undefined())
-        }
-        "cancel" => {
-            let (cancelled, notifications) =
-                manager.cancel_web_lock(request_id(args.get(1), context)?);
-            queue_web_lock_notifications(notifications);
-            flush_web_lock_notifications();
-            Ok(JsValue::from(cancelled))
-        }
-        "finish-stolen" => {
-            manager.finish_stolen_web_lock(request_id(args.get(1), context)?);
-            Ok(JsValue::undefined())
-        }
-        "query" => {
-            let (held, pending) = manager.query_web_locks(&origin);
-            let snapshot = |lock: storage::WebLockSnapshot| {
-                serde_json::json!({
-                    "name": lock.name,
-                    "mode": lock.mode.as_str(),
-                    "clientId": format!("client-{}", lock.client_id),
-                })
-            };
-            Ok(js_string!(
-                serde_json::json!({
-                    "held": held.into_iter().map(snapshot).collect::<Vec<_>>(),
-                    "pending": pending.into_iter().map(snapshot).collect::<Vec<_>>(),
-                })
-                .to_string()
-            )
-            .into())
-        }
-        _ => Err(JsNativeError::typ()
-            .with_message(format!("unknown Web Locks operation: {operation}"))
-            .into()),
-    }
-}
-
-/// Host-side backing store for the Cache Storage JavaScript wrappers.
-///
-/// Cache operations are deliberately exposed as one JSON boundary: request
-/// and response objects are realm-local, immutable snapshots and must never be
-/// retained as `JsValue`s by the native manager.  The wrapper queues the call
-/// on the networking task source before invoking this binding, so the native
-/// store itself remains synchronous and lock-scoped.
-fn cache_storage_native(
-    _this: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let operation = string_argument(args.first(), "", context)?;
-    let name = string_argument(args.get(1), "", context)?;
-    let payload = string_argument(args.get(2), "", context)?;
-    with_host_state(|host| {
-        let state = host.borrow();
-        let origin = state
-            .document_origins
-            .get(&state.document.identity())
-            .cloned()
-            .flatten()
-            .ok_or_else(|| {
-                JsError::from(
-                    JsNativeError::error()
-                        .with_message("Cache Storage is unavailable for an opaque origin"),
-                )
-            })?;
-        let manager = state.storage_manager.clone();
-        let output = match operation.as_str() {
-            "open" => {
-                manager.cache_open(&origin, name);
-                serde_json::json!(true)
-            }
-            "has" => serde_json::json!(manager.cache_has(&origin, &name)),
-            "keys" => serde_json::json!(manager.cache_names(&origin)),
-            "delete" => serde_json::json!(manager.cache_delete(&origin, &name)),
-            "entries" => {
-                let entries = manager.cache_entries(&origin, &name).ok_or_else(|| {
-                    JsError::from(
-                        JsNativeError::error().with_message("Cache object no longer exists"),
-                    )
-                })?;
-                serde_json::Value::Array(
-                    entries
-                        .into_iter()
-                        .map(|entry| {
-                            serde_json::json!({
-                                "id": entry.id,
-                                "request": entry.request,
-                                "response": entry.response,
-                            })
-                        })
-                        .collect(),
-                )
-            }
-            "put" => {
-                let value: serde_json::Value = serde_json::from_str(&payload).map_err(|error| {
-                    JsError::from(
-                        JsNativeError::typ()
-                            .with_message(format!("invalid Cache.put snapshot: {error}")),
-                    )
-                })?;
-                let request = value
-                    .get("request")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        JsError::from(
-                            JsNativeError::typ().with_message("Cache.put request snapshot missing"),
-                        )
-                    })?;
-                let response = value
-                    .get("response")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        JsError::from(
-                            JsNativeError::typ()
-                                .with_message("Cache.put response snapshot missing"),
-                        )
-                    })?;
-                if manager
-                    .cache_put(&origin, &name, request.to_string(), response.to_string())
-                    .is_none()
-                {
-                    return Err(JsError::from(
-                        JsNativeError::error().with_message("Cache object no longer exists"),
-                    ));
-                }
-                serde_json::json!(true)
-            }
-            "delete-entry" => {
-                let id = serde_json::from_str::<u64>(&payload).map_err(|error| {
-                    JsError::from(
-                        JsNativeError::typ()
-                            .with_message(format!("invalid Cache entry id: {error}")),
-                    )
-                })?;
-                serde_json::json!(manager.cache_delete_entry(&origin, &name, id))
-            }
-            _ => {
-                return Err(JsError::from(JsNativeError::typ().with_message(format!(
-                    "unknown Cache Storage operation: {operation}"
-                ))));
-            }
-        };
-        let encoded = serde_json::to_string(&output).map_err(|error| {
-            JsError::from(JsNativeError::error().with_message(error.to_string()))
-        })?;
-        Ok(js_string!(encoded).into())
     })
 }
 
@@ -17957,747 +16484,6 @@ fn close_auxiliary_window_native(
         host.borrow_mut().close_auxiliary_context(id);
         Ok(JsValue::undefined())
     })
-}
-
-fn broadcast_channel_id_argument(value: Option<&JsValue>, context: &mut Context) -> JsResult<u64> {
-    let value = value.cloned().unwrap_or_default();
-    if let Some(string) = value.as_string() {
-        return string.to_std_string_escaped().parse::<u64>().map_err(|_| {
-            JsNativeError::typ()
-                .with_message("invalid BroadcastChannel id")
-                .into()
-        });
-    }
-    let number = value.to_number(context)?;
-    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
-        return Err(JsNativeError::typ()
-            .with_message("invalid BroadcastChannel id")
-            .into());
-    }
-    Ok(number as u64)
-}
-
-/// Allocates a per-runtime BroadcastChannel id and records the endpoint
-/// reference in that runtime's target table.  Modern callers pass a `WeakRef`
-/// so this native table does not extend the channel's lifetime; realms without
-/// WeakRef pass the endpoint itself as a strong compatibility fallback.
-fn broadcast_channel_register_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let name = string_argument(args.first(), "", context)?;
-    let endpoint = args.get(1).cloned().unwrap_or_default();
-    if !endpoint.is_object() {
-        return Err(JsNativeError::typ()
-            .with_message("BroadcastChannel endpoint reference must be an object")
-            .into());
-    }
-    with_host_state(|state| {
-        let (channel_id, metadata) = {
-            let mut host = state.borrow_mut();
-            let channel_id = host.next_broadcast_channel_id;
-            host.next_broadcast_channel_id = host.next_broadcast_channel_id.saturating_add(1);
-            let metadata = BroadcastChannelMetadata {
-                name,
-                origin: broadcast_channel_origin(&host),
-                origin_text: host_state_origin(&host),
-            };
-            host.broadcast_channels.insert(channel_id, endpoint);
-            host.broadcast_channel_metadata
-                .insert(channel_id, metadata.clone());
-            (channel_id, metadata)
-        };
-        register_broadcast_channel(state, channel_id, &metadata);
-        Ok(JsValue::from(js_string!(channel_id.to_string())))
-    })
-}
-
-/// Posts a previously structured-cloned wire to every same-origin channel
-/// with the same name.  The sender's own endpoint is excluded by the native
-/// registry, while sibling endpoints in this runtime are treated exactly like
-/// endpoints in another runtime.
-fn broadcast_channel_post_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let channel_id = broadcast_channel_id_argument(args.first(), context)?;
-    let data = string_argument(args.get(1), "", context)?;
-    with_host_state(|state| {
-        post_broadcast_channel(state, channel_id, data);
-        Ok(JsValue::undefined())
-    })
-}
-
-fn broadcast_channel_close_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let channel_id = broadcast_channel_id_argument(args.first(), context)?;
-    with_host_state(|state| {
-        unregister_broadcast_channel(state, channel_id);
-        let mut host = state.borrow_mut();
-        host.broadcast_channels.remove(&channel_id);
-        host.broadcast_channel_metadata.remove(&channel_id);
-        Ok(JsValue::undefined())
-    })
-}
-
-fn shared_worker_connect_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let requested_url = string_argument(args.first(), "", context)?;
-    let name = string_argument(args.get(1), "", context)?;
-    with_host_state(|state| {
-        if state.borrow().shared_worker_id.is_some() {
-            return Err(JsNativeError::error()
-                .with_message("SharedWorker construction from a SharedWorker is unsupported")
-                .into());
-        }
-        create_shared_worker_for_owner_state(Rc::clone(state), &requested_url, &name)
-            .map(|id| JsValue::from(js_string!(id.to_string())))
-    })
-}
-
-fn shared_worker_bind_port_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let connection_id = worker_id_argument(args, context)?;
-    let port = args.get(1).cloned().unwrap_or_default();
-    if !port.is_object() {
-        return Err(JsNativeError::typ()
-            .with_message("SharedWorker port must be an object")
-            .into());
-    }
-    let owner_object = args.get(2).cloned().unwrap_or_default();
-    if !owner_object.is_object() {
-        return Err(JsNativeError::typ()
-            .with_message("SharedWorker owner must be an object")
-            .into());
-    }
-    with_host_state(|state| {
-        let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
-            return Ok(JsValue::undefined());
-        };
-        let (owner_state, origin, pending, startup_error) = {
-            let mut shared = entry.borrow_mut();
-            let Some(connection) = shared.connections.get_mut(&connection_id) else {
-                return Ok(JsValue::undefined());
-            };
-            let Some(owner_state) = connection.owner_state.upgrade() else {
-                connection.closed = true;
-                return Ok(JsValue::undefined());
-            };
-            if !Rc::ptr_eq(&owner_state, state) {
-                return Err(JsNativeError::error()
-                    .with_message("SharedWorker port belongs to another global")
-                    .into());
-            }
-            connection.owner_port = Some(port.clone());
-            let origin = connection.owner_origin.clone();
-            let pending = std::mem::take(&mut connection.pending_to_owner);
-            let startup_error = connection.startup_error.take();
-            (owner_state, origin, pending, startup_error)
-        };
-        state
-            .borrow_mut()
-            .shared_worker_ports
-            .insert(connection_id, port.clone());
-        for data in pending {
-            owner_state
-                .borrow_mut()
-                .event_loop
-                .enqueue_shared_worker_owner_message(
-                    connection_id,
-                    port.clone(),
-                    data,
-                    origin.clone(),
-                );
-        }
-        if let Some(message) = startup_error {
-            // SharedWorker startup failures are reported asynchronously on the
-            // page-facing SharedWorker object, matching Dedicated Worker error
-            // delivery and ensuring construction never silently succeeds.
-            state.borrow_mut().event_loop.enqueue_worker_error(
-                connection_id,
-                Some(owner_object),
-                None,
-                message,
-            );
-        }
-        Ok(JsValue::undefined())
-    })
-}
-
-fn shared_worker_port_post_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let connection_id = worker_id_argument(args, context)?;
-    let data = args
-        .get(1)
-        .cloned()
-        .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
-    with_host_state(|state| {
-        let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
-            return Ok(JsValue::undefined());
-        };
-        if state.borrow().shared_worker_id.is_some() {
-            // The call originated in the shared-worker realm.  Route it to
-            // the page endpoint, retaining the wire until the page port has
-            // been bound (the constructor binds immediately after connect).
-            let (owner_state, owner_port, origin) = {
-                let mut shared = entry.borrow_mut();
-                let Some(connection) = shared.connections.get_mut(&connection_id) else {
-                    return Ok(JsValue::undefined());
-                };
-                if connection.closed {
-                    return Ok(JsValue::undefined());
-                }
-                let Some(owner_state) = connection.owner_state.upgrade() else {
-                    connection.closed = true;
-                    return Ok(JsValue::undefined());
-                };
-                let owner_port = connection.owner_port.clone();
-                let origin = connection.owner_origin.clone();
-                if owner_port.is_none() {
-                    connection.pending_to_owner.push_back(data);
-                    return Ok(JsValue::undefined());
-                }
-                (owner_state, owner_port, origin)
-            };
-            if let Some(owner_port) = owner_port {
-                owner_state
-                    .borrow_mut()
-                    .event_loop
-                    .enqueue_shared_worker_owner_message(connection_id, owner_port, data, origin);
-            }
-        } else {
-            // The call originated in a page realm.  Ensure the connection is
-            // owned by that exact global before enqueueing into the shared
-            // worker runtime.
-            let runtime = {
-                let shared = entry.borrow();
-                let Some(connection) = shared.connections.get(&connection_id) else {
-                    return Ok(JsValue::undefined());
-                };
-                if connection.closed
-                    || connection
-                        .owner_state
-                        .upgrade()
-                        .is_none_or(|owner| !Rc::ptr_eq(&owner, state))
-                {
-                    return Ok(JsValue::undefined());
-                }
-                Rc::clone(&shared.runtime)
-            };
-            runtime
-                .borrow_mut()
-                .host_state
-                .borrow_mut()
-                .event_loop
-                .enqueue_shared_worker_message(connection_id, data);
-        }
-        Ok(JsValue::undefined())
-    })
-}
-
-fn shared_worker_port_close_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let connection_id = worker_id_argument(args, context)?;
-    with_host_state(|state| {
-        let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
-            state
-                .borrow_mut()
-                .shared_worker_ports
-                .remove(&connection_id);
-            return Ok(JsValue::undefined());
-        };
-        let mut shared = entry.borrow_mut();
-        let Some(connection) = shared.connections.get_mut(&connection_id) else {
-            state
-                .borrow_mut()
-                .shared_worker_ports
-                .remove(&connection_id);
-            return Ok(JsValue::undefined());
-        };
-        if state.borrow().shared_worker_id.is_none()
-            && connection
-                .owner_state
-                .upgrade()
-                .is_none_or(|owner| !Rc::ptr_eq(&owner, state))
-        {
-            return Ok(JsValue::undefined());
-        }
-        connection.closed = true;
-        connection.owner_port = None;
-        connection.pending_to_owner.clear();
-        state
-            .borrow_mut()
-            .shared_worker_ports
-            .remove(&connection_id);
-        Ok(JsValue::undefined())
-    })
-}
-
-fn worklet_status(ok: bool, name: &str, message: &str, duplicate: bool) -> JsValue {
-    let name = serde_json::to_string(name).unwrap_or_else(|_| "\"Error\"".to_string());
-    let message = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string());
-    js_string!(format!(
-        "{{\"ok\":{ok},\"duplicate\":{duplicate},\"name\":{name},\"message\":{message}}}"
-    ))
-    .into()
-}
-
-fn worklet_error_name(error: &str) -> &'static str {
-    for name in [
-        "InvalidModificationError",
-        "InvalidStateError",
-        "DataCloneError",
-        "SecurityError",
-        "NotAllowedError",
-        "OperationError",
-        "NetworkError",
-        "AbortError",
-        "AggregateError",
-        "EvalError",
-        "RangeError",
-        "ReferenceError",
-        "SyntaxError",
-        "TypeError",
-        "URIError",
-        "Error",
-    ] {
-        if error.starts_with(name) || error.contains(&format!("name: \"{name}\"")) {
-            return name;
-        }
-    }
-    "OperationError"
-}
-
-fn create_worklet_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    let id = with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let id = state.next_worklet_id;
-        state.next_worklet_id = state.next_worklet_id.saturating_add(1);
-        Ok(id.to_string())
-    })?;
-    Ok(js_string!(id).into())
-}
-
-/// Loads and evaluates one Worklet module in the owner page's isolated
-/// WorkletGlobalScope. The JavaScript wrapper converts this status record into
-/// the asynchronous `addModule()` Promise lifecycle.
-fn worklet_add_module_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let id = worker_id_argument(args, context)?;
-    let requested_url = string_argument(args.get(1), "", context)?;
-    with_host_state(|owner_state| {
-        let (owner_url, base_url, storage, session_id, user_agent, secure) = {
-            let state = owner_state.borrow();
-            (
-                state
-                    .base_url
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| state.location_href.clone()),
-                state.base_url.clone(),
-                state.storage_manager.clone(),
-                state.storage_session_id,
-                state.navigator_user_agent.clone(),
-                host_is_secure_context(&state),
-            )
-        };
-        if !secure {
-            return Ok(worklet_status(
-                false,
-                "NotAllowedError",
-                "Worklet modules require a secure context",
-                false,
-            ));
-        }
-        let resolved_url = match resolve_worker_url(&requested_url, &owner_url, base_url.as_ref()) {
-            Ok(url) => url,
-            Err(error) => {
-                return Ok(worklet_status(
-                    false,
-                    "SecurityError",
-                    &error.to_string(),
-                    false,
-                ));
-            }
-        };
-        // A module map hit is resolved entirely from the deterministic cache:
-        // do not refetch a resource that has already executed successfully.
-        // This also ensures a repeated `addModule()` call cannot observe a
-        // changing network response after the first successful registration.
-        if let Some(runtime) = owner_state.borrow().worklet_runtime.clone() {
-            let runtime_ref = runtime.borrow();
-            let worklet_state = runtime_ref.host_state.borrow();
-            if worklet_state.worklet_terminated {
-                return Ok(worklet_status(
-                    false,
-                    "InvalidStateError",
-                    "WorkletGlobalScope has been torn down",
-                    false,
-                ));
-            }
-            if worklet_state.worklet_modules.contains(&resolved_url) {
-                return Ok(worklet_status(true, "", "", true));
-            }
-        }
-        // Fetch before constructing the isolated realm. This keeps failed
-        // addModule() calls side-effect free and makes retries deterministic.
-        let fetched = {
-            let mut state = owner_state.borrow_mut();
-            fetch_script_resource_with_client(
-                &requested_url,
-                base_url.as_ref(),
-                &mut state.http_client,
-            )
-        };
-        let (effective_url, source, _) = match fetched {
-            Some(value) => value,
-            None => {
-                return Ok(worklet_status(
-                    false,
-                    "TypeError",
-                    &format!("failed to fetch Worklet module: {requested_url}"),
-                    false,
-                ));
-            }
-        };
-        // A redirect must not turn a same-origin module into a cross-origin
-        // script. Data URLs are intentionally retained for deterministic
-        // inline tests, matching the existing Worker implementation.
-        if !effective_url.starts_with("data:") {
-            let owner = match owner_url.parse::<crate::http::Url>() {
-                Ok(url) => url,
-                Err(_) => {
-                    return Ok(worklet_status(
-                        false,
-                        "SecurityError",
-                        "Worklet owner has no origin",
-                        false,
-                    ));
-                }
-            };
-            let effective = match effective_url.parse::<crate::http::Url>() {
-                Ok(url) => url,
-                Err(_) => {
-                    return Ok(worklet_status(
-                        false,
-                        "TypeError",
-                        "Worklet module URL is invalid",
-                        false,
-                    ));
-                }
-            };
-            if !same_origin_url(&owner, &effective) {
-                return Ok(worklet_status(
-                    false,
-                    "SecurityError",
-                    "Worklet module must be same-origin",
-                    false,
-                ));
-            }
-        }
-
-        let runtime_handle = if let Some(runtime) = owner_state.borrow().worklet_runtime.clone() {
-            runtime
-        } else {
-            let mut runtime = match JsRuntime::with_document_url_and_storage(
-                blank_html_document(),
-                &owner_url,
-                storage,
-                session_id,
-            ) {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    return Ok(worklet_status(
-                        false,
-                        "OperationError",
-                        &error.to_string(),
-                        false,
-                    ));
-                }
-            };
-            runtime.set_user_agent(user_agent);
-            let worklet_state = Rc::clone(&runtime.host_state);
-            {
-                let mut state = worklet_state.borrow_mut();
-                state.worklet_owner = Some(Rc::clone(owner_state));
-                state.worklet_id = Some(id);
-                state.worklet_terminated = false;
-            }
-            if let Err(error) = runtime.eval(&format!(
-                "__omoikane_install_worklet_global({effective_url:?}, {id:?})"
-            )) {
-                return Ok(worklet_status(
-                    false,
-                    "OperationError",
-                    &error.to_string(),
-                    false,
-                ));
-            }
-            let runtime = Rc::new(RefCell::new(runtime));
-            owner_state.borrow_mut().worklet_runtime = Some(Rc::clone(&runtime));
-            runtime
-        };
-
-        {
-            let runtime = runtime_handle.borrow();
-            let state = runtime.host_state.borrow();
-            if state.worklet_terminated {
-                return Ok(worklet_status(
-                    false,
-                    "InvalidStateError",
-                    "WorkletGlobalScope has been torn down",
-                    false,
-                ));
-            }
-            if state.worklet_modules.contains(&resolved_url) {
-                return Ok(worklet_status(true, "", "", true));
-            }
-        }
-
-        let evaluation = {
-            let mut runtime = runtime_handle.borrow_mut();
-            let document = runtime.document();
-            let (result, _, _) = runtime.eval_module_timed(&source, &effective_url, document);
-            result
-        };
-        if let Err(error) = evaluation {
-            let message = error.to_string();
-            return Ok(worklet_status(
-                false,
-                worklet_error_name(&message),
-                &message,
-                false,
-            ));
-        }
-        runtime_handle
-            .borrow()
-            .host_state
-            .borrow_mut()
-            .worklet_modules
-            .insert(resolved_url);
-        Ok(worklet_status(true, "", "", false))
-    })
-}
-
-fn worklet_register_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let id = worker_id_argument(args, context)?;
-    let name = string_argument(args.get(1), "", context)?;
-    with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        if state.worklet_id != Some(id) || state.worklet_terminated {
-            return Ok(JsValue::from(false));
-        }
-        state.worklet_registrations.insert(name);
-        Ok(JsValue::from(true))
-    })
-}
-
-fn worklet_registered_names_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let id = worker_id_argument(args, context)?;
-    with_host_state(|owner_state| {
-        let runtime = owner_state.borrow().worklet_runtime.clone();
-        let Some(runtime) = runtime else {
-            return Ok(js_string!("[]").into());
-        };
-        let runtime_ref = runtime.borrow();
-        let state = runtime_ref.host_state.borrow();
-        if state.worklet_id != Some(id) || state.worklet_terminated {
-            return Ok(js_string!("[]").into());
-        }
-        let mut names: Vec<_> = state.worklet_registrations.iter().cloned().collect();
-        names.sort();
-        let json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
-        Ok(js_string!(json).into())
-    })
-}
-
-fn worklet_module_count_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let id = worker_id_argument(args, context)?;
-    with_host_state(|owner_state| {
-        let runtime = owner_state.borrow().worklet_runtime.clone();
-        let Some(runtime) = runtime else {
-            return Ok(JsValue::from(0));
-        };
-        let runtime_ref = runtime.borrow();
-        let state = runtime_ref.host_state.borrow();
-        if state.worklet_id != Some(id) || state.worklet_terminated {
-            return Ok(JsValue::from(0));
-        }
-        Ok(JsValue::from(state.worklet_modules.len() as u32))
-    })
-}
-
-fn worklet_teardown_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let id = worker_id_argument(args, context)?;
-    with_host_state(|owner_state| {
-        let runtime = {
-            let mut state = owner_state.borrow_mut();
-            let Some(runtime) = state.worklet_runtime.take() else {
-                return Ok(JsValue::from(false));
-            };
-            if runtime.borrow().host_state.borrow().worklet_id != Some(id) {
-                state.worklet_runtime = Some(runtime);
-                return Ok(JsValue::from(false));
-            }
-            runtime
-        };
-        {
-            let worklet_state = Rc::clone(&runtime.borrow().host_state);
-            let mut state = worklet_state.borrow_mut();
-            state.worklet_terminated = true;
-            state.worklet_owner = None;
-            state.worklet_modules.clear();
-            state.worklet_registrations.clear();
-        }
-        Ok(JsValue::from(true))
-    })
-}
-
-fn create_shared_worker_for_owner_state(
-    owner_state: Rc<RefCell<HostState>>,
-    requested_url: &str,
-    name: &str,
-) -> JsResult<u64> {
-    let (owner_url, base_url, storage, session_id, user_agent, origin, origin_text) = {
-        let state = owner_state.borrow();
-        let origin = shared_worker_origin(&state).ok_or_else(|| {
-            JsNativeError::error().with_message("SharedWorker requires an eligible origin")
-        })?;
-        (
-            state
-                .base_url
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| state.location_href.clone()),
-            state.base_url.clone(),
-            state.storage_manager.clone(),
-            state.storage_session_id,
-            state.navigator_user_agent.clone(),
-            origin,
-            host_state_origin(&state),
-        )
-    };
-    let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
-    let key = SharedWorkerKey {
-        origin,
-        url: worker_url.clone(),
-        name: name.to_string(),
-    };
-    let entry = if let Some(existing) = shared_worker_entry_for_key(&key) {
-        existing
-    } else {
-        let source = {
-            let mut state = owner_state.borrow_mut();
-            fetch_script_resource_with_client(
-                requested_url,
-                base_url.as_ref(),
-                &mut state.http_client,
-            )
-            .map(|(_, source, _)| source)
-        };
-        let shared_id = next_shared_worker_id();
-        let mut runtime = JsRuntime::with_document_url_and_storage(
-            blank_html_document(),
-            &worker_url,
-            storage,
-            session_id,
-        )?;
-        runtime.set_user_agent(user_agent);
-        runtime.host_state.borrow_mut().shared_worker_id = Some(shared_id);
-        runtime.eval(&format!(
-            "__omoikane_install_shared_worker_global({worker_url:?}, {shared_id:?})"
-        ))?;
-        let source_loaded = source.is_some();
-        let startup_error = match source {
-            Some(source) => runtime.eval(&source).err().map(|error| error.to_string()),
-            None => Some(format!(
-                "failed to fetch SharedWorker script: {requested_url}"
-            )),
-        };
-        if startup_error.is_some() {
-            report_safe_worker_or_module_failure(
-                owner_state.borrow().error_reporter.clone(),
-                ErrorCategory::Worker,
-                if source_loaded {
-                    "SHARED_WORKER_STARTUP_FAILED"
-                } else {
-                    "SHARED_WORKER_FETCH_FAILED"
-                },
-                if source_loaded { "execute" } else { "fetch" },
-            );
-            runtime.host_state.borrow_mut().worker_terminated = true;
-        }
-        let entry = Rc::new(RefCell::new(SharedWorkerRuntime {
-            key,
-            runtime: Rc::new(RefCell::new(runtime)),
-            startup_error,
-            connections: HashMap::new(),
-        }));
-        SHARED_WORKER_REGISTRY.with(|registry| registry.borrow_mut().push(Rc::clone(&entry)));
-        entry
-    };
-
-    let connection_id = next_shared_worker_connection_id();
-    let startup_error = entry.borrow().startup_error.clone();
-    entry.borrow_mut().connections.insert(
-        connection_id,
-        SharedWorkerConnection {
-            owner_state: Rc::downgrade(&owner_state),
-            owner_port: None,
-            owner_origin: origin_text,
-            pending_to_owner: VecDeque::new(),
-            startup_error,
-            closed: false,
-        },
-    );
-    let runtime = Rc::clone(&entry.borrow().runtime);
-    // The runtime is borrowed independently from the registry entry so
-    // `postMessage` calls made synchronously by an onconnect handler can
-    // safely look the connection up again.
-    if entry.borrow().startup_error.is_none() {
-        let _ = runtime.borrow_mut().eval(&format!(
-            "__omoikane_dispatch_shared_worker_connect({connection_id:?})"
-        ));
-    }
-    Ok(connection_id)
 }
 
 fn create_worker_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
