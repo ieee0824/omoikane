@@ -11314,6 +11314,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(get_element_by_id_native),
         ),
         (
+            js_string!("__omoikane_subtree_has_window_name"),
+            1,
+            NativeFunction::from_copy_closure(subtree_has_window_name_native),
+        ),
+        (
             js_string!("__omoikane_node_index"),
             1,
             NativeFunction::from_copy_closure(node_index_native),
@@ -15242,6 +15247,42 @@ fn get_element_by_id_native(
             pending.extend(node.child_nodes().into_iter().rev());
         }
         Ok(JsValue::null())
+    })
+}
+
+fn subtree_has_window_name_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    with_host_state(|state| {
+        let Some(root) = state.borrow().get_node(node_id) else {
+            return Ok(JsValue::from(false));
+        };
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            match node.node_type() {
+                NodeType::Element => {
+                    let tag = node.local_name().unwrap_or_default();
+                    let has_id = node.get_attribute("id").is_some_and(|id| !id.is_empty());
+                    let has_name = matches!(tag.as_str(), "embed" | "form" | "img" | "object")
+                        && node
+                            .get_attribute("name")
+                            .is_some_and(|name| !name.is_empty());
+                    if has_id || tag == "iframe" || has_name {
+                        return Ok(JsValue::from(true));
+                    }
+                    pending.extend(node.child_nodes());
+                }
+                NodeType::Document | NodeType::DocumentFragment => {
+                    pending.extend(node.child_nodes());
+                }
+                _ => {}
+            }
+        }
+        Ok(JsValue::from(false))
     })
 }
 
