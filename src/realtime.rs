@@ -526,8 +526,11 @@ pub fn parse_event_stream(input: &str) -> Vec<(String, String, String, Option<u6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers,
+    };
     use std::net::TcpListener;
-    use std::thread;
 
     #[test]
     fn event_stream_parses_multiline_type_id_and_retry() {
@@ -575,8 +578,7 @@ mod tests {
 
     /// Binds a listener that must never see a connection during the test.
     fn untouched_listener() -> (TcpListener, String) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
+        let listener = bind_loopback().unwrap();
         let url = format!("ws://{}/socket", listener.local_addr().unwrap());
         (listener, url)
     }
@@ -649,17 +651,11 @@ mod tests {
 
     #[test]
     fn websocket_handshake_masking_fragment_ping_and_close_round_trip() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut byte = [0u8; 1];
-            while !request.ends_with(b"\r\n\r\n") {
-                stream.read_exact(&mut byte).unwrap();
-                request.push(byte[0]);
-            }
-            let request = String::from_utf8(request).unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let key = request
                 .lines()
                 .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
@@ -743,6 +739,6 @@ mod tests {
                 reason: "done".into()
             }
         );
-        server.join().unwrap();
+        server.join();
     }
 }

@@ -177,8 +177,11 @@ impl Drop for ModuleFetchPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers,
+    };
+    use std::io::Write;
     use std::sync::atomic::AtomicUsize;
     use std::task::Wake;
 
@@ -191,27 +194,19 @@ mod tests {
 
     #[test]
     fn module_workers_use_top_level_site_for_samesite_cookies() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let url = format!("http://{}/module.js", listener.local_addr().unwrap());
         let target: Url = url.parse().unwrap();
-        let server = std::thread::spawn(move || {
+        let server = FixtureWorker::spawn(move || {
             let mut cookies = Vec::new();
             for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(&stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let mut cookie = None;
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some(value) = line.strip_prefix("Cookie: ") {
-                        cookie = Some(value.trim().to_string());
-                    }
-                }
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let cookie = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Cookie: "))
+                    .map(str::trim)
+                    .map(str::to_string);
                 cookies.push(cookie);
                 stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             }
@@ -242,10 +237,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
-        assert_eq!(
-            server.join().unwrap(),
-            [None, Some("strict=1; lax=2".to_string())]
-        );
+        assert_eq!(server.join(), [None, Some("strict=1; lax=2".to_string())]);
     }
 
     #[test]
@@ -278,10 +270,7 @@ mod tests {
 
     #[test]
     fn dropping_pool_discards_queued_requests_without_waiting_for_active_io() {
-        use std::io::Write;
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
+        let listener = bind_loopback().unwrap();
         let url = format!("http://{}/module.js", listener.local_addr().unwrap());
         let pool = ModuleFetchPool::new(Arc::new(Mutex::new(CookieJar::new()))).unwrap();
         let active: Vec<_> = (0..WORKERS)
@@ -290,14 +279,10 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut connections = Vec::new();
         while connections.len() < WORKERS {
-            match listener.accept() {
-                Ok((stream, _)) => connections.push(stream),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "workers did not start");
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => panic!("accept: {error}"),
-            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "workers did not start");
+            connections
+                .push(accept_with_timeout(&listener, remaining).expect("workers did not start"));
         }
         let mut queued = pool.fetch(url, false, None);
         drop(pool);
