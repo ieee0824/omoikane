@@ -29,7 +29,6 @@ COMMAND = [
 ]
 report = {
     "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-    "base_revision": subprocess.check_output(["git", "rev-parse", "HEAD^"], text=True).strip(),
     "platform": platform.platform(),
     "rustc": subprocess.check_output(["rustc", "--version", "--verbose"], text=True),
     "fixture_sha256": hashlib.sha256(Path("tests/fixtures/acid3/acid3.html").read_bytes()).hexdigest(),
