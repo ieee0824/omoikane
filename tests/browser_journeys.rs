@@ -1,7 +1,6 @@
 //! Browser behavior contracts exercised through the same session API as the GUI.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::io::{Read, Write};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -12,6 +11,13 @@ use std::time::{Duration, Instant};
 use omoikane::frame::BrowserFrame;
 use omoikane::platform_browser::PlatformBrowser;
 use serde_json::{Value, json};
+
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback, read_request_headers,
+};
 
 #[derive(Clone, Debug)]
 struct Request {
@@ -24,50 +30,33 @@ struct FixtureServer {
     origin: String,
     stop: Arc<AtomicBool>,
     requests: Arc<Mutex<Vec<Request>>>,
-    worker: Option<thread::JoinHandle<()>>,
+    worker: Option<FixtureWorker<()>>,
 }
 
 impl FixtureServer {
     fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let worker_requests = requests.clone();
-        let worker = thread::spawn(move || {
+        let worker = FixtureWorker::spawn(move || {
             while !worker_stop.load(Ordering::Relaxed) {
-                let (mut stream, _) = match listener.accept() {
-                    Ok(connection) => connection,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
+                let mut stream = match accept_with_timeout(&listener, Duration::from_millis(50)) {
+                    Ok(stream) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
                     Err(error) => panic!("fixture accept: {error}"),
                 };
-                // BSD sockets can inherit the listener's nonblocking flag.
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
                 stream
                     .set_write_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                let mut reader = BufReader::new(&mut stream);
-                let mut request = String::new();
-                reader.read_line(&mut request).unwrap();
-                let mut fields = request.split_whitespace();
+                let headers = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let mut fields = headers.lines().next().unwrap().split_whitespace();
                 let method = fields.next().unwrap().to_owned();
                 let path = fields.next().unwrap().to_owned();
                 let mut length = 0;
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" {
-                        break;
-                    }
-                    assert!(!line.is_empty(), "incomplete fixture request");
+                for line in headers.lines().skip(1) {
                     if let Some((name, value)) = line.split_once(':')
                         && name.eq_ignore_ascii_case("content-length")
                     {
@@ -75,7 +64,8 @@ impl FixtureServer {
                     }
                 }
                 let mut body = vec![0; length];
-                reader.read_exact(&mut body).unwrap();
+                stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+                stream.read_exact(&mut body).unwrap();
                 worker_requests.lock().unwrap().push(Request {
                     method,
                     path: path.clone(),
@@ -204,10 +194,7 @@ impl FixtureServer {
 impl Drop for FixtureServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        let result = self.worker.take().unwrap().join();
-        if !thread::panicking() {
-            result.expect("fixture server failed");
-        }
+        drop(self.worker.take());
     }
 }
 

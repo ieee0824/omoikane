@@ -3,8 +3,15 @@ use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
 use omoikane::platform_browser::PlatformBrowser;
 use serde_json::json;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::Write;
+
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 
 fn evaluate(session: &mut CdpSession, expression: &str) -> serde_json::Value {
     session
@@ -105,12 +112,11 @@ fn removing_iframe_hides_departing_document_before_teardown() {
 
 #[test]
 fn nested_iframe_loads_then_hides_all_departing_documents() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 2048];
-        let _ = stream.read(&mut request).unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let body = "<body onload='parent.startTest()'><iframe onload='parent.parent.startTest()'></iframe><iframe onload='parent.parent.startTest()'></iframe></body>";
         write!(
             stream,
@@ -158,7 +164,7 @@ fn nested_iframe_loads_then_hides_all_departing_documents() {
             .to_std_string_escaped(),
         "0:hidden,1:hidden,2:hidden"
     );
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -375,12 +381,11 @@ fn cross_origin_iframe_receives_departure_events_in_its_own_realm() {
 
 #[test]
 fn iframe_window_load_handler_can_initiate_visibility_work() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 2048];
-        let _ = stream.read(&mut request).unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let body = "<body onload='parent.childBodyLoaded = true'><script>onload = () => { parent.childLoaded = true; }</script></body>";
         write!(
             stream,
@@ -416,17 +421,16 @@ fn iframe_window_load_handler_can_initiate_visibility_work() {
             .to_boolean(),
         "{diagnostic}, errors={errors:?}"
     );
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn iframe_body_onload_without_script_runs() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 2048];
-        let _ = stream.read(&mut request).unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let body = "<body onload='parent.bodyOnlyLoaded = true'></body>";
         write!(
             stream,
@@ -447,7 +451,7 @@ fn iframe_body_onload_without_script_runs() {
     assert!(runtime.execute_document_scripts(Some(&base)).is_empty());
     runtime.tick(0).unwrap();
     assert!(runtime.eval("bodyOnlyLoaded").unwrap().to_boolean());
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -488,9 +492,9 @@ fn cdp_lifecycle_changes_visibility_and_new_navigation_inherits_it() {
 
 #[test]
 fn navigation_hides_departing_document_between_beforeunload_and_pagehide() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         let first = r#"<script>
             sessionStorage.setItem('departureOrder', '');
             for (const type of ['beforeunload', 'visibilitychange', 'pagehide', 'unload']) {
@@ -502,12 +506,9 @@ fn navigation_hides_departing_document_between_beforeunload_and_pagehide() {
             }
         </script>"#;
         for (path, body) in [("/first", first), ("/second", "<p>next</p>")] {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2048];
-            let count = stream.read(&mut request).unwrap();
-            assert!(
-                String::from_utf8_lossy(&request[..count]).starts_with(&format!("GET {path} "))
-            );
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            assert!(request.starts_with(&format!("GET {path} ")));
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -534,7 +535,7 @@ fn navigation_hides_departing_document_between_beforeunload_and_pagehide() {
         evaluate(&mut session, "sessionStorage.getItem('departureOrder')"),
         "beforeunload:visible,visibilitychange:hidden,pagehide:hidden,unload:hidden,"
     );
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]

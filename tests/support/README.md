@@ -14,6 +14,8 @@ servers remain tracked by Issue #1089.
 `cookie_samesite.rs`, `error_reporting_http.rs`, `form_target.rs`, and
 `module_identity.rs` also use it; their 24 test cases retain their responses
 and assertions.
+`browser_journeys.rs`, `page_visibility.rs`, and `pointer_lock.rs` also use it;
+their 45 test cases retain their responses and assertions.
 
 Issue #885 first migrates `document_cookie_bridge.rs` and
 `fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,
@@ -21,9 +23,6 @@ header/body boundary, and worker-join behavior. The following current fixture
 files still use local server logic and have not been migrated:
 
 - `acid3_common/harness.rs`
-- `browser_journeys.rs`
-- `page_visibility.rs`
-- `pointer_lock.rs`
 - `subresource_cookie_store.rs`
 - `wpt_smoke/server.rs`
 

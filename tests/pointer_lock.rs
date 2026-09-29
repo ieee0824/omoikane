@@ -2,6 +2,15 @@ use omoikane::{
     html::TreeBuilder,
     js::{JsRuntime, PointerLockTransition},
 };
+use std::io::Write;
+
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 
 fn runtime() -> JsRuntime {
     let mut runtime = JsRuntime::with_document(
@@ -562,20 +571,11 @@ fn host_keyboard_input_reaches_child_realm_listener() {
 }
 
 fn child_input_session(script: &str) -> omoikane::cdp::CdpSession {
-    use std::io::{Read, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
-        let mut request = Vec::new();
-        while !request.ends_with(b"\r\n\r\n") {
-            let mut byte = [0];
-            stream.read_exact(&mut byte).unwrap();
-            request.push(byte[0]);
-        }
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let body = "<!doctype html><body></body>";
         write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
     });
@@ -583,7 +583,7 @@ fn child_input_session(script: &str) -> omoikane::cdp::CdpSession {
     session
         .dispatch("Page.navigate", serde_json::json!({"url":url}))
         .unwrap();
-    server.join().unwrap();
+    server.join();
     cdp_eval(
         &mut session,
         "document.body.innerHTML='<input id=topField><iframe id=frame></iframe>'; globalThis.frame=document.getElementById('frame'); globalThis.child=frame.contentDocument; child.body.innerHTML='<input id=field><div id=lock></div>'; globalThis.field=child.getElementById('field'); globalThis.order=[];",
