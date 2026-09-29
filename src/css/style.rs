@@ -385,6 +385,87 @@ impl ComputedStyle {
             .insert(name.to_string(), ComputedValue::Px(value));
     }
 
+    /// Exposes logical aliases of the final physical values to computed CSSOM.
+    /// This runs after layout has resolved used width and height.
+    pub(crate) fn populate_logical_cssom(&mut self, flex_or_grid_item: bool) {
+        let flow = logical_flow_from_properties(&self.properties);
+        for name in [
+            "inline-size",
+            "block-size",
+            "min-inline-size",
+            "min-block-size",
+            "max-inline-size",
+            "max-block-size",
+            "inset-inline-start",
+            "inset-inline-end",
+            "inset-block-start",
+            "inset-block-end",
+            "margin-inline-start",
+            "margin-inline-end",
+            "margin-block-start",
+            "margin-block-end",
+            "padding-inline-start",
+            "padding-inline-end",
+            "padding-block-start",
+            "padding-block-end",
+            "border-inline-start-width",
+            "border-inline-end-width",
+            "border-block-start-width",
+            "border-block-end-width",
+            "border-inline-start-style",
+            "border-inline-end-style",
+            "border-block-start-style",
+            "border-block-end-style",
+            "border-inline-start-color",
+            "border-inline-end-color",
+            "border-block-start-color",
+            "border-block-end-color",
+            "border-start-start-radius",
+            "border-start-end-radius",
+            "border-end-start-radius",
+            "border-end-end-radius",
+        ] {
+            let Some(physical) = flow.physical_name(name) else {
+                continue;
+            };
+            let mut value = self.properties.get(&physical).cloned().unwrap_or_else(|| {
+                if name.starts_with("max-") {
+                    ComputedValue::Keyword("none".to_string())
+                } else if name.starts_with("min-") || name.ends_with("-size")
+                    || name.starts_with("inset-")
+                {
+                    ComputedValue::Keyword("auto".to_string())
+                } else if name.ends_with("-style") {
+                    ComputedValue::Keyword("none".to_string())
+                } else if name.ends_with("-color") {
+                    self.properties.get("color").cloned()
+                        .unwrap_or_else(|| ComputedValue::Color("black".to_string()))
+                } else if name.ends_with("-width") {
+                    let style = physical.replace("-width", "-style");
+                    let visible = matches!(self.properties.get(&style),
+                        Some(ComputedValue::Keyword(keyword)) if !matches!(keyword.as_str(), "none" | "hidden"));
+                    ComputedValue::Px(if visible { 3.0 } else { 0.0 })
+                } else {
+                    ComputedValue::Px(0.0)
+                }
+            });
+            if name.ends_with("-color") && value.css_text().eq_ignore_ascii_case("currentcolor") {
+                value = self
+                    .properties
+                    .get("color")
+                    .cloned()
+                    .unwrap_or_else(|| ComputedValue::Color("black".to_string()));
+            }
+            if name.starts_with("min-")
+                && !flex_or_grid_item
+                && matches!(&value, ComputedValue::Keyword(keyword) if keyword == "auto")
+            {
+                value = ComputedValue::Px(0.0);
+            }
+            self.properties.insert(name.to_string(), value);
+        }
+    }
+
     pub(crate) fn set_paint_value(&mut self, name: &str, value: String) {
         if name.starts_with("background-position-") {
             let computed = super::parse_style_attribute(&format!("{name}: {value}"))
@@ -2398,7 +2479,7 @@ impl StyleResolver {
                 .cloned()
                 .collect()
         };
-        remove_reverted_candidates(&mut custom_candidates, None);
+        remove_reverted_candidates(&mut custom_candidates, None, None);
         let inherited_custom_properties = inherited_custom_properties(parent_style);
         let mut custom_properties = inherited_custom_properties.clone();
         let mut specified_custom_properties = BTreeMap::new();
@@ -2428,7 +2509,8 @@ impl StyleResolver {
             .unwrap_or_else(|| resolve_custom_property_values(&custom_properties));
         candidates = expand_pending_shorthand_candidates(candidates, &custom_properties);
         candidates.sort_by(compare_candidate_priority);
-        remove_reverted_candidates(&mut candidates, Some(&custom_properties));
+        let flow = logical_flow_from_candidates(&candidates, &custom_properties, parent_style);
+        remove_reverted_candidates(&mut candidates, Some(&custom_properties), Some(flow));
 
         let mut properties: BTreeMap<String, ComputedValue> = BTreeMap::new();
         let mut component_values: BTreeMap<String, Value> = BTreeMap::new();
@@ -2588,7 +2670,10 @@ impl StyleResolver {
         // value changed after syntax validation or inheritance fallback.
         candidates = expand_pending_shorthand_candidates(unexpanded_candidates, &custom_properties);
         candidates.sort_by(compare_candidate_priority);
-        remove_reverted_candidates(&mut candidates, Some(&custom_properties));
+        let flow = logical_flow_from_candidates(&candidates, &custom_properties, parent_style);
+        remove_reverted_candidates(&mut candidates, Some(&custom_properties), Some(flow));
+        let logical_flow =
+            logical_flow_from_candidates(&candidates, &custom_properties, parent_style);
 
         for candidate in candidates {
             if matches!(candidate.name.as_str(), "font-size" | "line-height")
@@ -2626,6 +2711,7 @@ impl StyleResolver {
                         &mut properties,
                         &candidate.name.to_ascii_lowercase(),
                         computed,
+                        logical_flow,
                     );
                     if candidate.important {
                         important_properties.insert(candidate.name.to_ascii_lowercase());
@@ -2647,8 +2733,13 @@ impl StyleResolver {
             };
             if candidate.name == "gap" || candidate.name == "grid-gap" {
                 if let Some((row_gap, column_gap)) = compute_gap_shorthand(&resolved_value, ctx) {
-                    insert_computed_property(&mut properties, "row-gap", row_gap);
-                    insert_computed_property(&mut properties, "column-gap", column_gap);
+                    insert_computed_property(&mut properties, "row-gap", row_gap, logical_flow);
+                    insert_computed_property(
+                        &mut properties,
+                        "column-gap",
+                        column_gap,
+                        logical_flow,
+                    );
                     if candidate.important {
                         important_properties.insert("row-gap".to_string());
                         important_properties.insert("column-gap".to_string());
@@ -2663,7 +2754,7 @@ impl StyleResolver {
                     "column-gap"
                 };
                 let computed = compute_value(&resolved_value, target, ctx);
-                insert_computed_property(&mut properties, target, computed);
+                insert_computed_property(&mut properties, target, computed, logical_flow);
                 if candidate.important {
                     important_properties.insert(target.to_string());
                 }
@@ -2685,7 +2776,7 @@ impl StyleResolver {
                     parent_style,
                 );
             }
-            insert_computed_property(&mut properties, &candidate.name, computed);
+            insert_computed_property(&mut properties, &candidate.name, computed, logical_flow);
             if candidate.important {
                 important_properties.insert(candidate.name.to_ascii_lowercase());
             }
@@ -2879,7 +2970,8 @@ impl StyleResolver {
                 resolve_value_with_custom_properties(&declaration.value, &custom_properties)
                     .unwrap_or_else(|| declaration.value.clone());
             let computed = compute_value(&resolved, property_name, ctx);
-            insert_computed_property(properties, property_name, computed);
+            let flow = logical_flow_from_properties(properties);
+            insert_computed_property(properties, property_name, computed, flow);
         }
         if let Some(progress) = animation_progress {
             self.apply_registered_animation_interpolation(
@@ -3305,41 +3397,118 @@ fn compute_gap_shorthand(
     }
 }
 
+fn inherited_flow_keyword<'a>(
+    parent: Option<&'a ComputedStyle>,
+    name: &str,
+    initial: &'a str,
+) -> &'a str {
+    match parent.and_then(|style| style.get(name)) {
+        Some(ComputedValue::Keyword(value)) => value,
+        _ => initial,
+    }
+}
+
+fn logical_flow_from_candidates(
+    candidates: &[Candidate],
+    custom_properties: &BTreeMap<String, Value>,
+    parent: Option<&ComputedStyle>,
+) -> super::logical::LogicalFlow {
+    let inherited_direction = inherited_flow_keyword(parent, "direction", "ltr");
+    let inherited_mode = inherited_flow_keyword(parent, "writing-mode", "horizontal-tb");
+    let mut direction = inherited_direction;
+    let mut mode = inherited_mode;
+    for candidate in candidates {
+        if !matches!(candidate.name.as_str(), "direction" | "writing-mode") {
+            continue;
+        }
+        let Some(Value::Keyword(keyword)) =
+            resolve_value_with_custom_properties(&candidate.value, custom_properties)
+        else {
+            continue;
+        };
+        if matches!(
+            validate_declaration(&candidate.name, &Value::Keyword(keyword.clone())),
+            DeclarationValidation::Invalid
+        ) {
+            continue;
+        }
+        let normalized = keyword.to_ascii_lowercase();
+        let value = match normalized.as_str() {
+            "inherit" | "unset" => {
+                if candidate.name == "direction" {
+                    inherited_direction
+                } else {
+                    inherited_mode
+                }
+            }
+            "initial" => {
+                if candidate.name == "direction" {
+                    "ltr"
+                } else {
+                    "horizontal-tb"
+                }
+            }
+            _ => {
+                // Candidate values are borrowed only for this loop; use a
+                // fixed keyword because the grammar has a closed set.
+                match normalized.as_str() {
+                    "rtl" => "rtl",
+                    "ltr" => "ltr",
+                    "vertical-rl" => "vertical-rl",
+                    "vertical-lr" => "vertical-lr",
+                    "sideways-rl" => "sideways-rl",
+                    "sideways-lr" => "sideways-lr",
+                    "horizontal-tb" => "horizontal-tb",
+                    _ => continue,
+                }
+            }
+        };
+        if candidate.name == "direction" {
+            direction = value;
+        } else {
+            mode = value;
+        }
+    }
+    super::logical::LogicalFlow::new(mode, direction)
+}
+
+fn logical_flow_from_properties(
+    properties: &BTreeMap<String, ComputedValue>,
+) -> super::logical::LogicalFlow {
+    let keyword = |name, default| match properties.get(name) {
+        Some(ComputedValue::Keyword(value)) => value.as_str(),
+        _ => default,
+    };
+    super::logical::LogicalFlow::new(
+        keyword("writing-mode", "horizontal-tb"),
+        keyword("direction", "ltr"),
+    )
+}
+
 fn insert_computed_property(
     properties: &mut BTreeMap<String, ComputedValue>,
     name: &str,
-    computed: ComputedValue,
+    mut computed: ComputedValue,
+    flow: super::logical::LogicalFlow,
 ) {
     if should_skip_computed_property(name, &computed) {
         return;
     }
+    if name.starts_with("border-")
+        && name.ends_with("-width")
+        && let ComputedValue::Px(value) = &mut computed
+    {
+        *value = value.max(0.0);
+    }
     // Logical and physical box properties participate in the same cascade.
     // Keep the logical value for CSSOM exposure, while also updating the
-    // physical side consumed by the current horizontal LTR layout engine.
+    // physical side consumed by layout and paint for the resolved flow.
     // Because candidates are inserted in cascade order, a later declaration
     // in either spelling correctly wins for layout.
-    if let Some(physical_name) = logical_box_property_physical_name(name) {
-        properties.insert(physical_name.to_string(), computed.clone());
+    if let Some(physical_name) = flow.physical_name(name) {
+        properties.insert(physical_name, computed.clone());
     }
     properties.insert(name.to_string(), computed);
-}
-
-fn logical_box_property_physical_name(name: &str) -> Option<&'static str> {
-    match name {
-        "padding-inline-start" => Some("padding-left"),
-        "padding-inline-end" => Some("padding-right"),
-        "padding-block-start" => Some("padding-top"),
-        "padding-block-end" => Some("padding-bottom"),
-        "margin-inline-start" => Some("margin-left"),
-        "margin-inline-end" => Some("margin-right"),
-        "margin-block-start" => Some("margin-top"),
-        "margin-block-end" => Some("margin-bottom"),
-        "contain-intrinsic-inline-size" => Some("contain-intrinsic-width"),
-        "contain-intrinsic-block-size" => Some("contain-intrinsic-height"),
-        "overscroll-behavior-inline" => Some("overscroll-behavior-x"),
-        "overscroll-behavior-block" => Some("overscroll-behavior-y"),
-        _ => None,
-    }
 }
 
 fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
@@ -3444,6 +3613,13 @@ fn is_color_property(name: &str) -> bool {
         || name.eq_ignore_ascii_case("border-right-color")
         || name.eq_ignore_ascii_case("border-bottom-color")
         || name.eq_ignore_ascii_case("border-left-color")
+        || matches!(
+            name,
+            "border-inline-start-color"
+                | "border-inline-end-color"
+                | "border-block-start-color"
+                | "border-block-end-color"
+        )
         || name.eq_ignore_ascii_case("outline-color")
         || name.eq_ignore_ascii_case("column-rule-color")
         || name.eq_ignore_ascii_case("text-decoration-color")
@@ -3636,6 +3812,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // never accepts a top-level comma-separated list.
     if is_color_property(name) {
         return validate_color_value(value);
+    }
+    if let Some(validation) = validate_logical_box_declaration(name, value) {
+        return validation;
     }
     if name.eq_ignore_ascii_case("counter-reset") || name.eq_ignore_ascii_case("counter-increment")
     {
@@ -4411,6 +4590,130 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     DeclarationValidation::Unvalidated
 }
 
+fn validate_logical_box_declaration(name: &str, value: &Value) -> Option<DeclarationValidation> {
+    let is_offset = matches!(
+        name,
+        "top"
+            | "right"
+            | "bottom"
+            | "left"
+            | "inset-inline-start"
+            | "inset-inline-end"
+            | "inset-block-start"
+            | "inset-block-end"
+    );
+    let is_border_width = matches!(
+        name,
+        "border-inline-start-width"
+            | "border-inline-end-width"
+            | "border-block-start-width"
+            | "border-block-end-width"
+    );
+    let is_border_style = matches!(
+        name,
+        "border-inline-start-style"
+            | "border-inline-end-style"
+            | "border-block-start-style"
+            | "border-block-end-style"
+    );
+    let is_corner = matches!(
+        name,
+        "border-start-start-radius"
+            | "border-start-end-radius"
+            | "border-end-start-radius"
+            | "border-end-end-radius"
+    );
+    if is_offset {
+        let valid = matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+            || valid_logical_length(value, true, true);
+        return Some(if valid {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        });
+    }
+    if is_border_width {
+        let valid = matches!(value, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "thin" | "medium" | "thick") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+            || valid_logical_length(value, false, false);
+        return Some(if valid {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        });
+    }
+    if is_border_style {
+        let valid = matches!(value, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "none" | "hidden" | "dotted" | "dashed" | "solid" | "double" | "groove" | "ridge" | "inset" | "outset") || is_css_wide_keyword(&keyword.to_ascii_lowercase()));
+        return Some(if valid {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        });
+    }
+    if is_corner {
+        let valid = match value {
+            Value::List(values) if (1..=2).contains(&values.len()) => values
+                .iter()
+                .all(|value| valid_logical_length(value, false, true)),
+            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => true,
+            value => valid_logical_length(value, false, true),
+        };
+        return Some(if valid {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        });
+    }
+    if matches!(
+        name,
+        "inset"
+            | "inset-inline"
+            | "inset-block"
+            | "border-inline"
+            | "border-block"
+            | "border-inline-start"
+            | "border-inline-end"
+            | "border-block-start"
+            | "border-block-end"
+            | "border-inline-width"
+            | "border-inline-style"
+            | "border-inline-color"
+            | "border-block-width"
+            | "border-block-style"
+            | "border-block-color"
+    ) {
+        return Some(DeclarationValidation::Invalid);
+    }
+    None
+}
+
+fn valid_logical_length(value: &Value, allow_negative: bool, allow_percentage: bool) -> bool {
+    match value {
+        Value::Length(number, unit) => {
+            number.is_finite()
+                && (allow_negative || *number >= 0.0)
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some()
+        }
+        Value::Percentage(number) => {
+            allow_percentage && number.is_finite() && (allow_negative || *number >= 0.0)
+        }
+        Value::Number(number) => *number == 0.0,
+        Value::Function { name, .. } if is_length_percentage_math_function(name) => {
+            let computed = compute_value(value, "left", ResolutionContext::default());
+            match computed {
+                ComputedValue::Px(number) | ComputedValue::Number(number) => {
+                    number.is_finite() && (allow_negative || number >= 0.0)
+                }
+                ComputedValue::Percentage(number) => {
+                    allow_percentage && number.is_finite() && (allow_negative || number >= 0.0)
+                }
+                ComputedValue::LengthPercentage(_) => allow_percentage,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 fn validate_scroll_snap_declaration(name: &str, value: &Value) -> Option<DeclarationValidation> {
     let name = name.to_ascii_lowercase();
     if matches!(
@@ -4636,8 +4939,9 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
         is_css_wide_keyword(&keyword)
             || matches!(
                 keyword.as_str(),
-                "auto" | "min-content" | "max-content" | "fit-content" | "stretch"
+                "min-content" | "max-content" | "fit-content" | "stretch"
             )
+            || (keyword == "auto" && !matches!(name, "max-inline-size" | "max-block-size"))
             || (name.starts_with("max-") && keyword == "none")
     };
     match value {
@@ -4678,6 +4982,12 @@ fn is_non_negative_sizing_property(name: &str) -> bool {
         name,
         "width"
             | "height"
+            | "inline-size"
+            | "block-size"
+            | "min-inline-size"
+            | "min-block-size"
+            | "max-inline-size"
+            | "max-block-size"
             | "min-width"
             | "min-height"
             | "max-width"
@@ -6096,6 +6406,12 @@ fn is_length_property(name: &str) -> bool {
         name,
         "width"
             | "height"
+            | "inline-size"
+            | "block-size"
+            | "min-inline-size"
+            | "min-block-size"
+            | "max-inline-size"
+            | "max-block-size"
             | "min-width"
             | "min-height"
             | "max-width"
@@ -6120,6 +6436,10 @@ fn is_length_property(name: &str) -> bool {
             | "border-right-width"
             | "border-bottom-width"
             | "border-left-width"
+            | "border-inline-start-width"
+            | "border-inline-end-width"
+            | "border-block-start-width"
+            | "border-block-end-width"
             | "top"
             | "right"
             | "bottom"
@@ -6782,6 +7102,7 @@ impl From<&Candidate> for RevertedLayer {
 fn remove_reverted_candidates(
     candidates: &mut Vec<Candidate>,
     custom_properties: Option<&BTreeMap<String, Value>>,
+    flow: Option<super::logical::LogicalFlow>,
 ) {
     #[derive(Default)]
     struct PropertyRevertState {
@@ -6794,7 +7115,7 @@ fn remove_reverted_candidates(
     let mut states: HashMap<String, PropertyRevertState> = HashMap::new();
     for candidate in candidates.iter().rev() {
         let state = states
-            .entry(revert_property_group(&candidate.name).to_string())
+            .entry(revert_property_group(&candidate.name, flow))
             .or_default();
         if state.winner_found {
             continue;
@@ -6824,7 +7145,7 @@ fn remove_reverted_candidates(
 
     candidates.retain(|candidate| {
         !states
-            .get(revert_property_group(&candidate.name))
+            .get(&revert_property_group(&candidate.name, flow))
             .is_some_and(|state| {
                 state
                     .reverted_layers
@@ -6837,8 +7158,9 @@ fn remove_reverted_candidates(
     });
 }
 
-fn revert_property_group(name: &str) -> &str {
-    logical_box_property_physical_name(name).unwrap_or(name)
+fn revert_property_group(name: &str, flow: Option<super::logical::LogicalFlow>) -> String {
+    flow.and_then(|flow| flow.physical_name(name))
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn candidate_can_win_before_revert(
@@ -7286,6 +7608,19 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "background-size",
     "backdrop-filter",
     "backface-visibility",
+    "block-size",
+    "border-block",
+    "border-block-color",
+    "border-block-end",
+    "border-block-end-color",
+    "border-block-end-style",
+    "border-block-end-width",
+    "border-block-start",
+    "border-block-start-color",
+    "border-block-start-style",
+    "border-block-start-width",
+    "border-block-style",
+    "border-block-width",
     "border-bottom-color",
     "border-bottom-style",
     "border-bottom-width",
@@ -7295,6 +7630,20 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "border-top-right-radius",
     "border-collapse",
     "border-color",
+    "border-end-end-radius",
+    "border-end-start-radius",
+    "border-inline",
+    "border-inline-color",
+    "border-inline-end",
+    "border-inline-end-color",
+    "border-inline-end-style",
+    "border-inline-end-width",
+    "border-inline-start",
+    "border-inline-start-color",
+    "border-inline-start-style",
+    "border-inline-start-width",
+    "border-inline-style",
+    "border-inline-width",
     "border-left-color",
     "border-left-style",
     "border-left-width",
@@ -7302,6 +7651,8 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "border-right-style",
     "border-right-width",
     "border-spacing",
+    "border-start-end-radius",
+    "border-start-start-radius",
     "border-style",
     "border-width",
     "border-top-color",
@@ -7312,6 +7663,9 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "break-before",
     "break-inside",
     "page",
+    "inset",
+    "inset-inline",
+    "inset-block",
     "inset-inline-start",
     "inset-inline-end",
     "inset-block-start",
@@ -7376,6 +7730,7 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "grid-row-start",
     "grid-row-end",
     "height",
+    "inline-size",
     "justify-content",
     "justify-items",
     "justify-self",
@@ -7393,8 +7748,12 @@ const SUPPORTED_PROPERTIES: &[&str] = &[
     "margin-block-start",
     "margin-block-end",
     "max-height",
+    "max-inline-size",
+    "max-block-size",
     "max-width",
     "min-height",
+    "min-inline-size",
+    "min-block-size",
     "min-width",
     "column-gap",
     "outline-color",
@@ -7533,6 +7892,21 @@ fn is_shorthand_or_legacy_alias(name: &str) -> bool {
     matches!(
         name,
         "animation"
+            | "inset"
+            | "inset-inline"
+            | "inset-block"
+            | "border-inline"
+            | "border-block"
+            | "border-inline-start"
+            | "border-inline-end"
+            | "border-block-start"
+            | "border-block-end"
+            | "border-inline-width"
+            | "border-inline-style"
+            | "border-inline-color"
+            | "border-block-width"
+            | "border-block-style"
+            | "border-block-color"
             | "border-color"
             | "border-style"
             | "border-width"
@@ -7582,6 +7956,13 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
     if property.is_empty() || value.is_empty() || contains_top_level_semicolon(value) {
         return false;
     }
+    if (property.starts_with("inset")
+        || property.starts_with("border-inline")
+        || property.starts_with("border-block"))
+        && super::split_top_level_commas(value).len() > 1
+    {
+        return false;
+    }
 
     let declarations = super::parse_style_attribute(&format!("{property}: {value}"));
     if declarations.is_empty() {
@@ -7614,6 +7995,133 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
             }
         }
     })
+}
+
+/// Canonicalizes a logical border width assigned through CSSOM.
+///
+/// The specified-value serializer keeps relative units, but orders simple
+/// `calc()` terms and turns unitless zero into a length as CSSOM requires.
+pub(crate) fn normalize_logical_border_width(property: &str, text: &str) -> Option<String> {
+    if !supports_declaration(property, text) {
+        return None;
+    }
+    let declarations = super::parse_style_attribute(&format!("{property}: {text}"));
+    let values = declarations
+        .iter()
+        .map(|declaration| normalize_border_width_component(&declaration.value))
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        [start, end] if start == end => Some(start.clone()),
+        [start, end] => Some(format!("{start} {end}")),
+        [single] => Some(single.clone()),
+        _ => None,
+    }
+}
+
+fn normalize_border_width_component(value: &Value) -> String {
+    if matches!(value, Value::Number(number) if *number == 0.0) {
+        return "0px".to_string();
+    }
+    if let Value::Function { name, arguments } = value
+        && name.eq_ignore_ascii_case("calc")
+        && let [Value::List(terms)] = arguments.as_slice()
+        && let [
+            Value::Length(first, first_unit),
+            Value::Keyword(operator),
+            Value::Length(second, second_unit),
+        ] = terms.as_slice()
+        && matches!(operator.as_str(), "+" | "-")
+        && second_unit < first_unit
+    {
+        let second = if operator == "-" { -*second } else { *second };
+        return format!("calc({second}{second_unit} + {first}{first_unit})");
+    }
+    render_value(value)
+}
+
+/// Validates and canonicalizes logical inset shorthands and longhands.
+pub(crate) fn normalize_logical_inset(property: &str, text: &str) -> Option<String> {
+    if !supports_declaration(property, text) {
+        return None;
+    }
+    let declarations = super::parse_style_attribute(&format!("{property}: {text}"));
+    let values = declarations
+        .iter()
+        .map(|declaration| normalize_border_width_component(&declaration.value))
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        [single] => Some(single.clone()),
+        [start, end] => Some(if start == end {
+            start.clone()
+        } else {
+            format!("{start} {end}")
+        }),
+        [top, right, bottom, left] if top == right && top == bottom && top == left => {
+            Some(top.clone())
+        }
+        [top, right, bottom, left] if top == bottom && right == left => {
+            Some(format!("{top} {right}"))
+        }
+        [top, right, bottom, left] if right == left => Some(format!("{top} {right} {bottom}")),
+        [top, right, bottom, left] => Some(format!("{top} {right} {bottom} {left}")),
+        _ => None,
+    }
+}
+
+/// Serializes a logical border color while preserving named color spellings.
+pub(crate) fn normalize_logical_border_color(property: &str, text: &str) -> Option<String> {
+    if !supports_declaration(property, text) {
+        return None;
+    }
+    let declarations = super::parse_style_attribute(&format!("{property}: {text}"));
+    let values = declarations
+        .iter()
+        .map(|declaration| {
+            let value = render_value(&declaration.value);
+            if value.starts_with('#') {
+                let color = crate::paint::color::parse_color(&value)?;
+                Some(format!("rgb({}, {}, {})", color.r, color.g, color.b))
+            } else {
+                Some(value)
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    match values.as_slice() {
+        [single] => Some(single.clone()),
+        [start, end] if start == end => Some(start.clone()),
+        [start, end] => Some(format!("{start} {end}")),
+        _ => None,
+    }
+}
+
+/// Validates and serializes a logical border shorthand in width/style/color order.
+pub(crate) fn normalize_logical_border_shorthand(property: &str, text: &str) -> Option<String> {
+    if !supports_declaration(property, text) {
+        return None;
+    }
+    if matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+    ) {
+        return Some(text.trim().to_ascii_lowercase());
+    }
+    let declarations = super::parse_style_attribute(&format!("{property}: {text}"));
+    let mut width = None;
+    let mut style = None;
+    let mut color = None;
+    for declaration in declarations {
+        match declaration.name.rsplit('-').next()? {
+            "width" => width = Some(normalize_border_width_component(&declaration.value)),
+            "style" => style = Some(render_value(&declaration.value)),
+            "color" => color = Some(render_value(&declaration.value)),
+            _ => return None,
+        }
+    }
+    let values = [width, style, color]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join(" "))
 }
 
 /// Validates and canonicalizes the specified underline longhand value for CSSOM.
@@ -7714,6 +8222,10 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             | "border-right-width"
             | "border-bottom-width"
             | "border-left-width"
+            | "border-inline-start-width"
+            | "border-inline-end-width"
+            | "border-block-start-width"
+            | "border-block-end-width"
             | "column-rule-width"
     ) && let Value::Keyword(keyword) = value
     {
@@ -10142,7 +10654,7 @@ fn zero_border_width_for_none_style(properties: &mut BTreeMap<String, ComputedVa
         let style_key = format!("border-{side}-style");
         let is_none = matches!(
             properties.get(&style_key),
-            Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("none")
+            Some(ComputedValue::Keyword(keyword)) if matches!(keyword.to_ascii_lowercase().as_str(), "none" | "hidden")
         );
         if is_none {
             let width_key = format!("border-{side}-width");

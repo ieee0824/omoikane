@@ -1,0 +1,12 @@
+{
+  "tests": [
+    { "path": "css/css-logical/parsing/inline-size-valid.html" },
+    { "path": "css/css-logical/parsing/block-size-valid.html" },
+    { "path": "css/css-logical/parsing/inset-valid.html" },
+    { "path": "css/css-logical/parsing/inset-shorthand.html" },
+    { "path": "css/css-logical/parsing/border-inline-valid.html" },
+    { "path": "css/css-logical/parsing/border-block-valid.html" },
+    { "path": "css/css-logical/parsing/border-inline-width-valid.html" },
+    { "path": "css/css-logical/parsing/border-block-width-valid.html" }
+  ]
+}

@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 540px; height: 240px; background: white; }
+  .box { position: absolute; box-sizing: border-box; border: 0 solid; }
+  #ltr {
+    inset: 12px auto auto 12px;
+    inline-size: 76px; block-size: 54px;
+    border-inline-start: 6px solid #d34b48;
+    border-block-end: 4px solid #5683d1;
+    border-start-start-radius: 12px;
+    background: #f9dddd;
+  }
+  #rtl {
+    direction: rtl;
+    inset: 12px auto auto 110px;
+    inline-size: 76px; block-size: 54px;
+    border-inline-start: 6px solid #d34b48;
+    border-block-end: 4px solid #5683d1;
+    border-start-start-radius: 12px;
+    background: #f9dddd;
+  }
+  #vertical-rl {
+    writing-mode: vertical-rl;
+    inset: 12px auto auto 208px;
+    inline-size: 54px; block-size: 76px;
+    border-inline-start: 6px solid #d34b48;
+    border-block-end: 4px solid #5683d1;
+    border-start-start-radius: 12px;
+    background: #f9dddd;
+  }
+  #vertical-lr {
+    writing-mode: vertical-lr; direction: rtl;
+    inset-block-start: 12px; inset-inline-end: 72px;
+    inline-size: 54px; block-size: 76px;
+    border-inline-start: 6px solid #d34b48;
+    border-block-end: 4px solid #5683d1;
+    border-start-start-radius: 12px;
+    background: #f9dddd;
+  }
+  #sizing {
+    inset: 100px auto auto 110px;
+    min-inline-size: 54px; max-inline-size: 54px;
+    min-block-size: 76px; max-block-size: 76px;
+    border-inline-width: 3px 5px;
+    border-inline-style: solid;
+    border-inline-color: #377a57;
+    background: #dff1e3;
+  }
+</style>
+<div id="ltr" class="box" data-probe></div>
+<div id="rtl" class="box" data-probe></div>
+<div id="vertical-rl" class="box" data-probe></div>
+<div id="vertical-lr" class="box" data-probe></div>
+<div id="sizing" class="box" data-probe></div>

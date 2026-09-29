@@ -7,6 +7,7 @@ use std::fmt;
 
 mod container;
 mod filter;
+mod logical;
 mod matcher;
 mod media;
 mod parser;

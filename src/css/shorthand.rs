@@ -54,7 +54,18 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "margin" | "padding" | "scroll-padding" | "scroll-margin" => {
             expand_box_shorthand(name, value, important)
         }
-        "margin-inline"
+        "inset" => expand_box_shorthand("inset", value, important)
+            .into_iter()
+            .map(|mut declaration| {
+                if let Some(side) = declaration.name.strip_prefix("inset-") {
+                    declaration.name = side.to_string();
+                }
+                declaration
+            })
+            .collect(),
+        "inset-inline"
+        | "inset-block"
+        | "margin-inline"
         | "margin-block"
         | "padding-inline"
         | "padding-block"
@@ -65,8 +76,23 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "border-width" | "border-style" | "border-color" => {
             expand_border_axis_shorthand(name, value, important)
         }
+        "border-inline-width"
+        | "border-inline-style"
+        | "border-inline-color"
+        | "border-block-width"
+        | "border-block-style"
+        | "border-block-color" => expand_logical_border_axis_shorthand(name, value, important),
         "border" => expand_border_shorthand(value, important),
         "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            expand_border_side_shorthand(name, value, important)
+        }
+        "border-inline" | "border-block" => ["start", "end"]
+            .into_iter()
+            .flat_map(|side| {
+                expand_border_side_shorthand(&format!("{name}-{side}"), value.clone(), important)
+            })
+            .collect(),
+        "border-inline-start" | "border-inline-end" | "border-block-start" | "border-block-end" => {
             expand_border_side_shorthand(name, value, important)
         }
         "background" => expand_background_shorthand(value, important),
@@ -116,6 +142,9 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
     matches!(
         name,
         "all"
+            | "inset"
+            | "inset-inline"
+            | "inset-block"
             | "margin"
             | "padding"
             | "margin-inline"
@@ -136,6 +165,18 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "border-right"
             | "border-bottom"
             | "border-left"
+            | "border-inline"
+            | "border-block"
+            | "border-inline-start"
+            | "border-inline-end"
+            | "border-block-start"
+            | "border-block-end"
+            | "border-inline-width"
+            | "border-inline-style"
+            | "border-inline-color"
+            | "border-block-width"
+            | "border-block-style"
+            | "border-block-color"
             | "background"
             | "background-position"
             | "mask"
@@ -203,24 +244,32 @@ fn expand_css_wide_shorthand(
     }
 
     let longhands: Vec<String> = match name {
+        "inset" => ["top", "right", "bottom", "left"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         "margin" | "padding" | "scroll-padding" | "scroll-margin" => {
             ["top", "right", "bottom", "left"]
                 .into_iter()
                 .map(|side| format!("{name}-{side}"))
                 .collect()
         }
-        "margin-inline" | "padding-inline" | "scroll-padding-inline" | "scroll-margin-inline" => {
-            ["inline-start", "inline-end"]
-                .into_iter()
-                .map(|side| format!("{}-{side}", name.strip_suffix("-inline").unwrap_or(name)))
-                .collect()
-        }
-        "margin-block" | "padding-block" | "scroll-padding-block" | "scroll-margin-block" => {
-            ["block-start", "block-end"]
-                .into_iter()
-                .map(|side| format!("{}-{side}", name.strip_suffix("-block").unwrap_or(name)))
-                .collect()
-        }
+        "inset-inline"
+        | "margin-inline"
+        | "padding-inline"
+        | "scroll-padding-inline"
+        | "scroll-margin-inline" => ["inline-start", "inline-end"]
+            .into_iter()
+            .map(|side| format!("{}-{side}", name.strip_suffix("-inline").unwrap_or(name)))
+            .collect(),
+        "inset-block"
+        | "margin-block"
+        | "padding-block"
+        | "scroll-padding-block"
+        | "scroll-margin-block" => ["block-start", "block-end"]
+            .into_iter()
+            .map(|side| format!("{}-{side}", name.strip_suffix("-block").unwrap_or(name)))
+            .collect(),
         "border-width" | "border-style" | "border-color" => {
             let suffix = name.strip_prefix("border-").unwrap_or(name);
             ["top", "right", "bottom", "left"]
@@ -249,6 +298,32 @@ fn expand_css_wide_shorthand(
             ["width", "style", "color"]
                 .into_iter()
                 .map(|suffix| format!("{name}-{suffix}"))
+                .collect()
+        }
+        "border-inline" | "border-block" => ["start", "end"]
+            .into_iter()
+            .flat_map(|side| {
+                ["width", "style", "color"]
+                    .into_iter()
+                    .map(move |suffix| format!("{name}-{side}-{suffix}"))
+            })
+            .collect(),
+        "border-inline-start" | "border-inline-end" | "border-block-start" | "border-block-end" => {
+            ["width", "style", "color"]
+                .into_iter()
+                .map(|suffix| format!("{name}-{suffix}"))
+                .collect()
+        }
+        "border-inline-width"
+        | "border-inline-style"
+        | "border-inline-color"
+        | "border-block-width"
+        | "border-block-style"
+        | "border-block-color" => {
+            let (axis, suffix) = name.rsplit_once('-').unwrap_or((name, ""));
+            ["start", "end"]
+                .into_iter()
+                .map(|side| format!("{axis}-{side}-{suffix}"))
                 .collect()
         }
         "background" => [
@@ -639,6 +714,94 @@ fn expand_logical_axis_shorthand(name: &str, value: Value, important: bool) -> V
             important,
         },
     ]
+}
+
+fn expand_logical_border_axis_shorthand(
+    name: &str,
+    value: Value,
+    important: bool,
+) -> Vec<Declaration> {
+    let (axis, suffix) = name.rsplit_once('-').unwrap_or((name, ""));
+    let values = match value {
+        Value::List(values) => values,
+        value => vec![value],
+    };
+    let (start, end) = match values.as_slice() {
+        [value] => (value.clone(), value.clone()),
+        [start, end] => (start.clone(), end.clone()),
+        _ => return Vec::new(),
+    };
+    [start, end]
+        .into_iter()
+        .zip(["start", "end"])
+        .map(|(value, side)| Declaration {
+            name: format!("{axis}-{side}-{suffix}"),
+            value,
+            important,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod logical_shorthand_tests {
+    use super::*;
+
+    fn names(name: &str, value: Value) -> Vec<String> {
+        expand_shorthand(name, value, false)
+            .into_iter()
+            .map(|declaration| declaration.name)
+            .collect()
+    }
+
+    #[test]
+    fn inset_expands_to_physical_and_logical_offsets() {
+        let one = Value::Length(1.0, "px".to_string());
+        let two = Value::Length(2.0, "px".to_string());
+        assert_eq!(
+            names("inset", Value::List(vec![one.clone(), two.clone()])),
+            ["top", "right", "bottom", "left"]
+        );
+        assert_eq!(
+            names("inset-inline", Value::List(vec![one, two])),
+            ["inset-inline-start", "inset-inline-end"]
+        );
+        assert_eq!(
+            names("inset-block", Value::Keyword("revert-layer".to_string())),
+            ["inset-block-start", "inset-block-end"]
+        );
+    }
+
+    #[test]
+    fn logical_border_shorthands_expand_to_side_components() {
+        assert_eq!(
+            names(
+                "border-inline-width",
+                Value::List(vec![
+                    Value::Length(1.0, "px".to_string()),
+                    Value::Length(2.0, "px".to_string()),
+                ])
+            ),
+            ["border-inline-start-width", "border-inline-end-width"]
+        );
+        assert_eq!(
+            names(
+                "border-block",
+                Value::List(vec![
+                    Value::Length(2.0, "px".to_string()),
+                    Value::Keyword("solid".to_string()),
+                    Value::Keyword("red".to_string()),
+                ])
+            ),
+            [
+                "border-block-start-width",
+                "border-block-start-style",
+                "border-block-start-color",
+                "border-block-end-width",
+                "border-block-end-style",
+                "border-block-end-color",
+            ]
+        );
+    }
 }
 
 fn expand_place_shorthand(
@@ -1050,6 +1213,11 @@ fn expand_border_shorthand(value: Value, important: bool) -> Vec<Declaration> {
         match item {
             Value::Length(_, _) if width.is_none() => width = Some(item),
             Value::Number(number) if number == 0.0 && width.is_none() => width = Some(item),
+            Value::Function { ref name, .. }
+                if matches!(name.as_str(), "calc" | "min" | "max" | "clamp") && width.is_none() =>
+            {
+                width = Some(item)
+            }
             Value::Keyword(_) if is_width_keyword && width.is_none() => width = Some(item),
             Value::Keyword(_) if is_border_style && style.is_none() => style = Some(item),
             Value::Color(_) | Value::Function { .. } | Value::Keyword(_) if color.is_none() => {
@@ -1143,6 +1311,11 @@ fn expand_border_side_shorthand(name: &str, value: Value, important: bool) -> Ve
 
         match item {
             Value::Length(_, _) | Value::Number(_) if width.is_none() => width = Some(item),
+            Value::Function { ref name, .. }
+                if matches!(name.as_str(), "calc" | "min" | "max" | "clamp") && width.is_none() =>
+            {
+                width = Some(item)
+            }
             Value::Keyword(_) if is_width_keyword && width.is_none() => width = Some(item),
             Value::Keyword(_) if is_border_style && style.is_none() => style = Some(item),
             Value::Color(_) | Value::Function { .. } | Value::Keyword(_) if color.is_none() => {

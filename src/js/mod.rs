@@ -14351,6 +14351,18 @@ fn computed_style_native(
                             );
                         }
                     }
+                    let auto_min_size = ["min-width", "min-height"].iter().any(|name| {
+                        matches!(style.get(name), Some(ComputedValue::Keyword(value)) if value == "auto")
+                    });
+                    let flex_or_grid_item = pseudo.is_none() && auto_min_size
+                        && node.parent_node().is_some_and(|parent| {
+                            matches!(
+                                resolver.computed_style(&parent).get("display"),
+                                Some(ComputedValue::Keyword(display))
+                                    if matches!(display.as_str(), "flex" | "inline-flex" | "grid" | "inline-grid")
+                            )
+                        });
+                    style.populate_logical_cssom(flex_or_grid_item);
                     serialize_computed_style(&style)
                 }
                 None => "{}".to_string(),
@@ -16582,6 +16594,47 @@ fn normalize_style_value_native(
         "text-underline-position" | "text-underline-offset"
     ) {
         crate::css::style::normalize_underline_value(&property, &value)
+    } else if matches!(
+        property.as_str(),
+        "inset"
+            | "inset-inline"
+            | "inset-block"
+            | "inset-inline-start"
+            | "inset-inline-end"
+            | "inset-block-start"
+            | "inset-block-end"
+    ) {
+        crate::css::style::normalize_logical_inset(&property, &value)
+    } else if matches!(
+        property.as_str(),
+        "border-inline-start-width"
+            | "border-inline-end-width"
+            | "border-block-start-width"
+            | "border-block-end-width"
+            | "border-inline-width"
+            | "border-block-width"
+    ) {
+        crate::css::style::normalize_logical_border_width(&property, &value)
+    } else if matches!(
+        property.as_str(),
+        "border-inline-start-color"
+            | "border-inline-end-color"
+            | "border-block-start-color"
+            | "border-block-end-color"
+            | "border-inline-color"
+            | "border-block-color"
+    ) {
+        crate::css::style::normalize_logical_border_color(&property, &value)
+    } else if matches!(
+        property.as_str(),
+        "border-inline"
+            | "border-block"
+            | "border-inline-start"
+            | "border-inline-end"
+            | "border-block-start"
+            | "border-block-end"
+    ) {
+        crate::css::style::normalize_logical_border_shorthand(&property, &value)
     } else if property == "transition" {
         crate::css::normalize_transition_shorthand(&value)
     } else if matches!(
@@ -16630,14 +16683,39 @@ fn normalize_style_value_native(
                 | "min-height"
                 | "max-width"
                 | "max-height"
+                | "inline-size"
+                | "block-size"
+                | "min-inline-size"
+                | "min-block-size"
+                | "max-inline-size"
+                | "max-block-size"
                 | "top"
                 | "right"
                 | "bottom"
                 | "left"
+                | "inset"
+                | "inset-inline"
+                | "inset-block"
                 | "inset-inline-start"
                 | "inset-inline-end"
                 | "inset-block-start"
                 | "inset-block-end"
+                | "border-inline-start-style"
+                | "border-inline-end-style"
+                | "border-block-start-style"
+                | "border-block-end-style"
+                | "border-inline-style"
+                | "border-block-style"
+                | "border-inline-start-color"
+                | "border-inline-end-color"
+                | "border-block-start-color"
+                | "border-block-end-color"
+                | "border-inline-color"
+                | "border-block-color"
+                | "border-start-start-radius"
+                | "border-start-end-radius"
+                | "border-end-start-radius"
+                | "border-end-end-radius"
                 | "object-position"
                 | "contain-intrinsic-size"
                 | "contain-intrinsic-width"
