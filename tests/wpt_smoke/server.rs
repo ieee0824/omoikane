@@ -1,27 +1,50 @@
 //! Local HTTP fixture server for WPT smoke cases.
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::thread;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
+
+use super::http_fixture::{
+    FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback, read_request_headers,
+};
 
 pub(super) struct StaticServer {
     pub(super) base_url: String,
+    stop: Arc<AtomicBool>,
+    worker: Option<FixtureWorker<()>>,
 }
 impl StaticServer {
     pub(super) fn start(root: PathBuf) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind WPT server");
+        let listener = bind_loopback().expect("bind WPT server");
         let address = listener.local_addr().expect("WPT server address");
-        let root = Arc::new(root);
-        thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                serve(stream, &root);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = FixtureWorker::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                match accept_with_timeout(&listener, Duration::from_millis(50)) {
+                    Ok(stream) => serve(stream, &root),
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+                    Err(error) => panic!("WPT server accept: {error}"),
+                }
             }
         });
         Self {
             base_url: format!("http://{address}"),
+            stop,
+            worker: Some(worker),
         }
+    }
+}
+
+impl Drop for StaticServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        drop(self.worker.take());
     }
 }
 
@@ -55,38 +78,29 @@ fn echo_endpoint_preserves_crlf_and_escapes_request_bytes() {
 }
 
 fn serve(mut stream: TcpStream, root: &Path) {
-    let mut request_line = String::new();
+    let Ok(headers) = read_request_headers(&mut stream, READ_TIMEOUT) else {
+        return;
+    };
+    let request_line = headers.lines().next().unwrap_or_default();
     let mut request_content_type = String::new();
     let mut content_length = 0;
     let mut body = Vec::new();
+    for header in headers.lines().skip(1) {
+        if let Some((key, value)) = header.split_once(':') {
+            if key.eq_ignore_ascii_case("content-length") {
+                let Ok(length) = value.trim().parse::<usize>() else {
+                    return;
+                };
+                content_length = length;
+            } else if key.eq_ignore_ascii_case("content-type") {
+                request_content_type = value.trim().to_string();
+            }
+        }
+    }
+    body.resize(content_length, 0);
+    if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err() || stream.read_exact(&mut body).is_err()
     {
-        let mut reader = BufReader::new(&stream);
-        if reader.read_line(&mut request_line).is_err() {
-            return;
-        }
-        loop {
-            let mut header = String::new();
-            if reader.read_line(&mut header).is_err() {
-                return;
-            }
-            if header == "\r\n" || header.is_empty() {
-                break;
-            }
-            if let Some((key, value)) = header.split_once(':') {
-                if key.eq_ignore_ascii_case("content-length") {
-                    let Ok(length) = value.trim().parse::<usize>() else {
-                        return;
-                    };
-                    content_length = length;
-                } else if key.eq_ignore_ascii_case("content-type") {
-                    request_content_type = value.trim().to_string();
-                }
-            }
-        }
-        body.resize(content_length, 0);
-        if reader.read_exact(&mut body).is_err() {
-            return;
-        }
+        return;
     }
     let target = request_line.split_whitespace().nth(1).unwrap_or("/");
     let path = target.split("?").next().unwrap_or("/");
