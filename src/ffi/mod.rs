@@ -511,11 +511,13 @@ fn into_c_string(value: String) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers,
+    };
     use base64::Engine;
     use std::fs;
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-    use std::thread;
+    use std::io::Write;
 
     fn to_c_string(value: &str) -> CString {
         CString::new(value).unwrap()
@@ -615,23 +617,16 @@ mod tests {
 
     #[test]
     fn ffi_can_override_user_agent_for_navigation() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
 
             let mut user_agent = None;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
+            for line in request.lines().skip(1) {
                 let trimmed = line.trim().to_string();
-                if trimmed.is_empty() {
-                    break;
-                }
                 if let Some((name, value)) = trimmed.split_once(':') {
                     if name.trim().eq_ignore_ascii_case("user-agent") {
                         user_agent = Some(value.trim().to_string());
@@ -659,6 +654,7 @@ mod tests {
         // SAFETY: The handle is live and the URL CString remains readable during this call.
         let ok = unsafe { omoikane_navigate(browser, url.as_ptr()) };
         assert!(ok);
+        server.join();
 
         // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };

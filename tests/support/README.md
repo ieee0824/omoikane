@@ -27,3 +27,7 @@ Issue #885 first migrates `document_cookie_bridge.rs` and
 `fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,
 header/body boundary, and worker-join behavior. The remaining `src/` unit-test
 servers are tracked by Issue #1089 and should be migrated in reviewable changes.
+
+`src/ffi/mod.rs` and `src/platform_browser.rs` use the shared fixture for their
+navigation and download server tests. The platform browser's closed-port error
+test still binds and closes a listener deliberately.
