@@ -1,5 +1,9 @@
 use super::*;
 use crate::html::TreeBuilder;
+use crate::test_support::http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 use serde_json::{Value, json};
 
 fn runtime() -> JsRuntime {
@@ -533,7 +537,7 @@ fn same_origin_child_can_register_a_parent_face_without_leaking_membership() {
     assert!(runtime.take_task_errors().is_empty());
 }
 
-fn serve_font(cors: bool) -> (String, std::thread::JoinHandle<String>) {
+fn serve_font(cors: bool) -> (String, FixtureWorker<String>) {
     serve_font_response(
         "200 OK",
         if cors {
@@ -549,41 +553,16 @@ fn serve_font_response(
     status: &'static str,
     headers: String,
     bytes: Vec<u8>,
-) -> (String, std::thread::JoinHandle<String>) {
-    use std::io::{BufRead, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+) -> (String, FixtureWorker<String>) {
+    use std::io::Write;
+    let listener = bind_loopback().unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    listener.set_nonblocking(true).unwrap();
-    let worker = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(5))
-                }
-                Err(e) => panic!("font fixture was not requested: {e}"),
-            }
-        };
-        stream.set_nonblocking(false).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+    let worker = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         stream
             .set_write_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let mut request = String::new();
-        let mut reader = std::io::BufReader::new(&mut stream);
-        loop {
-            let mut line = String::new();
-            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
-            request.push_str(&line);
-            if line == "\r\n" {
-                break;
-            }
-        }
+        let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         write!(stream,"HTTP/1.1 {status}\r\nContent-Type: font/ttf\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",bytes.len(),headers).unwrap();
         stream.write_all(&bytes).unwrap();
         request
@@ -600,7 +579,7 @@ fn font_requests_enforce_cors_and_send_the_creation_documents_origin() {
             JsRuntime::with_document_and_url(document, "http://127.0.0.1:1/").unwrap();
         runtime.eval(&format!("globalThis.corsResult='pending';new FontFace('Cors',{}).load().then(()=>corsResult='loaded',e=>corsResult=e.name);",serde_json::to_string(&format!("url({origin}/font.ttf)")).unwrap())).unwrap();
         runtime.run_until_idle().unwrap();
-        let request = worker.join().unwrap();
+        let request = worker.join();
         assert!(
             request
                 .to_ascii_lowercase()
@@ -628,7 +607,6 @@ fn font_url_keeps_the_base_used_at_construction() {
     assert!(
         worker
             .join()
-            .unwrap()
             .starts_with("GET /initial/font.ttf HTTP/1.1\r\n")
     );
     assert_eq!(eval_json(&mut runtime, "relativeFace.status"), "loaded");
@@ -636,8 +614,7 @@ fn font_url_keeps_the_base_used_at_construction() {
 
 #[test]
 fn font_src_blocks_redirect_before_contacting_the_destination() {
-    let forbidden = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    forbidden.set_nonblocking(true).unwrap();
+    let forbidden = bind_loopback().unwrap();
     let location = format!("http://{}/blocked.ttf", forbidden.local_addr().unwrap());
     let (origin, worker) =
         serve_font_response("302 Found", format!("Location: {location}\r\n"), Vec::new());
@@ -647,12 +624,7 @@ fn font_src_blocks_redirect_before_contacting_the_destination() {
     runtime.install_csp_policy(&["font-src 'self'".into()]);
     runtime.eval("globalThis.redirectResult='pending';new FontFace('Redirect','url(redirect.ttf)').load().then(()=>redirectResult='loaded',e=>redirectResult=e.name);").unwrap();
     runtime.run_until_idle().unwrap();
-    assert!(
-        worker
-            .join()
-            .unwrap()
-            .starts_with("GET /redirect.ttf HTTP/1.1\r\n")
-    );
+    assert!(worker.join().starts_with("GET /redirect.ttf HTTP/1.1\r\n"));
     assert_eq!(
         forbidden.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
