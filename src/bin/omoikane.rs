@@ -34,6 +34,8 @@ use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
 mod device_scale;
 #[path = "omoikane/pointer_lock_host.rs"]
 mod pointer_lock_host;
+#[path = "omoikane/url_bar.rs"]
+mod url_bar;
 
 #[cfg(test)]
 #[path = "omoikane/keyboard_tests.rs"]
