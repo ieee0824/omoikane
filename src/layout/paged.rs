@@ -995,7 +995,10 @@ fn margin_content_sizes(
                 }
             }
             PageMarginFragment::Image(source) => {
-                if let Some(image) = super::inline::decode_or_fetch_image_asset(source) {
+                let base_url = super::current_image_base_url();
+                if let Some(image) =
+                    super::inline::decode_or_fetch_image_asset(source, base_url.as_ref())
+                {
                     let size = if horizontal {
                         image.width() as f32
                     } else {

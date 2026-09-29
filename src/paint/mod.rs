@@ -1537,7 +1537,10 @@ fn paint_page_margin_content(
                 rendered.push(RenderedMarginFragment::Text(content, width));
             }
             PageMarginFragment::Image(source) => {
-                let Some(image) = crate::layout::decode_or_fetch_image_asset(&source) else {
+                let base_url = crate::layout::current_image_base_url();
+                let Some(image) =
+                    crate::layout::decode_or_fetch_image_asset(&source, base_url.as_ref())
+                else {
                     continue;
                 };
                 if image.width == 0 || image.height == 0 {
@@ -3686,7 +3689,8 @@ fn paint_replaced_image_box(
     let Some(source) = attributes.get("src") else {
         return;
     };
-    let Some(image) = crate::layout::decode_or_fetch_image_asset(source) else {
+    let base_url = crate::layout::current_image_base_url();
+    let Some(image) = crate::layout::decode_or_fetch_image_asset(source, base_url.as_ref()) else {
         return;
     };
 

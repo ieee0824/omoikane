@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use crate::dom::{Node, NodeHandle, NodeType};
+use crate::http::Url;
 use crate::layout::Rect;
 use crate::paint::Canvas;
 use crate::paint::Image;
@@ -73,6 +74,7 @@ pub(crate) fn render_svg_to_image_with_current_color(
         svg_node,
         if vb_w > 0.0 { vb_w } else { width },
         if vb_h > 0.0 { vb_h } else { height },
+        crate::layout::current_image_base_url(),
     );
 
     let initial_paint = SvgPaint {
@@ -894,14 +896,21 @@ struct SvgResources {
     by_id: BTreeMap<String, NodeHandle>,
     viewport_width: f32,
     viewport_height: f32,
+    image_base_url: Option<Url>,
 }
 
 impl SvgResources {
-    fn collect(root: &NodeHandle, viewport_width: f32, viewport_height: f32) -> Self {
+    fn collect(
+        root: &NodeHandle,
+        viewport_width: f32,
+        viewport_height: f32,
+        image_base_url: Option<Url>,
+    ) -> Self {
         let mut resources = Self {
             by_id: BTreeMap::new(),
             viewport_width,
             viewport_height,
+            image_base_url,
         };
         resources.collect_node(root);
         resources
@@ -1917,7 +1926,8 @@ fn render_svg_element(
             else {
                 return;
             };
-            let Some(image) = decode_svg_image_reference(&href) else {
+            let Some(image) = decode_svg_image_reference(&href, resources.image_base_url.as_ref())
+            else {
                 return;
             };
             let viewport = Rect {
@@ -1946,10 +1956,10 @@ fn render_svg_element(
     }
 }
 
-fn decode_svg_image_reference(href: &str) -> Option<Image> {
-    let reference = crate::layout::canonical_image_asset_reference(href)?;
+fn decode_svg_image_reference(href: &str, base_url: Option<&Url>) -> Option<Image> {
+    let reference = crate::layout::canonical_image_asset_reference(href, base_url)?;
     let _active = ActiveSvgImageReference::acquire(&reference)?;
-    crate::layout::decode_or_fetch_image_asset(href)
+    crate::layout::decode_or_fetch_image_asset(href, base_url)
 }
 
 fn svg_image_destination(
@@ -3304,19 +3314,31 @@ mod tests {
     fn svg_image_reference_guard_canonicalizes_relative_and_absolute_urls() {
         let base = "https://example.test/assets/document.svg".parse().unwrap();
         crate::layout::with_image_base_url(Some(base), || {
-            let relative = crate::layout::canonical_image_asset_reference("self.svg").unwrap();
+            let base = crate::layout::current_image_base_url();
+            let relative =
+                crate::layout::canonical_image_asset_reference("self.svg", base.as_ref()).unwrap();
             let absolute = crate::layout::canonical_image_asset_reference(
                 "HTTPS://EXAMPLE.TEST:443/assets/./self.svg",
+                base.as_ref(),
             )
             .unwrap();
             assert_eq!(relative, absolute);
             assert_eq!(
-                crate::layout::canonical_image_asset_reference("DATA:image/png,bytes"),
-                crate::layout::canonical_image_asset_reference("data:image/png,bytes"),
+                crate::layout::canonical_image_asset_reference(
+                    "DATA:image/png,bytes",
+                    base.as_ref()
+                ),
+                crate::layout::canonical_image_asset_reference(
+                    "data:image/png,bytes",
+                    base.as_ref()
+                ),
             );
 
             let _active = ActiveSvgImageReference::acquire(&relative).unwrap();
-            assert!(decode_svg_image_reference("https://example.test/assets/self.svg").is_none());
+            assert!(
+                decode_svg_image_reference("https://example.test/assets/self.svg", base.as_ref())
+                    .is_none()
+            );
         });
     }
 
