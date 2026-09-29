@@ -3143,7 +3143,7 @@ mod tests {
                 "{point:?}"
             );
         }
-        for point in [(-0.0001, 5.0), (10.0001, 5.0), (5.0, -0.0001)] {
+        for point in [(-0.000001, 5.0), (10.000001, 5.0), (5.0, -0.000001)] {
             assert!(
                 !polygon_hit_geometry(&square, true, point, 0.0).fill,
                 "{point:?}"

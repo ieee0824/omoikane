@@ -414,17 +414,16 @@ where
         let mut resolved_render_state = false;
         while let Some(ancestor) = current {
             if ancestor.node_type() == NodeType::Element {
-                if ancestor
-                    .get_attribute("aria-hidden")
-                    .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-                {
+                if ancestor.with_attribute("aria-hidden", |value| {
+                    value.is_some_and(|value| value.eq_ignore_ascii_case("true"))
+                }) {
                     return Some(HiddenCause::AriaSubtree);
                 }
-                if ancestor.get_attribute("inert").is_some() {
+                if ancestor.has_attribute("inert") {
                     return Some(HiddenCause::InertSubtree);
                 }
                 let tag = ancestor.tag_name().unwrap_or_default();
-                if ancestor.get_attribute("hidden").is_some()
+                if ancestor.has_attribute("hidden")
                     || (tag == "input" && input_type(&ancestor) == "hidden")
                     || matches!(
                         tag.as_str(),
@@ -515,15 +514,15 @@ where
         ancestor_hidden: Option<HiddenCause>,
     ) -> Option<AccessibilityNode> {
         let tag = node.tag_name().unwrap_or_default();
-        let aria_hidden = node
-            .get_attribute("aria-hidden")
-            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-        let inert = node.get_attribute("inert").is_some();
-        let html_hidden = node.get_attribute("hidden").is_some()
+        let aria_hidden = node.with_attribute("aria-hidden", |value| {
+            value.is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        });
+        let inert = node.has_attribute("inert");
+        let html_hidden = node.has_attribute("hidden")
             || (tag == "input"
-                && node
-                    .get_attribute("type")
-                    .is_some_and(|value| value.eq_ignore_ascii_case("hidden")));
+                && node.with_attribute("type", |value| {
+                    value.is_some_and(|value| value.eq_ignore_ascii_case("hidden"))
+                }));
         let structurally_hidden = matches!(
             tag.as_str(),
             "head"
@@ -639,16 +638,15 @@ where
             return None;
         }
         let tag = node.tag_name().unwrap_or_default();
-        if node
-            .get_attribute("aria-hidden")
-            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-        {
+        if node.with_attribute("aria-hidden", |value| {
+            value.is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        }) {
             return Some(HiddenCause::AriaElement);
         }
-        if node.get_attribute("inert").is_some() {
+        if node.has_attribute("inert") {
             return Some(HiddenCause::InertElement);
         }
-        if node.get_attribute("hidden").is_some()
+        if node.has_attribute("hidden")
             || (tag == "input" && input_type(node) == "hidden")
             || matches!(
                 tag.as_str(),
@@ -1730,11 +1728,13 @@ fn has_global_aria_attribute_for_role(node: &NodeHandle, role: &str) -> bool {
         "aria-relevant",
         "aria-roledescription",
     ];
-    node.attributes().is_some_and(|attributes| {
-        attributes.keys().any(|name| {
-            GLOBAL_ARIA_ATTRIBUTES.contains(&name.as_str())
-                && (!role_prohibits_name(role)
-                    || !matches!(name.as_str(), "aria-label" | "aria-labelledby"))
+    node.with_attributes(|attributes| {
+        attributes.is_some_and(|attributes| {
+            attributes.keys().any(|name| {
+                GLOBAL_ARIA_ATTRIBUTES.contains(&name.as_str())
+                    && (!role_prohibits_name(role)
+                        || !matches!(name.as_str(), "aria-label" | "aria-labelledby"))
+            })
         })
     })
 }

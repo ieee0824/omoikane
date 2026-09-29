@@ -27,7 +27,7 @@ fn polygon_clip_hit_testing_includes_boundary_but_not_zero_area_shapes() {
     ] {
         assert!(square.contains(point), "{point:?}");
     }
-    for point in [(-0.0001, 5.0), (10.0001, 5.0), (5.0, -0.0001)] {
+    for point in [(-0.000001, 5.0), (10.000001, 5.0), (5.0, -0.000001)] {
         assert!(!square.contains(point), "{point:?}");
     }
     let line = ClipPathShape::Polygon {

@@ -915,18 +915,46 @@ impl NodeHandle {
 
     /// Returns the element tag name, if this is an element node.
     pub fn tag_name(&self) -> Option<String> {
-        match &self.0.borrow().data {
-            NodeData::Element(element) => Some(element.tag_name.clone()),
+        self.with_tag_name(|name| name.map(str::to_owned))
+    }
+
+    /// Reads an element tag name without cloning it.
+    ///
+    /// The node is immutably borrowed while `read` runs; do not mutate it in
+    /// the callback.
+    pub fn with_tag_name<R>(&self, read: impl FnOnce(Option<&str>) -> R) -> R {
+        let inner = self.0.borrow();
+        let name = match &inner.data {
+            NodeData::Element(element) => Some(element.tag_name.as_str()),
             _ => None,
-        }
+        };
+        read(name)
+    }
+
+    /// Tests an element tag name with case-sensitive equality, without cloning.
+    pub fn has_tag_name(&self, expected: &str) -> bool {
+        self.with_tag_name(|name| name == Some(expected))
     }
 
     /// Returns a clone of the element attributes, if this is an element node.
     pub fn attributes(&self) -> Option<BTreeMap<String, String>> {
-        match &self.0.borrow().data {
-            NodeData::Element(element) => Some(element.attributes.clone()),
+        self.with_attributes(|attributes| attributes.cloned())
+    }
+
+    /// Reads the element attribute map without cloning it.
+    ///
+    /// The node is immutably borrowed while `read` runs; do not mutate it in
+    /// the callback.
+    pub fn with_attributes<R>(
+        &self,
+        read: impl FnOnce(Option<&BTreeMap<String, String>>) -> R,
+    ) -> R {
+        let inner = self.0.borrow();
+        let attributes = match &inner.data {
+            NodeData::Element(element) => Some(&element.attributes),
             _ => None,
-        }
+        };
+        read(attributes)
     }
 
     /// Returns qualified name, namespace, local name, and value for each
@@ -1002,7 +1030,17 @@ impl NodeHandle {
     /// The exact attribute name is checked first to preserve case-sensitive XML
     /// names, followed by an ASCII-lowercase lookup for HTML-style names.
     pub fn get_attribute(&self, name: &str) -> Option<String> {
-        match &self.0.borrow().data {
+        self.with_attribute(name, |value| value.map(str::to_owned))
+    }
+
+    /// Reads one attribute without cloning it, using [`Self::get_attribute`]
+    /// name matching semantics.
+    ///
+    /// The node is immutably borrowed while `read` runs; do not mutate it in
+    /// the callback.
+    pub fn with_attribute<R>(&self, name: &str, read: impl FnOnce(Option<&str>) -> R) -> R {
+        let inner = self.0.borrow();
+        let value = match &inner.data {
             NodeData::Element(element) => element
                 .attribute_records
                 .iter()
@@ -1016,9 +1054,20 @@ impl NodeHandle {
                             .find(|attribute| attribute.qualified_name == lowercase)
                     })?
                 })
-                .map(|attribute| attribute.value.clone()),
+                .map(|attribute| attribute.value.as_str()),
             _ => None,
-        }
+        };
+        read(value)
+    }
+
+    /// Tests whether an attribute exists without cloning its value.
+    pub fn has_attribute(&self, name: &str) -> bool {
+        self.with_attribute(name, |value| value.is_some())
+    }
+
+    /// Compares an attribute value exactly, without cloning it.
+    pub fn attribute_eq(&self, name: &str, expected: &str) -> bool {
+        self.with_attribute(name, |value| value == Some(expected))
     }
 
     /// Sets an attribute on an element node. No-op for other node kinds.
@@ -1976,6 +2025,44 @@ mod tests {
         assert_eq!(text.node_name(), "#text");
         assert_eq!(comment.node_name(), "#comment");
         assert_eq!(doctype.node_name(), "html");
+    }
+
+    #[test]
+    fn borrowed_dom_reads_preserve_html_xml_and_missing_node_semantics() {
+        let html = NodeHandle::element("div");
+        html.set_attribute("DATA-ID", "Mixed Value");
+        assert!(html.has_tag_name("div"));
+        assert!(!html.has_tag_name("DIV"));
+        assert_eq!(html.with_tag_name(|name| name.unwrap().to_owned()), "div");
+        assert!(html.has_attribute("DATA-ID"));
+        assert!(html.attribute_eq("data-id", "Mixed Value"));
+        assert!(!html.attribute_eq("data-id", "mixed value"));
+        assert!(html.with_attribute("DATA-ID", |value| {
+            value.is_some_and(|v| v.starts_with("Mixed"))
+        }));
+        assert_eq!(
+            html.with_attributes(
+                |attributes| attributes.and_then(|map| map.get("data-id").cloned())
+            ),
+            Some("Mixed Value".to_string())
+        );
+        html.set_attribute("data-id", "updated");
+        assert!(html.attribute_eq("DATA-ID", "updated"));
+
+        let xml = NodeHandle::xml_element("MixedTag", None);
+        xml.set_attribute("MixedCase", "value");
+        assert!(xml.has_tag_name("MixedTag"));
+        assert!(!xml.has_tag_name("mixedtag"));
+        assert!(xml.has_attribute("MixedCase"));
+        assert!(!xml.has_attribute("mixedcase"));
+
+        let text = NodeHandle::text("plain");
+        assert!(!text.has_tag_name("div"));
+        assert!(!text.has_attribute("data-id"));
+        assert!(!text.attribute_eq("data-id", ""));
+        assert!(text.with_tag_name(|name| name.is_none()));
+        assert!(text.with_attribute("data-id", |value| value.is_none()));
+        assert!(text.with_attributes(|attributes| attributes.is_none()));
     }
 
     #[test]
