@@ -1,13 +1,20 @@
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     net::TcpListener,
     path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    thread,
+};
+
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
 };
 
 use omoikane::{
@@ -87,13 +94,12 @@ impl Drop for TestDatabase {
     }
 }
 
-fn serve_once(response: &'static [u8]) -> (String, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+fn serve_once(response: &'static [u8]) -> (String, FixtureWorker<()>) {
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 2048];
-        let _ = stream.read(&mut request).unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         stream.write_all(response).unwrap();
     });
     (format!("http://{address}"), handle)
@@ -121,7 +127,7 @@ fn transport_and_redirect_failures_keep_http_error_results() {
     let redirect_error = client
         .get(&format!("{base}/start?token=QUERY_SECRET_938"))
         .unwrap_err();
-    server.join().unwrap();
+    server.join();
     assert_eq!(redirect_error.to_string(), "too many redirects");
     reporter.flush().unwrap();
     database.assert_report("HTTP_TRANSPORT_FAILED");
@@ -143,7 +149,7 @@ fn failed_script_response_is_reported_without_changing_later_script_execution() 
     runtime.set_error_reporter(Arc::clone(&reporter), ExecutionSurface::Headless);
     let page_url: Url = format!("{base}/page").parse().unwrap();
     let errors = runtime.execute_document_scripts(Some(&page_url));
-    server.join().unwrap();
+    server.join();
     assert_eq!(errors.len(), 1);
     assert!(runtime.eval("afterFailure").unwrap().as_boolean().unwrap());
     reporter.flush().unwrap();

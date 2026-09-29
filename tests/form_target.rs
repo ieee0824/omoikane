@@ -1,14 +1,19 @@
 //! Form submission into an existing child browsing context.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::io::{Read, Write};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
-use std::thread;
 use std::time::Duration;
+
+#[path = "support/http_fixture.rs"]
+mod http_fixture;
+
+use http_fixture::{
+    FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback, read_request_headers,
+};
 
 use omoikane::{html::TreeBuilder, js::JsRuntime};
 
@@ -23,7 +28,7 @@ struct Server {
     origin: String,
     requests: mpsc::Receiver<Request>,
     stop: Arc<AtomicBool>,
-    worker: Option<thread::JoinHandle<()>>,
+    worker: Option<FixtureWorker<()>>,
 }
 
 impl Server {
@@ -32,40 +37,26 @@ impl Server {
     }
 
     fn with_html(html: &'static [u8]) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
+        let listener = bind_loopback().unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (send, requests) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
-        let worker = thread::spawn(move || {
+        let worker = FixtureWorker::spawn(move || {
             while !worker_stop.load(Ordering::Relaxed) {
-                let (mut stream, _) = match listener.accept() {
-                    Ok(connection) => connection,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
+                let mut stream = match accept_with_timeout(&listener, Duration::from_millis(50)) {
+                    Ok(stream) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
                     Err(error) => panic!("accept: {error}"),
                 };
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
                 stream
                     .set_write_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
-                let mut reader = BufReader::new(&mut stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
+                let headers = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let line = headers.split_inclusive("\r\n").next().unwrap().to_owned();
                 let mut content_type = String::new();
                 let mut length = 0;
-                loop {
-                    let mut header = String::new();
-                    reader.read_line(&mut header).unwrap();
-                    if header == "\r\n" || header.is_empty() {
-                        break;
-                    }
+                for header in headers.lines().skip(1) {
                     if let Some((key, value)) = header.split_once(':') {
                         if key.eq_ignore_ascii_case("content-length") {
                             length = value.trim().parse::<usize>().unwrap();
@@ -75,8 +66,10 @@ impl Server {
                     }
                 }
                 let mut body = vec![0; length];
-                reader.read_exact(&mut body).unwrap();
-                drop(reader);
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                stream.read_exact(&mut body).unwrap();
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", html.len()).unwrap();
                 stream.write_all(html).unwrap();
                 let _ = send.send(Request {
@@ -98,7 +91,7 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap();
+        self.worker.take().unwrap().join();
     }
 }
 
