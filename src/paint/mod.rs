@@ -4732,7 +4732,11 @@ impl ClipPathShape {
                 let dy = (point.1 - center.1) / *ry;
                 dx * dx + dy * dy <= 1.0 + 1e-4
             }
-            Self::Polygon { points, .. } => point_in_polygon(point, points),
+            Self::Polygon { points, .. } => crate::geometry::point_in_polygon(
+                point,
+                points,
+                crate::geometry::PolygonUse::CssClip,
+            ),
         }
     }
 }
@@ -5172,34 +5176,6 @@ fn valid_clip_path_polygon_body(body: &str) -> bool {
             let point = split_top_level_whitespace(component.trim());
             point.len() == 2 && point.iter().all(|part| valid_clip_path_length(part))
         })
-}
-
-fn point_in_polygon(point: (f32, f32), points: &[(f32, f32)]) -> bool {
-    let mut inside = false;
-    let mut previous = *points.last().unwrap_or(&(0.0, 0.0));
-    for &current in points {
-        let on_edge = ((current.1 - previous.1) * (point.0 - previous.0)
-            - (current.0 - previous.0) * (point.1 - previous.1))
-            .abs()
-            <= 1e-4
-            && point.0 >= current.0.min(previous.0) - 1e-4
-            && point.0 <= current.0.max(previous.0) + 1e-4
-            && point.1 >= current.1.min(previous.1) - 1e-4
-            && point.1 <= current.1.max(previous.1) + 1e-4;
-        if on_edge {
-            return true;
-        }
-        if (current.1 > point.1) != (previous.1 > point.1) {
-            let intersection_x = (previous.0 - current.0) * (point.1 - current.1)
-                / (previous.1 - current.1)
-                + current.0;
-            if point.0 < intersection_x {
-                inside = !inside;
-            }
-        }
-        previous = current;
-    }
-    inside
 }
 
 /// Returns `None` for unsupported clip shapes, `Some(None)` for an empty inset,

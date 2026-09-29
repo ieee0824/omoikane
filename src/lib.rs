@@ -13,6 +13,7 @@ pub mod error_reporting;
 pub mod ffi;
 pub mod font;
 pub mod frame;
+mod geometry;
 pub mod html;
 pub mod http;
 pub mod js;

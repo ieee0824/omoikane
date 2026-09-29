@@ -11,6 +11,34 @@ use crate::layout::{
 use crate::paint::*;
 
 #[test]
+fn polygon_clip_hit_testing_includes_boundary_but_not_zero_area_shapes() {
+    let square = ClipPathShape::Polygon {
+        points: vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+        bounds: Rect::default(),
+    };
+    for point in [
+        (5.0, 5.0),
+        (5.0, 0.0),
+        (10.0, 5.0),
+        (5.0, 10.0),
+        (0.0, 5.0),
+        (0.0, 0.0),
+        (10.0, 10.0),
+    ] {
+        assert!(square.contains(point), "{point:?}");
+    }
+    for point in [(-0.0001, 5.0), (10.0001, 5.0), (5.0, -0.0001)] {
+        assert!(!square.contains(point), "{point:?}");
+    }
+    let line = ClipPathShape::Polygon {
+        points: vec![(0.0, 5.0), (5.0, 5.0), (10.0, 5.0)],
+        bounds: Rect::default(),
+    };
+    assert!(!line.contains((5.0, 5.0)));
+    assert!(!line.contains((5.0, 5.0001)));
+}
+
+#[test]
 fn printed_content_uses_each_fragment_destination_and_clip() {
     let document =
         TreeBuilder::parse("<body><div id='blue'></div><div id='red'></div></body>").document();
