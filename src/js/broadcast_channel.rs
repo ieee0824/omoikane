@@ -15,8 +15,39 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
+/// `BroadcastChannel` endpoints owned by one realm.
+pub(super) struct State {
+    /// Endpoint references keyed by a per-realm numeric id.  Modern realms
+    /// store a `WeakRef` here so native registration does not keep an
+    /// otherwise unreachable channel alive; legacy realms may store the
+    /// endpoint itself as a compatibility fallback.  Delivery dereferences
+    /// the value in the target realm.
+    channels: HashMap<u64, JsValue>,
+    metadata: HashMap<u64, BroadcastChannelMetadata>,
+    next_id: u64,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            channels: HashMap::new(),
+            metadata: HashMap::new(),
+            next_id: 1,
+        }
+    }
+}
+
+impl State {
+    /// Traces the endpoint references retained for delivery.
+    pub(super) unsafe fn trace(&self, tracer: &mut Tracer) {
+        for channel in self.channels.values() {
+            unsafe { channel.trace(tracer) };
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub(super) struct BroadcastChannelMetadata {
+struct BroadcastChannelMetadata {
     name: String,
     origin: Option<StorageOrigin>,
     /// Serialized origin used for `MessageEvent.origin`.  This is captured at
@@ -92,7 +123,8 @@ fn register_broadcast_channel(
 fn post_broadcast_channel(sender_state: &Rc<RefCell<HostState>>, channel_id: u64, data: String) {
     let Some(metadata) = sender_state
         .borrow()
-        .broadcast_channel_metadata
+        .broadcast_channel
+        .metadata
         .get(&channel_id)
         .cloned()
     else {
@@ -163,15 +195,16 @@ fn broadcast_channel_register_native(
     with_host_state(|state| {
         let (channel_id, metadata) = {
             let mut host = state.borrow_mut();
-            let channel_id = host.next_broadcast_channel_id;
-            host.next_broadcast_channel_id = host.next_broadcast_channel_id.saturating_add(1);
+            let channel_id = host.broadcast_channel.next_id;
+            host.broadcast_channel.next_id = host.broadcast_channel.next_id.saturating_add(1);
             let metadata = BroadcastChannelMetadata {
                 name,
                 origin: broadcast_channel_origin(&host),
                 origin_text: host_state_origin(&host),
             };
-            host.broadcast_channels.insert(channel_id, endpoint);
-            host.broadcast_channel_metadata
+            host.broadcast_channel.channels.insert(channel_id, endpoint);
+            host.broadcast_channel
+                .metadata
                 .insert(channel_id, metadata.clone());
             (channel_id, metadata)
         };
@@ -206,8 +239,8 @@ fn broadcast_channel_close_native(
     with_host_state(|state| {
         unregister_broadcast_channel(state, channel_id);
         let mut host = state.borrow_mut();
-        host.broadcast_channels.remove(&channel_id);
-        host.broadcast_channel_metadata.remove(&channel_id);
+        host.broadcast_channel.channels.remove(&channel_id);
+        host.broadcast_channel.metadata.remove(&channel_id);
         Ok(JsValue::undefined())
     })
 }
@@ -246,7 +279,8 @@ impl JsRuntime {
         let channel = self
             .host_state
             .borrow()
-            .broadcast_channels
+            .broadcast_channel
+            .channels
             .get(&channel_id)
             .cloned();
         let Some(channel) = channel else {
@@ -281,8 +315,8 @@ impl JsRuntime {
         if result.as_ref().ok().and_then(JsValue::as_boolean) == Some(true) {
             unregister_broadcast_channel(&self.host_state, channel_id);
             let mut state = self.host_state.borrow_mut();
-            state.broadcast_channels.remove(&channel_id);
-            state.broadcast_channel_metadata.remove(&channel_id);
+            state.broadcast_channel.channels.remove(&channel_id);
+            state.broadcast_channel.metadata.remove(&channel_id);
         }
         let cleanup_result = self.clear_broadcast_channel_values();
         self.record_error_from("broadcast channel cleanup", cleanup_result);

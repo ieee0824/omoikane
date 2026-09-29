@@ -58,7 +58,6 @@ mod compression_stream_tests;
 #[cfg(test)]
 mod computed_pseudo_tests;
 mod document_write;
-use broadcast_channel::BroadcastChannelMetadata;
 mod errors;
 use errors::JsHostError;
 pub use errors::{FindInPageError, JsEvaluationError, NotificationPermissionError};
@@ -1725,14 +1724,7 @@ struct HostState {
     /// process-local connection id.  The endpoint remains in its own Boa
     /// realm; native delivery only retains it until the port is closed.
     shared_worker_ports: HashMap<u64, JsValue>,
-    /// `BroadcastChannel` endpoint references owned by this realm, keyed by a
-    /// per-realm numeric id.  Modern realms store a `WeakRef` here so native
-    /// registration does not keep an otherwise unreachable channel alive;
-    /// legacy realms may store the endpoint itself as a compatibility
-    /// fallback.  Delivery dereferences the value in the target realm.
-    broadcast_channels: HashMap<u64, JsValue>,
-    broadcast_channel_metadata: HashMap<u64, BroadcastChannelMetadata>,
-    next_broadcast_channel_id: u64,
+    broadcast_channel: broadcast_channel::State,
     /// One isolated WorkletGlobalScope shared by Worklet instances in this
     /// browsing context (including `CSS.paintWorklet`). The runtime is lazily
     /// constructed on the first `addModule()` call.
@@ -1792,9 +1784,7 @@ unsafe impl Trace for HostState {
         if let Some(dialog) = &self.pending_javascript_dialog {
             unsafe { dialog.suspension.trace(tracer) };
         }
-        for channel in self.broadcast_channels.values() {
-            unsafe { channel.trace(tracer) };
-        }
+        unsafe { self.broadcast_channel.trace(tracer) };
         for port in self.shared_worker_ports.values() {
             unsafe { port.trace(tracer) };
         }
@@ -2251,9 +2241,7 @@ impl HostState {
             worker_startup_outgoing: VecDeque::new(),
             shared_worker_id: None,
             shared_worker_ports: HashMap::new(),
-            broadcast_channels: HashMap::new(),
-            broadcast_channel_metadata: HashMap::new(),
-            next_broadcast_channel_id: 1,
+            broadcast_channel: broadcast_channel::State::default(),
             worklet_runtime: None,
             next_worklet_id: 1,
             worklet_owner: None,
