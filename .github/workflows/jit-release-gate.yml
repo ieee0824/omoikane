@@ -80,11 +80,10 @@ jobs:
         run: cp .artifacts/jit-gate5/inputs/Cargo.lock Cargo.lock
       - uses: Swatinem/rust-cache@v2
         with:
-          # Refresh the stale macOS entry and evaluate the new Boa side cache
-          # against a newly saved dependency cache on a warm run.
-          key: jit-gate5-v2-${{ matrix.target }}-${{ matrix.kind }}
+          # A failed suite may leave an incomplete cache at a permanent key.
+          # Refresh the existing entries and save only after successful jobs.
+          key: jit-gate5-v3-${{ matrix.target }}-${{ matrix.kind }}
           cache-workspace-crates: true
-          cache-on-failure: true
       # rust-cache sees only the root workspace and drops the nested Boa path
       # dependencies from target/debug. Restore them after rust-cache cleanup.
       - name: Restore Boa suite artifacts
