@@ -33,6 +33,8 @@ jobs:
           components: rustfmt
       - name: Test formatting failure detection
         run: python3 -m unittest discover -s scripts/tests -p 'test_check_rustfmt.py'
+      - name: Test GUI navigation fixture
+        run: python3 -m unittest discover -s scripts/tests -p 'test_gui_navigation_fixture.py'
       - name: Verify root crate formatting
         run: python3 scripts/check_rustfmt.py
 
