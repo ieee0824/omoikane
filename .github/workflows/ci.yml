@@ -41,7 +41,9 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.run_full == 'true'
-    runs-on: ubuntu-latest
+    # Pinned to the image the Browser behavior matrix uses: this job also
+    # stands in for its x86_64 interpreter element (#1065).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Verify Cargo target guard
@@ -63,10 +65,25 @@ jobs:
           sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core
       - name: Verify benchmark reference result validation
         run: python3 -m unittest discover -s scripts/tests -p 'test_benchmark_reference.py'
+      - name: Record browser build inputs
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/browser
+          rustc --version --verbose > .artifacts/browser/toolchain.txt
+          test "$(rustc --version --verbose | awk '/^host:/ {print $2}')" = x86_64-unknown-linux-gnu
+          git rev-parse HEAD > .artifacts/browser/revision.txt
+          cargo metadata --locked --format-version 1 > .artifacts/browser/dependencies.json
+          cp Cargo.lock .artifacts/browser/Cargo.lock
+      # Also covers Browser behavior's x86_64 interpreter contracts: browser
+      # journeys, Acid3, font selection and their painted-frame reports.
       - name: Run all tests (including ignored)
         env:
           OMOIKANE_JS_BENCH_REPORT: .artifacts/js-benchmark/report.json
-        run: cargo test --locked -- --include-ignored
+          OMOIKANE_BROWSER_REPORT_DIR: .artifacts/browser/journeys
+          OMOIKANE_JIT_GATE_REPORT_DIR: .artifacts/browser/acid3
+        run: |
+          set -o pipefail
+          cargo test --locked -- --include-ignored 2>&1 | tee .artifacts/browser/tests.log
       - name: Run Gate 2 differential harness
         run: cargo test --locked --features jit-differential --test jit_differential
 
@@ -81,6 +98,13 @@ jobs:
         with:
           name: js-benchmark-report
           path: .artifacts/js-benchmark/
+          if-no-files-found: error
+      - name: Upload browser logs, reports and painted frames
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-x86_64-unknown-linux-gnu-interpreter
+          path: .artifacts/browser/
           if-no-files-found: error
 
 
