@@ -1164,19 +1164,33 @@ pub(crate) fn extract_document_base_url(
 }
 
 pub(crate) fn collect_text_contents(node: &NodeHandle) -> String {
-    let mut text = String::new();
-    for child in node.child_nodes() {
-        match child.node_type() {
-            NodeType::Text => {
-                if let Some(data) = child.data() {
-                    text.push_str(&data);
-                }
-            }
-            NodeType::Element => text.push_str(&collect_text_contents(&child)),
-            _ => {}
-        }
+    crate::dom::collect_descendant_text(node, crate::dom::TextTraversal::Elements)
+}
+
+#[cfg(test)]
+mod text_collection_tests {
+    use super::*;
+
+    #[test]
+    fn stylesheet_text_enters_elements_but_not_fragment_children() {
+        let style = NodeHandle::element("style");
+        style.append_child(NodeHandle::text("div {"));
+        let nested = NodeHandle::element("span");
+        nested.append_child(NodeHandle::text(" color: red;"));
+        style.append_child(nested);
+        style.append_child(NodeHandle::comment("ignored"));
+        style.append_child(NodeHandle::processing_instruction("target", "ignored"));
+        let fragment = NodeHandle::document_fragment();
+        fragment.append_child(NodeHandle::text("ignored"));
+        style.append_child(fragment);
+        style.append_child(NodeHandle::text(" }"));
+
+        assert_eq!(collect_text_contents(&style), "div { color: red; }");
+        assert_eq!(
+            extract_author_stylesheets(&style, None).unwrap(),
+            vec!["div { color: red; }"]
+        );
     }
-    text
 }
 
 pub(crate) fn materialize_local_assets(

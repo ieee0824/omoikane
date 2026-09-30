@@ -9573,18 +9573,7 @@ fn collect_script_elements_recursive(node: &NodeHandle, out: &mut Vec<NodeHandle
 /// Collects text content from a node's text-node children (for inline script content).
 /// Only includes Text nodes, not comments or other node types.
 fn collect_text_content(node: &NodeHandle) -> String {
-    use crate::dom::NodeType;
-    let mut text = String::new();
-    for child in node.child_nodes() {
-        if child.node_type() == NodeType::Text {
-            if let Some(data) = child.data() {
-                text.push_str(&data);
-            }
-        } else {
-            text.push_str(&collect_text_content(&child));
-        }
-    }
-    text
+    crate::dom::collect_descendant_text(node, crate::dom::TextTraversal::All)
 }
 
 /// A resource reference (`src`) resolved to something fetchable.
@@ -17686,23 +17675,7 @@ fn get_text_content_native(
 }
 
 fn collect_text_recursive(node: &NodeHandle) -> String {
-    let mut text = String::new();
-    for child in node.child_nodes() {
-        match child.node_type() {
-            crate::dom::NodeType::Text => {
-                if let Some(data) = child.data() {
-                    text.push_str(&data);
-                }
-            }
-            crate::dom::NodeType::Comment
-            | crate::dom::NodeType::ProcessingInstruction
-            | crate::dom::NodeType::DocumentType => {}
-            _ => {
-                text.push_str(&collect_text_recursive(&child));
-            }
-        }
-    }
-    text
+    crate::dom::collect_descendant_text(node, crate::dom::TextTraversal::Containers)
 }
 
 fn set_text_content_native(

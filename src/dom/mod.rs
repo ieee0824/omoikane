@@ -172,6 +172,46 @@ pub enum NodeType {
     DocumentType,
 }
 
+/// Selects which non-text children a descendant text collector may enter.
+#[derive(Clone, Copy)]
+pub(crate) enum TextTraversal {
+    /// Inline script extraction visits every non-text child.
+    All,
+    /// DOM textContent excludes character-data leaves and document types.
+    Containers,
+    /// Stylesheet extraction enters only element children.
+    Elements,
+}
+
+/// Collects descendant Text data in tree order, excluding the root's own data.
+pub(crate) fn collect_descendant_text(node: &NodeHandle, traversal: TextTraversal) -> String {
+    fn append(node: &NodeHandle, traversal: TextTraversal, output: &mut String) {
+        for child in node.child_nodes() {
+            let inner = child.0.borrow();
+            if let NodeData::Text(text) = &inner.data {
+                output.push_str(text.data());
+                continue;
+            }
+            drop(inner);
+            let recurse = match traversal {
+                TextTraversal::All => true,
+                TextTraversal::Containers => !matches!(
+                    child.node_type(),
+                    NodeType::Comment | NodeType::ProcessingInstruction | NodeType::DocumentType
+                ),
+                TextTraversal::Elements => child.node_type() == NodeType::Element,
+            };
+            if recurse {
+                append(&child, traversal, output);
+            }
+        }
+    }
+
+    let mut output = String::new();
+    append(node, traversal, &mut output);
+    output
+}
+
 /// Shadow tree visibility requested through `Element.attachShadow()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShadowRootMode {
@@ -2009,6 +2049,61 @@ fn parse_attribute_selector(selector: &str) -> Option<AttributeSelector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descendant_text_preserves_each_traversal_contract() {
+        let root = NodeHandle::document_fragment();
+        root.append_child(NodeHandle::text("first"));
+        let nested = NodeHandle::element("span");
+        nested.append_child(NodeHandle::text("nested"));
+        root.append_child(nested);
+        for leaf in [
+            NodeHandle::comment("ignored comment data"),
+            NodeHandle::processing_instruction("target", "ignored instruction data"),
+            NodeHandle::document_type("html", "", ""),
+        ] {
+            // The native tree permits children on these normally leaf nodes;
+            // preserve each caller's existing traversal even for such trees.
+            leaf.append_child(NodeHandle::text("leaf"));
+            root.append_child(leaf);
+        }
+        let fragment = NodeHandle::document_fragment();
+        fragment.append_child(NodeHandle::text("fragment"));
+        root.append_child(fragment);
+        assert_eq!(
+            collect_descendant_text(&root, TextTraversal::All),
+            "firstnestedleafleafleaffragment"
+        );
+        assert_eq!(
+            collect_descendant_text(&root, TextTraversal::Containers),
+            "firstnestedfragment"
+        );
+        assert_eq!(
+            collect_descendant_text(&root, TextTraversal::Elements),
+            "firstnested"
+        );
+    }
+
+    #[test]
+    fn descendant_text_excludes_root_data_and_handles_empty_trees() {
+        for traversal in [
+            TextTraversal::All,
+            TextTraversal::Containers,
+            TextTraversal::Elements,
+        ] {
+            for root in [
+                NodeHandle::document(),
+                NodeHandle::element("div"),
+                NodeHandle::document_fragment(),
+                NodeHandle::text("root data"),
+                NodeHandle::comment("root data"),
+                NodeHandle::processing_instruction("target", "root data"),
+                NodeHandle::document_type("html", "", ""),
+            ] {
+                assert_eq!(collect_descendant_text(&root, traversal), "");
+            }
+        }
+    }
 
     #[test]
     fn exposes_basic_node_metadata() {
