@@ -21,9 +21,8 @@ pub(super) struct PhysicalRect {
 }
 
 impl PhysicalRect {
-    // Input routing by region starts in #1138.
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn contains(self, x: f64, y: f64) -> bool {
+    /// Returns whether a physical position lies inside the rectangle.
+    pub(super) fn contains(self, x: f64, y: f64) -> bool {
         x >= f64::from(self.x)
             && y >= f64::from(self.y)
             && x < f64::from(self.x) + f64::from(self.width)
@@ -32,8 +31,6 @@ impl PhysicalRect {
 }
 
 /// The window region under a physical position.
-// Input routing by region starts in #1138.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum WindowRegion {
     /// Inside the toolbar, in logical pixels from the toolbar's top-left.
@@ -130,8 +127,6 @@ impl ChromeLayout {
     }
 
     /// Returns the region under a physical window position.
-    // Input routing by region starts in #1138.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn region_at(&self, physical_x: f64, physical_y: f64) -> WindowRegion {
         let factor = self.scale.factor();
         if self.toolbar.contains(physical_x, physical_y) {

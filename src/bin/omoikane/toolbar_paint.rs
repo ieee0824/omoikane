@@ -25,6 +25,13 @@ const TEXT_PADDING: f64 = 8.0;
 /// URL text size in logical pixels.
 const FONT_SIZE: f64 = 14.0;
 
+/// Returns the URL field's border box inside the toolbar `area`. Painting and
+/// click hit-testing share it so the clickable area matches what is drawn.
+pub(super) fn url_field(area: PhysicalRect, scale: DeviceScale) -> PhysicalRect {
+    let margin = (FIELD_MARGIN * scale.factor()).round() as u32;
+    inset(area, margin, margin)
+}
+
 /// Paints the toolbar and the URL field for `bar` into `area` of `target`.
 ///
 /// `target` is a surface of rows `stride` pixels wide. Pixels outside `area`
@@ -54,8 +61,7 @@ pub(super) fn paint_toolbar(
         DIVIDER,
     );
 
-    let margin = px(FIELD_MARGIN);
-    let field = inset(area, margin, margin);
+    let field = url_field(area, scale);
     if field.width == 0 || field.height == 0 {
         return;
     }
