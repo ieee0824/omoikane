@@ -1,3 +1,8 @@
+use super::browser_session::{
+    BrowserSessionAction, BrowserSessionState, PendingPageNavigation, deadline_after,
+    page_task_script_error_lines, pending_evaluation_busy_message, session_evaluation,
+};
+use super::dom::{cdp_node_type, serialize_outer_html};
 use super::*;
 use crate::error_reporting::{EventStore, ReporterConfig, RetentionPolicy};
 use std::cell::RefCell;
