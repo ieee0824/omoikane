@@ -2417,7 +2417,27 @@ impl HitCollector {
     }
 }
 
-fn hit_test_box(
+/// Per-box geometry resolved by [`hit_test_box_geometry`]: the accumulated
+/// transform, the query point in this box's local coordinate space and in
+/// its parent's (for recursing into children), and the effective clip and
+/// style used for the rest of the hit test.
+struct HitTestGeometry {
+    transform: AffineTransform,
+    local_point: (f32, f32),
+    query_point: (f32, f32),
+    clip: Option<Rect>,
+    style: ComputedStyle,
+    border_box: Rect,
+}
+
+/// Resolves the transform, local hit-test point, and effective clip for one
+/// box, applying `clip-path` and `overflow` clipping in turn.
+///
+/// Returns `None` as soon as any check rules out a hit anywhere in this box:
+/// `visibility: hidden`, a point outside the inherited clip, a
+/// non-invertible transform, a non-finite local point, a point outside the
+/// owning paint fragment, or a point clipped out by `clip-path`/`overflow`.
+fn hit_test_box_geometry(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     ancestor_transform: AffineTransform,
@@ -2425,21 +2445,20 @@ fn hit_test_box(
     viewport: Rect,
     x: f32,
     y: f32,
-    hits: &mut HitCollector,
-) -> bool {
+) -> Option<HitTestGeometry> {
     if layout.visibility == Visibility::Hidden
         || inherited_clip.is_some_and(|clip| !rect_contains_point(clip, x, y))
     {
-        return false;
+        return None;
     }
     let transform = ancestor_transform.multiply(layout.transform);
     let Some(inverse) = transform.inverse() else {
-        return false;
+        return None;
     };
     let mut query_point = (x, y);
     let mut local_point = inverse.transform_point(x, y);
     if !local_point.0.is_finite() || !local_point.1.is_finite() {
-        return false;
+        return None;
     }
     let fragment_source_clip = if !layout
         .block_fragments
@@ -2455,7 +2474,7 @@ fn hit_test_box(
             .filter(|fragment| fragment.owns_paint)
             .find(|fragment| rect_contains_point(fragment.clip, local_point.0, local_point.1))
         else {
-            return false;
+            return None;
         };
         let (dx, dy) = fragment.translation();
         local_point.0 -= dx;
@@ -2470,24 +2489,24 @@ fn hit_test_box(
     let mut clip = fragment_source_clip.or(inherited_clip);
     if let Some(inset) = clip_path_inset_rect(&style, border_box) {
         let Some(inset) = inset else {
-            return false;
+            return None;
         };
         clip = intersect_optional_clip(clip, transformed_rect_bounds(inset, transform));
         if clip.is_none()
             || clip.is_some_and(|area| !rect_contains_point(area, query_point.0, query_point.1))
         {
-            return false;
+            return None;
         }
     }
     if let Some(shape) = clip_shape {
         if !shape.contains(local_point) {
-            return false;
+            return None;
         }
         clip = intersect_optional_clip(clip, transformed_rect_bounds(shape.bounds(), transform));
         if clip.is_none()
             || clip.is_some_and(|area| !rect_contains_point(area, query_point.0, query_point.1))
         {
-            return false;
+            return None;
         }
     }
     let paint_containment = crate::layout::has_containment(&style, "paint");
@@ -2518,10 +2537,33 @@ fn hit_test_box(
         };
         clip = intersect_optional_clip(clip, overflow_clip);
         if clip.is_none() {
-            return false;
+            return None;
         }
     }
+    Some(HitTestGeometry {
+        transform,
+        local_point,
+        query_point,
+        clip,
+        style,
+        border_box,
+    })
+}
 
+/// Partitions `layout`'s children into the paint-order groups hit-testing
+/// walks front-to-back: negative z-index, in-flow normal, floats, inline,
+/// auto/zero z-index positioned, and positive z-index.
+fn partition_children_for_hit_test<'a>(
+    layout: &'a LayoutBox,
+    resolver: &mut StyleResolver,
+) -> (
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+) {
     let mut negative = Vec::new();
     let mut normal = Vec::new();
     let mut floats = Vec::new();
@@ -2546,72 +2588,109 @@ fn hit_test_box(
             inline.push(child);
         }
     }
+    (negative, normal, floats, inline, auto_positioned, positive)
+}
 
-    for group in [&positive, &auto_positioned, &inline] {
+/// Hit-tests three paint-order groups of children back-to-front (the reverse
+/// of paint order), stopping as soon as one records a hit.
+#[allow(clippy::too_many_arguments)]
+fn hit_test_child_groups(
+    groups: [&[&LayoutBox]; 3],
+    resolver: &mut StyleResolver,
+    transform: AffineTransform,
+    clip: Option<Rect>,
+    viewport: Rect,
+    x: f32,
+    y: f32,
+    hits: &mut HitCollector,
+) -> bool {
+    for group in groups {
         for child in group.iter().rev() {
-            if hit_test_box(
-                child,
-                resolver,
-                transform,
-                clip,
-                viewport,
-                query_point.0,
-                query_point.1,
-                hits,
-            ) {
+            if hit_test_box(child, resolver, transform, clip, viewport, x, y, hits) {
                 return true;
             }
         }
     }
-    // Inline SVG is represented by one replaced layout box for painting, but
-    // pointer events still target its child geometry.  Resolve the child hit
-    // before line fragments return the SVG viewport element itself.
-    if layout.node.tag_name().as_deref() == Some("svg") {
-        // SVG is painted by the inline-image path into the fragment's content
-        // box.  Use that exact destination when available so padding and
-        // borders remain click-through instead of being mapped into the SVG
-        // viewBox.  The layout content box is a safe fallback for boxes that
-        // do not carry an inline image fragment (e.g. an empty SVG).
-        let svg_box = layout
-            .lines
-            .iter()
-            .flat_map(|line| line.fragments.iter())
-            .find_map(|fragment| match &fragment.content {
-                InlineFragmentContent::Image(_, fragment_style)
-                    if fragment.node.identity() == layout.node.identity() =>
-                {
-                    let border = EdgeSizesForPaint::from_style(fragment_style);
-                    Some(inline_fragment_content_rect(
-                        fragment.rect,
-                        fragment_style,
-                        border,
-                    ))
-                }
+    false
+}
+
+/// Hit-tests an inline `<svg>` root that is painted as a replaced element.
+///
+/// Inline SVG is represented by one replaced layout box for painting, but
+/// pointer events still target its child geometry. This must run before line
+/// fragments return the SVG viewport element itself. Returns `true` once a
+/// hit is recorded and the search can stop.
+fn hit_test_svg_root_replaced_box(
+    layout: &LayoutBox,
+    local_point: (f32, f32),
+    resolver: &mut StyleResolver,
+    hits: &mut HitCollector,
+) -> bool {
+    if layout.node.tag_name().as_deref() != Some("svg") {
+        return false;
+    }
+    // SVG is painted by the inline-image path into the fragment's content
+    // box.  Use that exact destination when available so padding and
+    // borders remain click-through instead of being mapped into the SVG
+    // viewBox.  The layout content box is a safe fallback for boxes that
+    // do not carry an inline image fragment (e.g. an empty SVG).
+    let svg_box = layout
+        .lines
+        .iter()
+        .flat_map(|line| line.fragments.iter())
+        .find_map(|fragment| match &fragment.content {
+            InlineFragmentContent::Image(_, fragment_style)
+                if fragment.node.identity() == layout.node.identity() =>
+            {
+                let border = EdgeSizesForPaint::from_style(fragment_style);
+                Some(inline_fragment_content_rect(
+                    fragment.rect,
+                    fragment_style,
+                    border,
+                ))
+            }
+            _ => None,
+        })
+        .unwrap_or(layout.dimensions.content);
+    if rect_contains_point(svg_box, local_point.0, local_point.1) {
+        let local_x = local_point.0 - svg_box.x;
+        let local_y = local_point.1 - svg_box.y;
+        let mut computed_pointer_events =
+            |node: &NodeHandle| match resolver.computed_property(node, "pointer-events") {
+                Some(ComputedValue::Keyword(value)) => Some(value),
                 _ => None,
-            })
-            .unwrap_or(layout.dimensions.content);
-        if rect_contains_point(svg_box, local_point.0, local_point.1) {
-            let local_x = local_point.0 - svg_box.x;
-            let local_y = local_point.1 - svg_box.y;
-            let mut computed_pointer_events =
-                |node: &NodeHandle| match resolver.computed_property(node, "pointer-events") {
-                    Some(ComputedValue::Keyword(value)) => Some(value),
-                    _ => None,
-                };
-            if let Some(target) = crate::svg::hit_test_svg(
-                &layout.node,
-                local_x,
-                local_y,
-                svg_box.width,
-                svg_box.height,
-                &mut computed_pointer_events,
-            ) {
-                if hits.record(target, None) {
-                    return true;
-                }
+            };
+        if let Some(target) = crate::svg::hit_test_svg(
+            &layout.node,
+            local_x,
+            local_y,
+            svg_box.width,
+            svg_box.height,
+            &mut computed_pointer_events,
+        ) {
+            if hits.record(target, None) {
+                return true;
             }
         }
     }
+    false
+}
+
+/// Hit-tests this box's own inline line fragments (text, inline replaced
+/// content, and any inline `<svg>` fragments) against `local_point`.
+///
+/// Returns `Some(true)` once a hit is recorded and the search can stop,
+/// `Some(false)` when a matching fragment names no event target element
+/// (this ends the whole hit test for `layout` without falling through to
+/// its float/normal/negative child groups or its own border-box test,
+/// matching the original control flow), and `None` to continue to the next
+/// stage.
+fn hit_test_line_fragments(
+    layout: &LayoutBox,
+    local_point: (f32, f32),
+    resolver: &mut StyleResolver,
+    hits: &mut HitCollector,
+) -> Option<bool> {
     for line in layout.lines.iter().rev() {
         for fragment in line.fragments.iter().rev() {
             if fragment.style.visibility == Visibility::Hidden
@@ -2653,39 +2732,89 @@ fn hit_test_box(
                             &mut computed_pointer_events,
                         ) {
                             if hits.record(target, None) {
-                                return true;
+                                return Some(true);
                             }
                         }
                     }
                 }
                 let Some(target) = event_target_element(&fragment.node) else {
-                    return false;
+                    return Some(false);
                 };
                 if accepts_pointer_events_value(
                     resolver.computed_property(&target, "pointer-events"),
                 ) {
                     if hits.record(target, layout.pseudo) {
-                        return true;
+                        return Some(true);
                     }
                 }
             }
         }
     }
-    for group in [&floats, &normal, &negative] {
-        for child in group.iter().rev() {
-            if hit_test_box(
-                child,
-                resolver,
-                transform,
-                clip,
-                viewport,
-                query_point.0,
-                query_point.1,
-                hits,
-            ) {
-                return true;
-            }
-        }
+    None
+}
+
+fn hit_test_box(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    ancestor_transform: AffineTransform,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    x: f32,
+    y: f32,
+    hits: &mut HitCollector,
+) -> bool {
+    let Some(HitTestGeometry {
+        transform,
+        local_point,
+        query_point,
+        clip,
+        style,
+        border_box,
+    }) = hit_test_box_geometry(
+        layout,
+        resolver,
+        ancestor_transform,
+        inherited_clip,
+        viewport,
+        x,
+        y,
+    )
+    else {
+        return false;
+    };
+
+    let (negative, normal, floats, inline, auto_positioned, positive) =
+        partition_children_for_hit_test(layout, resolver);
+
+    if hit_test_child_groups(
+        [&positive, &auto_positioned, &inline],
+        resolver,
+        transform,
+        clip,
+        viewport,
+        query_point.0,
+        query_point.1,
+        hits,
+    ) {
+        return true;
+    }
+    if hit_test_svg_root_replaced_box(layout, local_point, resolver, hits) {
+        return true;
+    }
+    if let Some(result) = hit_test_line_fragments(layout, local_point, resolver, hits) {
+        return result;
+    }
+    if hit_test_child_groups(
+        [&floats, &normal, &negative],
+        resolver,
+        transform,
+        clip,
+        viewport,
+        query_point.0,
+        query_point.1,
+        hits,
+    ) {
+        return true;
     }
     if rect_contains_point(border_box, local_point.0, local_point.1)
         && accepts_pointer_events(&style)
@@ -6467,177 +6596,11 @@ fn paint_prepared_background_image(
         };
         let (repeat_x, repeat_y) = background_repeat(style);
         if has_explicit_size {
-            let (tile_w, tile_h) = background_size(style, area, area.width, area.height);
-            if tile_w <= 0.0 || tile_h <= 0.0 {
-                return;
-            }
-            let tile_w = tile_w.max(1.0);
-            let tile_h = tile_h.max(1.0);
-            let fixed = background_attachment(style) == BackgroundAttachment::Fixed;
-            let (pos_cw, pos_ch) = if fixed {
-                (viewport.width, viewport.height)
-            } else {
-                (area.width, area.height)
-            };
-            let (position_x, position_y) =
-                background_position(style, pos_cw, pos_ch, tile_w, tile_h);
-            let anchor_x = if fixed {
-                viewport.x + position_x
-            } else {
-                area.x + position_x
-            };
-            let anchor_y = if fixed {
-                viewport.y + position_y
-            } else {
-                area.y + position_y
-            };
-            let clip_area = clip.unwrap_or(area);
-            let x_start = if repeat_x {
-                anchor_x + ((clip_area.x - anchor_x) / tile_w).floor() * tile_w
-            } else {
-                anchor_x
-            };
-            let y_start = if repeat_y {
-                anchor_y + ((clip_area.y - anchor_y) / tile_h).floor() * tile_h
-            } else {
-                anchor_y
-            };
-            let x_end = if repeat_x {
-                clip_area.x + clip_area.width
-            } else {
-                area.x + area.width
-            };
-            let y_end = if repeat_y {
-                clip_area.y + clip_area.height
-            } else {
-                area.y + area.height
-            };
-
-            let tile_image = if repeat_x || repeat_y {
-                let tw = tile_w.ceil().max(1.0) as u32;
-                let th = tile_h.ceil().max(1.0) as u32;
-                if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
-                    let mut tile_canvas = Canvas::new(tw, th);
-                    color::paint_gradient(
-                        &mut tile_canvas,
-                        gradient,
-                        Rect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: tile_w,
-                            height: tile_h,
-                        },
-                        None,
-                    );
-                    Image::new(tw, th, tile_canvas.pixels).ok()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let mut ty = y_start;
-            while ty < y_end {
-                let mut tx = x_start;
-                while tx < x_end {
-                    let tile_rect = Rect {
-                        x: tx,
-                        y: ty,
-                        width: tile_w,
-                        height: tile_h,
-                    };
-                    if let Some(ref image) = tile_image {
-                        canvas.draw_image_scaled_clipped(image, tile_rect, clip.or(Some(area)));
-                    } else {
-                        color::paint_gradient(canvas, gradient, tile_rect, clip.or(Some(area)));
-                    }
-                    if !repeat_x {
-                        break;
-                    }
-                    tx += tile_w;
-                }
-                if !repeat_y {
-                    break;
-                }
-                ty += tile_h;
-            }
+            paint_tiled_gradient_background_sized(
+                canvas, style, area, clip, viewport, gradient, repeat_x, repeat_y,
+            );
         } else {
-            if !repeat_x && !repeat_y {
-                color::paint_gradient(canvas, gradient, area, clip.or(Some(area)));
-                return;
-            }
-            let tile_width = area.width.max(1.0);
-            let tile_height = area.height.max(1.0);
-            let tw = tile_width.ceil() as u32;
-            let th = tile_height.ceil() as u32;
-            let tile_image = if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
-                let mut tile_canvas = Canvas::new(tw, th);
-                color::paint_gradient(
-                    &mut tile_canvas,
-                    gradient,
-                    Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: tile_width,
-                        height: tile_height,
-                    },
-                    None,
-                );
-                Image::new(tw, th, tile_canvas.pixels).ok()
-            } else {
-                None
-            };
-            let clip_area = clip.unwrap_or(area);
-            let x_start = if repeat_x {
-                area.x + ((clip_area.x - area.x) / tile_width).floor() * tile_width
-            } else {
-                area.x
-            };
-            let y_start = if repeat_y {
-                area.y + ((clip_area.y - area.y) / tile_height).floor() * tile_height
-            } else {
-                area.y
-            };
-            let x_end = if repeat_x {
-                clip_area.x + clip_area.width
-            } else {
-                area.x + area.width
-            };
-            let y_end = if repeat_y {
-                clip_area.y + clip_area.height
-            } else {
-                area.y + area.height
-            };
-            let mut y = y_start;
-            while y < y_end {
-                let mut x = x_start;
-                while x < x_end {
-                    let tile_rect = Rect {
-                        x,
-                        y,
-                        width: tile_width,
-                        height: tile_height,
-                    };
-                    if let Some(ref tile_image) = tile_image {
-                        canvas.draw_image_scaled_clipped(
-                            tile_image,
-                            tile_rect,
-                            clip.or(Some(area)),
-                        );
-                    } else {
-                        color::paint_gradient(canvas, gradient, tile_rect, clip.or(Some(area)));
-                    }
-                    if !repeat_x {
-                        break;
-                    }
-                    x += tile_width;
-                }
-                if !repeat_y {
-                    break;
-                }
-                y += tile_height;
-            }
+            paint_tiled_gradient_background_auto(canvas, area, clip, gradient, repeat_x, repeat_y);
         }
         return;
     }
@@ -6646,7 +6609,215 @@ fn paint_prepared_background_image(
     let PreparedBackgroundImage::Image(image) = background else {
         return;
     };
+    paint_tiled_image_background(canvas, style, area, clip, viewport, image);
+}
 
+/// Paints a repeating/positioned CSS gradient background when
+/// `background-size` was given an explicit (non-`auto`) value: the gradient
+/// is rendered once into a tile-sized buffer, then that tile is stamped
+/// across the painted area per `background-repeat`/`background-position`.
+#[allow(clippy::too_many_arguments)]
+fn paint_tiled_gradient_background_sized(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    area: Rect,
+    clip: Option<Rect>,
+    viewport: Rect,
+    gradient: &color::Gradient,
+    repeat_x: bool,
+    repeat_y: bool,
+) {
+    let (tile_w, tile_h) = background_size(style, area, area.width, area.height);
+    if tile_w <= 0.0 || tile_h <= 0.0 {
+        return;
+    }
+    let tile_w = tile_w.max(1.0);
+    let tile_h = tile_h.max(1.0);
+    let fixed = background_attachment(style) == BackgroundAttachment::Fixed;
+    let (pos_cw, pos_ch) = if fixed {
+        (viewport.width, viewport.height)
+    } else {
+        (area.width, area.height)
+    };
+    let (position_x, position_y) = background_position(style, pos_cw, pos_ch, tile_w, tile_h);
+    let anchor_x = if fixed {
+        viewport.x + position_x
+    } else {
+        area.x + position_x
+    };
+    let anchor_y = if fixed {
+        viewport.y + position_y
+    } else {
+        area.y + position_y
+    };
+    let clip_area = clip.unwrap_or(area);
+    let x_start = if repeat_x {
+        anchor_x + ((clip_area.x - anchor_x) / tile_w).floor() * tile_w
+    } else {
+        anchor_x
+    };
+    let y_start = if repeat_y {
+        anchor_y + ((clip_area.y - anchor_y) / tile_h).floor() * tile_h
+    } else {
+        anchor_y
+    };
+    let x_end = if repeat_x {
+        clip_area.x + clip_area.width
+    } else {
+        area.x + area.width
+    };
+    let y_end = if repeat_y {
+        clip_area.y + clip_area.height
+    } else {
+        area.y + area.height
+    };
+
+    let tile_image = if repeat_x || repeat_y {
+        let tw = tile_w.ceil().max(1.0) as u32;
+        let th = tile_h.ceil().max(1.0) as u32;
+        if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
+            let mut tile_canvas = Canvas::new(tw, th);
+            color::paint_gradient(
+                &mut tile_canvas,
+                gradient,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: tile_w,
+                    height: tile_h,
+                },
+                None,
+            );
+            Image::new(tw, th, tile_canvas.pixels).ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut ty = y_start;
+    while ty < y_end {
+        let mut tx = x_start;
+        while tx < x_end {
+            let tile_rect = Rect {
+                x: tx,
+                y: ty,
+                width: tile_w,
+                height: tile_h,
+            };
+            if let Some(ref image) = tile_image {
+                canvas.draw_image_scaled_clipped(image, tile_rect, clip.or(Some(area)));
+            } else {
+                color::paint_gradient(canvas, gradient, tile_rect, clip.or(Some(area)));
+            }
+            if !repeat_x {
+                break;
+            }
+            tx += tile_w;
+        }
+        if !repeat_y {
+            break;
+        }
+        ty += tile_h;
+    }
+}
+
+/// Paints a repeating CSS gradient background when `background-size` is
+/// `auto`: the gradient tiles at the painted area's own size (or, with no
+/// repeat at all, is drawn once).
+fn paint_tiled_gradient_background_auto(
+    canvas: &mut Canvas,
+    area: Rect,
+    clip: Option<Rect>,
+    gradient: &color::Gradient,
+    repeat_x: bool,
+    repeat_y: bool,
+) {
+    if !repeat_x && !repeat_y {
+        color::paint_gradient(canvas, gradient, area, clip.or(Some(area)));
+        return;
+    }
+    let tile_width = area.width.max(1.0);
+    let tile_height = area.height.max(1.0);
+    let tw = tile_width.ceil() as u32;
+    let th = tile_height.ceil() as u32;
+    let tile_image = if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
+        let mut tile_canvas = Canvas::new(tw, th);
+        color::paint_gradient(
+            &mut tile_canvas,
+            gradient,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: tile_width,
+                height: tile_height,
+            },
+            None,
+        );
+        Image::new(tw, th, tile_canvas.pixels).ok()
+    } else {
+        None
+    };
+    let clip_area = clip.unwrap_or(area);
+    let x_start = if repeat_x {
+        area.x + ((clip_area.x - area.x) / tile_width).floor() * tile_width
+    } else {
+        area.x
+    };
+    let y_start = if repeat_y {
+        area.y + ((clip_area.y - area.y) / tile_height).floor() * tile_height
+    } else {
+        area.y
+    };
+    let x_end = if repeat_x {
+        clip_area.x + clip_area.width
+    } else {
+        area.x + area.width
+    };
+    let y_end = if repeat_y {
+        clip_area.y + clip_area.height
+    } else {
+        area.y + area.height
+    };
+    let mut y = y_start;
+    while y < y_end {
+        let mut x = x_start;
+        while x < x_end {
+            let tile_rect = Rect {
+                x,
+                y,
+                width: tile_width,
+                height: tile_height,
+            };
+            if let Some(ref tile_image) = tile_image {
+                canvas.draw_image_scaled_clipped(tile_image, tile_rect, clip.or(Some(area)));
+            } else {
+                color::paint_gradient(canvas, gradient, tile_rect, clip.or(Some(area)));
+            }
+            if !repeat_x {
+                break;
+            }
+            x += tile_width;
+        }
+        if !repeat_y {
+            break;
+        }
+        y += tile_height;
+    }
+}
+
+/// Paints a repeating/positioned raster image background, per
+/// `background-size`, `background-repeat`, `background-position`, and
+/// `background-attachment`.
+fn paint_tiled_image_background(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    area: Rect,
+    clip: Option<Rect>,
+    viewport: Rect,
+    image: &Image,
+) {
     let (tile_width, tile_height) = background_size(
         style,
         area,
@@ -6713,7 +6884,7 @@ fn paint_prepared_background_image(
                 width: tile_width,
                 height: tile_height,
             };
-            canvas.draw_image_scaled_clipped(&image, dest, clip.or(Some(area)));
+            canvas.draw_image_scaled_clipped(image, dest, clip.or(Some(area)));
             if !repeat_x {
                 break;
             }
