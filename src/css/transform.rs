@@ -1027,22 +1027,10 @@ fn parse_zero_length(value: &str) -> bool {
 }
 
 fn parse_angle(value: &str) -> Option<f32> {
-    let normalized = value.trim().to_ascii_lowercase();
-    let value = normalized.as_str();
-    if let Some(degrees) = value.strip_suffix("deg") {
-        return Some(parse_number(degrees)? * PI / 180.0);
-    }
-    if let Some(radians) = value.strip_suffix("rad") {
-        return parse_number(radians);
-    }
-    if let Some(gradians) = value.strip_suffix("grad") {
-        return Some(parse_number(gradians)? * PI / 200.0);
-    }
-    if let Some(turns) = value.strip_suffix("turn") {
-        return Some(parse_number(turns)? * 2.0 * PI);
-    }
-    let zero = parse_number(value)?;
-    (zero == 0.0).then_some(0.0)
+    use super::angle::{CssAngle, UnitlessZero};
+    let angle = CssAngle::parse(value, UnitlessZero::Numeric, true)?;
+    // Historically `rad` matched before `grad`, making gradians invalid here.
+    (!angle.is_gradians()).then(|| angle.radians())
 }
 
 fn parse_transform_origin_3d(
@@ -1119,6 +1107,34 @@ fn is_vertical_keyword(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn angle_input_contract() {
+        for (input, radians) in [
+            ("-180deg", -PI),
+            (" 180 DEG ", PI),
+            (".5TURN", PI),
+            ("1rad", 1.0),
+            ("-0", 0.0),
+            ("+0.0", 0.0),
+        ] {
+            assert_eq!(parse_angle(input), Some(radians), "{input}");
+        }
+        for input in [
+            "1",
+            "NaNdeg",
+            "infturn",
+            "bad",
+            "deg",
+            "200grad",
+            " 200 GRAD ",
+        ] {
+            assert_eq!(parse_angle(input), None, "{input}");
+        }
+        assert!(parse_angle("3e38turn").unwrap().is_infinite());
+        assert!(parse_angle("3e38deg").unwrap().is_infinite());
+        assert_eq!(parse_angle("3e38rad"), Some(3e38));
+    }
 
     fn reference() -> TransformReferenceBox {
         TransformReferenceBox {

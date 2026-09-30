@@ -236,20 +236,9 @@ fn parse_factor(input: &str, default: f32, clamp_one: bool) -> Option<f32> {
 }
 
 fn parse_angle(input: &str) -> Option<f32> {
-    let lower = input.trim().to_ascii_lowercase();
-    if lower == "0" {
-        return Some(0.0);
-    }
-    let (number, scale) = if let Some(value) = lower.strip_suffix("deg") {
-        (value, 1.0)
-    } else if let Some(value) = lower.strip_suffix("grad") {
-        (value, 0.9)
-    } else if let Some(value) = lower.strip_suffix("rad") {
-        (value, 180.0 / std::f32::consts::PI)
-    } else {
-        (lower.strip_suffix("turn")?, 360.0)
-    };
-    let degrees = number.trim().parse::<f32>().ok()? * scale;
+    use super::angle::{CssAngle, UnitlessZero};
+    let degrees = CssAngle::parse(input, UnitlessZero::Literal, true)?
+        .degrees_with_radian_factor(180.0 / std::f32::consts::PI);
     degrees.is_finite().then_some(degrees)
 }
 
@@ -362,6 +351,28 @@ fn format_function(function: &FilterFunction) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn angle_input_contract() {
+        for (input, degrees) in [
+            ("-90deg", -90.0),
+            (" 100 GRAD ", 90.0),
+            (".25TURN", 90.0),
+            ("1rad", 180.0 / std::f32::consts::PI),
+            ("0", 0.0),
+        ] {
+            assert_eq!(parse_angle(input), Some(degrees), "{input}");
+        }
+        for input in [
+            "-0", "+0", "0.0", "1", "NaNdeg", "infturn", "3e38turn", "bad", "deg",
+        ] {
+            assert_eq!(parse_angle(input), None, "{input}");
+        }
+        assert_eq!(
+            normalize_filter_list("hue-rotate(.25turn)"),
+            Some("hue-rotate(90deg)".into())
+        );
+    }
 
     #[test]
     fn parses_and_normalizes_filter_lists() {
