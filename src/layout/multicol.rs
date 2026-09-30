@@ -177,9 +177,73 @@ pub(super) fn layout_multicol_children(
         used_height,
     );
 
-    // Apply the ordinary margin formatter's corrections before column
-    // placement. Returning those corrections after changing columns would
-    // shift fragments on the physical y axis a second time.
+    apply_multicol_child_shifts(&mut result, resolver, style);
+    remeasure_spanning_children(
+        &mut result,
+        resolver,
+        x,
+        width,
+        containing_height,
+        viewport,
+        positioned_ancestor,
+    );
+
+    let (anchors, atomic_line_by_node, fragmented_children) = build_flow_anchors(&result, resolver);
+
+    if anchors.is_empty() {
+        result.cursor_y = y;
+        result.float_bottom = y;
+        return result;
+    }
+
+    let (column_height, explicit_height) = resolve_column_height(
+        &result,
+        &anchors,
+        style,
+        padding,
+        border,
+        containing_height,
+        used_height,
+        y,
+        geometry.count,
+    );
+
+    let mut placement =
+        place_flow_anchors_in_columns(&result, anchors, x, width, geometry, column_height, y);
+
+    apply_column_placement(
+        &mut result,
+        &mut placement,
+        resolver,
+        &atomic_line_by_node,
+        &fragmented_children,
+        column_height,
+    );
+
+    position_spanning_children(&mut result, &mut placement, x, resolver);
+
+    finalize_multicol_layout(
+        &mut result,
+        placement,
+        geometry,
+        explicit_height,
+        x,
+        y,
+        width,
+        column_height,
+    );
+
+    result
+}
+
+/// Applies the ordinary margin formatter's corrections before column
+/// placement. Returning those corrections after changing columns would
+/// shift fragments on the physical y axis a second time.
+fn apply_multicol_child_shifts(
+    result: &mut BlockChildrenResult,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+) {
     let shifts = std::mem::take(&mut result.child_shifts);
     let mut shifts = shifts.into_iter().peekable();
     for (index, child) in result.children.iter_mut().enumerate() {
@@ -199,10 +263,21 @@ pub(super) fn layout_multicol_children(
             establishes_fixed_containing_block(style),
         );
     }
+}
 
-    // Spanners are measured at the full multicol inline size before balancing.
-    // Their narrow provisional height must not be used to place the following
-    // column row.
+/// Spanners are measured at the full multicol inline size before balancing.
+/// Their narrow provisional height must not be used to place the following
+/// column row.
+#[allow(clippy::too_many_arguments)]
+fn remeasure_spanning_children(
+    result: &mut BlockChildrenResult,
+    resolver: &mut StyleResolver,
+    x: f32,
+    width: f32,
+    containing_height: f32,
+    viewport: LayoutViewport,
+    positioned_ancestor: Option<BoxDimensions>,
+) {
     for index in 0..result.children.len() {
         let span_node = result.children[index].node.clone();
         let child_style = resolver.computed_style(&span_node);
@@ -264,7 +339,16 @@ pub(super) fn layout_multicol_children(
             }
         }
     }
+}
 
+/// Indexes lines that contain atomic inline fragments, then builds the
+/// sorted list of flow anchors (lines, ordinary children, spanners, and
+/// orphan/widow-aware child line groups) that the column-filling algorithm
+/// walks in source order.
+fn build_flow_anchors(
+    result: &BlockChildrenResult,
+    resolver: &mut StyleResolver,
+) -> (Vec<FlowAnchor>, HashMap<usize, usize>, HashSet<usize>) {
     let mut atomic_line_by_node = HashMap::new();
     for (line_index, line) in result.lines.iter().enumerate() {
         for fragment in &line.fragments {
@@ -360,12 +444,26 @@ pub(super) fn layout_multicol_children(
             .then_with(|| flow_item_order(left.item).cmp(&flow_item_order(right.item)))
     });
 
-    if anchors.is_empty() {
-        result.cursor_y = y;
-        result.float_bottom = y;
-        return result;
-    }
+    (anchors, atomic_line_by_node, fragmented_children)
+}
 
+/// Resolves the used column block-size: either the container's explicit
+/// height, or a height chosen to balance content evenly across `count`
+/// columns per the CSS Multi-column Layout balancing algorithm. Returns the
+/// column height together with the explicit height, if any, since the
+/// caller needs both to compute the final container height later.
+#[allow(clippy::too_many_arguments)]
+fn resolve_column_height(
+    result: &BlockChildrenResult,
+    anchors: &[FlowAnchor],
+    style: &ComputedStyle,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    containing_height: f32,
+    used_height: Option<UsedHeight>,
+    y: f32,
+    count: usize,
+) -> (f32, Option<f32>) {
     let source_bottom = result.cursor_y.max(result.float_bottom);
     let source_height = (source_bottom - y).max(
         anchors
@@ -381,54 +479,82 @@ pub(super) fn layout_multicol_children(
         style.get("column-fill"),
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto")
     );
-    let balanced = balanced_height(&anchors, source_height, geometry.count);
+    let balanced = balanced_height(anchors, source_height, count);
     let column_height = match (explicit_height, fill_auto) {
         (Some(height), true) => height,
         (Some(height), false) => balanced.min(height).max(1.0),
         (None, _) => balanced.max(1.0),
     };
+    (column_height, explicit_height)
+}
 
-    let mut line_moves = vec![(0.0, 0.0); result.lines.len()];
-    let mut child_moves = vec![None; result.children.len()];
-    let mut child_line_moves = result
-        .children
-        .iter()
-        .map(|child| vec![None; child.lines.len()])
-        .collect::<Vec<_>>();
-    let mut child_fragments = vec![Vec::new(); result.children.len()];
-    let mut spanner_targets = Vec::new();
-    let mut source_cursor = y;
-    let mut row_y = y;
-    let mut column = 0usize;
-    let mut local_y = 0.0f32;
-    let mut row_has_content = false;
-    let mut maximum_bottom = y;
-    let mut row_columns = Vec::new();
-    let mut maximum_column = 0usize;
+/// Accumulated per-anchor placement results for the column-filling loop:
+/// where each line/child/fragment lands, plus bookkeeping for column rules
+/// and the row layout actually used.
+struct ColumnPlacementState {
+    line_moves: Vec<(f32, f32)>,
+    child_moves: Vec<Option<(f32, f32)>>,
+    child_line_moves: Vec<Vec<Option<(f32, f32)>>>,
+    child_fragments: Vec<Vec<BlockFragment>>,
+    spanner_targets: Vec<(usize, f32)>,
+    row_columns: Vec<(f32, usize)>,
+    source_cursor: f32,
+    row_y: f32,
+    column: usize,
+    local_y: f32,
+    row_has_content: bool,
+    maximum_bottom: f32,
+    maximum_column: usize,
+}
+
+/// Walks the sorted flow anchors and assigns each one a column and a
+/// position within that column, following the fragment-type-specific rules:
+/// a full-width spanner starts a new row, a `box-decoration-break: clone`
+/// child repeats its border/padding at each fragment, overflow content from
+/// a continuously fragmentable box splits by paint extent, and everything
+/// else moves as a single atomic unit.
+fn place_flow_anchors_in_columns(
+    result: &BlockChildrenResult,
+    anchors: Vec<FlowAnchor>,
+    x: f32,
+    width: f32,
+    geometry: ColumnGeometry,
+    column_height: f32,
+    y: f32,
+) -> ColumnPlacementState {
+    let mut state = ColumnPlacementState {
+        line_moves: vec![(0.0, 0.0); result.lines.len()],
+        child_moves: vec![None; result.children.len()],
+        child_line_moves: result
+            .children
+            .iter()
+            .map(|child| vec![None; child.lines.len()])
+            .collect::<Vec<_>>(),
+        child_fragments: vec![Vec::new(); result.children.len()],
+        spanner_targets: Vec::new(),
+        row_columns: Vec::new(),
+        source_cursor: y,
+        row_y: y,
+        column: 0,
+        local_y: 0.0,
+        row_has_content: false,
+        maximum_bottom: y,
+        maximum_column: 0,
+    };
 
     for anchor in anchors {
-        let gap = (anchor.top - source_cursor).max(0.0);
-        advance_columns(&mut column, &mut local_y, gap, column_height);
-        if anchor.break_before && local_y > 0.0 {
-            column += 1;
-            local_y = 0.0;
+        let gap = (anchor.top - state.source_cursor).max(0.0);
+        advance_columns(&mut state.column, &mut state.local_y, gap, column_height);
+        if anchor.break_before && state.local_y > 0.0 {
+            state.column += 1;
+            state.local_y = 0.0;
         }
 
         if matches!(anchor.item, FlowItem::Spanner(_)) {
-            if row_has_content {
-                row_columns.push((row_y, column));
-                row_y += column_height;
-            }
-            column = 0;
-            local_y = 0.0;
-            row_has_content = false;
             let FlowItem::Spanner(index) = anchor.item else {
                 unreachable!()
             };
-            spanner_targets.push((index, row_y));
-            row_y += anchor.height;
-            maximum_bottom = maximum_bottom.max(row_y);
-            source_cursor = (anchor.top + anchor.height).max(source_cursor);
+            place_spanner_anchor(&mut state, index, anchor, column_height);
             continue;
         }
 
@@ -436,83 +562,17 @@ pub(super) fn layout_multicol_children(
             let FlowItem::Child(index) = anchor.item else {
                 unreachable!("only ordinary child boxes clone decorations")
             };
-            advance_columns(
-                &mut column,
-                &mut local_y,
-                clone.margin_before,
+            place_clone_fragment_anchor(
+                &mut state,
+                result,
+                index,
+                anchor,
+                x,
+                width,
+                geometry,
                 column_height,
+                clone,
             );
-            let child = &result.children[index];
-            let border_width = child.dimensions.content.width
-                + child.dimensions.padding.horizontal()
-                + child.dimensions.border.horizontal();
-            let decoration = clone.decoration();
-            let mut remaining = clone.content_height;
-            let mut source_progress = 0.0f32;
-            let mut first = true;
-            while first || remaining > 0.000_1 {
-                first = false;
-                if local_y >= column_height - 0.000_1 {
-                    column += 1;
-                    local_y = 0.0;
-                }
-                if column_height - local_y <= decoration + 0.000_1 && local_y > 0.0 {
-                    column += 1;
-                    local_y = 0.0;
-                }
-                let available = (column_height - local_y - decoration).max(0.0);
-                let extent = if available > 0.000_1 {
-                    remaining.min(available)
-                } else {
-                    // An explicit fragmentainer can be smaller than the cloned
-                    // decorations themselves. Keep one overflowing fragment
-                    // instead of looping without consuming source content.
-                    remaining
-                };
-                let target_border_x =
-                    column_x(x, width, geometry, column) + child.dimensions.margin.left;
-                let target_border_y = row_y + local_y;
-                let target = Rect {
-                    x: target_border_x,
-                    y: target_border_y,
-                    width: border_width,
-                    height: decoration + extent,
-                };
-                let source = Rect {
-                    x: child.dimensions.content.x,
-                    y: child.dimensions.content.y + source_progress,
-                    width: child.dimensions.content.width,
-                    height: extent,
-                };
-                child_fragments[index].push(BlockFragment {
-                    source,
-                    target,
-                    clip: target,
-                    owns_paint: true,
-                    clone_content_target: Some(Rect {
-                        x: target.x + child.dimensions.border.left + child.dimensions.padding.left,
-                        y: target.y + clone.decoration_before,
-                        width: child.dimensions.content.width,
-                        height: extent,
-                    }),
-                });
-                local_y += target.height;
-                source_progress += extent;
-                remaining -= extent;
-                row_has_content = true;
-                maximum_column = maximum_column.max(column);
-                maximum_bottom = maximum_bottom.max(target.y + target.height);
-                if remaining > 0.000_1 && local_y >= column_height - 0.000_1 {
-                    column += 1;
-                    local_y = 0.0;
-                }
-            }
-            advance_columns(&mut column, &mut local_y, clone.margin_after, column_height);
-            source_cursor = (anchor.top + anchor.height).max(source_cursor);
-            if anchor.break_after {
-                column += 1;
-                local_y = 0.0;
-            }
             continue;
         }
 
@@ -520,145 +580,322 @@ pub(super) fn layout_multicol_children(
             let FlowItem::Child(index) = anchor.item else {
                 unreachable!("only ordinary child boxes are continuously fragmentable")
             };
-            let child = &result.children[index];
-            let border_box = Rect {
-                x: child.dimensions.content.x
-                    - child.dimensions.padding.left
-                    - child.dimensions.border.left,
-                y: child.dimensions.content.y
-                    - child.dimensions.padding.top
-                    - child.dimensions.border.top,
-                width: child.dimensions.content.width
-                    + child.dimensions.padding.horizontal()
-                    + child.dimensions.border.horizontal(),
-                height: child.dimensions.content.height
-                    + child.dimensions.padding.vertical()
-                    + child.dimensions.border.vertical(),
-            };
-            let paint_extent = if child.overflow.clips_y() {
-                anchor.height
-            } else {
-                let overflow_bottom = child.dimensions.content.y - child.dimensions.padding.top
-                    + child.scrollable_overflow().1;
-                (overflow_bottom - anchor.top).max(anchor.height)
-            };
-            let mut fragment_column = column;
-            let mut fragment_local_y = local_y;
-            let mut remaining = paint_extent;
-            let mut source_progress = 0.0f32;
-            while remaining > 0.000_1 {
-                if fragment_local_y >= column_height - 0.000_1 {
-                    fragment_column += 1;
-                    fragment_local_y = 0.0;
-                }
-                let available = (column_height - fragment_local_y).max(0.0);
-                if available <= 0.000_1 {
-                    fragment_column += 1;
-                    fragment_local_y = 0.0;
-                    continue;
-                }
-                let extent = remaining.min(available);
-                let source_top = anchor.top + source_progress;
-                let source_bottom = source_top + extent;
-                let clipped_top = source_top.max(border_box.y);
-                let clipped_bottom = source_bottom.min(border_box.y + border_box.height);
-                let target_x = column_x(x, width, geometry, fragment_column);
-                let target_y = row_y + fragment_local_y;
-                let source = Rect {
-                    x,
-                    y: source_top,
-                    width: geometry.width,
-                    height: extent,
-                };
-                let clip = Rect {
-                    x: target_x,
-                    y: target_y,
-                    width: geometry.width,
-                    height: extent,
-                };
-                let dx = target_x - source.x;
-                let dy = target_y - source_top;
-                let target_source_y = if clipped_bottom > clipped_top {
-                    clipped_top
-                } else {
-                    border_box.y.clamp(source_top, source_bottom)
-                };
-                child_fragments[index].push(BlockFragment {
-                    source,
-                    target: Rect {
-                        x: border_box.x + dx,
-                        y: target_source_y + dy,
-                        width: border_box.width,
-                        height: (clipped_bottom - clipped_top).max(0.0),
-                    },
-                    clip,
-                    owns_paint: true,
-                    clone_content_target: None,
-                });
-                fragment_local_y += extent;
-                source_progress += extent;
-                remaining -= extent;
-                row_has_content = true;
-                maximum_column = maximum_column.max(fragment_column);
-                maximum_bottom = maximum_bottom.max(target_y + extent);
-                if remaining > 0.000_1 && fragment_local_y >= column_height - 0.000_1 {
-                    fragment_column += 1;
-                    fragment_local_y = 0.0;
-                }
-            }
-            advance_fragmented_flow(&mut column, &mut local_y, anchor.height, column_height);
-            source_cursor = (anchor.top + anchor.height).max(source_cursor);
-            if anchor.break_after {
-                column += 1;
-                local_y = 0.0;
-            }
+            place_overflow_fragment_anchor(
+                &mut state,
+                result,
+                index,
+                anchor,
+                x,
+                width,
+                geometry,
+                column_height,
+            );
             continue;
         }
 
-        if anchor.height <= column_height
-            && local_y > 0.0
-            && local_y + anchor.height > column_height
-        {
-            column += 1;
-            local_y = 0.0;
-        }
-        let target_x = column_x(x, width, geometry, column);
-        let target_y = row_y + local_y;
-        let dx = target_x - x;
-        let dy = target_y - anchor.top;
-        match anchor.item {
-            FlowItem::Line(index) => line_moves[index] = (dx, dy),
-            FlowItem::Child(index) => child_moves[index] = Some((dx, dy)),
-            FlowItem::ChildLines { child, start, end } => {
-                for movement in &mut child_line_moves[child][start..end] {
-                    *movement = Some((dx, dy));
-                }
-            }
-            FlowItem::Spanner(_) => unreachable!(),
-        }
-        local_y += anchor.height;
-        row_has_content = true;
-        maximum_column = maximum_column.max(column);
-        maximum_bottom = maximum_bottom.max(target_y + anchor.height);
-        source_cursor = (anchor.top + anchor.height).max(source_cursor);
-        if anchor.break_after {
-            column += 1;
-            local_y = 0.0;
-        }
+        place_ordinary_anchor(&mut state, anchor, x, width, geometry, column_height);
     }
 
-    for (line, &(dx, dy)) in result.lines.iter_mut().zip(&line_moves) {
+    state
+}
+
+/// Starts a fresh column row for a full-width (`column-span: all`) child,
+/// closing out the previous row first if it held any content.
+fn place_spanner_anchor(
+    state: &mut ColumnPlacementState,
+    index: usize,
+    anchor: FlowAnchor,
+    column_height: f32,
+) {
+    if state.row_has_content {
+        state.row_columns.push((state.row_y, state.column));
+        state.row_y += column_height;
+    }
+    state.column = 0;
+    state.local_y = 0.0;
+    state.row_has_content = false;
+    state.spanner_targets.push((index, state.row_y));
+    state.row_y += anchor.height;
+    state.maximum_bottom = state.maximum_bottom.max(state.row_y);
+    state.source_cursor = (anchor.top + anchor.height).max(state.source_cursor);
+}
+
+/// Repeats a `box-decoration-break: clone` child's border/padding at every
+/// column fragment it spans, splitting its content height by the space
+/// remaining in each column.
+#[allow(clippy::too_many_arguments)]
+fn place_clone_fragment_anchor(
+    state: &mut ColumnPlacementState,
+    result: &BlockChildrenResult,
+    index: usize,
+    anchor: FlowAnchor,
+    x: f32,
+    width: f32,
+    geometry: ColumnGeometry,
+    column_height: f32,
+    clone: CloneFragmentation,
+) {
+    advance_columns(
+        &mut state.column,
+        &mut state.local_y,
+        clone.margin_before,
+        column_height,
+    );
+    let child = &result.children[index];
+    let border_width = child.dimensions.content.width
+        + child.dimensions.padding.horizontal()
+        + child.dimensions.border.horizontal();
+    let decoration = clone.decoration();
+    let mut remaining = clone.content_height;
+    let mut source_progress = 0.0f32;
+    let mut first = true;
+    while first || remaining > 0.000_1 {
+        first = false;
+        if state.local_y >= column_height - 0.000_1 {
+            state.column += 1;
+            state.local_y = 0.0;
+        }
+        if column_height - state.local_y <= decoration + 0.000_1 && state.local_y > 0.0 {
+            state.column += 1;
+            state.local_y = 0.0;
+        }
+        let available = (column_height - state.local_y - decoration).max(0.0);
+        let extent = if available > 0.000_1 {
+            remaining.min(available)
+        } else {
+            // An explicit fragmentainer can be smaller than the cloned
+            // decorations themselves. Keep one overflowing fragment
+            // instead of looping without consuming source content.
+            remaining
+        };
+        let target_border_x =
+            column_x(x, width, geometry, state.column) + child.dimensions.margin.left;
+        let target_border_y = state.row_y + state.local_y;
+        let target = Rect {
+            x: target_border_x,
+            y: target_border_y,
+            width: border_width,
+            height: decoration + extent,
+        };
+        let source = Rect {
+            x: child.dimensions.content.x,
+            y: child.dimensions.content.y + source_progress,
+            width: child.dimensions.content.width,
+            height: extent,
+        };
+        state.child_fragments[index].push(BlockFragment {
+            source,
+            target,
+            clip: target,
+            owns_paint: true,
+            clone_content_target: Some(Rect {
+                x: target.x + child.dimensions.border.left + child.dimensions.padding.left,
+                y: target.y + clone.decoration_before,
+                width: child.dimensions.content.width,
+                height: extent,
+            }),
+        });
+        state.local_y += target.height;
+        source_progress += extent;
+        remaining -= extent;
+        state.row_has_content = true;
+        state.maximum_column = state.maximum_column.max(state.column);
+        state.maximum_bottom = state.maximum_bottom.max(target.y + target.height);
+        if remaining > 0.000_1 && state.local_y >= column_height - 0.000_1 {
+            state.column += 1;
+            state.local_y = 0.0;
+        }
+    }
+    advance_columns(
+        &mut state.column,
+        &mut state.local_y,
+        clone.margin_after,
+        column_height,
+    );
+    state.source_cursor = (anchor.top + anchor.height).max(state.source_cursor);
+    if anchor.break_after {
+        state.column += 1;
+        state.local_y = 0.0;
+    }
+}
+
+/// Splits the visible overflow of a continuously fragmentable child across
+/// as many column fragments as its paint extent needs, clipping each
+/// fragment to the child's own border box.
+#[allow(clippy::too_many_arguments)]
+fn place_overflow_fragment_anchor(
+    state: &mut ColumnPlacementState,
+    result: &BlockChildrenResult,
+    index: usize,
+    anchor: FlowAnchor,
+    x: f32,
+    width: f32,
+    geometry: ColumnGeometry,
+    column_height: f32,
+) {
+    let child = &result.children[index];
+    let border_box = Rect {
+        x: child.dimensions.content.x
+            - child.dimensions.padding.left
+            - child.dimensions.border.left,
+        y: child.dimensions.content.y - child.dimensions.padding.top - child.dimensions.border.top,
+        width: child.dimensions.content.width
+            + child.dimensions.padding.horizontal()
+            + child.dimensions.border.horizontal(),
+        height: child.dimensions.content.height
+            + child.dimensions.padding.vertical()
+            + child.dimensions.border.vertical(),
+    };
+    let paint_extent = if child.overflow.clips_y() {
+        anchor.height
+    } else {
+        let overflow_bottom = child.dimensions.content.y - child.dimensions.padding.top
+            + child.scrollable_overflow().1;
+        (overflow_bottom - anchor.top).max(anchor.height)
+    };
+    let mut fragment_column = state.column;
+    let mut fragment_local_y = state.local_y;
+    let mut remaining = paint_extent;
+    let mut source_progress = 0.0f32;
+    while remaining > 0.000_1 {
+        if fragment_local_y >= column_height - 0.000_1 {
+            fragment_column += 1;
+            fragment_local_y = 0.0;
+        }
+        let available = (column_height - fragment_local_y).max(0.0);
+        if available <= 0.000_1 {
+            fragment_column += 1;
+            fragment_local_y = 0.0;
+            continue;
+        }
+        let extent = remaining.min(available);
+        let source_top = anchor.top + source_progress;
+        let source_bottom = source_top + extent;
+        let clipped_top = source_top.max(border_box.y);
+        let clipped_bottom = source_bottom.min(border_box.y + border_box.height);
+        let target_x = column_x(x, width, geometry, fragment_column);
+        let target_y = state.row_y + fragment_local_y;
+        let source = Rect {
+            x,
+            y: source_top,
+            width: geometry.width,
+            height: extent,
+        };
+        let clip = Rect {
+            x: target_x,
+            y: target_y,
+            width: geometry.width,
+            height: extent,
+        };
+        let dx = target_x - source.x;
+        let dy = target_y - source_top;
+        let target_source_y = if clipped_bottom > clipped_top {
+            clipped_top
+        } else {
+            border_box.y.clamp(source_top, source_bottom)
+        };
+        state.child_fragments[index].push(BlockFragment {
+            source,
+            target: Rect {
+                x: border_box.x + dx,
+                y: target_source_y + dy,
+                width: border_box.width,
+                height: (clipped_bottom - clipped_top).max(0.0),
+            },
+            clip,
+            owns_paint: true,
+            clone_content_target: None,
+        });
+        fragment_local_y += extent;
+        source_progress += extent;
+        remaining -= extent;
+        state.row_has_content = true;
+        state.maximum_column = state.maximum_column.max(fragment_column);
+        state.maximum_bottom = state.maximum_bottom.max(target_y + extent);
+        if remaining > 0.000_1 && fragment_local_y >= column_height - 0.000_1 {
+            fragment_column += 1;
+            fragment_local_y = 0.0;
+        }
+    }
+    advance_fragmented_flow(
+        &mut state.column,
+        &mut state.local_y,
+        anchor.height,
+        column_height,
+    );
+    state.source_cursor = (anchor.top + anchor.height).max(state.source_cursor);
+    if anchor.break_after {
+        state.column += 1;
+        state.local_y = 0.0;
+    }
+}
+
+/// Places a line, ordinary child, or fragmented child-line group as a
+/// single atomic unit within the current column, wrapping to the next
+/// column first if it would not fit in the space remaining.
+fn place_ordinary_anchor(
+    state: &mut ColumnPlacementState,
+    anchor: FlowAnchor,
+    x: f32,
+    width: f32,
+    geometry: ColumnGeometry,
+    column_height: f32,
+) {
+    if anchor.height <= column_height
+        && state.local_y > 0.0
+        && state.local_y + anchor.height > column_height
+    {
+        state.column += 1;
+        state.local_y = 0.0;
+    }
+    let target_x = column_x(x, width, geometry, state.column);
+    let target_y = state.row_y + state.local_y;
+    let dx = target_x - x;
+    let dy = target_y - anchor.top;
+    match anchor.item {
+        FlowItem::Line(index) => state.line_moves[index] = (dx, dy),
+        FlowItem::Child(index) => state.child_moves[index] = Some((dx, dy)),
+        FlowItem::ChildLines { child, start, end } => {
+            for movement in &mut state.child_line_moves[child][start..end] {
+                *movement = Some((dx, dy));
+            }
+        }
+        FlowItem::Spanner(_) => unreachable!(),
+    }
+    state.local_y += anchor.height;
+    state.row_has_content = true;
+    state.maximum_column = state.maximum_column.max(state.column);
+    state.maximum_bottom = state.maximum_bottom.max(target_y + anchor.height);
+    state.source_cursor = (anchor.top + anchor.height).max(state.source_cursor);
+    if anchor.break_after {
+        state.column += 1;
+        state.local_y = 0.0;
+    }
+}
+
+/// Moves lines and children to their assigned column positions, installs
+/// the per-child block fragments computed above, and shrinks fragmented
+/// children's reported height to one column's worth of content.
+fn apply_column_placement(
+    result: &mut BlockChildrenResult,
+    state: &mut ColumnPlacementState,
+    resolver: &mut StyleResolver,
+    atomic_line_by_node: &HashMap<usize, usize>,
+    fragmented_children: &HashSet<usize>,
+    column_height: f32,
+) {
+    for (line, &(dx, dy)) in result.lines.iter_mut().zip(&state.line_moves) {
         translate_line(line, dx, dy);
     }
     for (index, child) in result.children.iter_mut().enumerate() {
-        if !child_fragments[index].is_empty() {
-            child.block_fragments = std::mem::take(&mut child_fragments[index]);
+        if !state.child_fragments[index].is_empty() {
+            child.block_fragments = std::mem::take(&mut state.child_fragments[index]);
             let owners = child.block_fragments.clone();
             propagate_descendant_fragments(&mut child.children, &owners);
         } else if fragmented_children.contains(&index) {
             let mut atomic_moves = HashMap::new();
             for (line_index, line) in child.lines.iter_mut().enumerate() {
-                let movement = child_line_moves[index][line_index].unwrap_or((0.0, 0.0));
+                let movement = state.child_line_moves[index][line_index].unwrap_or((0.0, 0.0));
                 for fragment in &line.fragments {
                     if matches!(fragment.content, InlineFragmentContent::AtomicInline(_)) {
                         atomic_moves.insert(fragment.node.identity(), movement);
@@ -680,37 +917,59 @@ pub(super) fn layout_multicol_children(
                 .height
                 .min((column_height - decorations).max(0.0));
         } else if let Some(&line_index) = atomic_line_by_node.get(&child.node.identity()) {
-            let (dx, dy) = line_moves[line_index];
+            let (dx, dy) = state.line_moves[line_index];
             translate_layout_box(child, dx, dy, resolver);
-        } else if let Some((dx, dy)) = child_moves[index] {
+        } else if let Some((dx, dy)) = state.child_moves[index] {
             translate_layout_box(child, dx, dy, resolver);
         }
     }
+}
 
-    // A spanning child establishes a fresh column row. It was already laid out
-    // at the full multicol width before balancing, so only its final row
-    // position changes here.
-    for (index, target_y) in spanner_targets {
+/// A spanning child establishes a fresh column row. It was already laid out
+/// at the full multicol width before balancing, so only its final row
+/// position changes here.
+fn position_spanning_children(
+    result: &mut BlockChildrenResult,
+    state: &mut ColumnPlacementState,
+    x: f32,
+    resolver: &mut StyleResolver,
+) {
+    for (index, target_y) in std::mem::take(&mut state.spanner_targets) {
         let spanner = &mut result.children[index];
         translate_layout_box_to_outer(spanner, x, target_y, resolver);
-        maximum_bottom = maximum_bottom.max(target_y + spanner.total_height());
+        state.maximum_bottom = state.maximum_bottom.max(target_y + spanner.total_height());
     }
+}
 
-    let balanced_bottom = if row_has_content {
-        row_columns.push((row_y, column));
-        row_y + column_height
+/// Resolves the container's final block size (explicit height, or the
+/// balanced column extent) and builds the column-rule rectangles and
+/// scrollable overflow rect for the finished layout.
+#[allow(clippy::too_many_arguments)]
+fn finalize_multicol_layout(
+    result: &mut BlockChildrenResult,
+    mut state: ColumnPlacementState,
+    geometry: ColumnGeometry,
+    explicit_height: Option<f32>,
+    x: f32,
+    y: f32,
+    width: f32,
+    column_height: f32,
+) {
+    let balanced_bottom = if state.row_has_content {
+        state.row_columns.push((state.row_y, state.column));
+        state.row_y + column_height
     } else {
-        row_y
+        state.row_y
     };
     result.cursor_y = explicit_height
         .map(|height| y + height)
-        .unwrap_or_else(|| balanced_bottom.max(maximum_bottom));
+        .unwrap_or_else(|| balanced_bottom.max(state.maximum_bottom));
     result.float_bottom = result.cursor_y;
-    let used_column_count = geometry.count.max(maximum_column + 1);
+    let used_column_count = geometry.count.max(state.maximum_column + 1);
     let overflow_width = geometry.width * used_column_count as f32
         + geometry.gap * used_column_count.saturating_sub(1) as f32;
     let mut rules = Vec::new();
-    for (row_top, last_column) in row_columns {
+    for (row_top, last_column) in state.row_columns {
         let columns = geometry.count.max(last_column + 1);
         for boundary in 1..columns {
             let offset = boundary as f32 * geometry.width + (boundary as f32 - 0.5) * geometry.gap;
@@ -736,7 +995,6 @@ pub(super) fn layout_multicol_children(
         },
         rules,
     });
-    result
 }
 
 #[allow(clippy::too_many_arguments)]
