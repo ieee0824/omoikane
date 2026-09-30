@@ -9710,34 +9710,9 @@ fn apply_ua_defaults(
     }
 
     match tag.as_str() {
-        "iframe" => {
-            // HTML's rendering defaults give the replaced element a 2px inset border.
-            for side in ["top", "right", "bottom", "left"] {
-                properties
-                    .entry(format!("border-{side}-style"))
-                    .or_insert(ComputedValue::Keyword("inset".to_string()));
-                properties
-                    .entry(format!("border-{side}-width"))
-                    .or_insert(ComputedValue::Px(2.0));
-            }
-        }
-        "video" | "canvas" | "picture" => {
-            properties
-                .entry("display".to_string())
-                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
-        }
-        "audio" => {
-            if node.get_attribute("controls").is_none() {
-                properties.insert(
-                    "display".to_string(),
-                    ComputedValue::Keyword("none".to_string()),
-                );
-            } else {
-                properties
-                    .entry("display".to_string())
-                    .or_insert(ComputedValue::Keyword("inline-block".to_string()));
-            }
-        }
+        "iframe" => apply_iframe_ua_defaults(properties),
+        "video" | "canvas" | "picture" => apply_video_like_ua_defaults(properties),
+        "audio" => apply_audio_ua_defaults(node, properties),
         "source" => {
             properties.insert(
                 "display".to_string(),
@@ -9754,194 +9729,23 @@ fn apply_ua_defaults(
                 .entry("display".to_string())
                 .or_insert(ComputedValue::Keyword("list-item".to_string()));
         }
-        "dialog" => {
-            if node.get_attribute("open").is_none() {
-                properties.insert(
-                    "display".to_string(),
-                    ComputedValue::Keyword("none".to_string()),
-                );
-            } else {
-                properties
-                    .entry("display".to_string())
-                    .or_insert(ComputedValue::Keyword("block".to_string()));
-            }
-        }
+        "dialog" => apply_dialog_ua_defaults(node, properties),
         "time" => {
             properties
                 .entry("display".to_string())
                 .or_insert(ComputedValue::Keyword("inline".to_string()));
         }
-        "progress" | "meter" => {
-            properties
-                .entry("display".to_string())
-                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
-            properties
-                .entry("width".to_string())
-                .or_insert(ComputedValue::Px(160.0));
-            properties
-                .entry("height".to_string())
-                .or_insert(ComputedValue::Px(16.0));
-            properties
-                .entry("background-color".to_string())
-                .or_insert(ComputedValue::Color("#e6e6e6".to_string()));
-            for side in ["top", "right", "bottom", "left"] {
-                properties
-                    .entry(format!("border-{side}-style"))
-                    .or_insert(ComputedValue::Keyword("solid".to_string()));
-                properties
-                    .entry(format!("border-{side}-width"))
-                    .or_insert(ComputedValue::Px(1.0));
-                properties
-                    .entry(format!("border-{side}-color"))
-                    .or_insert(ComputedValue::Color("#767676".to_string()));
-            }
-        }
+        "progress" | "meter" => apply_progress_or_meter_ua_defaults(properties),
         "form" => {
             properties
                 .entry("display".to_string())
                 .or_insert(ComputedValue::Keyword("block".to_string()));
         }
-        "input" => {
-            let input_type = node
-                .get_attribute("type")
-                .unwrap_or_else(|| "text".to_string())
-                .trim()
-                .to_ascii_lowercase();
-            if input_type == "hidden" {
-                properties.insert(
-                    "display".to_string(),
-                    ComputedValue::Keyword("none".to_string()),
-                );
-            } else {
-                properties
-                    .entry("display".to_string())
-                    .or_insert(ComputedValue::Keyword("inline-block".to_string()));
-                properties
-                    .entry("background-color".to_string())
-                    .or_insert(ComputedValue::Color("white".to_string()));
-                for side in ["top", "right", "bottom", "left"] {
-                    properties
-                        .entry(format!("border-{side}-style"))
-                        .or_insert(ComputedValue::Keyword("solid".to_string()));
-                    properties
-                        .entry(format!("border-{side}-width"))
-                        .or_insert(ComputedValue::Px(2.0));
-                    properties
-                        .entry(format!("border-{side}-color"))
-                        .or_insert(ComputedValue::Color("#767676".to_string()));
-                }
-                properties
-                    .entry("padding-top".to_string())
-                    .or_insert(ComputedValue::Px(1.0));
-                properties
-                    .entry("padding-right".to_string())
-                    .or_insert(ComputedValue::Px(2.0));
-                properties
-                    .entry("padding-bottom".to_string())
-                    .or_insert(ComputedValue::Px(1.0));
-                properties
-                    .entry("padding-left".to_string())
-                    .or_insert(ComputedValue::Px(2.0));
-            }
-        }
-        "button" => {
-            properties
-                .entry("display".to_string())
-                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
-            properties
-                .entry("background-color".to_string())
-                .or_insert(ComputedValue::Color("#efefef".to_string()));
-            properties
-                .entry("text-align".to_string())
-                .or_insert(ComputedValue::Keyword("center".to_string()));
-            for side in ["top", "right", "bottom", "left"] {
-                properties
-                    .entry(format!("border-{side}-style"))
-                    .or_insert(ComputedValue::Keyword("solid".to_string()));
-                properties
-                    .entry(format!("border-{side}-width"))
-                    .or_insert(ComputedValue::Px(2.0));
-                properties
-                    .entry(format!("border-{side}-color"))
-                    .or_insert(ComputedValue::Color("#767676".to_string()));
-            }
-            properties
-                .entry("padding-top".to_string())
-                .or_insert(ComputedValue::Px(1.0));
-            properties
-                .entry("padding-right".to_string())
-                .or_insert(ComputedValue::Px(6.0));
-            properties
-                .entry("padding-bottom".to_string())
-                .or_insert(ComputedValue::Px(1.0));
-            properties
-                .entry("padding-left".to_string())
-                .or_insert(ComputedValue::Px(6.0));
-        }
-        "textarea" => {
-            properties
-                .entry("display".to_string())
-                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
-            properties
-                .entry("background-color".to_string())
-                .or_insert(ComputedValue::Color("white".to_string()));
-            for side in ["top", "right", "bottom", "left"] {
-                properties
-                    .entry(format!("border-{side}-style"))
-                    .or_insert(ComputedValue::Keyword("solid".to_string()));
-                properties
-                    .entry(format!("border-{side}-width"))
-                    .or_insert(ComputedValue::Px(1.0));
-                properties
-                    .entry(format!("border-{side}-color"))
-                    .or_insert(ComputedValue::Color("#767676".to_string()));
-            }
-            for side in ["top", "right", "bottom", "left"] {
-                properties
-                    .entry(format!("padding-{side}"))
-                    .or_insert(ComputedValue::Px(2.0));
-            }
-        }
-        "select" => {
-            properties
-                .entry("display".to_string())
-                .or_insert(ComputedValue::Keyword("inline-block".to_string()));
-            properties
-                .entry("background-color".to_string())
-                .or_insert(ComputedValue::Color("#efefef".to_string()));
-            for side in ["top", "right", "bottom", "left"] {
-                properties
-                    .entry(format!("border-{side}-style"))
-                    .or_insert(ComputedValue::Keyword("solid".to_string()));
-                properties
-                    .entry(format!("border-{side}-width"))
-                    .or_insert(ComputedValue::Px(1.0));
-                properties
-                    .entry(format!("border-{side}-color"))
-                    .or_insert(ComputedValue::Color("#767676".to_string()));
-            }
-            properties
-                .entry("padding-top".to_string())
-                .or_insert(ComputedValue::Px(1.0));
-            properties
-                .entry("padding-right".to_string())
-                .or_insert(ComputedValue::Px(4.0));
-            properties
-                .entry("padding-bottom".to_string())
-                .or_insert(ComputedValue::Px(1.0));
-            properties
-                .entry("padding-left".to_string())
-                .or_insert(ComputedValue::Px(4.0));
-        }
-        "p" => {
-            let em = parent_font_size;
-            properties
-                .entry("margin-top".to_string())
-                .or_insert(ComputedValue::Px(em));
-            properties
-                .entry("margin-bottom".to_string())
-                .or_insert(ComputedValue::Px(em));
-        }
+        "input" => apply_input_ua_defaults(node, properties),
+        "button" => apply_button_ua_defaults(properties),
+        "textarea" => apply_textarea_ua_defaults(properties),
+        "select" => apply_select_ua_defaults(properties),
+        "p" => apply_p_ua_defaults(properties, parent_font_size),
         "b" | "strong" => {
             properties
                 .entry("font-weight".to_string())
@@ -9952,92 +9756,16 @@ fn apply_ua_defaults(
                 .entry("font-style".to_string())
                 .or_insert(ComputedValue::Keyword("italic".to_string()));
         }
-        "hr" => {
-            properties
-                .entry("border-top-style".to_string())
-                .or_insert(ComputedValue::Keyword("inset".to_string()));
-            properties
-                .entry("border-top-width".to_string())
-                .or_insert(ComputedValue::Px(1.0));
-            let half_em = parent_font_size * 0.5;
-            properties
-                .entry("margin-top".to_string())
-                .or_insert(ComputedValue::Px(half_em));
-            properties
-                .entry("margin-bottom".to_string())
-                .or_insert(ComputedValue::Px(half_em));
-        }
-        "ul" => {
-            properties
-                .entry("list-style-type".to_string())
-                .or_insert(ComputedValue::Keyword("disc".to_string()));
-            properties
-                .entry("list-style-position".to_string())
-                .or_insert(ComputedValue::Keyword("outside".to_string()));
-            let em = parent_font_size;
-            properties
-                .entry("margin-top".to_string())
-                .or_insert(ComputedValue::Px(em));
-            properties
-                .entry("margin-bottom".to_string())
-                .or_insert(ComputedValue::Px(em));
-            properties
-                .entry("padding-left".to_string())
-                .or_insert(ComputedValue::Px(em * 2.5));
-        }
-        "ol" => {
-            properties
-                .entry("list-style-type".to_string())
-                .or_insert(ComputedValue::Keyword("decimal".to_string()));
-            properties
-                .entry("list-style-position".to_string())
-                .or_insert(ComputedValue::Keyword("outside".to_string()));
-            let em = parent_font_size;
-            properties
-                .entry("margin-top".to_string())
-                .or_insert(ComputedValue::Px(em));
-            properties
-                .entry("margin-bottom".to_string())
-                .or_insert(ComputedValue::Px(em));
-            properties
-                .entry("padding-left".to_string())
-                .or_insert(ComputedValue::Px(em * 2.5));
-        }
+        "hr" => apply_hr_ua_defaults(properties, parent_font_size),
+        "ul" => apply_list_ua_defaults(properties, parent_font_size, "disc"),
+        "ol" => apply_list_ua_defaults(properties, parent_font_size, "decimal"),
         "li" => {
             properties
                 .entry("display".to_string())
                 .or_insert(ComputedValue::Keyword("list-item".to_string()));
         }
-        "blockquote" => {
-            let em = parent_font_size;
-            properties
-                .entry("margin-top".to_string())
-                .or_insert(ComputedValue::Px(em));
-            properties
-                .entry("margin-bottom".to_string())
-                .or_insert(ComputedValue::Px(em));
-            properties
-                .entry("margin-left".to_string())
-                .or_insert(ComputedValue::Px(40.0));
-            properties
-                .entry("margin-right".to_string())
-                .or_insert(ComputedValue::Px(40.0));
-        }
-        "pre" => {
-            properties
-                .entry("font-family".to_string())
-                .or_insert(ComputedValue::Keyword("monospace".to_string()));
-            properties
-                .entry("white-space".to_string())
-                .or_insert(ComputedValue::Keyword("pre".to_string()));
-            let em = parent_font_size;
-            properties
-                .entry("margin-top".to_string())
-                .or_insert(ComputedValue::Px(em));
-            properties
-                .entry("margin-bottom".to_string())
-                .or_insert(ComputedValue::Px(em));
-        }
+        "blockquote" => apply_blockquote_ua_defaults(properties, parent_font_size),
+        "pre" => apply_pre_ua_defaults(properties, parent_font_size),
         "code" | "kbd" | "samp" | "tt" => {
             properties
                 .entry("font-family".to_string())
@@ -10051,17 +9779,7 @@ fn apply_ua_defaults(
                 .entry("margin-left".to_string())
                 .or_insert(ComputedValue::Px(40.0));
         }
-        "th" => {
-            properties
-                .entry("font-weight".to_string())
-                .or_insert(ComputedValue::Keyword("bold".to_string()));
-            properties
-                .entry("text-align".to_string())
-                .or_insert(ComputedValue::Keyword("center".to_string()));
-            properties
-                .entry("display".to_string())
-                .or_insert(ComputedValue::Keyword("table-cell".to_string()));
-        }
+        "th" => apply_th_ua_defaults(properties),
         "td" => {
             properties
                 .entry("display".to_string())
@@ -10075,39 +9793,9 @@ fn apply_ua_defaults(
                 .entry("color".to_string())
                 .or_insert(ComputedValue::Color("#0000ee".to_string()));
         }
-        "sub" => {
-            properties
-                .entry("display".to_string())
-                .or_insert(ComputedValue::Keyword("inline".to_string()));
-            properties
-                .entry("vertical-align".to_string())
-                .or_insert(ComputedValue::Keyword("sub".to_string()));
-            let smaller = parent_font_size * 0.833;
-            properties
-                .entry("font-size".to_string())
-                .or_insert(ComputedValue::Px(smaller));
-        }
-        "sup" => {
-            properties
-                .entry("display".to_string())
-                .or_insert(ComputedValue::Keyword("inline".to_string()));
-            properties
-                .entry("vertical-align".to_string())
-                .or_insert(ComputedValue::Keyword("super".to_string()));
-            let smaller = parent_font_size * 0.833;
-            properties
-                .entry("font-size".to_string())
-                .or_insert(ComputedValue::Px(smaller));
-        }
-        "small" => {
-            properties
-                .entry("display".to_string())
-                .or_insert(ComputedValue::Keyword("inline".to_string()));
-            let smaller = parent_font_size * 0.833;
-            properties
-                .entry("font-size".to_string())
-                .or_insert(ComputedValue::Px(smaller));
-        }
+        "sub" => apply_scaled_inline_ua_defaults(properties, parent_font_size, Some("sub")),
+        "sup" => apply_scaled_inline_ua_defaults(properties, parent_font_size, Some("super")),
+        "small" => apply_scaled_inline_ua_defaults(properties, parent_font_size, None),
         "center" => {
             properties
                 .entry("text-align".to_string())
@@ -10140,6 +9828,318 @@ fn apply_ua_defaults(
         }
         _ => {}
     }
+}
+
+/// Applies a uniform border (same style/width, and optionally the same
+/// color) to all four sides. Several UA default blocks below repeat this
+/// per-side loop for their tag's default border.
+fn apply_uniform_border(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    style: &'static str,
+    width: f32,
+    color: Option<&'static str>,
+) {
+    for side in ["top", "right", "bottom", "left"] {
+        properties
+            .entry(format!("border-{side}-style"))
+            .or_insert(ComputedValue::Keyword(style.to_string()));
+        properties
+            .entry(format!("border-{side}-width"))
+            .or_insert(ComputedValue::Px(width));
+        if let Some(color) = color {
+            properties
+                .entry(format!("border-{side}-color"))
+                .or_insert(ComputedValue::Color(color.to_string()));
+        }
+    }
+}
+
+/// `<iframe>`'s UA default: HTML's rendering defaults give the replaced
+/// element a 2px inset border.
+fn apply_iframe_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+    apply_uniform_border(properties, "inset", 2.0, None);
+}
+
+/// `<video>`/`<canvas>`/`<picture>`'s shared UA default: `inline-block`.
+fn apply_video_like_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+    properties
+        .entry("display".to_string())
+        .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+}
+
+/// `<audio>`'s UA default: hidden unless it has a `controls` attribute.
+fn apply_audio_ua_defaults(node: &NodeHandle, properties: &mut BTreeMap<String, ComputedValue>) {
+    if node.get_attribute("controls").is_none() {
+        properties.insert(
+            "display".to_string(),
+            ComputedValue::Keyword("none".to_string()),
+        );
+    } else {
+        properties
+            .entry("display".to_string())
+            .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    }
+}
+
+/// `<dialog>`'s UA default: hidden unless it has an `open` attribute.
+fn apply_dialog_ua_defaults(node: &NodeHandle, properties: &mut BTreeMap<String, ComputedValue>) {
+    if node.get_attribute("open").is_none() {
+        properties.insert(
+            "display".to_string(),
+            ComputedValue::Keyword("none".to_string()),
+        );
+    } else {
+        properties
+            .entry("display".to_string())
+            .or_insert(ComputedValue::Keyword("block".to_string()));
+    }
+}
+
+/// `<progress>`/`<meter>`'s shared UA default: a fixed-size inline-block box
+/// with a light gray fill and a thin solid border.
+fn apply_progress_or_meter_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+    properties
+        .entry("display".to_string())
+        .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    properties
+        .entry("width".to_string())
+        .or_insert(ComputedValue::Px(160.0));
+    properties
+        .entry("height".to_string())
+        .or_insert(ComputedValue::Px(16.0));
+    properties
+        .entry("background-color".to_string())
+        .or_insert(ComputedValue::Color("#e6e6e6".to_string()));
+    apply_uniform_border(properties, "solid", 1.0, Some("#767676"));
+}
+
+/// `<input>`'s UA default: `type=hidden` is hidden; other types render as a
+/// bordered, padded inline-block box.
+fn apply_input_ua_defaults(node: &NodeHandle, properties: &mut BTreeMap<String, ComputedValue>) {
+    let input_type = node
+        .get_attribute("type")
+        .unwrap_or_else(|| "text".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    if input_type == "hidden" {
+        properties.insert(
+            "display".to_string(),
+            ComputedValue::Keyword("none".to_string()),
+        );
+        return;
+    }
+    properties
+        .entry("display".to_string())
+        .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    properties
+        .entry("background-color".to_string())
+        .or_insert(ComputedValue::Color("white".to_string()));
+    apply_uniform_border(properties, "solid", 2.0, Some("#767676"));
+    properties
+        .entry("padding-top".to_string())
+        .or_insert(ComputedValue::Px(1.0));
+    properties
+        .entry("padding-right".to_string())
+        .or_insert(ComputedValue::Px(2.0));
+    properties
+        .entry("padding-bottom".to_string())
+        .or_insert(ComputedValue::Px(1.0));
+    properties
+        .entry("padding-left".to_string())
+        .or_insert(ComputedValue::Px(2.0));
+}
+
+/// `<button>`'s UA default: a centered, bordered, padded inline-block box.
+fn apply_button_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+    properties
+        .entry("display".to_string())
+        .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    properties
+        .entry("background-color".to_string())
+        .or_insert(ComputedValue::Color("#efefef".to_string()));
+    properties
+        .entry("text-align".to_string())
+        .or_insert(ComputedValue::Keyword("center".to_string()));
+    apply_uniform_border(properties, "solid", 2.0, Some("#767676"));
+    properties
+        .entry("padding-top".to_string())
+        .or_insert(ComputedValue::Px(1.0));
+    properties
+        .entry("padding-right".to_string())
+        .or_insert(ComputedValue::Px(6.0));
+    properties
+        .entry("padding-bottom".to_string())
+        .or_insert(ComputedValue::Px(1.0));
+    properties
+        .entry("padding-left".to_string())
+        .or_insert(ComputedValue::Px(6.0));
+}
+
+/// `<textarea>`'s UA default: a bordered, uniformly padded inline-block box.
+fn apply_textarea_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+    properties
+        .entry("display".to_string())
+        .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    properties
+        .entry("background-color".to_string())
+        .or_insert(ComputedValue::Color("white".to_string()));
+    apply_uniform_border(properties, "solid", 1.0, Some("#767676"));
+    for side in ["top", "right", "bottom", "left"] {
+        properties
+            .entry(format!("padding-{side}"))
+            .or_insert(ComputedValue::Px(2.0));
+    }
+}
+
+/// `<select>`'s UA default: a bordered, padded inline-block box.
+fn apply_select_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+    properties
+        .entry("display".to_string())
+        .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    properties
+        .entry("background-color".to_string())
+        .or_insert(ComputedValue::Color("#efefef".to_string()));
+    apply_uniform_border(properties, "solid", 1.0, Some("#767676"));
+    properties
+        .entry("padding-top".to_string())
+        .or_insert(ComputedValue::Px(1.0));
+    properties
+        .entry("padding-right".to_string())
+        .or_insert(ComputedValue::Px(4.0));
+    properties
+        .entry("padding-bottom".to_string())
+        .or_insert(ComputedValue::Px(1.0));
+    properties
+        .entry("padding-left".to_string())
+        .or_insert(ComputedValue::Px(4.0));
+}
+
+/// `<p>`'s UA default: one line of vertical margin on each side.
+fn apply_p_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>, parent_font_size: f32) {
+    let em = parent_font_size;
+    properties
+        .entry("margin-top".to_string())
+        .or_insert(ComputedValue::Px(em));
+    properties
+        .entry("margin-bottom".to_string())
+        .or_insert(ComputedValue::Px(em));
+}
+
+/// `<hr>`'s UA default: an inset top border and half-line vertical margins.
+fn apply_hr_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>, parent_font_size: f32) {
+    properties
+        .entry("border-top-style".to_string())
+        .or_insert(ComputedValue::Keyword("inset".to_string()));
+    properties
+        .entry("border-top-width".to_string())
+        .or_insert(ComputedValue::Px(1.0));
+    let half_em = parent_font_size * 0.5;
+    properties
+        .entry("margin-top".to_string())
+        .or_insert(ComputedValue::Px(half_em));
+    properties
+        .entry("margin-bottom".to_string())
+        .or_insert(ComputedValue::Px(half_em));
+}
+
+/// `<ul>`/`<ol>`'s shared UA default: a marker style/position, one line of
+/// vertical margin, and an indented left padding. `list_style_type` is the
+/// only difference between the two tags (`disc` vs. `decimal`).
+fn apply_list_ua_defaults(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    parent_font_size: f32,
+    list_style_type: &'static str,
+) {
+    properties
+        .entry("list-style-type".to_string())
+        .or_insert(ComputedValue::Keyword(list_style_type.to_string()));
+    properties
+        .entry("list-style-position".to_string())
+        .or_insert(ComputedValue::Keyword("outside".to_string()));
+    let em = parent_font_size;
+    properties
+        .entry("margin-top".to_string())
+        .or_insert(ComputedValue::Px(em));
+    properties
+        .entry("margin-bottom".to_string())
+        .or_insert(ComputedValue::Px(em));
+    properties
+        .entry("padding-left".to_string())
+        .or_insert(ComputedValue::Px(em * 2.5));
+}
+
+/// `<blockquote>`'s UA default: one line of vertical margin and a 40px
+/// horizontal inset on each side.
+fn apply_blockquote_ua_defaults(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    parent_font_size: f32,
+) {
+    let em = parent_font_size;
+    properties
+        .entry("margin-top".to_string())
+        .or_insert(ComputedValue::Px(em));
+    properties
+        .entry("margin-bottom".to_string())
+        .or_insert(ComputedValue::Px(em));
+    properties
+        .entry("margin-left".to_string())
+        .or_insert(ComputedValue::Px(40.0));
+    properties
+        .entry("margin-right".to_string())
+        .or_insert(ComputedValue::Px(40.0));
+}
+
+/// `<pre>`'s UA default: a monospace, whitespace-preserving block with one
+/// line of vertical margin.
+fn apply_pre_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>, parent_font_size: f32) {
+    properties
+        .entry("font-family".to_string())
+        .or_insert(ComputedValue::Keyword("monospace".to_string()));
+    properties
+        .entry("white-space".to_string())
+        .or_insert(ComputedValue::Keyword("pre".to_string()));
+    let em = parent_font_size;
+    properties
+        .entry("margin-top".to_string())
+        .or_insert(ComputedValue::Px(em));
+    properties
+        .entry("margin-bottom".to_string())
+        .or_insert(ComputedValue::Px(em));
+}
+
+/// `<th>`'s UA default: bold, centered table-cell text.
+fn apply_th_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+    properties
+        .entry("font-weight".to_string())
+        .or_insert(ComputedValue::Keyword("bold".to_string()));
+    properties
+        .entry("text-align".to_string())
+        .or_insert(ComputedValue::Keyword("center".to_string()));
+    properties
+        .entry("display".to_string())
+        .or_insert(ComputedValue::Keyword("table-cell".to_string()));
+}
+
+/// `<sub>`/`<sup>`/`<small>`'s shared UA default: all three render inline at
+/// 0.833x the parent font size; `sub`/`sup` additionally set
+/// `vertical-align` (`vertical_align` is `None` for `small`).
+fn apply_scaled_inline_ua_defaults(
+    properties: &mut BTreeMap<String, ComputedValue>,
+    parent_font_size: f32,
+    vertical_align: Option<&'static str>,
+) {
+    properties
+        .entry("display".to_string())
+        .or_insert(ComputedValue::Keyword("inline".to_string()));
+    if let Some(vertical_align) = vertical_align {
+        properties
+            .entry("vertical-align".to_string())
+            .or_insert(ComputedValue::Keyword(vertical_align.to_string()));
+    }
+    let smaller = parent_font_size * 0.833;
+    properties
+        .entry("font-size".to_string())
+        .or_insert(ComputedValue::Px(smaller));
 }
 
 fn collect_builtin_ua_candidates(
@@ -10190,93 +10190,166 @@ fn collect_builtin_ua_candidates(
     }
 }
 
-fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
-    for property in ["counter-reset", "counter-increment"] {
-        properties
-            .entry(property.to_string())
-            .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
+/// A property's CSS initial value, expressed so it can live in a `static`
+/// table. [`InitialValue::resolve`] converts each variant into the concrete
+/// [`ComputedValue`] `apply_initial_values` inserts when the cascade left a
+/// property unset.
+enum InitialValue {
+    /// A CSS keyword, e.g. `none` or `auto`.
+    Keyword(&'static str),
+    /// A pixel length.
+    Px(f32),
+    /// A plain number, e.g. `orphans`/`widows`.
+    Number(f32),
+    /// A named color.
+    Color(&'static str),
+    /// A `<position>` whose x/y components are both percentages.
+    Position(f32, f32),
+    /// The initial value is `currentcolor`, resolved against the element's
+    /// already-computed `color` (itself possibly just defaulted). Rows with
+    /// this variant are applied in a second pass, once `color` is settled.
+    CurrentColor,
+}
+
+impl InitialValue {
+    /// Converts a non-[`InitialValue::CurrentColor`] row into a
+    /// [`ComputedValue`]. Callers filter `CurrentColor` out beforehand and
+    /// resolve it separately with the element's computed `color`.
+    fn resolve(&self) -> ComputedValue {
+        match self {
+            InitialValue::Keyword(keyword) => ComputedValue::Keyword((*keyword).to_string()),
+            InitialValue::Px(px) => ComputedValue::Px(*px),
+            InitialValue::Number(n) => ComputedValue::Number(*n),
+            InitialValue::Color(color) => ComputedValue::Color((*color).to_string()),
+            InitialValue::Position(x, y) => ComputedValue::Position {
+                x: Box::new(ComputedValue::Percentage(*x)),
+                y: Box::new(ComputedValue::Percentage(*y)),
+            },
+            InitialValue::CurrentColor => {
+                unreachable!("CurrentColor rows are resolved separately, see apply_initial_values")
+            }
+        }
     }
-    properties
-        .entry("shape-outside".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("shape-margin".to_string())
-        .or_insert(ComputedValue::Px(0.0));
-    properties
-        .entry("background-clip".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("border-box".to_string()));
-    properties
-        .entry("background-color".to_string())
-        .or_insert_with(|| ComputedValue::Color("transparent".to_string()));
-    properties
-        .entry("background-origin".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("padding-box".to_string()));
-    properties
-        .entry("color".to_string())
-        .or_insert_with(|| ComputedValue::Color("black".to_string()));
-    properties
-        .entry("font-size".to_string())
-        .or_insert_with(|| ComputedValue::Px(16.0));
-    properties
-        .entry("direction".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("ltr".to_string()));
-    properties
-        .entry("writing-mode".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("horizontal-tb".to_string()));
-    properties
-        .entry("unicode-bidi".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
-    properties
-        .entry("text-transform".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("text-overflow".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("clip".to_string()));
-    properties
-        .entry("text-decoration-line".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("text-decoration-style".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("solid".to_string()));
+}
+
+/// CSS initial values keyed by property name, applied by `entry(name)
+/// .or_insert_with(...)` so an already-resolved value is left untouched.
+/// This intentionally excludes the handful of properties whose initial value
+/// depends on another property's resolved value or on the number of layers
+/// in a shorthand — those stay as explicit code in `apply_initial_values`.
+const INITIAL_VALUES: &[(&str, InitialValue)] = &[
+    ("counter-reset", InitialValue::Keyword("none")),
+    ("counter-increment", InitialValue::Keyword("none")),
+    ("shape-outside", InitialValue::Keyword("none")),
+    ("shape-margin", InitialValue::Px(0.0)),
+    ("background-clip", InitialValue::Keyword("border-box")),
+    ("background-color", InitialValue::Color("transparent")),
+    ("background-origin", InitialValue::Keyword("padding-box")),
+    ("color", InitialValue::Color("black")),
+    ("font-size", InitialValue::Px(16.0)),
+    ("direction", InitialValue::Keyword("ltr")),
+    ("writing-mode", InitialValue::Keyword("horizontal-tb")),
+    ("unicode-bidi", InitialValue::Keyword("normal")),
+    ("text-transform", InitialValue::Keyword("none")),
+    ("text-overflow", InitialValue::Keyword("clip")),
+    ("text-decoration-line", InitialValue::Keyword("none")),
+    ("text-decoration-style", InitialValue::Keyword("solid")),
+    // `text-decoration-color`'s initial value is `currentcolor`.
+    ("text-decoration-color", InitialValue::CurrentColor),
+    ("text-decoration-thickness", InitialValue::Keyword("auto")),
+    ("text-underline-position", InitialValue::Keyword("auto")),
+    ("text-underline-offset", InitialValue::Keyword("auto")),
+    // `cursor` initial value is `auto` (CSS UI). Ensuring it is always
+    // present lets a dropped/absent `cursor` declaration serialize as `auto`
+    // in getComputedStyle (Acid3 test 47).
+    ("cursor", InitialValue::Keyword("auto")),
+    ("pointer-events", InitialValue::Keyword("auto")),
+    ("scroll-behavior", InitialValue::Keyword("auto")),
+    ("overscroll-behavior-block", InitialValue::Keyword("auto")),
+    ("overscroll-behavior-inline", InitialValue::Keyword("auto")),
+    ("overscroll-behavior-x", InitialValue::Keyword("auto")),
+    ("overscroll-behavior-y", InitialValue::Keyword("auto")),
+    ("scroll-snap-type", InitialValue::Keyword("none")),
+    ("scroll-snap-align", InitialValue::Keyword("none")),
+    ("position", InitialValue::Keyword("static")),
+    ("contain", InitialValue::Keyword("none")),
+    ("content-visibility", InitialValue::Keyword("visible")),
+    ("contain-intrinsic-width", InitialValue::Keyword("none")),
+    ("contain-intrinsic-height", InitialValue::Keyword("none")),
+    (
+        "contain-intrinsic-inline-size",
+        InitialValue::Keyword("none"),
+    ),
+    (
+        "contain-intrinsic-block-size",
+        InitialValue::Keyword("none"),
+    ),
+    ("container-name", InitialValue::Keyword("none")),
+    ("container-type", InitialValue::Keyword("normal")),
+    ("column-count", InitialValue::Keyword("auto")),
+    ("column-width", InitialValue::Keyword("auto")),
+    ("column-gap", InitialValue::Keyword("normal")),
+    ("column-fill", InitialValue::Keyword("balance")),
+    ("column-span", InitialValue::Keyword("none")),
+    ("box-decoration-break", InitialValue::Keyword("slice")),
+    ("column-rule-style", InitialValue::Keyword("none")),
+    ("column-rule-width", InitialValue::Px(3.0)),
+    // `column-rule-color`'s initial value is `currentcolor`.
+    ("column-rule-color", InitialValue::CurrentColor),
+    ("break-before", InitialValue::Keyword("auto")),
+    ("break-after", InitialValue::Keyword("auto")),
+    ("break-inside", InitialValue::Keyword("auto")),
+    ("page", InitialValue::Keyword("auto")),
+    ("orphans", InitialValue::Number(2.0)),
+    ("widows", InitialValue::Number(2.0)),
+    // CSS Sizing: `aspect-ratio` is `auto`, meaning "use the intrinsic ratio".
+    ("aspect-ratio", InitialValue::Keyword("auto")),
+    // CSS Images: `object-fit` is `fill` and `object-position` is `50% 50%`.
+    // Keeping them present lets getComputedStyle serialize the initial value
+    // even when nothing declares them.
+    ("object-fit", InitialValue::Keyword("fill")),
+    ("object-position", InitialValue::Position(50.0, 50.0)),
+    // CSS Masking initial values. `none` is an identity mask in the paint
+    // implementation; match-source resolves gradients/images through their
+    // alpha channel and keeps SVG/image defaults deterministic.
+    ("mask-image", InitialValue::Keyword("none")),
+    ("mask-mode", InitialValue::Keyword("match-source")),
+    ("mask-composite", InitialValue::Keyword("add")),
+    ("transform", InitialValue::Keyword("none")),
+    ("transform-origin", InitialValue::Keyword("50% 50%")),
+    ("perspective", InitialValue::Keyword("none")),
+    ("perspective-origin", InitialValue::Keyword("50% 50%")),
+    ("transform-style", InitialValue::Keyword("flat")),
+    ("backface-visibility", InitialValue::Keyword("visible")),
+    ("mix-blend-mode", InitialValue::Keyword("normal")),
+    ("isolation", InitialValue::Keyword("auto")),
+    ("transition-property", InitialValue::Keyword("all")),
+    ("transition-duration", InitialValue::Keyword("0s")),
+    ("transition-timing-function", InitialValue::Keyword("ease")),
+    ("transition-delay", InitialValue::Keyword("0s")),
+];
+
+fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
+    for (name, initial) in INITIAL_VALUES {
+        if matches!(initial, InitialValue::CurrentColor) {
+            continue;
+        }
+        properties
+            .entry((*name).to_string())
+            .or_insert_with(|| initial.resolve());
+    }
+    // `currentcolor`-valued initial values are resolved once `color` (set by
+    // the author or defaulted above) is known.
     let current_color = properties
         .get("color")
         .cloned()
         .unwrap_or_else(|| ComputedValue::Color("black".to_string()));
-    properties
-        .entry("text-decoration-color".to_string())
-        .or_insert(current_color.clone());
-    properties
-        .entry("text-decoration-thickness".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    for property in ["text-underline-position", "text-underline-offset"] {
-        properties
-            .entry(property.to_string())
-            .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    }
-    // `cursor` initial value is `auto` (CSS UI). Ensuring it is always present
-    // lets a dropped/absent `cursor` declaration serialize as `auto` in
-    // getComputedStyle (Acid3 test 47).
-    properties
-        .entry("cursor".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    properties
-        .entry("pointer-events".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    for property in [
-        "scroll-behavior",
-        "overscroll-behavior-block",
-        "overscroll-behavior-inline",
-        "overscroll-behavior-x",
-        "overscroll-behavior-y",
-    ] {
-        properties
-            .entry(property.to_string())
-            .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    }
-    for (property, initial) in [("scroll-snap-type", "none"), ("scroll-snap-align", "none")] {
-        properties
-            .entry(property.to_string())
-            .or_insert_with(|| ComputedValue::Keyword(initial.to_string()));
+    for (name, initial) in INITIAL_VALUES {
+        if matches!(initial, InitialValue::CurrentColor) {
+            properties
+                .entry((*name).to_string())
+                .or_insert_with(|| current_color.clone());
+        }
     }
     for side in [
         "top",
@@ -10295,25 +10368,6 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
             .entry(format!("scroll-margin-{side}"))
             .or_insert(ComputedValue::Px(0.0));
     }
-    properties
-        .entry("position".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("static".to_string()));
-    properties
-        .entry("contain".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("content-visibility".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("visible".to_string()));
-    for property in [
-        "contain-intrinsic-width",
-        "contain-intrinsic-height",
-        "contain-intrinsic-inline-size",
-        "contain-intrinsic-block-size",
-    ] {
-        properties
-            .entry(property.to_string())
-            .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    }
     let intrinsic_width = properties
         .get("contain-intrinsic-width")
         .map(computed_value_css_text)
@@ -10330,116 +10384,6 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
             format!("{intrinsic_width} {intrinsic_height}")
         }),
     );
-    properties
-        .entry("container-name".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("container-type".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
-    properties
-        .entry("column-count".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    properties
-        .entry("column-width".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    properties
-        .entry("column-gap".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
-    properties
-        .entry("column-fill".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("balance".to_string()));
-    properties
-        .entry("column-span".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("box-decoration-break".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("slice".to_string()));
-    properties
-        .entry("column-rule-style".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("column-rule-width".to_string())
-        .or_insert_with(|| ComputedValue::Px(3.0));
-    properties
-        .entry("column-rule-color".to_string())
-        .or_insert_with(|| current_color.clone());
-    for property in ["break-before", "break-after", "break-inside"] {
-        properties
-            .entry(property.to_string())
-            .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    }
-    properties
-        .entry("page".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    for property in ["orphans", "widows"] {
-        properties
-            .entry(property.to_string())
-            .or_insert(ComputedValue::Number(2.0));
-    }
-    // CSS Sizing: `aspect-ratio` is `auto`, meaning "use the intrinsic ratio".
-    properties
-        .entry("aspect-ratio".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    // CSS Images: `object-fit` is `fill` and `object-position` is `50% 50%`.
-    // Keeping them present lets getComputedStyle serialize the initial value
-    // even when nothing declares them.
-    properties
-        .entry("object-fit".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("fill".to_string()));
-    properties
-        .entry("object-position".to_string())
-        .or_insert_with(|| ComputedValue::Position {
-            x: Box::new(ComputedValue::Percentage(50.0)),
-            y: Box::new(ComputedValue::Percentage(50.0)),
-        });
-    // CSS Masking initial values.  `none` is an identity mask in the paint
-    // implementation; match-source resolves gradients/images through their
-    // alpha channel and keeps SVG/image defaults deterministic.
-    properties
-        .entry("mask-image".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("mask-mode".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("match-source".to_string()));
-    properties
-        .entry("mask-composite".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("add".to_string()));
-    properties
-        .entry("transform".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("transform-origin".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
-    properties
-        .entry("perspective".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("none".to_string()));
-    properties
-        .entry("perspective-origin".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("50% 50%".to_string()));
-    properties
-        .entry("transform-style".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("flat".to_string()));
-    properties
-        .entry("backface-visibility".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("visible".to_string()));
-    properties
-        .entry("mix-blend-mode".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("normal".to_string()));
-    properties
-        .entry("isolation".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-    properties
-        .entry("transition-property".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("all".to_string()));
-    properties
-        .entry("transition-duration".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("0s".to_string()));
-    properties
-        .entry("transition-timing-function".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("ease".to_string()));
-    properties
-        .entry("transition-delay".to_string())
-        .or_insert_with(|| ComputedValue::Keyword("0s".to_string()));
 }
 
 fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedValue>) {
