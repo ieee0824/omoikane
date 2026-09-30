@@ -5,11 +5,13 @@ use super::browser_session::{
 use super::dom::{cdp_node_type, serialize_outer_html};
 use super::*;
 use crate::error_reporting::{EventStore, ReporterConfig, RetentionPolicy};
+use crate::test_support::http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 use std::cell::RefCell;
 use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::rc::Rc;
-use std::thread;
 
 #[test]
 fn typed_session_errors_preserve_json_rpc_messages_and_sources() {
@@ -619,13 +621,12 @@ fn browser_session_emits_each_sequential_dialog_opening() {
 
 #[test]
 fn resumed_async_evaluation_commits_queued_location_navigation() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for body in ["<title>Start</title>", "<title>Async next</title>"] {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer).unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
@@ -692,7 +693,7 @@ fn resumed_async_evaluation_commits_queued_location_navigation() {
     );
     let tree = browser_payloads(&mut session, client.client_id);
     assert_eq!(tree[0]["result"]["frameTree"]["frame"]["url"], next_url);
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -1508,14 +1509,13 @@ fn responds_to_ping_and_removes_closed_clients() {
 
 #[test]
 fn page_domain_navigates_reloads_and_emits_network_events() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         let body = "<html><body><main id=\"app\">Hello</main></body></html>";
         for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer).unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
@@ -1554,7 +1554,7 @@ fn page_domain_navigates_reloads_and_emits_network_events() {
             .any(|event| event.method == "Page.loadEventFired")
     );
 
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -1562,14 +1562,12 @@ fn navigation_survives_a_dynamically_inserted_module_script_that_throws() {
     // The shape blog.piapro.net failed on: a page script inserts a
     // `type="module"` script, and that module throws. Neither the module's
     // syntax nor its exception may cost the navigation (issue #303).
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for index in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 4096];
-            let size = stream.read(&mut buffer).unwrap();
-            let _ = String::from_utf8_lossy(&buffer[..size]);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let body: &[u8] = match index {
                 0 => b"<html><body><main id='content'>rendered</main><script>                           const s = document.createElement('script');                           s.type = 'module';                           s.src = '/module.js';                           document.head.appendChild(s);                           </script></body></html>",
                 _ => b"export const answer = 42; throw new Error('module boom');",
@@ -1603,20 +1601,30 @@ fn navigation_survives_a_dynamically_inserted_module_script_that_throws() {
         .unwrap();
     assert_eq!(content["result"]["value"], "rendered");
     assert_eq!(session.current_url(), format!("{origin}/page"));
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn get_and_post_form_submissions_reach_http_server_and_install_documents() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for index in 0..3 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 4096];
-            let size = stream.read(&mut buffer).unwrap();
-            let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let mut request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let content_length = request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            let mut body = vec![0; content_length];
+            stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+            stream.read_exact(&mut body).unwrap();
+            request.push_str(&String::from_utf8(body).unwrap());
             if index > 0 {
                 sender.send(request).unwrap();
             }
@@ -1662,18 +1670,17 @@ fn get_and_post_form_submissions_reach_http_server_and_install_documents() {
     assert!(post_request.starts_with("POST /submit HTTP/1.1\r\n"));
     assert!(post_request.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
     assert!(post_request.ends_with("q=hello+world&via=button"));
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn web_storage_survives_same_origin_document_navigation() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer).unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let body = "<html><body></body></html>";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1709,19 +1716,17 @@ fn web_storage_survives_same_origin_document_navigation() {
         .unwrap();
     assert_eq!(result["result"]["value"], true);
 
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn location_requests_install_new_documents_and_preserve_commit_semantics() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for _ in 0..4 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 4096];
-            let size = stream.read(&mut buffer).unwrap();
-            let request = String::from_utf8_lossy(&buffer[..size]);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let path = request
                 .lines()
                 .next()
@@ -1784,18 +1789,17 @@ fn location_requests_install_new_documents_and_preserve_commit_semantics() {
     assert_eq!(session.current_url(), format!("{origin}/third"));
     assert_eq!(session.history_entries.len(), history_len_before_replace);
 
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn script_navigation_records_only_its_origin_and_top_level_site() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer).unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let body = "<html><body>visited navigation</body></html>";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1868,17 +1872,16 @@ fn script_navigation_records_only_its_origin_and_top_level_site() {
             .has_visited_url(&next, &other_origin)
     );
     assert!(!session.storage_manager.has_visited_url(&next, &other_site));
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn cdp_observes_unvisited_style_while_paint_uses_visited_color() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 1024];
-        let _ = stream.read(&mut buffer).unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let body = r#"<!doctype html><html><head><style>
                 body { margin: 0 }
                 a { display:block; width:40px; height:40px; color:#aa0000; background-color:#ff0000 }
@@ -1897,7 +1900,7 @@ fn cdp_observes_unvisited_style_while_paint_uses_visited_color() {
     session
         .dispatch("Page.navigate", json!({ "url": start }))
         .unwrap();
-    server.join().unwrap();
+    server.join();
 
     let query = || {
         json!({
@@ -1966,12 +1969,11 @@ fn cdp_observes_unvisited_style_while_paint_uses_visited_color() {
 
 #[test]
 fn fragment_navigation_keeps_document_and_skips_network_fetch() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 1024];
-        let _ = stream.read(&mut buffer).unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let body = r#"<html><head><style>:target { color: rgb(13, 42, 71) }</style></head>
                 <body><main id='persistent'></main><div id='section'></div><div id='next'></div>
                 <iframe id='child' srcdoc="<div id='section'></div>"></iframe></body></html>"#;
@@ -2039,17 +2041,16 @@ fn fragment_navigation_keeps_document_and_skips_network_fetch() {
             .iter()
             .any(|event| event.method == "Page.navigatedWithinDocument")
     );
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn history_api_url_changes_keep_target_until_traversal() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 1024];
-        let _ = stream.read(&mut buffer).unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let body = "<html><head><style>:target { color: rgb(13, 42, 71) }</style></head><body><div id='one'></div><div id='two'></div><div id='three'></div></body></html>";
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2065,7 +2066,7 @@ fn history_api_url_changes_keep_target_until_traversal() {
     session
         .dispatch("Page.navigate", json!({ "url": base_url }))
         .unwrap();
-    server.join().unwrap();
+    server.join();
     session
         .dispatch(
             "Runtime.evaluate",
@@ -2129,14 +2130,12 @@ fn history_api_url_changes_keep_target_until_traversal() {
 
 #[test]
 fn history_state_and_traversal_are_owned_by_browser_session() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for _ in 0..1 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 2048];
-            let size = stream.read(&mut buffer).unwrap();
-            let request = String::from_utf8_lossy(&buffer[..size]);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let path = request
                 .lines()
                 .next()
@@ -2195,20 +2194,18 @@ fn history_state_and_traversal_are_owned_by_browser_session() {
         .unwrap();
     assert_eq!(restored["result"]["value"], true);
 
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn restored_document_reuses_its_same_document_history_entries() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         let mut requests = Vec::new();
         for _ in 0..3 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 1024];
-            let size = stream.read(&mut buffer).unwrap();
-            let request = String::from_utf8_lossy(&buffer[..size]);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let path = request
                 .lines()
                 .next()
@@ -2261,21 +2258,16 @@ fn restored_document_reuses_its_same_document_history_entries() {
         )
         .unwrap();
     assert_eq!(result["result"]["value"], true);
-    assert_eq!(server.join().unwrap(), ["/start", "/other", "/state"]);
+    assert_eq!(server.join(), ["/start", "/other", "/state"]);
 }
 
-fn custom_form_state_server(
-    requests: usize,
-    redirect_reload: bool,
-) -> (String, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+fn custom_form_state_server(requests: usize, redirect_reload: bool) -> (String, FixtureWorker<()>) {
+    let listener = bind_loopback().unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for index in 0..requests {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 2048];
-            let size = stream.read(&mut buffer).unwrap();
-            let request = String::from_utf8_lossy(&buffer[..size]);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             if redirect_reload && index == 1 {
                 stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /changed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                 continue;
@@ -2339,7 +2331,7 @@ fn custom_form_state_survives_back_forward_and_reload() {
         .dispatch("Runtime.evaluate", json!({"expression": "history.back()"}))
         .unwrap();
     assert_custom_form_state(&mut session, r#"[[["saved","restore"]],"saved"]"#);
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -2377,7 +2369,7 @@ fn custom_form_state_is_restored_by_suspendable_page_startup() {
         &mut session,
         r#"[[["async saved","restore"]],"async saved"]"#,
     );
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -2404,7 +2396,7 @@ fn custom_form_state_is_saved_before_pushstate_changes_the_current_entry() {
         &mut session,
         r#"[[["first","restore"],["second","restore"]],"second"]"#,
     );
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -2424,17 +2416,16 @@ fn custom_form_state_is_not_delivered_to_a_reload_redirect() {
         session.current_url()
     );
     assert_custom_form_state(&mut session, r#"[[],"default"]"#);
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn failed_script_navigation_preserves_current_document_and_url() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 1024];
-        let _ = stream.read(&mut buffer).unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let body = "<html><body><main id='stable'></main></body></html>";
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2449,7 +2440,7 @@ fn failed_script_navigation_preserves_current_document_and_url() {
     session
         .dispatch("Page.navigate", json!({ "url": stable_url }))
         .unwrap();
-    server.join().unwrap();
+    server.join();
 
     let failed = session.dispatch(
         "Runtime.evaluate",
@@ -2479,13 +2470,12 @@ fn failed_script_navigation_preserves_current_document_and_url() {
 
 #[test]
 fn redirect_commits_final_url_to_document_location_and_history() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for request_index in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer).unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let response = if request_index == 0 {
                 "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
             } else {
@@ -2521,19 +2511,17 @@ fn redirect_commits_final_url_to_document_location_and_history() {
         )
         .unwrap();
     assert_eq!(state["result"]["value"], true);
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
 fn event_loop_driver_commits_timer_and_animation_frame_navigation() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for _ in 0..3 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 2048];
-            let size = stream.read(&mut buffer).unwrap();
-            let request = String::from_utf8_lossy(&buffer[..size]);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let path = request
                 .lines()
                 .next()
@@ -2573,7 +2561,7 @@ fn event_loop_driver_commits_timer_and_animation_frame_navigation() {
     session.drive_event_loop(16).unwrap();
     assert_eq!(session.current_url(), format!("{origin}/frame"));
 
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]

@@ -557,10 +557,12 @@ fn build_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    };
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
     use rustls::{RootCertStore, ServerConfig, ServerConnection};
     use std::io::Read;
-    use std::net::TcpListener;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -606,7 +608,7 @@ mod tests {
     #[test]
     fn negotiates_h2_with_alpn_and_falls_back_to_http11() {
         let (cert_der, key_der) = generate_test_cert("localhost");
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let server_config = ServerConfig::builder()
@@ -617,8 +619,10 @@ mod tests {
         Arc::get_mut(&mut server_config).unwrap().alpn_protocols =
             vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-        std::thread::spawn(move || {
-            let (tcp_stream, _) = listener.accept().unwrap();
+        let worker = FixtureWorker::spawn(move || {
+            let tcp_stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            tcp_stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+            tcp_stream.set_write_timeout(Some(READ_TIMEOUT)).unwrap();
             let mut conn = ServerConnection::new(server_config).unwrap();
             let mut tcp_stream = tcp_stream;
             conn.complete_io(&mut tcp_stream).unwrap();
@@ -639,12 +643,13 @@ mod tests {
         conn.complete_io(&mut stream).unwrap();
 
         assert_eq!(conn.alpn_protocol(), Some(b"h2".as_slice()));
+        worker.join();
     }
 
     #[test]
     fn sends_basic_get_over_http2() {
         let (cert_der, key_der) = generate_test_cert("localhost");
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let server_config = ServerConfig::builder()
@@ -654,8 +659,10 @@ mod tests {
         let mut server_config = Arc::new(server_config);
         Arc::get_mut(&mut server_config).unwrap().alpn_protocols = vec![b"h2".to_vec()];
 
-        std::thread::spawn(move || {
-            let (tcp_stream, _) = listener.accept().unwrap();
+        let worker = FixtureWorker::spawn(move || {
+            let tcp_stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            tcp_stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+            tcp_stream.set_write_timeout(Some(READ_TIMEOUT)).unwrap();
             let conn = ServerConnection::new(server_config).unwrap();
             let mut tls_stream = StreamOwned::new(conn, tcp_stream);
 
@@ -719,6 +726,7 @@ mod tests {
         assert_eq!(response.status_code(), 200);
         assert_eq!(response.body(), b"hello");
         assert_eq!(response.header("content-type"), Some("text/plain"));
+        worker.join();
     }
 
     fn encode_headers_for_test(headers: &[(String, String)]) -> Vec<u8> {

@@ -1,42 +1,32 @@
 use super::broadcast_channel::broadcast_channel_post_native;
 use super::*;
+use crate::test_support::http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers,
+};
 use boa_engine::native_function::NativeCallSuspension;
 use boa_gc::{Gc, GcRefCell};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::task::{Context as FutureContext, Poll, Waker};
-use std::thread;
 
 fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
-    let mut request = Vec::new();
-    let mut buffer = [0u8; 1024];
-    let mut expected_len = None;
-    loop {
-        let read = stream.read(&mut buffer).unwrap();
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&buffer[..read]);
-        if expected_len.is_none()
-            && let Some(headers_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
-        {
-            let headers = String::from_utf8_lossy(&request[..headers_end]);
-            let content_len = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-            expected_len = Some(headers_end + 4 + content_len);
-        }
-        if expected_len.is_some_and(|expected| request.len() >= expected) {
-            break;
-        }
-    }
+    let headers = read_request_headers(stream, READ_TIMEOUT).unwrap();
+    let content_len = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let mut request = headers.into_bytes();
+    let headers_len = request.len();
+    request.resize(headers_len + content_len, 0);
+    stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+    stream.read_exact(&mut request[headers_len..]).unwrap();
     request
 }
 
@@ -3023,10 +3013,10 @@ fn webgl_canvas_context_state_resources_and_loss_boundary() {
 
 #[test]
 fn websocket_api_echo_close_and_networking_task_order() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
         let key = request
             .lines()
@@ -3078,7 +3068,7 @@ fn websocket_api_echo_close_and_networking_task_order() {
         eval_str(&mut runtime, "messageOrigin"),
         format!("ws://{address}")
     );
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -3166,11 +3156,11 @@ fn websocket_address_policy_allows_only_the_documents_own_host_privately() {
 
 #[test]
 fn event_source_parses_events_and_reconnects_with_last_event_id() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         for attempt in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
             let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
             let request_lower = request.to_ascii_lowercase();
             assert!(request_lower.contains("accept: text/event-stream"));
@@ -3213,7 +3203,7 @@ fn event_source_parses_events_and_reconnects_with_last_event_id() {
         eval_str(&mut runtime, "sseOrigin"),
         format!("http://{address}")
     );
-    server.join().unwrap();
+    server.join();
 }
 
 #[test]
@@ -5278,11 +5268,11 @@ fn response_and_request_round_trip_blob_bodies() {
 #[test]
 fn fetch_preserves_binary_response_bytes() {
     let payload: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe, 0x0a];
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
     let served = payload.clone();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         read_http_request(&mut stream);
         write!(
             stream,
@@ -5313,7 +5303,7 @@ fn fetch_preserves_binary_response_bytes() {
         )
         .unwrap();
     runtime.run_jobs().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert_eq!(
         runtime
@@ -6107,12 +6097,11 @@ fn fetch_bodies_expose_streams_one_shot_consumption_and_form_data() {
 
 #[test]
 fn implements_fetch_api() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 1024];
-        let _ = stream.read(&mut buffer).unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
         stream.write_all(response).unwrap();
     });
@@ -6133,18 +6122,18 @@ fn implements_fetch_api() {
         .as_string()
         .unwrap()
         .to_std_string_escaped();
-    handle.join().unwrap();
+    handle.join();
 
     assert_eq!(result, "hello");
 }
 
 #[test]
 fn fetch_body_presence_distinguishes_empty_streams_from_null_bodies() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
+    let handle = FixtureWorker::spawn(move || {
         for _ in 0..3 {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
             let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
             let response = if request.starts_with("GET /empty ") {
                 b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
@@ -6177,7 +6166,7 @@ fn fetch_body_presence_distinguishes_empty_streams_from_null_bodies() {
         ))
         .unwrap();
     runtime.run_jobs().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert_eq!(
         runtime
@@ -6192,10 +6181,10 @@ fn fetch_body_presence_distinguishes_empty_streams_from_null_bodies() {
 
 #[test]
 fn fetch_sends_method_headers_and_body_and_exposes_response_metadata() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let request = read_http_request(&mut stream);
         let request = String::from_utf8(request).unwrap();
         assert!(request.starts_with("POST /submit HTTP/1.1\r\n"));
@@ -6238,7 +6227,7 @@ fn fetch_sends_method_headers_and_body_and_exposes_response_metadata() {
         ))
         .unwrap();
     runtime.run_jobs().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert!(
         runtime
@@ -6259,10 +6248,10 @@ fn fetch_sends_method_headers_and_body_and_exposes_response_metadata() {
 
 #[test]
 fn fetch_reports_redirected_final_url() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut first, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut first = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let first_request = String::from_utf8(read_http_request(&mut first)).unwrap();
         assert!(first_request.starts_with("GET /start HTTP/1.1\r\n"));
         first
@@ -6271,7 +6260,7 @@ fn fetch_reports_redirected_final_url() {
             )
             .unwrap();
 
-        let (mut second, _) = listener.accept().unwrap();
+        let mut second = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let second_request = String::from_utf8(read_http_request(&mut second)).unwrap();
         assert!(second_request.starts_with("GET /final HTTP/1.1\r\n"));
         second
@@ -6291,7 +6280,7 @@ fn fetch_reports_redirected_final_url() {
         ))
         .unwrap();
     runtime.run_jobs().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert!(runtime
         .eval(&format!(
@@ -6305,10 +6294,10 @@ fn fetch_reports_redirected_final_url() {
 
 #[test]
 fn fetch_does_not_report_url_parser_normalization_as_a_redirect() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
         assert!(request.starts_with("GET / HTTP/1.1\r\n"));
         stream
@@ -6325,7 +6314,7 @@ fn fetch_does_not_report_url_parser_normalization_as_a_redirect() {
         ))
         .unwrap();
     runtime.run_jobs().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert!(runtime
         .eval(&format!(
@@ -6373,10 +6362,10 @@ fn network_failures_reject_fetch_and_fire_xhr_error_without_sync_throw() {
 
 #[test]
 fn fetch_and_xhr_share_the_page_cookie_jar() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut first, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut first = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let first_request = String::from_utf8(read_http_request(&mut first)).unwrap();
         assert!(first_request.starts_with("GET /session HTTP/1.1\r\n"));
         first
@@ -6385,7 +6374,7 @@ fn fetch_and_xhr_share_the_page_cookie_jar() {
             )
             .unwrap();
 
-        let (mut second, _) = listener.accept().unwrap();
+        let mut second = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let second_request = String::from_utf8(read_http_request(&mut second)).unwrap();
         assert!(second_request.starts_with("GET /profile HTTP/1.1\r\n"));
         assert!(second_request.contains("Cookie: session=miku\r\n"));
@@ -6416,7 +6405,7 @@ fn fetch_and_xhr_share_the_page_cookie_jar() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert_eq!(
         runtime.eval("cookieXhr.status").unwrap().as_number(),
@@ -6426,10 +6415,10 @@ fn fetch_and_xhr_share_the_page_cookie_jar() {
 
 #[test]
 fn cross_origin_fetch_checks_origin_and_filters_response_headers() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
         assert!(request.contains("Origin: http://origin.test\r\n"));
         stream
@@ -6455,7 +6444,7 @@ fn cross_origin_fetch_checks_origin_and_filters_response_headers() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert!(runtime
         .eval(r#"corsResult.type === "cors" && corsResult.body === "ok" && corsResult.contentType === "text/plain" && corsResult.public === "visible" && corsResult.secret === null"#)
@@ -6491,11 +6480,11 @@ fn fetch_policy_values_are_validated_and_response_type_is_internal() {
 
 #[test]
 fn no_cors_is_opaque_and_xhr_cors_failure_fires_error() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
+    let handle = FixtureWorker::spawn(move || {
         for index in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
             let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
             if index == 0 {
                 assert!(!request.contains("Origin:"));
@@ -6523,7 +6512,7 @@ fn no_cors_is_opaque_and_xhr_cors_failure_fires_error() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert!(runtime
         .eval(r#"opaqueResult.join(",") === "opaque,0,,," && corsFailureXhr.status === 0 && corsFailureEvents.join(",") === "error,loadend""#)
@@ -6534,11 +6523,11 @@ fn no_cors_is_opaque_and_xhr_cors_failure_fires_error() {
 
 #[test]
 fn cors_preflight_is_validated_and_cached() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
+    let handle = FixtureWorker::spawn(move || {
         for index in 0..3 {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
             let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
             if index == 0 {
                 assert!(request.starts_with("OPTIONS /data HTTP/1.1\r\n"));
@@ -6565,13 +6554,13 @@ fn cors_preflight_is_validated_and_cached() {
         ))
         .unwrap();
     runtime.run_jobs().unwrap();
-    handle.join().unwrap();
+    handle.join();
     assert_eq!(eval_str(&mut runtime, "preflightBodies.join(',')"), "ok,ok");
 }
 
 #[test]
 fn credentials_mode_and_xhr_with_credentials_send_cookies() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
     // Different ports are cross-origin but same-site, so Lax cookies may
     // still be sent when credentials are explicitly included.
@@ -6582,9 +6571,9 @@ fn credentials_mode_and_xhr_with_credentials_send_cookies() {
     };
     let origin = format!("http://127.0.0.1:{origin_port}");
     let response_origin = origin.clone();
-    let handle = thread::spawn(move || {
+    let handle = FixtureWorker::spawn(move || {
         for index in 0..4 {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
             let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
             if index < 2 {
                 assert!(!request.contains("Cookie:"));
@@ -6622,7 +6611,7 @@ fn credentials_mode_and_xhr_with_credentials_send_cookies() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    handle.join().unwrap();
+    handle.join();
     assert!(runtime
         .eval("omitFetch === 200 && sameOriginFetch === 200 && credentialFetch === 200 && credentialXhr.status === 200")
         .unwrap()
@@ -6632,11 +6621,11 @@ fn credentials_mode_and_xhr_with_credentials_send_cookies() {
 
 #[test]
 fn fetch_redirect_modes_follow_error_and_manual() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
+    let handle = FixtureWorker::spawn(move || {
         for index in 0..4 {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
             let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
             if index == 1 {
                 assert!(request.starts_with("GET /final HTTP/1.1\r\n"));
@@ -6659,7 +6648,7 @@ fn fetch_redirect_modes_follow_error_and_manual() {
         ))
         .unwrap();
     runtime.run_jobs().unwrap();
-    handle.join().unwrap();
+    handle.join();
     assert!(runtime
         .eval(r#"redirectModes.follow[0] === true && redirectModes.follow[1] === "done" && redirectModes.error === true && redirectModes.manual.join(",") === "opaqueredirect,0,""#)
         .unwrap()
@@ -6737,12 +6726,11 @@ fn request_and_xhr_resolve_relative_urls() {
 
 #[test]
 fn xml_http_request_get_completes_and_abort_suppresses_completion() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 1024];
-        let _ = stream.read(&mut buffer).unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
         stream.write_all(response).unwrap();
     });
@@ -6756,19 +6744,18 @@ fn xml_http_request_get_completes_and_abort_suppresses_completion() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    handle.join().unwrap();
+    handle.join();
     assert!(runtime
         .eval(r#"xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200 && xhr.responseText === "hello" && xhrEvents.join(",") === "load,loadend""#)
         .unwrap()
         .as_boolean()
         .unwrap());
 
-    let abort_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let abort_listener = bind_loopback().unwrap();
     let abort_address = abort_listener.local_addr().unwrap();
-    let abort_handle = thread::spawn(move || {
-        let (mut stream, _) = abort_listener.accept().unwrap();
-        let mut buffer = [0u8; 1024];
-        let _ = stream.read(&mut buffer).unwrap();
+    let abort_handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&abort_listener, ACCEPT_TIMEOUT).unwrap();
+        let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
         let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nlater";
         stream.write_all(response).unwrap();
     });
@@ -6779,7 +6766,7 @@ fn xml_http_request_get_completes_and_abort_suppresses_completion() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    abort_handle.join().unwrap();
+    abort_handle.join();
     assert!(runtime
         .eval(r#"xhr.readyState === XMLHttpRequest.UNSENT && xhr.status === 0 && xhr.responseText === "" && xhrEvents.join(",") === "loadend""#)
         .unwrap()
@@ -6789,10 +6776,10 @@ fn xml_http_request_get_completes_and_abort_suppresses_completion() {
 
 #[test]
 fn xml_http_request_sends_request_and_exposes_states_and_response_headers() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let request = read_http_request(&mut stream);
         let request = String::from_utf8(request).unwrap();
         assert!(request.starts_with("PUT /api/item HTTP/1.1\r\n"));
@@ -6826,7 +6813,7 @@ fn xml_http_request_sends_request_and_exposes_states_and_response_headers() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert!(
         runtime
@@ -6851,10 +6838,10 @@ fn xml_http_request_sends_request_and_exposes_states_and_response_headers() {
 
 #[test]
 fn xml_http_request_reports_download_and_upload_progress_events() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let request = read_http_request(&mut stream);
         let request = String::from_utf8(request).unwrap();
         assert!(request.ends_with("\r\n\r\nrequest"));
@@ -6891,7 +6878,7 @@ fn xml_http_request_reports_download_and_upload_progress_events() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert!(runtime
         .eval(
@@ -6911,10 +6898,10 @@ fn xml_http_request_reports_download_and_upload_progress_events() {
 
 #[test]
 fn xml_http_request_timeout_is_exclusive_and_finishes_with_loadend() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let _ = read_http_request(&mut stream);
         std::thread::sleep(std::time::Duration::from_millis(100));
         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlate");
@@ -6937,7 +6924,7 @@ fn xml_http_request_timeout_is_exclusive_and_finishes_with_loadend() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     let state = runtime
         .eval(r#"JSON.stringify([timeoutEvents, timeoutXhr.readyState, timeoutXhr.status, timeoutXhr.responseText])"#)
@@ -7080,10 +7067,10 @@ fn xml_http_request_response_type_preserves_binary_bytes() {
 
 #[test]
 fn xml_http_request_http_binary_response_type_preserves_bytes() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         let _ = read_http_request(&mut stream);
         let body = [0u8, 255, 1, 128];
         write!(
@@ -7112,7 +7099,7 @@ fn xml_http_request_http_binary_response_type_preserves_bytes() {
         ))
         .unwrap();
     runtime.run_until_idle().unwrap();
-    handle.join().unwrap();
+    handle.join();
 
     assert!(
         runtime
@@ -14537,13 +14524,12 @@ fn inline_module_url_uses_parseable_document_base() {
 
 #[test]
 fn inline_module_resolves_relative_import_against_document_url() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0u8; 1024];
-        let size = stream.read(&mut request).unwrap();
-        assert!(String::from_utf8_lossy(&request[..size]).contains("GET /app/dep.js "));
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+        assert!(request.contains("GET /app/dep.js "));
         let body = b"export const answer = 42;";
         write!(
             stream,
@@ -14559,7 +14545,7 @@ fn inline_module_resolves_relative_import_against_document_url() {
     );
     let base: crate::http::Url = format!("http://{address}/app/index.html").parse().unwrap();
     let errors = runtime.execute_document_scripts(Some(&base));
-    handle.join().unwrap();
+    handle.join();
 
     assert!(errors.is_empty(), "unexpected module errors: {errors:?}");
     assert_eq!(runtime.eval("answer").unwrap().as_number(), Some(42.0));
@@ -14742,28 +14728,24 @@ fn indexeddb_rejects_array_key_paths_and_normalizes_boxed_store_names() {
     );
 }
 
-fn serve_visit_documents(first_body: &str) -> (u16, thread::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+fn serve_visit_documents(first_body: &str) -> (u16, FixtureWorker<Vec<String>>) {
+    let listener = bind_loopback().unwrap();
     let port = listener.local_addr().unwrap().port();
-    listener.set_nonblocking(true).unwrap();
     let first_body = first_body.to_owned();
-    let server = thread::spawn(move || {
+    let server = FixtureWorker::spawn(move || {
         let mut paths = Vec::new();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while paths.len() < 2 && std::time::Instant::now() < deadline {
-            let Ok((mut stream, _)) = listener.accept() else {
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            };
-            stream.set_nonblocking(false).unwrap();
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 break;
             }
-            stream.set_read_timeout(Some(remaining)).unwrap();
-            let mut request = [0u8; 2048];
-            let size = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..size]);
+            let mut stream = match accept_with_timeout(&listener, remaining) {
+                Ok(stream) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => break,
+                Err(error) => panic!("visit fixture accept failed: {error}"),
+            };
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             let path = request.split_whitespace().nth(1).unwrap().to_owned();
             let body = if path == "/first" {
                 first_body.as_str()
@@ -14815,7 +14797,7 @@ fn iframe_visits_use_the_navigating_frame_origin_and_top_level_site() {
     runtime.run_until_idle().unwrap();
 
     assert_eq!(
-        server.join().unwrap(),
+        server.join(),
         vec!["/first".to_string(), "/second".to_string()]
     );
     assert!(storage.has_visited_url(&first, &owner_source));
@@ -14852,7 +14834,7 @@ fn popup_visits_use_the_opening_page_then_the_popup_partition() {
     runtime.run_until_idle().unwrap();
 
     assert_eq!(
-        server.join().unwrap(),
+        server.join(),
         vec!["/first".to_string(), "/second".to_string()]
     );
     assert!(storage.has_visited_url(&first, &owner_source));
@@ -14887,7 +14869,7 @@ fn reused_popup_resolves_relative_navigation_against_the_opener() {
     runtime.run_until_idle().unwrap();
 
     assert_eq!(
-        server.join().unwrap(),
+        server.join(),
         vec!["/first".to_string(), "/second".to_string()]
     );
     assert!(storage.has_visited_url(&first, &source));
@@ -14924,7 +14906,7 @@ fn named_iframe_link_visit_uses_the_child_initiator_partition() {
     runtime.run_until_idle().unwrap();
 
     assert_eq!(
-        server.join().unwrap(),
+        server.join(),
         vec!["/first".to_string(), "/second".to_string()]
     );
     assert!(storage.has_visited_url(&first, &owner_source));
@@ -15389,7 +15371,7 @@ fn performance_navigation_duration_and_domcontentloaded_bubble() {
 
 #[test]
 fn performance_resource_timing_records_fetch_and_xhr_success_and_abort() {
-    let port = spawn_static_http_server("text/plain", "tïmed");
+    let (port, _port_server) = spawn_static_http_server("text/plain", "tïmed");
     let mut runtime = JsRuntime::with_document_and_url(
         default_document(),
         &format!("http://127.0.0.1:{port}/index.html"),
@@ -15546,7 +15528,7 @@ fn performance_resource_timing_link_finishes_when_rel_follows_href() {
 
 #[test]
 fn performance_resource_timing_script_redirect_records_redirect_window() {
-    let port = spawn_redirect_script_server();
+    let (port, _port_server) = spawn_redirect_script_server();
     let requested = format!("http://127.0.0.1:{port}/redirect.js");
     let effective = format!("http://127.0.0.1:{port}/final.js");
     let mut runtime = runtime_from_html(&format!(
@@ -15577,7 +15559,7 @@ fn performance_resource_timing_script_redirect_records_redirect_window() {
 
 #[test]
 fn performance_resource_timing_fetch_redirect_uses_effective_url() {
-    let port = spawn_redirect_script_server();
+    let (port, _port_server) = spawn_redirect_script_server();
     let requested = format!("http://127.0.0.1:{port}/redirect.js");
     let effective = format!("http://127.0.0.1:{port}/final.js");
     let mut runtime = JsRuntime::with_document_and_url(
@@ -15612,7 +15594,7 @@ fn performance_resource_timing_fetch_redirect_uses_effective_url() {
 
 #[test]
 fn performance_resource_timing_failed_script_resolves_reference_name() {
-    let port = spawn_redirect_script_server();
+    let (port, _port_server) = spawn_redirect_script_server();
     let effective = format!("http://127.0.0.1:{port}/missing.js");
     let mut runtime = runtime_from_html(
         r#"<html><head><script src="missing.js"></script></head><body></body></html>"#,
@@ -17767,7 +17749,7 @@ fn connected_dynamic_external_script_loads_executes_and_fires_load() {
 
 #[test]
 fn connected_dynamic_script_redirect_records_effective_resource_timing() {
-    let port = spawn_redirect_script_server();
+    let (port, _port_server) = spawn_redirect_script_server();
     let requested = format!("http://127.0.0.1:{port}/redirect.js");
     let effective = format!("http://127.0.0.1:{port}/final.js");
     use crate::html::TreeBuilder;
@@ -18028,22 +18010,13 @@ fn recorded_task_errors_are_bounded() {
 
 #[test]
 fn external_scripts_share_page_http_cookies() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
+    let handle = FixtureWorker::spawn(move || {
         let mut second_request_has_cookie = false;
         for request_index in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut bytes = Vec::new();
-            let mut buffer = [0u8; 1024];
-            loop {
-                let read = stream.read(&mut buffer).unwrap();
-                bytes.extend_from_slice(&buffer[..read]);
-                if read == 0 || bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let request = String::from_utf8_lossy(&bytes);
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             if request_index == 1 {
                 second_request_has_cookie = request
                     .lines()
@@ -18083,7 +18056,7 @@ fn external_scripts_share_page_http_cookies() {
         Some(true)
     );
     assert!(
-        handle.join().unwrap(),
+        handle.join(),
         "the second script request must receive the first response's cookie"
     );
 }
@@ -21930,33 +21903,71 @@ fn acid3_traversal_filter_mutation_and_tree_regrafting_regressions() {
 
 // ── iframe / contentDocument (sub-browsing contexts) ────────────────────
 
-/// A tiny static HTTP/1.1 server that answers every request with the same
-/// status, `Content-Type`, and body. It stays alive for the whole process
-/// (detached, like the other HTTP client tests), so a lazily-loaded iframe
-/// can both fetch and later reload its document.
-fn spawn_static_http_server(content_type: &'static str, body: &'static str) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+/// Owns a reusable fixture until its test ends, then stops and joins its worker.
+struct HttpTestServer {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<FixtureWorker<()>>,
+}
+
+impl Drop for HttpTestServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            drop(worker);
+        }
+    }
+}
+
+fn spawn_reusable_http_server(
+    response: impl Fn(&str, u16) -> String + Send + 'static,
+) -> (u16, HttpTestServer) {
+    let listener = bind_loopback().unwrap();
     let port = listener.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                content_type,
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_stop = stop.clone();
+    let worker = FixtureWorker::spawn(move || {
+        while !worker_stop.load(std::sync::atomic::Ordering::Acquire) {
+            let mut stream =
+                match accept_with_timeout(&listener, std::time::Duration::from_millis(50)) {
+                    Ok(stream) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                };
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            stream.set_write_timeout(Some(READ_TIMEOUT)).unwrap();
+            let path = request.split_whitespace().nth(1).unwrap_or("/");
+            // Some resource tests deliberately abort requests; retain that behavior.
+            let _ = stream.write_all(response(path, port).as_bytes());
         }
     });
-    port
+    (
+        port,
+        HttpTestServer {
+            stop,
+            worker: Some(worker),
+        },
+    )
+}
+
+/// Answers every request with the same response, allowing iframe reloads
+/// while the owning test keeps its server guard alive.
+fn spawn_static_http_server(
+    content_type: &'static str,
+    body: &'static str,
+) -> (u16, HttpTestServer) {
+    spawn_reusable_http_server(move |_, _| {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            content_type,
+            body.len(),
+            body
+        )
+    })
 }
 
 /// Static test server with per-path content. Route data is copied before
 /// spawning so callers can use ordinary local slice literals.
-fn spawn_path_http_server(routes: &[(&str, &str, &str)]) -> u16 {
+fn spawn_path_http_server(routes: &[(&str, &str, &str)]) -> (u16, HttpTestServer) {
     let routes: Vec<_> = routes
         .iter()
         .map(|(path, content_type, body)| {
@@ -21967,128 +21978,116 @@ fn spawn_path_http_server(routes: &[(&str, &str, &str)]) -> u16 {
             )
         })
         .collect();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let mut request = [0u8; 2048];
-            let size = stream.read(&mut request).unwrap_or_default();
-            let path = String::from_utf8_lossy(&request[..size])
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("/")
-                .to_string();
-            let (status, content_type, body) = routes
-                .iter()
-                .find(|(route, _, _)| route == &path)
-                .map(|(_, content_type, body)| ("200 OK", content_type.as_str(), body.as_str()))
-                .unwrap_or(("404 Not Found", "text/plain", "not found"));
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-        }
-    });
-    port
+    spawn_reusable_http_server(move |path, _| {
+        let (status, content_type, body) = routes
+            .iter()
+            .find(|(route, _, _)| route == path)
+            .map(|(_, content_type, body)| ("200 OK", content_type.as_str(), body.as_str()))
+            .unwrap_or(("404 Not Found", "text/plain", "not found"));
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    })
 }
 
 /// Serves a same-origin XHTML outer frame whose script creates a nested
 /// same-origin XHTML frame. The nested script writes through `parent` so
 /// tests can distinguish the owning child Realm from the top-level Realm.
-fn spawn_nested_xhtml_server() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let mut request = [0u8; 4096];
-            let size = stream.read(&mut request).unwrap_or(0);
-            let request = String::from_utf8_lossy(&request[..size]);
-            let path = request.split_whitespace().nth(1).unwrap_or("/");
-            let body = if path.ends_with("/outer.xhtml") {
-                format!(
-                    "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>var nested=document.createElement('iframe');nested.src='http://127.0.0.1:{port}/nested.xhtml';document.body.appendChild(nested);</script></body></html>"
-                )
-            } else {
-                "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.document.documentElement.setAttribute('data-nested-parent','yes')</script></body></html>".to_string()
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/xhtml+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
-        }
-    });
-    port
+fn spawn_nested_xhtml_server() -> (u16, HttpTestServer) {
+    spawn_reusable_http_server(|path, port| {
+        let body = if path.ends_with("/outer.xhtml") {
+            format!(
+                "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>var nested=document.createElement('iframe');nested.src='http://127.0.0.1:{port}/nested.xhtml';document.body.appendChild(nested);</script></body></html>"
+            )
+        } else {
+            "<html xmlns='http://www.w3.org/1999/xhtml'><body><script>parent.document.documentElement.setAttribute('data-nested-parent','yes')</script></body></html>".to_string()
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/xhtml+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    })
 }
 
 /// Serves an XHTML frame below `/frames/` and its relative external
 /// script. The top-level page base is `/index.html`, so using the wrong
 /// Realm/document base would request `/relative.js` and fail.
-fn spawn_relative_child_script_server() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let mut request = [0u8; 4096];
-            let size = stream.read(&mut request).unwrap_or(0);
-            let request = String::from_utf8_lossy(&request[..size]);
-            let path = request.split_whitespace().nth(1).unwrap_or("/");
-            let (content_type, body) = if path.ends_with("/frames/child.xhtml") {
-                (
-                    "application/xhtml+xml",
-                    "<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>var s=document.createElement('script');s.src='relative.js';s.addEventListener('load',function(){document.documentElement.setAttribute('data-relative-load','yes')});document.head.appendChild(s)</script></body></html>".to_string(),
-                )
-            } else if path.ends_with("/frames/relative.js") {
-                (
-                    "text/javascript",
-                    "document.documentElement.setAttribute('data-relative-script','yes')"
-                        .to_string(),
-                )
-            } else {
-                ("text/plain", String::new())
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-        }
-    });
-    port
+fn spawn_relative_child_script_server() -> (u16, HttpTestServer) {
+    spawn_reusable_http_server(|path, _| {
+        let (content_type, body) = if path.ends_with("/frames/child.xhtml") {
+            (
+                "application/xhtml+xml",
+                "<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>var s=document.createElement('script');s.src='relative.js';s.addEventListener('load',function(){document.documentElement.setAttribute('data-relative-load','yes')});document.head.appendChild(s)</script></body></html>".to_string(),
+            )
+        } else if path.ends_with("/frames/relative.js") {
+            (
+                "text/javascript",
+                "document.documentElement.setAttribute('data-relative-script','yes')".to_string(),
+            )
+        } else {
+            ("text/plain", String::new())
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    })
 }
 
-fn spawn_redirect_script_server() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let mut request = [0u8; 4096];
-            let size = stream.read(&mut request).unwrap_or(0);
-            let request = String::from_utf8_lossy(&request[..size]);
-            let path = request.split_whitespace().nth(1).unwrap_or("/");
-            let (status, headers, body) = match path {
-                "/redirect.js" => ("302 Found", "Location: /final.js\r\n", ""),
-                "/final.js" => (
-                    "200 OK",
-                    "Content-Type: text/javascript\r\n",
-                    "globalThis.redirectScriptRan = true;",
-                ),
-                _ => ("404 Not Found", "", ""),
-            };
-            let response = format!(
-                "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len(),
-            );
-            let _ = stream.write_all(response.as_bytes());
+fn spawn_redirect_script_server() -> (u16, HttpTestServer) {
+    spawn_reusable_http_server(|path, _| {
+        let (status, headers, body) = match path {
+            "/redirect.js" => ("302 Found", "Location: /final.js\r\n", ""),
+            "/final.js" => (
+                "200 OK",
+                "Content-Type: text/javascript\r\n",
+                "globalThis.redirectScriptRan = true;",
+            ),
+            _ => ("404 Not Found", "", ""),
+        };
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        )
+    })
+}
+
+#[test]
+fn reusable_http_fixture_serves_reloads_and_joins_on_drop() {
+    struct WorkerLifetime(std::sync::mpsc::Sender<()>);
+    impl Drop for WorkerLifetime {
+        fn drop(&mut self) {
+            self.0.send(()).unwrap();
         }
+    }
+    let (finished, completion) = std::sync::mpsc::channel();
+    let lifetime = WorkerLifetime(finished);
+    let (port, server) = spawn_reusable_http_server(move |path, _| {
+        let _ = &lifetime;
+        assert_eq!(path, "/reload");
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string()
     });
-    port
+    for _ in 0..2 {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+        stream
+            .write_all(b"GET /reload HTTP/1.1\r\nHost: local")
+            .unwrap();
+        stream.write_all(b"host\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.ends_with("\r\n\r\nok"));
+    }
+    assert!(matches!(
+        completion.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    drop(server);
+    completion
+        .try_recv()
+        .expect("server drop must join the worker before returning");
 }
 
 fn eval_string_value(runtime: &mut JsRuntime, source: &str) -> Option<String> {
@@ -22293,7 +22292,7 @@ fn svg_text_geometry_uses_utf16_ranges_and_nested_transforms() {
 #[test]
 fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "image/svg+xml",
         r#"<svg xmlns="http://www.w3.org/2000/svg"><text>svg</text></svg>"#,
     );
@@ -22618,7 +22617,7 @@ fn connected_object_with_data_dispatches_load() {
 #[test]
 fn connected_iframe_src_change_renavigates_and_fires_load() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="x">frame</p></body></html>"#,
     );
@@ -22668,7 +22667,7 @@ fn connected_iframe_src_change_renavigates_and_fires_load() {
 #[test]
 fn connected_iframe_set_attribute_src_renavigates_and_fires_load() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="loaded">via-setattr</p></body></html>"#,
     );
@@ -22713,7 +22712,7 @@ fn connected_iframe_set_attribute_src_renavigates_and_fires_load() {
 #[test]
 fn connected_iframe_set_attribute_src_with_whitespace_only_change_is_noop() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="loaded">same-doc</p></body></html>"#,
     );
@@ -22750,7 +22749,7 @@ fn connected_iframe_set_attribute_src_with_whitespace_only_change_is_noop() {
 #[test]
 fn removing_empty_srcdoc_navigates_to_the_underlying_src() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="loaded">from-src</p></body></html>"#,
     );
@@ -22796,7 +22795,8 @@ fn removing_empty_srcdoc_navigates_to_the_underlying_src() {
 #[test]
 fn dynamic_onload_attribute_runs_on_iframe_src_renavigation() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server("text/html", r#"<html><body></body></html>"#);
+    let (port, _port_server) =
+        spawn_static_http_server("text/html", r#"<html><body></body></html>"#);
     let doc = TreeBuilder::parse(
         r#"<html><body><span id="target" class="hide"></span><iframe id="f"></iframe></body></html>"#,
     )
@@ -22958,7 +22958,7 @@ fn crafted_on_attribute_name_does_not_break_or_pollute_handler_store() {
 #[test]
 fn connected_object_data_change_renavigates_and_fires_load() {
     use crate::html::TreeBuilder;
-    let port = spawn_path_http_server(&[
+    let (port, _port_server) = spawn_path_http_server(&[
         (
             "/first.html",
             "text/html",
@@ -23023,7 +23023,7 @@ fn connected_object_data_change_renavigates_and_fires_load() {
 #[test]
 fn connected_object_set_attribute_data_with_whitespace_only_change_is_noop() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="loaded">same-doc</p></body></html>"#,
     );
@@ -23297,7 +23297,7 @@ fn iframe_content_document_is_stable_across_accesses() {
 #[test]
 fn iframe_html_src_is_parsed_into_content_document() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html; charset=utf-8",
         r#"<!DOCTYPE html><html><head></head><body><p id="loaded">hi</p></body></html>"#,
     );
@@ -23329,7 +23329,7 @@ fn iframe_html_src_is_parsed_into_content_document() {
 #[test]
 fn iframe_xml_src_preserves_case_namespace_entities_and_doctype() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "application/xml; charset=utf-8",
         r#"<?xml version='1.0'?><!DOCTYPE Root SYSTEM 'urn:test'><Root xmlns='urn:root' xmlns:p='urn:child' A='&lt;&#65;'><p:Child/></Root>"#,
     );
@@ -23347,7 +23347,7 @@ fn iframe_xml_src_preserves_case_namespace_entities_and_doctype() {
 #[test]
 fn malformed_xml_discards_the_whole_partial_tree() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server("text/xml", "<root><test/></wrong>");
+    let (port, _port_server) = spawn_static_http_server("text/xml", "<root><test/></wrong>");
     let doc = TreeBuilder::parse(&format!(
         r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/bad.xml"></iframe></body></html>"#
     )).document();
@@ -23368,7 +23368,7 @@ fn malformed_xml_discards_the_whole_partial_tree() {
 #[test]
 fn xhtml_scripts_run_only_for_well_formed_correct_namespace_documents() {
     use crate::html::TreeBuilder;
-    let port = spawn_path_http_server(&[
+    let (port, _port_server) = spawn_path_http_server(&[
         (
             "/x.xhtml",
             "text/xml",
@@ -23405,7 +23405,7 @@ fn xhtml_scripts_run_only_for_well_formed_correct_namespace_documents() {
 #[test]
 fn iframe_xhtml_script_uses_child_realm_and_drops_cross_origin_parent_access() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
                 globalThis.childRealmMarker = 'child';
@@ -23479,7 +23479,7 @@ fn iframe_xhtml_script_uses_child_realm_and_drops_cross_origin_parent_access() {
 #[test]
 fn iframe_same_origin_child_realm_binds_frame_element() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
                 const frame = frameElement;
@@ -23532,7 +23532,7 @@ fn iframe_same_origin_child_realm_binds_frame_element() {
 #[test]
 fn iframe_child_realm_routes_dynamic_script_and_load_event() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><head></head><body><script>
                 const script = document.createElement('script');
@@ -23579,7 +23579,7 @@ fn iframe_child_realm_routes_dynamic_script_and_load_event() {
 #[test]
 fn iframe_child_dynamic_script_uses_document_url_as_base() {
     use crate::html::TreeBuilder;
-    let port = spawn_relative_child_script_server();
+    let (port, _port_server) = spawn_relative_child_script_server();
     let doc = TreeBuilder::parse(&format!(
         r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/frames/child.xhtml"></iframe></body></html>"#
     ))
@@ -23618,7 +23618,7 @@ fn iframe_child_dynamic_script_uses_document_url_as_base() {
 #[test]
 fn nested_same_origin_child_realm_uses_owning_parent_global() {
     use crate::html::TreeBuilder;
-    let port = spawn_nested_xhtml_server();
+    let (port, _port_server) = spawn_nested_xhtml_server();
     let doc = TreeBuilder::parse(&format!(
         r#"<html><body><iframe id="outer" src="http://127.0.0.1:{port}/outer.xhtml"></iframe></body></html>"#
     ))
@@ -23653,14 +23653,14 @@ fn nested_same_origin_child_realm_uses_owning_parent_global() {
 #[test]
 fn reloaded_iframe_drops_stale_child_realm_timers() {
     use crate::html::TreeBuilder;
-    let old_port = spawn_static_http_server(
+    let (old_port, _old_port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>
                 setTimeout(() => document.documentElement.setAttribute('data-stale', 'bad'), 10);
                 requestAnimationFrame(() => document.documentElement.setAttribute('data-stale-frame', 'bad'));
             </script></body></html>"#,
     );
-    let new_port = spawn_static_http_server(
+    let (new_port, _new_port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         "<html xmlns='http://www.w3.org/1999/xhtml'><body></body></html>",
     );
@@ -23711,7 +23711,7 @@ fn reloaded_iframe_drops_stale_child_realm_timers() {
 #[test]
 fn retired_iframe_cancels_document_owned_timers_and_animation_frames() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script><![CDATA[
                 setTimeout(() => {
@@ -23786,7 +23786,7 @@ fn retired_iframe_cancels_document_owned_timers_and_animation_frames() {
 #[test]
 fn iframe_document_owner_does_not_leak_into_nested_worker_runtime() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script><![CDATA[
                 parent.workerTimerValue = 'pending';
@@ -23887,15 +23887,15 @@ fn object_sandbox_attribute_does_not_create_iframe_policy() {
 #[test]
 fn iframe_sandbox_enforces_script_and_origin_boundaries() {
     use crate::html::TreeBuilder;
-    let blocked_port = spawn_static_http_server(
+    let (blocked_port, _blocked_port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>void 0</script></body></html>"#,
     );
-    let scripts_port = spawn_static_http_server(
+    let (scripts_port, _scripts_port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>void 0</script></body></html>"#,
     );
-    let same_origin_port = spawn_static_http_server(
+    let (same_origin_port, _same_origin_port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>void 0</script></body></html>"#,
     );
@@ -23994,7 +23994,7 @@ fn iframe_sandbox_enforces_script_and_origin_boundaries() {
 #[test]
 fn failing_xhtml_script_does_not_stop_later_scripts_or_iframe_load() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "application/xhtml+xml",
         r#"<html xmlns='http://www.w3.org/1999/xhtml'><body><script>throw new Error('expected')</script><script>parent.xhtmlAfterError='ran'</script></body></html>"#,
     );
@@ -24031,7 +24031,8 @@ fn failing_xhtml_script_does_not_stop_later_scripts_or_iframe_load() {
 #[test]
 fn iframe_png_src_is_not_parsed_as_html() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server("image/png", r#"<html><body><p>FAIL</p></body></html>"#);
+    let (port, _port_server) =
+        spawn_static_http_server("image/png", r#"<html><body><p>FAIL</p></body></html>"#);
     let doc = TreeBuilder::parse(&format!(
         r#"<html><body><iframe id="f" src="http://127.0.0.1:{port}/empty.png"></iframe></body></html>"#
     ))
@@ -24054,7 +24055,7 @@ fn iframe_png_src_is_not_parsed_as_html() {
 #[test]
 fn iframe_text_plain_src_is_not_parsed_as_html() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/plain; charset=utf-8",
         r#"<html><body><p>FAIL</p></body></html>"#,
     );
@@ -24079,7 +24080,7 @@ fn iframe_text_plain_src_is_not_parsed_as_html() {
 #[test]
 fn iframe_relative_src_resolves_against_base_url() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="rel">yes</p></body></html>"#,
     );
@@ -24106,7 +24107,7 @@ fn iframe_relative_src_resolves_against_base_url() {
 #[test]
 fn iframe_relative_src_honors_explicit_base_url_override() {
     use crate::html::TreeBuilder;
-    let port = spawn_path_http_server(&[(
+    let (port, _port_server) = spawn_path_http_server(&[(
         "/base/child.html",
         "text/html",
         r#"<html><body><p id="base">override</p></body></html>"#,
@@ -24137,7 +24138,7 @@ fn iframe_relative_src_honors_explicit_base_url_override() {
 #[test]
 fn nested_srcdoc_inherits_owner_base_for_resources_and_history_urls() {
     use crate::html::TreeBuilder;
-    let port = spawn_path_http_server(&[
+    let (port, _port_server) = spawn_path_http_server(&[
         (
             "/outer/frame.html",
             "text/html",
@@ -24183,7 +24184,7 @@ fn nested_srcdoc_inherits_owner_base_for_resources_and_history_urls() {
 #[test]
 fn data_document_nested_relative_resource_does_not_use_top_level_base() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="leak">top base leaked</p></body></html>"#,
     );
@@ -24350,7 +24351,7 @@ fn element_setattribute_does_not_leak_to_js_property() {
 #[test]
 fn iframe_changing_src_reloads_content_document() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="x">loaded</p></body></html>"#,
     );
@@ -24525,7 +24526,7 @@ fn cloned_sub_document_node_reports_sub_document_owner() {
 #[test]
 fn iframe_reload_unregisters_previous_sub_document_tree() {
     use crate::html::TreeBuilder;
-    let port =
+    let (port, _port_server) =
         spawn_static_http_server("text/html", r#"<html><body><p id="x">A</p></body></html>"#);
     let doc =
         TreeBuilder::parse(r#"<html><body><iframe id="f"></iframe></body></html>"#).document();
@@ -24572,7 +24573,7 @@ fn iframe_reload_unregisters_previous_sub_document_tree() {
 #[test]
 fn retained_iframe_wrappers_never_alias_later_document_generations() {
     use crate::html::TreeBuilder;
-    let port = spawn_path_http_server(&[
+    let (port, _port_server) = spawn_path_http_server(&[
         (
             "/one.html",
             "text/html",
@@ -24635,7 +24636,7 @@ fn retained_iframe_wrappers_never_alias_later_document_generations() {
 #[test]
 fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
     use crate::html::TreeBuilder;
-    let port = spawn_path_http_server(&[
+    let (port, _port_server) = spawn_path_http_server(&[
         (
             "/outer-one.html",
             "text/html",
@@ -24688,7 +24689,7 @@ fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
 #[test]
 fn iframe_reload_discards_old_document_style_entry() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><style>#t { z-index: 1; position: absolute; }</style><div id="t"></div></body></html>"#,
     );
@@ -24794,7 +24795,7 @@ fn iframe_reload_discards_old_document_style_entry() {
 #[test]
 fn iframe_content_window_is_stable_and_reflects_reload() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="loaded">hi</p></body></html>"#,
     );
@@ -24898,7 +24899,7 @@ fn iframe_content_window_is_stable_and_reflects_reload() {
 #[test]
 fn iframe_location_navigation_resolves_relative_to_caller_document() {
     use crate::html::TreeBuilder;
-    let port = spawn_path_http_server(&[
+    let (port, _port_server) = spawn_path_http_server(&[
         (
             "/frame/child.html",
             "text/html",
@@ -25036,7 +25037,7 @@ fn page_scripts_cannot_reach_host_bindings_or_change_the_private_document_id() {
 #[test]
 fn cross_origin_iframe_scripts_cannot_reach_host_bindings() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><script>
               const names = ['__omoikane_get_inner_html', '__omoikane_document_cookie_get',
@@ -25075,7 +25076,7 @@ fn cross_origin_iframe_scripts_cannot_reach_host_bindings() {
 #[test]
 fn forged_dom_receivers_cannot_access_cross_origin_node_ids() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         "<html><body><p id='secret'>victim content</p><script>localStorage.setItem('private-key', 'victim storage'); try { const orphan = document.createElement('p'); orphan.textContent = 'detached secret'; document.documentElement.setAttribute('data-detached-own-text', orphan.textContent); document.documentElement.setAttribute('data-detached-id', String(orphan.__id)); globalThis.orphan = orphan; } catch (error) { document.documentElement.setAttribute('data-detached-error', error.name + ':' + error.message); }</script></body></html>",
     );
@@ -25240,11 +25241,11 @@ fn forged_dom_receivers_cannot_access_cross_origin_node_ids() {
 #[test]
 fn iframe_window_proxy_enforces_cross_origin_boundary_and_restores_access() {
     use crate::html::TreeBuilder;
-    let same_origin_port = spawn_static_http_server(
+    let (same_origin_port, _same_origin_port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="same">same</p></body></html>"#,
     );
-    let cross_origin_port = spawn_static_http_server(
+    let (cross_origin_port, _cross_origin_port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="cross">cross</p></body></html>"#,
     );
@@ -25392,7 +25393,7 @@ fn iframe_window_proxy_enforces_cross_origin_boundary_and_restores_access() {
 #[test]
 fn iframe_creator_origin_inheritance_and_opaque_navigation_are_explicit() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server("text/html", "<html><body></body></html>");
+    let (port, _port_server) = spawn_static_http_server("text/html", "<html><body></body></html>");
     let doc = TreeBuilder::parse("<html><body></body></html>").document();
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
@@ -25539,7 +25540,7 @@ fn iframe_history_url_expando_cannot_spoof_origin_checks() {
 #[test]
 fn iframe_location_reload_and_history_preserve_proxy_and_entry_rules() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="loaded">loaded</p></body></html>"#,
     );
@@ -25706,7 +25707,7 @@ fn iframe_location_reload_and_history_preserve_proxy_and_entry_rules() {
 #[test]
 fn iframe_direct_src_navigations_commit_each_history_entry_before_next_mutation() {
     use crate::html::TreeBuilder;
-    let port = spawn_path_http_server(&[
+    let (port, _port_server) = spawn_path_http_server(&[
         (
             "/a.html",
             "text/html",
@@ -25748,7 +25749,7 @@ fn iframe_direct_src_navigations_commit_each_history_entry_before_next_mutation(
 #[test]
 fn iframe_history_rebinds_state_entries_and_reload_uses_current_url() {
     use crate::html::TreeBuilder;
-    let port = spawn_path_http_server(&[
+    let (port, _port_server) = spawn_path_http_server(&[
         (
             "/a.html",
             "text/html",
@@ -26107,7 +26108,7 @@ fn detached_iframe_closes_nested_context_until_reconnected() {
 #[test]
 fn permanently_closed_window_location_cannot_navigate_reconnected_iframe() {
     use crate::html::TreeBuilder;
-    let port = spawn_static_http_server(
+    let (port, _port_server) = spawn_static_http_server(
         "text/html",
         r#"<html><body><p id="page">initial</p></body></html>"#,
     );
@@ -26212,7 +26213,7 @@ fn reloaded_iframe_default_view_follows_new_document() {
     // the reloaded document, so pre/post-reload identity comparison is not
     // reliable — the stale-document case is pinned in the native-contract
     // test `document_owner_iframe_native_maps_document_to_owning_iframe`).
-    let port = spawn_path_http_server(&[
+    let (port, _port_server) = spawn_path_http_server(&[
         (
             "/a.html",
             "text/html",

@@ -474,9 +474,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers, read_request_headers_from,
+    };
     use rustls::pki_types::ServerName;
     use rustls::{ClientConnection, StreamOwned};
-    use std::io::{BufRead, BufReader, Read};
+    use std::io::Read;
     use std::net::TcpListener;
 
     #[test]
@@ -536,26 +540,23 @@ mod tests {
     }
 
     /// Starts a local TCP server that reads an HTTP request, validates it,
-    /// and responds with a fixed 200 OK response. Returns the port.
+    /// and responds with a fixed 200 OK response. Returns the port and worker.
     fn start_test_server(
         expected_path: &str,
         expected_host: Option<&str>,
         response_body: &str,
-    ) -> u16 {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    ) -> (u16, FixtureWorker<()>) {
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let expected_path = expected_path.to_string();
         let expected_host = expected_host.map(|s| s.to_string());
         let response_body = response_body.to_string();
 
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-
-            // Read request line
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
+        let worker = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let request_line = request.lines().next().unwrap();
 
             // Validate request line contains expected path
             assert!(
@@ -567,14 +568,8 @@ mod tests {
 
             // Read headers, find Host
             let mut host_value = None;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    break;
-                }
-                if let Some((name, value)) = trimmed.split_once(':') {
+            for line in request.lines().skip(1) {
+                if let Some((name, value)) = line.split_once(':') {
                     if name.trim().eq_ignore_ascii_case("host") {
                         host_value = Some(value.trim().to_string());
                     }
@@ -598,12 +593,12 @@ mod tests {
             stream.flush().unwrap();
         });
 
-        port
+        (port, worker)
     }
 
     #[test]
     fn send_get_to_local_server() {
-        let port = start_test_server("/hello", None, "world");
+        let (port, worker) = start_test_server("/hello", None, "world");
 
         let url = format!("http://127.0.0.1:{}/hello", port);
         let req = HttpRequest::get(&url).unwrap();
@@ -611,33 +606,24 @@ mod tests {
 
         assert_eq!(resp.status_code(), 200);
         assert_eq!(resp.body(), b"world");
+        worker.join();
     }
 
     #[test]
     fn send_verifies_host_header_value() {
         // Port is dynamic, so we start the server first, then build the expected host.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
         let expected_host = format!("127.0.0.1:{}", port);
 
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-
-            // Skip request line
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
+        let worker = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
 
             // Read headers, verify Host value
             let mut host_value = None;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    break;
-                }
-                if let Some((name, value)) = trimmed.split_once(':') {
+            for line in request.lines().skip(1) {
+                if let Some((name, value)) = line.split_once(':') {
                     if name.trim().eq_ignore_ascii_case("host") {
                         host_value = Some(value.trim().to_string());
                     }
@@ -663,6 +649,7 @@ mod tests {
 
         assert_eq!(resp.status_code(), 200);
         assert_eq!(resp.body(), b"ok");
+        worker.join();
     }
 
     #[test]
@@ -692,16 +679,38 @@ mod tests {
         )
     }
 
+    // IPv6 is intentional: localhost resolves to ::1 on macOS.
+    fn bind_tls_loopback() -> TcpListener {
+        let listener = TcpListener::bind("[::1]:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        listener
+    }
+
+    fn accept_tls_socket(listener: &TcpListener) -> TcpStream {
+        let stream = accept_with_timeout(listener, ACCEPT_TIMEOUT).unwrap();
+        stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+        stream.set_write_timeout(Some(READ_TIMEOUT)).unwrap();
+        stream
+    }
+
+    fn read_tls_request(
+        stream: &mut StreamOwned<rustls::ServerConnection, TcpStream>,
+    ) -> io::Result<String> {
+        read_request_headers_from(stream, READ_TIMEOUT, |stream, remaining| {
+            stream.sock.set_read_timeout(Some(remaining))
+        })
+    }
+
     /// Starts a local TLS server that accepts one connection, reads an HTTP
     /// request, and responds with a fixed 200 OK response. Returns the port
-    /// and the CA certificate DER (for client trust).
+    /// the CA certificate DER (for client trust), and the joined worker.
     ///
     /// The server listens on `[::1]:0` so that `localhost` (which resolves to
     /// `::1` on macOS) can connect via `send_with_options`.
     fn start_tls_test_server(
         hostname: &str,
         response_body: &str,
-    ) -> (u16, CertificateDer<'static>) {
+    ) -> (u16, CertificateDer<'static>, FixtureWorker<io::Result<()>>) {
         let (cert_der, key_der) = generate_test_cert(hostname);
         let ca_cert = cert_der.clone();
 
@@ -710,18 +719,17 @@ mod tests {
             .with_single_cert(vec![cert_der], key_der)
             .unwrap();
 
-        let listener = TcpListener::bind("[::1]:0").unwrap();
+        let listener = bind_tls_loopback();
         let port = listener.local_addr().unwrap().port();
         let response_body = response_body.to_string();
 
-        std::thread::spawn(move || {
-            let (tcp_stream, _) = listener.accept().unwrap();
+        let worker = FixtureWorker::spawn(move || {
+            let tcp_stream = accept_tls_socket(&listener);
             let conn = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
             let mut tls_stream = StreamOwned::new(conn, tcp_stream);
 
-            // Read request (consume until \r\n\r\n)
-            let mut buf = vec![0u8; 4096];
-            let _ = tls_stream.read(&mut buf);
+            // Certificate rejection is returned to the rejection tests.
+            read_tls_request(&mut tls_stream)?;
 
             // Send response
             let response = format!(
@@ -729,17 +737,18 @@ mod tests {
                 response_body.len(),
                 response_body
             );
-            tls_stream.write_all(response.as_bytes()).unwrap();
-            tls_stream.flush().unwrap();
+            tls_stream.write_all(response.as_bytes())?;
+            tls_stream.flush()?;
+            Ok(())
         });
 
-        (port, ca_cert)
+        (port, ca_cert, worker)
     }
 
     #[test]
     fn connection_pool_reuses_http11_tls_connection() {
         let (cert_der, key_der) = generate_test_cert("localhost");
-        let listener = TcpListener::bind("[::1]:0").unwrap();
+        let listener = bind_tls_loopback();
         let port = listener.local_addr().unwrap().port();
         let server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -748,19 +757,13 @@ mod tests {
         let mut server_config = Arc::new(server_config);
         Arc::get_mut(&mut server_config).unwrap().alpn_protocols = vec![b"http/1.1".to_vec()];
 
-        let server = std::thread::spawn(move || {
-            let (tcp_stream, _) = listener.accept().unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let tcp_stream = accept_tls_socket(&listener);
             let conn = rustls::ServerConnection::new(server_config).unwrap();
             let mut tls_stream = StreamOwned::new(conn, tcp_stream);
 
             for expected_path in ["/first", "/second"] {
-                let mut request = Vec::new();
-                while !request.ends_with(b"\r\n\r\n") {
-                    let mut byte = [0u8; 1];
-                    tls_stream.read_exact(&mut byte).unwrap();
-                    request.push(byte[0]);
-                }
-                let request = String::from_utf8(request).unwrap();
+                let request = read_tls_request(&mut tls_stream).unwrap();
                 assert!(request.starts_with(&format!("GET {expected_path} HTTP/1.1\r\n")));
                 tls_stream
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
@@ -775,7 +778,7 @@ mod tests {
             let response = pool.send(&request, true).unwrap();
             assert_eq!(response.body(), b"ok");
         }
-        server.join().unwrap();
+        server.join();
     }
 
     /// Helper: connect to the local TLS server while exercising the same
@@ -804,7 +807,7 @@ mod tests {
 
     #[test]
     fn tls_https_success_with_trusted_cert() {
-        let (port, ca_cert) = start_tls_test_server("localhost", "tls-ok");
+        let (port, ca_cert, worker) = start_tls_test_server("localhost", "tls-ok");
 
         let url = format!("https://localhost:{}/", port);
         let req = HttpRequest::get(&url).unwrap();
@@ -812,13 +815,14 @@ mod tests {
 
         assert_eq!(resp.status_code(), 200);
         assert_eq!(resp.body(), b"tls-ok");
+        worker.join().unwrap();
     }
 
     #[test]
     fn tls_rejects_untrusted_self_signed_cert() {
         // Start a server with a self-signed cert, but connect using the
         // default Mozilla root store — the cert won't be trusted.
-        let (port, _ca_cert) = start_tls_test_server("localhost", "should-not-reach");
+        let (port, _ca_cert, worker) = start_tls_test_server("localhost", "should-not-reach");
 
         // Connect directly to [::1] to match the test server's bind address.
         let addr: std::net::SocketAddr = format!("[::1]:{}", port).parse().unwrap();
@@ -841,25 +845,29 @@ mod tests {
         let result = tls_stream.write_all(&req.serialize());
 
         assert!(result.is_err(), "should reject untrusted self-signed cert");
+        drop(tls_stream);
+        assert!(worker.join().is_err());
     }
 
     #[test]
     fn tls_rejects_hostname_mismatch() {
         // Certificate is issued for "correct-host.test", but we connect
         // using "localhost" — hostname verification should fail.
-        let (port, ca_cert) = start_tls_test_server("correct-host.test", "should-not-reach");
+        let (port, ca_cert, worker) =
+            start_tls_test_server("correct-host.test", "should-not-reach");
 
         let url = format!("https://localhost:{}/", port);
         let req = HttpRequest::get(&url).unwrap();
         let result = send_to_local_tls_server_with_config(&req, port, &ca_cert);
 
         assert!(result.is_err(), "should reject hostname mismatch");
+        assert!(worker.join().is_err());
     }
 
     #[test]
     fn tls_falls_back_to_http11_when_http2_header_decode_fails() {
         let (cert_der, key_der) = generate_test_cert("localhost");
-        let listener = TcpListener::bind("[::1]:0").unwrap();
+        let listener = bind_tls_loopback();
         let port = listener.local_addr().unwrap().port();
 
         let server_config = rustls::ServerConfig::builder()
@@ -870,10 +878,10 @@ mod tests {
         Arc::get_mut(&mut server_config).unwrap().alpn_protocols =
             vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-        let server = std::thread::spawn(move || {
+        let server = FixtureWorker::spawn(move || {
             // First connection negotiates h2 and returns an unsupported frame type,
             // which the client currently treats as InvalidHeader.
-            let (tcp_stream, _) = listener.accept().unwrap();
+            let tcp_stream = accept_tls_socket(&listener);
             let conn = rustls::ServerConnection::new(server_config.clone()).unwrap();
             let mut tls_stream = StreamOwned::new(conn, tcp_stream);
 
@@ -911,23 +919,14 @@ mod tests {
             tls_stream.flush().unwrap();
 
             // Second connection negotiates HTTP/1.1 and returns a valid response.
-            let (tcp_stream, _) = listener.accept().unwrap();
+            let tcp_stream = accept_tls_socket(&listener);
             // The reconnect proves the client consumed the invalid frame;
             // keep its first connection alive until that has happened.
             drop(tls_stream);
             let conn = rustls::ServerConnection::new(server_config).unwrap();
             let mut tls_stream = StreamOwned::new(conn, tcp_stream);
 
-            let mut reader = BufReader::new(&mut tls_stream);
-            let mut request = String::new();
-            loop {
-                let mut line = String::new();
-                assert!(reader.read_line(&mut line).unwrap() > 0);
-                request.push_str(&line);
-                if line == "\r\n" {
-                    break;
-                }
-            }
+            let request = read_tls_request(&mut tls_stream).unwrap();
             assert!(request.starts_with("GET / HTTP/1.1\r\n"));
             assert_eq!(
                 tls_stream.conn.alpn_protocol(),
@@ -972,7 +971,7 @@ mod tests {
 
         assert_eq!(response.status_code(), 200);
         assert_eq!(response.body(), b"fallback");
-        server.join().unwrap();
+        server.join();
     }
 
     /// Helper: connect to a TLS server with the insecure verifier (no trusted roots required).
@@ -987,7 +986,7 @@ mod tests {
     fn insecure_mode_accepts_self_signed_cert() {
         // Self-signed cert is not in the Mozilla root store, but insecure mode
         // should still succeed.
-        let (port, _ca_cert) = start_tls_test_server("localhost", "insecure-ok");
+        let (port, _ca_cert, worker) = start_tls_test_server("localhost", "insecure-ok");
 
         let url = format!("https://localhost:{}/", port);
         let req = HttpRequest::get(&url).unwrap();
@@ -995,13 +994,14 @@ mod tests {
 
         assert_eq!(resp.status_code(), 200);
         assert_eq!(resp.body(), b"insecure-ok");
+        worker.join().unwrap();
     }
 
     #[test]
     fn insecure_mode_accepts_hostname_mismatch() {
         // Certificate is for "correct-host.test" but we connect as "localhost".
         // In insecure mode this should be accepted.
-        let (port, _ca_cert) = start_tls_test_server("correct-host.test", "mismatch-ok");
+        let (port, _ca_cert, worker) = start_tls_test_server("correct-host.test", "mismatch-ok");
 
         let url = format!("https://localhost:{}/", port);
         let req = HttpRequest::get(&url).unwrap();
@@ -1009,12 +1009,13 @@ mod tests {
 
         assert_eq!(resp.status_code(), 200);
         assert_eq!(resp.body(), b"mismatch-ok");
+        worker.join().unwrap();
     }
 
     #[test]
     fn default_mode_still_rejects_untrusted_cert_after_insecure_added() {
         // Ensure the default (secure) path is not affected by the insecure code path.
-        let (port, _ca_cert) = start_tls_test_server("localhost", "should-not-reach");
+        let (port, _ca_cert, worker) = start_tls_test_server("localhost", "should-not-reach");
 
         let addr: std::net::SocketAddr = format!("[::1]:{}", port).parse().unwrap();
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
@@ -1038,6 +1039,8 @@ mod tests {
             result.is_err(),
             "secure mode should still reject untrusted cert"
         );
+        drop(tls_stream);
+        assert!(worker.join().is_err());
     }
 
     #[test]

@@ -44,6 +44,19 @@ pub fn accept_with_timeout(listener: &TcpListener, timeout: Duration) -> io::Res
 
 /// Read one request's headers without consuming a possible request body.
 pub fn read_request_headers(stream: &mut TcpStream, timeout: Duration) -> io::Result<String> {
+    read_request_headers_from(stream, timeout, |stream, remaining| {
+        stream.set_read_timeout(Some(remaining))
+    })
+}
+
+/// Read headers from a transport such as TLS without consuming its request body.
+/// Before each read, `set_read_timeout` must apply the remaining deadline to
+/// that transport's underlying socket; errors from configuration or I/O propagate.
+pub fn read_request_headers_from<R: Read>(
+    stream: &mut R,
+    timeout: Duration,
+    mut set_read_timeout: impl FnMut(&mut R, Duration) -> io::Result<()>,
+) -> io::Result<String> {
     let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
     while !bytes.ends_with(b"\r\n\r\n") {
@@ -54,7 +67,7 @@ pub fn read_request_headers(stream: &mut TcpStream, timeout: Duration) -> io::Re
                 "timed out reading HTTP request headers",
             ));
         }
-        stream.set_read_timeout(Some(remaining))?;
+        set_read_timeout(stream, remaining)?;
         let mut byte = [0];
         if let Err(error) = stream.read_exact(&mut byte) {
             if matches!(
