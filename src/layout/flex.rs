@@ -68,81 +68,22 @@ pub(super) fn layout_flex_container(
         .and_then(super::UsedHeight::percentage_basis)
         .or(specified_height);
 
-    let mut items = Vec::new();
-    let mut positioned_children = Vec::new();
-    let main_basis = match direction {
-        FlexDirection::Row => width,
-        FlexDirection::Column => definite_height.unwrap_or(0.0),
-    };
-    let mut pending_text = Vec::new();
-    for child in node.layout_child_nodes() {
-        if child.node_type() == NodeType::Text {
-            pending_text.push(child);
-            continue;
-        }
-        if child.node_type() != NodeType::Element {
-            continue;
-        }
-        let child_style = resolver.computed_style(&child);
-        if child_style.is_display_none() {
-            continue;
-        }
-        anonymous::append(
-            &mut items,
-            &mut pending_text,
-            resolver,
-            direction,
-            align,
-            width,
-        );
-        if is_out_of_flow_positioned(&child_style) {
-            positioned_children.push((child, child_style));
-            continue;
-        }
-        let base_main_size = flex_basis(&child_style, direction)
-            .or_else(|| resolved_main_size(&child_style, direction, main_basis))
-            .unwrap_or_else(|| auto_flex_base_main_size(&child, resolver, direction));
-        let min_main_size = match direction {
-            FlexDirection::Row => explicit_length(&child_style, "min-width")
-                .unwrap_or_else(|| super::minimum_content_width(&child, resolver)),
-            FlexDirection::Column => explicit_length(&child_style, "min-height").unwrap_or(0.0),
-        };
-        let (main_start_auto, main_end_auto) = main_axis_auto_margins(&child_style, direction);
-        items.push(FlexItemSpec {
-            node: child,
-            text_nodes: Vec::new(),
-            base_main_size,
-            min_main_size,
-            main_start_auto,
-            main_end_auto,
-            explicit_cross_size: explicit_cross_size(&child_style, direction),
-            flex_grow: flex_grow(&child_style),
-            flex_shrink: flex_shrink(&child_style),
-            align_self: align_self(&child_style),
-        });
-    }
-
-    anonymous::append(
-        &mut items,
-        &mut pending_text,
+    let (items, positioned_children, available_main_size) = collect_flex_items(
+        node,
         resolver,
         direction,
         align,
         width,
+        &style,
+        definite_height,
+        specified_height,
+        used_height,
+        containing_height,
+        padding,
+        border,
+        main_gap,
     );
 
-    let available_main_size = match direction {
-        FlexDirection::Row => width,
-        FlexDirection::Column => {
-            let natural = items.iter().map(|item| item.base_main_size).sum::<f32>()
-                + main_gap * items.len().saturating_sub(1) as f32;
-            let height = used_height
-                .map(|height| height.value)
-                .or(specified_height)
-                .unwrap_or(natural);
-            super::clamp_content_height(&style, height, containing_height, padding, border)
-        }
-    };
     let lines = build_flex_lines(&items, available_main_size, wrap, main_gap);
     let mut children = Vec::new();
     let mut cross_cursor = y;
@@ -150,262 +91,62 @@ pub(super) fn layout_flex_container(
     let line_count = lines.len();
 
     for (line_index, line) in lines.into_iter().enumerate() {
-        let line_item_count = line.items.len();
-        let fixed_main_gap = if line_item_count > 1 {
-            main_gap * (line_item_count.saturating_sub(1)) as f32
-        } else {
-            0.0
-        };
-        let available_main_for_items = (available_main_size - fixed_main_gap).max(0.0);
-        let resolved_main_sizes = resolve_flex_main_sizes(&line.items, available_main_for_items);
-        let mut laid_out = Vec::new();
-        let mut line_cross_size = 0.0f32;
-
-        for (item, main_size) in line.items.iter().zip(resolved_main_sizes.iter()) {
-            let child_style = resolver.computed_style(&item.node);
-            let column_width = item.explicit_cross_size.unwrap_or_else(|| {
-                if direction == FlexDirection::Column
-                    && item.align_self.unwrap_or(align) != AlignItems::Stretch
-                    && resolved_length(&child_style, "width", width).is_none()
-                {
-                    (intrinsic_width(&item.node, resolver)
-                        + edge_sizes(&child_style, "margin").horizontal())
-                    .min(width)
-                } else {
-                    width
-                }
-            });
-            let child_containing = match direction {
-                FlexDirection::Row => Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: *main_size,
-                    height: definite_height.or(item.explicit_cross_size).unwrap_or(0.0),
-                },
-                FlexDirection::Column => Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: column_width,
-                    height: *main_size,
-                },
-            };
-
-            // A definite single-line row already knows its stretch height.
-            // Apply it on the first pass so nested stretched flex containers
-            // do not recursively double their layout work.
-            let stretch_height = if direction == FlexDirection::Row
-                && wrap == FlexWrap::NoWrap
-                && stretches_height(&child_style, item.align_self.unwrap_or(align))
-            {
-                definite_height.map(|height| super::UsedHeight {
-                    value: (height
-                        - edge_sizes(&child_style, "margin").vertical()
-                        - edge_sizes(&child_style, "padding").vertical()
-                        - edge_sizes(&child_style, "border").vertical())
-                    .max(0.0),
-                    definite: true,
-                })
-            } else {
-                None
-            };
-            let layout_child =
-                layout_item(item, resolver, child_containing, viewport, stretch_height);
-            if let Some(layout_child) = layout_child {
-                let cross_size = match direction {
-                    FlexDirection::Row => layout_child.total_height(),
-                    FlexDirection::Column => layout_child.total_width(),
-                };
-                line_cross_size = line_cross_size.max(cross_size);
-                laid_out.push(LaidOutFlexItem {
-                    spec: item,
-                    layout: layout_child,
-                    containing: child_containing,
-                    used_height: stretch_height,
-                });
-            }
-        }
+        let (mut laid_out, mut line_cross_size, fixed_main_gap) = resolve_line_main_sizes(
+            &line,
+            resolver,
+            direction,
+            align,
+            wrap,
+            width,
+            definite_height,
+            available_main_size,
+            main_gap,
+            viewport,
+        );
 
         if direction == FlexDirection::Column {
-            let percentage_basis = definite_height.unwrap_or(0.0);
-            let heights = grown_column_heights(
-                &laid_out,
+            let available_main_for_items = (available_main_size - fixed_main_gap).max(0.0);
+            line_cross_size = grow_column_line_items(
+                &mut laid_out,
                 resolver,
                 available_main_for_items,
-                percentage_basis,
+                definite_height,
+                viewport,
             );
-            for (laid_out_item, height) in laid_out.iter_mut().zip(heights) {
-                let LaidOutFlexItem {
-                    spec: item,
-                    layout: child,
-                    containing,
-                    ..
-                } = laid_out_item;
-                let child_style = resolver.computed_style(&item.node);
-                let definite = definite_height.is_some()
-                    || flex_basis(&child_style, FlexDirection::Column).is_some();
-                // Even an unchanged auto height needs a second layout when
-                // flex layout has made its percentage basis definite.
-                if height != child.dimensions.content.height
-                    || (definite && explicit_length(&child_style, "height").is_none())
-                {
-                    if let Some(reflowed) = layout_item(
-                        item,
-                        resolver,
-                        Rect {
-                            height: percentage_basis,
-                            ..*containing
-                        },
-                        viewport,
-                        Some(super::UsedHeight {
-                            value: height,
-                            definite,
-                        }),
-                    ) {
-                        *child = reflowed;
-                    }
-                }
-            }
-            line_cross_size = laid_out
-                .iter()
-                .map(|item| item.layout.total_width())
-                .fold(0.0, f32::max);
         }
 
-        // A single flex line uses the container's cross size. Using only the
-        // tallest item here makes align-items:center/flex-end ineffective in
-        // a definite-height row (and in a definite-width column).
-        if wrap == FlexWrap::NoWrap {
-            line_cross_size = match direction {
-                FlexDirection::Row => super::clamp_content_height(
-                    &style,
-                    used_height
-                        .map(|height| height.value)
-                        .or(specified_height)
-                        .unwrap_or(line_cross_size),
-                    containing_height,
-                    padding,
-                    border,
-                ),
-                // A non-wrapping column has one flex line whose cross size is
-                // the container's content width.  Using the widest child's
-                // intrinsic width here makes align-items:center/flex-end align
-                // inside that child-sized strip instead of across the column.
-                FlexDirection::Column => width,
-            };
-        }
+        line_cross_size = resolve_line_cross_size(
+            &mut laid_out,
+            resolver,
+            direction,
+            wrap,
+            align,
+            &style,
+            used_height,
+            specified_height,
+            containing_height,
+            padding,
+            border,
+            width,
+            line_cross_size,
+            viewport,
+        );
 
-        if direction == FlexDirection::Row {
-            for laid_out_item in &mut laid_out {
-                let LaidOutFlexItem {
-                    spec: item,
-                    layout: child,
-                    containing,
-                    used_height,
-                } = laid_out_item;
-                let child_style = resolver.computed_style(&item.node);
-                if !stretches_height(&child_style, item.align_self.unwrap_or(align)) {
-                    continue;
-                }
-                let height = (line_cross_size
-                    - child.dimensions.margin.vertical()
-                    - child.dimensions.padding.vertical()
-                    - child.dimensions.border.vertical())
-                .max(0.0);
-                let height = super::clamp_content_height(
-                    &child_style,
-                    height,
-                    containing.height,
-                    child.dimensions.padding,
-                    child.dimensions.border,
-                );
-                if used_height.is_some() && child.dimensions.content.height == height {
-                    continue;
-                }
-                if let Some(reflowed) = layout_item(
-                    item,
-                    resolver,
-                    *containing,
-                    viewport,
-                    Some(super::UsedHeight {
-                        value: height,
-                        definite: true,
-                    }),
-                ) {
-                    *child = reflowed;
-                }
-            }
-        }
-
-        let (total_main_size, auto_margin_count) =
-            laid_out
-                .iter()
-                .fold((0.0f32, 0usize), |(total_size, auto_margins), item| {
-                    let item_size = match direction {
-                        FlexDirection::Row => item.layout.total_width(),
-                        FlexDirection::Column => item.layout.total_height(),
-                    };
-                    (
-                        total_size + item_size,
-                        auto_margins
-                            + usize::from(item.spec.main_start_auto)
-                            + usize::from(item.spec.main_end_auto),
-                    )
-                });
-        let used_main_size = total_main_size + fixed_main_gap;
-        let positive_free_space = (available_main_size - used_main_size).max(0.0);
-        let auto_margin = if auto_margin_count > 0 && positive_free_space > 0.0 {
-            positive_free_space / auto_margin_count as f32
-        } else {
-            0.0
-        };
-        let (line_start, justify_gap) = if auto_margin > 0.0 {
-            (0.0, 0.0)
-        } else {
-            justify_offsets(justify, available_main_size, used_main_size, laid_out.len())
-        };
-
-        let mut main_cursor = match direction {
-            FlexDirection::Row => x + line_start,
-            FlexDirection::Column => y + line_start,
-        };
-
-        let laid_out_count = laid_out.len();
-        for (index, laid_out_item) in laid_out.into_iter().enumerate() {
-            let LaidOutFlexItem {
-                spec: item,
-                layout: mut child,
-                ..
-            } = laid_out_item;
-            let child_main_size = match direction {
-                FlexDirection::Row => child.total_width(),
-                FlexDirection::Column => child.total_height(),
-            };
-            let child_cross_size = match direction {
-                FlexDirection::Row => child.total_height(),
-                FlexDirection::Column => child.total_width(),
-            };
-            let align_value = item.align_self.unwrap_or(align);
-            let cross_offset = align_offset(align_value, line_cross_size, child_cross_size);
-
-            if item.main_start_auto {
-                main_cursor += auto_margin;
-            }
-
-            let (outer_x, outer_y) = match direction {
-                FlexDirection::Row => (main_cursor, cross_cursor + cross_offset),
-                FlexDirection::Column => (x + cross_offset, main_cursor),
-            };
-            translate_layout_box_to_outer(&mut child, outer_x, outer_y, resolver);
-            children.push(child);
-
-            main_cursor += child_main_size;
-            if item.main_end_auto {
-                main_cursor += auto_margin;
-            }
-            if index + 1 < laid_out_count {
-                main_cursor += main_gap + justify_gap;
-            }
-        }
+        let main_cursor = position_line_items(
+            laid_out,
+            &mut children,
+            resolver,
+            direction,
+            justify,
+            align,
+            x,
+            y,
+            cross_cursor,
+            line_cross_size,
+            main_gap,
+            fixed_main_gap,
+            available_main_size,
+        );
 
         if direction == FlexDirection::Column {
             column_main_end = column_main_end.max(main_cursor);
@@ -481,6 +222,431 @@ pub(super) fn layout_flex_container(
         children,
         marker: None,
     })
+}
+
+/// Walks a flex container's children, building `FlexItemSpec`s for in-flow
+/// items and separating out absolutely positioned children (CSS Flexbox
+/// Section 4, Flex Items), and computes the flex line's available main size.
+fn collect_flex_items(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    direction: FlexDirection,
+    align: AlignItems,
+    width: f32,
+    style: &ComputedStyle,
+    definite_height: Option<f32>,
+    specified_height: Option<f32>,
+    used_height: Option<super::UsedHeight>,
+    containing_height: f32,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    main_gap: f32,
+) -> (Vec<FlexItemSpec>, Vec<(NodeHandle, ComputedStyle)>, f32) {
+    let mut items = Vec::new();
+    let mut positioned_children = Vec::new();
+    let main_basis = match direction {
+        FlexDirection::Row => width,
+        FlexDirection::Column => definite_height.unwrap_or(0.0),
+    };
+    let mut pending_text = Vec::new();
+    for child in node.layout_child_nodes() {
+        if child.node_type() == NodeType::Text {
+            pending_text.push(child);
+            continue;
+        }
+        if child.node_type() != NodeType::Element {
+            continue;
+        }
+        let child_style = resolver.computed_style(&child);
+        if child_style.is_display_none() {
+            continue;
+        }
+        anonymous::append(
+            &mut items,
+            &mut pending_text,
+            resolver,
+            direction,
+            align,
+            width,
+        );
+        if is_out_of_flow_positioned(&child_style) {
+            positioned_children.push((child, child_style));
+            continue;
+        }
+        let base_main_size = flex_basis(&child_style, direction)
+            .or_else(|| resolved_main_size(&child_style, direction, main_basis))
+            .unwrap_or_else(|| auto_flex_base_main_size(&child, resolver, direction));
+        let min_main_size = match direction {
+            FlexDirection::Row => explicit_length(&child_style, "min-width")
+                .unwrap_or_else(|| super::minimum_content_width(&child, resolver)),
+            FlexDirection::Column => explicit_length(&child_style, "min-height").unwrap_or(0.0),
+        };
+        let (main_start_auto, main_end_auto) = main_axis_auto_margins(&child_style, direction);
+        items.push(FlexItemSpec {
+            node: child,
+            text_nodes: Vec::new(),
+            base_main_size,
+            min_main_size,
+            main_start_auto,
+            main_end_auto,
+            explicit_cross_size: explicit_cross_size(&child_style, direction),
+            flex_grow: flex_grow(&child_style),
+            flex_shrink: flex_shrink(&child_style),
+            align_self: align_self(&child_style),
+        });
+    }
+
+    anonymous::append(
+        &mut items,
+        &mut pending_text,
+        resolver,
+        direction,
+        align,
+        width,
+    );
+
+    let available_main_size = match direction {
+        FlexDirection::Row => width,
+        FlexDirection::Column => {
+            let natural = items.iter().map(|item| item.base_main_size).sum::<f32>()
+                + main_gap * items.len().saturating_sub(1) as f32;
+            let height = used_height
+                .map(|height| height.value)
+                .or(specified_height)
+                .unwrap_or(natural);
+            super::clamp_content_height(&style, height, containing_height, padding, border)
+        }
+    };
+
+    (items, positioned_children, available_main_size)
+}
+
+/// Resolves each flex item's used main size for one line and performs the
+/// line's first layout pass (CSS Flexbox Section 9.3, Main Size
+/// Determination).
+fn resolve_line_main_sizes<'a>(
+    line: &FlexLine<'a>,
+    resolver: &mut StyleResolver,
+    direction: FlexDirection,
+    align: AlignItems,
+    wrap: FlexWrap,
+    width: f32,
+    definite_height: Option<f32>,
+    available_main_size: f32,
+    main_gap: f32,
+    viewport: super::LayoutViewport,
+) -> (Vec<LaidOutFlexItem<'a>>, f32, f32) {
+    let line_item_count = line.items.len();
+    let fixed_main_gap = if line_item_count > 1 {
+        main_gap * (line_item_count.saturating_sub(1)) as f32
+    } else {
+        0.0
+    };
+    let available_main_for_items = (available_main_size - fixed_main_gap).max(0.0);
+    let resolved_main_sizes = resolve_flex_main_sizes(&line.items, available_main_for_items);
+    let mut laid_out = Vec::new();
+    let mut line_cross_size = 0.0f32;
+
+    for (item, main_size) in line.items.iter().zip(resolved_main_sizes.iter()) {
+        let child_style = resolver.computed_style(&item.node);
+        let column_width = item.explicit_cross_size.unwrap_or_else(|| {
+            if direction == FlexDirection::Column
+                && item.align_self.unwrap_or(align) != AlignItems::Stretch
+                && resolved_length(&child_style, "width", width).is_none()
+            {
+                (intrinsic_width(&item.node, resolver)
+                    + edge_sizes(&child_style, "margin").horizontal())
+                .min(width)
+            } else {
+                width
+            }
+        });
+        let child_containing = match direction {
+            FlexDirection::Row => Rect {
+                x: 0.0,
+                y: 0.0,
+                width: *main_size,
+                height: definite_height.or(item.explicit_cross_size).unwrap_or(0.0),
+            },
+            FlexDirection::Column => Rect {
+                x: 0.0,
+                y: 0.0,
+                width: column_width,
+                height: *main_size,
+            },
+        };
+
+        // A definite single-line row already knows its stretch height.
+        // Apply it on the first pass so nested stretched flex containers
+        // do not recursively double their layout work.
+        let stretch_height = if direction == FlexDirection::Row
+            && wrap == FlexWrap::NoWrap
+            && stretches_height(&child_style, item.align_self.unwrap_or(align))
+        {
+            definite_height.map(|height| super::UsedHeight {
+                value: (height
+                    - edge_sizes(&child_style, "margin").vertical()
+                    - edge_sizes(&child_style, "padding").vertical()
+                    - edge_sizes(&child_style, "border").vertical())
+                .max(0.0),
+                definite: true,
+            })
+        } else {
+            None
+        };
+        let layout_child = layout_item(item, resolver, child_containing, viewport, stretch_height);
+        if let Some(layout_child) = layout_child {
+            let cross_size = match direction {
+                FlexDirection::Row => layout_child.total_height(),
+                FlexDirection::Column => layout_child.total_width(),
+            };
+            line_cross_size = line_cross_size.max(cross_size);
+            laid_out.push(LaidOutFlexItem {
+                spec: item,
+                layout: layout_child,
+                containing: child_containing,
+                used_height: stretch_height,
+            });
+        }
+    }
+
+    (laid_out, line_cross_size, fixed_main_gap)
+}
+
+/// Grows column-direction flex items to fill the line (the flexible-length
+/// resolution pass for `flex-direction: column`), and returns the line's
+/// resulting cross size.
+fn grow_column_line_items(
+    laid_out: &mut [LaidOutFlexItem],
+    resolver: &mut StyleResolver,
+    available_main_for_items: f32,
+    definite_height: Option<f32>,
+    viewport: super::LayoutViewport,
+) -> f32 {
+    let percentage_basis = definite_height.unwrap_or(0.0);
+    let heights = grown_column_heights(
+        laid_out,
+        resolver,
+        available_main_for_items,
+        percentage_basis,
+    );
+    for (laid_out_item, height) in laid_out.iter_mut().zip(heights) {
+        let LaidOutFlexItem {
+            spec: item,
+            layout: child,
+            containing,
+            ..
+        } = laid_out_item;
+        let child_style = resolver.computed_style(&item.node);
+        let definite =
+            definite_height.is_some() || flex_basis(&child_style, FlexDirection::Column).is_some();
+        // Even an unchanged auto height needs a second layout when
+        // flex layout has made its percentage basis definite.
+        if height != child.dimensions.content.height
+            || (definite && explicit_length(&child_style, "height").is_none())
+        {
+            if let Some(reflowed) = layout_item(
+                item,
+                resolver,
+                Rect {
+                    height: percentage_basis,
+                    ..*containing
+                },
+                viewport,
+                Some(super::UsedHeight {
+                    value: height,
+                    definite,
+                }),
+            ) {
+                *child = reflowed;
+            }
+        }
+    }
+    laid_out
+        .iter()
+        .map(|item| item.layout.total_width())
+        .fold(0.0, f32::max)
+}
+
+/// Resolves a flex line's final cross size and, for row-direction
+/// containers, stretches items whose cross size is `auto` to fill it
+/// (CSS Flexbox Section 9.4, Cross Size Determination).
+fn resolve_line_cross_size(
+    laid_out: &mut [LaidOutFlexItem],
+    resolver: &mut StyleResolver,
+    direction: FlexDirection,
+    wrap: FlexWrap,
+    align: AlignItems,
+    style: &ComputedStyle,
+    used_height: Option<super::UsedHeight>,
+    specified_height: Option<f32>,
+    containing_height: f32,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    width: f32,
+    mut line_cross_size: f32,
+    viewport: super::LayoutViewport,
+) -> f32 {
+    // A single flex line uses the container's cross size. Using only the
+    // tallest item here makes align-items:center/flex-end ineffective in
+    // a definite-height row (and in a definite-width column).
+    if wrap == FlexWrap::NoWrap {
+        line_cross_size = match direction {
+            FlexDirection::Row => super::clamp_content_height(
+                &style,
+                used_height
+                    .map(|height| height.value)
+                    .or(specified_height)
+                    .unwrap_or(line_cross_size),
+                containing_height,
+                padding,
+                border,
+            ),
+            // A non-wrapping column has one flex line whose cross size is
+            // the container's content width.  Using the widest child's
+            // intrinsic width here makes align-items:center/flex-end align
+            // inside that child-sized strip instead of across the column.
+            FlexDirection::Column => width,
+        };
+    }
+
+    if direction == FlexDirection::Row {
+        for laid_out_item in laid_out.iter_mut() {
+            let LaidOutFlexItem {
+                spec: item,
+                layout: child,
+                containing,
+                used_height,
+            } = laid_out_item;
+            let child_style = resolver.computed_style(&item.node);
+            if !stretches_height(&child_style, item.align_self.unwrap_or(align)) {
+                continue;
+            }
+            let height = (line_cross_size
+                - child.dimensions.margin.vertical()
+                - child.dimensions.padding.vertical()
+                - child.dimensions.border.vertical())
+            .max(0.0);
+            let height = super::clamp_content_height(
+                &child_style,
+                height,
+                containing.height,
+                child.dimensions.padding,
+                child.dimensions.border,
+            );
+            if used_height.is_some() && child.dimensions.content.height == height {
+                continue;
+            }
+            if let Some(reflowed) = layout_item(
+                item,
+                resolver,
+                *containing,
+                viewport,
+                Some(super::UsedHeight {
+                    value: height,
+                    definite: true,
+                }),
+            ) {
+                *child = reflowed;
+            }
+        }
+    }
+
+    line_cross_size
+}
+
+/// Positions a flex line's items along the main axis, applying
+/// justify-content, auto margins and cross-axis alignment offsets, then
+/// appends each item's laid-out box to `children` (CSS Flexbox Section 9.5,
+/// Main-Axis Alignment).  Returns the main-axis position immediately past
+/// the last item.
+fn position_line_items(
+    laid_out: Vec<LaidOutFlexItem>,
+    children: &mut Vec<LayoutBox>,
+    resolver: &mut StyleResolver,
+    direction: FlexDirection,
+    justify: JustifyContent,
+    align: AlignItems,
+    x: f32,
+    y: f32,
+    cross_cursor: f32,
+    line_cross_size: f32,
+    main_gap: f32,
+    fixed_main_gap: f32,
+    available_main_size: f32,
+) -> f32 {
+    let (total_main_size, auto_margin_count) =
+        laid_out
+            .iter()
+            .fold((0.0f32, 0usize), |(total_size, auto_margins), item| {
+                let item_size = match direction {
+                    FlexDirection::Row => item.layout.total_width(),
+                    FlexDirection::Column => item.layout.total_height(),
+                };
+                (
+                    total_size + item_size,
+                    auto_margins
+                        + usize::from(item.spec.main_start_auto)
+                        + usize::from(item.spec.main_end_auto),
+                )
+            });
+    let used_main_size = total_main_size + fixed_main_gap;
+    let positive_free_space = (available_main_size - used_main_size).max(0.0);
+    let auto_margin = if auto_margin_count > 0 && positive_free_space > 0.0 {
+        positive_free_space / auto_margin_count as f32
+    } else {
+        0.0
+    };
+    let (line_start, justify_gap) = if auto_margin > 0.0 {
+        (0.0, 0.0)
+    } else {
+        justify_offsets(justify, available_main_size, used_main_size, laid_out.len())
+    };
+
+    let mut main_cursor = match direction {
+        FlexDirection::Row => x + line_start,
+        FlexDirection::Column => y + line_start,
+    };
+
+    let laid_out_count = laid_out.len();
+    for (index, laid_out_item) in laid_out.into_iter().enumerate() {
+        let LaidOutFlexItem {
+            spec: item,
+            layout: mut child,
+            ..
+        } = laid_out_item;
+        let child_main_size = match direction {
+            FlexDirection::Row => child.total_width(),
+            FlexDirection::Column => child.total_height(),
+        };
+        let child_cross_size = match direction {
+            FlexDirection::Row => child.total_height(),
+            FlexDirection::Column => child.total_width(),
+        };
+        let align_value = item.align_self.unwrap_or(align);
+        let cross_offset = align_offset(align_value, line_cross_size, child_cross_size);
+
+        if item.main_start_auto {
+            main_cursor += auto_margin;
+        }
+
+        let (outer_x, outer_y) = match direction {
+            FlexDirection::Row => (main_cursor, cross_cursor + cross_offset),
+            FlexDirection::Column => (x + cross_offset, main_cursor),
+        };
+        translate_layout_box_to_outer(&mut child, outer_x, outer_y, resolver);
+        children.push(child);
+
+        main_cursor += child_main_size;
+        if item.main_end_auto {
+            main_cursor += auto_margin;
+        }
+        if index + 1 < laid_out_count {
+            main_cursor += main_gap + justify_gap;
+        }
+    }
+
+    main_cursor
 }
 
 pub(super) fn is_flex_container(style: &ComputedStyle) -> bool {

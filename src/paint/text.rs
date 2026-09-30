@@ -212,177 +212,32 @@ pub(crate) fn paint_text_with_registry(
             let fragment_rect = offset.rect(fragment.rect);
             match &fragment.content {
                 InlineFragmentContent::Text(text) => {
-                    let font_size = fragment.metrics.font_size.max(1.0);
-
-                    // Per-fragment style is used for text-transform and color so
-                    // that nested inline elements (e.g. <span>) can have
-                    // independent styling.
-                    let frag_color = fragment_paint_color(fragment, resolver, fallback_color);
-                    let text_transform = fragment_text_transform(&fragment.style);
-
-                    let transformed = apply_text_transform(text, text_transform);
-                    let transformed_text = transformed.as_deref().unwrap_or(text.as_str());
-                    // Resolve bidi before selecting the physical paint axis.
-                    // The vertical painter already maps the resulting visual
-                    // sequence onto its direction-aware column cursor, so it
-                    // must consume the same UAX#9 order as horizontal paint.
-                    let (visual_text, vertical_mode) =
-                        fragment_text_for_paint(transformed_text, &fragment.style);
-                    let display_text = visual_text.as_ref();
-                    // A resolved fragment level lets rustybuzz consume the logical
-                    // string with the matching direction. Without such a level, an
-                    // owned value means paint-time bidi resolution rewrote the
-                    // string, so preserve that established visual-order path.
-                    let can_shape_logical_text = fragment.style.resolved_bidi_level.is_some()
-                        || matches!(&visual_text, Cow::Borrowed(_));
-
-                    // Resolve the same installed or web face used by layout,
-                    // retaining the existing cluster-level fallback fonts.
-                    let selected = select_fragment_font(web_fonts, fragment, fonts);
-                    if let Some(primary_font) = selected.as_ref().map(AsRef::as_ref) {
-                        let web_candidates = select_fragment_web_fonts(web_fonts, fragment);
-                        let mut shaping_fonts: Vec<FontFallbackCandidate<'_>> = web_candidates
-                            .iter()
-                            .map(|candidate| FontFallbackCandidate {
-                                font: candidate.font,
-                                unicode_range: Some(candidate.unicode_range),
-                            })
-                            .collect();
-                        if web_candidates.is_empty() {
-                            shaping_fonts.push(FontFallbackCandidate::unrestricted(primary_font));
-                        }
-                        shaping_fonts.extend(
-                            fonts
-                                .iter()
-                                .map(Arc::as_ref)
-                                .map(FontFallbackCandidate::unrestricted),
-                        );
-                        if vertical_mode.is_some()
-                            || !can_shape_logical_text
-                            || paint_shaped_horizontal_text_with_candidates(
-                                canvas,
-                                fragment_rect,
-                                transformed_text,
-                                font_size,
-                                fragment.metrics.ascent,
-                                &shaping_fonts,
-                                &fragment.style,
-                                frag_color,
-                                clip,
-                                fragment.metrics.letter_spacing,
-                            )
-                            .is_none()
-                        {
-                            paint_fragment_text(
-                                canvas,
-                                fragment_rect,
-                                display_text,
-                                font_size,
-                                fragment.metrics.ascent,
-                                &shaping_fonts,
-                                frag_color,
-                                clip,
-                                fragment.metrics.letter_spacing,
-                                vertical_mode,
-                            );
-                        }
-                    } else if !fonts.is_empty() {
-                        if let Some(vertical_mode) = vertical_mode {
-                            let font_refs: Vec<FontFallbackCandidate<'_>> = fonts
-                                .iter()
-                                .map(Arc::as_ref)
-                                .map(FontFallbackCandidate::unrestricted)
-                                .collect();
-                            paint_fragment_text(
-                                canvas,
-                                fragment_rect,
-                                display_text,
-                                font_size,
-                                fragment.metrics.ascent,
-                                &font_refs,
-                                frag_color,
-                                clip,
-                                fragment.metrics.letter_spacing,
-                                Some(vertical_mode),
-                            );
-                        } else {
-                            let font_refs: Vec<&Font> =
-                                fonts.iter().map(|font| font.as_ref()).collect();
-                            if !can_shape_logical_text
-                                || paint_shaped_horizontal_text(
-                                    canvas,
-                                    fragment_rect,
-                                    transformed_text,
-                                    font_size,
-                                    fragment.metrics.ascent,
-                                    &font_refs,
-                                    &fragment.style,
-                                    frag_color,
-                                    clip,
-                                    fragment.metrics.letter_spacing,
-                                )
-                                .is_none()
-                            {
-                                paint_text_with_font(
-                                    canvas,
-                                    fragment_rect,
-                                    display_text,
-                                    font_size,
-                                    fragment.metrics.ascent,
-                                    fonts,
-                                    frag_color,
-                                    clip,
-                                    fragment.metrics.letter_spacing,
-                                );
-                            }
-                        }
-                    } else {
-                        // Fallback: placeholder rectangles
-                        paint_text_placeholder_with_mode(
-                            canvas,
-                            fragment_rect,
-                            display_text,
-                            font_size,
-                            frag_color,
-                            clip,
-                            fragment.metrics.letter_spacing,
-                            vertical_mode.map(|mode| mode.direction_rtl),
-                        );
-                    }
-
-                    // Draw every decoration captured at its originating box.
-                    // Descendant longhands therefore cannot restyle or cancel it.
-                    for decoration in fragment.style.text_decorations.iter() {
-                        let lines = decoration_lines(&decoration.line);
-                        let color =
-                            *decoration_colors
-                                .entry(decoration.origin)
-                                .or_insert_with(|| {
-                                    decoration_paint_color(
-                                        fragment, decoration, resolver, frag_color,
-                                    )
-                                });
-                        let geometry = decorations.entry(decoration.origin).or_insert_with(|| {
-                            DecorationGeometry::new(
-                                decoration,
-                                line,
-                                vertical_mode.is_some(),
-                                fonts,
-                                web_fonts,
-                            )
-                        });
-                        paint_fragment_decoration(
-                            canvas,
-                            fragment_rect,
-                            fragment.metrics.ascent,
-                            geometry,
-                            lines,
-                            color,
-                            clip,
-                            vertical_mode.is_some(),
-                            offset,
-                        );
-                    }
+                    let (frag_color, vertical_mode) = paint_text_fragment_glyphs(
+                        canvas,
+                        fragment,
+                        fragment_rect,
+                        text,
+                        resolver,
+                        fallback_color,
+                        fonts,
+                        web_fonts,
+                        clip,
+                    );
+                    paint_text_fragment_decorations(
+                        canvas,
+                        fragment,
+                        fragment_rect,
+                        line,
+                        resolver,
+                        frag_color,
+                        vertical_mode,
+                        fonts,
+                        web_fonts,
+                        clip,
+                        offset,
+                        &mut decorations,
+                        &mut decoration_colors,
+                    );
                 }
                 InlineFragmentContent::AtomicInline(_) => {
                     if let Some(child) = layout
@@ -421,181 +276,20 @@ pub(crate) fn paint_text_with_registry(
                     );
                 }
                 InlineFragmentContent::FormControl(style, value, editing) => {
-                    let paint = fragment_box_paint_style(fragment, resolver);
-                    let style = paint.as_ref().unwrap_or(style);
-                    let border = EdgeSizesForPaint::from_style(style);
-                    // A block control's owning LayoutBox already painted its
-                    // background and border. Inline controls have no such box.
-                    if fragment.node.identity() != layout.node.identity() {
-                        if let Some(background) = background_color(style) {
-                            canvas.fill_rect_clipped(fragment_rect, background, clip);
-                        }
-                        if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
-                            paint_rect_borders(canvas, fragment_rect, style, border, clip);
-                        }
-                    }
-                    let content_rect = inline_fragment_content_rect(fragment_rect, style, border);
-                    let color = fragment_paint_color(fragment, resolver, fallback_color);
-                    // Same font policy as the Text branch: the fragment's
-                    // resolved installed or web face first, then the global fonts.
-                    let web_candidates = select_fragment_web_fonts(web_fonts, fragment);
-                    let mut fragment_fonts: Vec<&Font> = web_candidates
-                        .iter()
-                        .map(|candidate| candidate.font)
-                        .collect();
-                    let mut fragment_candidates: Vec<FontFallbackCandidate<'_>> = web_candidates
-                        .iter()
-                        .map(|candidate| FontFallbackCandidate {
-                            font: candidate.font,
-                            unicode_range: Some(candidate.unicode_range),
-                        })
-                        .collect();
-                    let selected = select_fragment_font(web_fonts, fragment, fonts);
-                    if web_candidates.is_empty()
-                        && let Some(font) = selected.as_ref().map(AsRef::as_ref)
-                    {
-                        fragment_fonts.push(font);
-                        fragment_candidates.push(FontFallbackCandidate::unrestricted(font));
-                    }
-                    fragment_fonts.extend(fonts.iter().map(|font| font.as_ref()));
-                    fragment_candidates.extend(
-                        fonts
-                            .iter()
-                            .map(Arc::as_ref)
-                            .map(FontFallbackCandidate::unrestricted),
+                    paint_form_control_fragment(
+                        canvas,
+                        layout,
+                        fragment,
+                        fragment_rect,
+                        style,
+                        value,
+                        editing,
+                        resolver,
+                        fallback_color,
+                        fonts,
+                        web_fonts,
+                        clip,
                     );
-                    if fragment.node.tag_name().as_deref() == Some("textarea") {
-                        let soft_wrap = !fragment
-                            .node
-                            .attributes()
-                            .and_then(|attributes| attributes.get("wrap").cloned())
-                            .is_some_and(|wrap| wrap.eq_ignore_ascii_case("off"));
-                        paint_textarea_value_with_candidates(
-                            canvas,
-                            content_rect,
-                            Rect {
-                                x: fragment_rect.x + border.left,
-                                y: fragment_rect.y + border.top,
-                                width: (fragment_rect.width - border.total_horizontal()).max(0.0),
-                                height: (fragment_rect.height - border.total_vertical()).max(0.0),
-                            },
-                            value,
-                            *editing,
-                            style,
-                            &fragment.style,
-                            fragment.metrics.font_size,
-                            fragment.metrics.ascent,
-                            &fragment_candidates,
-                            color,
-                            clip,
-                            fragment.metrics.letter_spacing,
-                            soft_wrap,
-                        );
-                        continue;
-                    }
-                    let x_offset = if is_text_align_center(style) {
-                        let text_width = measure_form_control_text_width_with_candidates(
-                            value,
-                            fragment.metrics.font_size,
-                            &fragment_candidates,
-                            fragment.metrics.letter_spacing,
-                        );
-                        ((content_rect.width - text_width) / 2.0).max(0.0)
-                    } else {
-                        0.0
-                    };
-                    let text_rect = Rect {
-                        x: content_rect.x + x_offset,
-                        y: content_rect.y
-                            + ((content_rect.height - fragment.metrics.font_size) / 2.0).max(0.0),
-                        width: (content_rect.width - x_offset).max(0.0),
-                        height: fragment.metrics.font_size,
-                    };
-                    let mut caret_x = None;
-                    if let Some(editing) = editing.filter(|state| state.focused) {
-                        let before = text_prefix_by_utf16_offset(value, editing.selection_start);
-                        let selected = text_prefix_by_utf16_offset(value, editing.selection_end);
-                        let start_x = text_rect.x
-                            + measure_form_control_text_width_with_candidates(
-                                before,
-                                fragment.metrics.font_size,
-                                &fragment_candidates,
-                                fragment.metrics.letter_spacing,
-                            );
-                        let end_x = text_rect.x
-                            + measure_form_control_text_width_with_candidates(
-                                selected,
-                                fragment.metrics.font_size,
-                                &fragment_candidates,
-                                fragment.metrics.letter_spacing,
-                            );
-                        if editing.selection_start != editing.selection_end {
-                            canvas.fill_rect_clipped(
-                                Rect {
-                                    x: start_x,
-                                    y: text_rect.y,
-                                    width: (end_x - start_x).max(1.0),
-                                    height: text_rect.height,
-                                },
-                                Color::rgba(51, 153, 255, 120),
-                                clip,
-                            );
-                        } else {
-                            caret_x = Some(start_x);
-                        }
-                    }
-                    if !value.is_empty() {
-                        if fragment_fonts.is_empty() {
-                            paint_text_placeholder(
-                                canvas,
-                                text_rect,
-                                value,
-                                fragment.metrics.font_size,
-                                color,
-                                clip,
-                                fragment.metrics.letter_spacing,
-                            );
-                        } else {
-                            if paint_shaped_horizontal_text_with_candidates(
-                                canvas,
-                                text_rect,
-                                value,
-                                fragment.metrics.font_size,
-                                fragment.metrics.ascent,
-                                &fragment_candidates,
-                                &fragment.style,
-                                color,
-                                clip,
-                                fragment.metrics.letter_spacing,
-                            )
-                            .is_none()
-                            {
-                                paint_text_with_font_refs(
-                                    canvas,
-                                    text_rect,
-                                    value,
-                                    fragment.metrics.font_size,
-                                    fragment.metrics.ascent,
-                                    &fragment_fonts,
-                                    color,
-                                    clip,
-                                    fragment.metrics.letter_spacing,
-                                );
-                            }
-                        }
-                    }
-                    if let Some(x) = caret_x {
-                        canvas.fill_rect_clipped(
-                            Rect {
-                                x,
-                                y: text_rect.y,
-                                width: 1.0,
-                                height: text_rect.height,
-                            },
-                            color,
-                            clip,
-                        );
-                    }
                 }
                 InlineFragmentContent::IconFormControl(style, image, width, height) => {
                     if let Some(background) = background_color(style) {
@@ -616,6 +310,401 @@ pub(crate) fn paint_text_with_registry(
                 }
             }
         }
+    }
+}
+
+/// A text fragment's originating box, keyed the same way as its captured
+/// text decorations, for caching per-origin decoration state on a line.
+type DecorationOrigin = (usize, Option<crate::css::PseudoElement>);
+
+/// Selects the resolved installed or web font for one text fragment and
+/// paints its glyphs, falling back to placeholder rectangles when no font is
+/// available. Returns the fragment's paint color and vertical writing mode
+/// so the caller can paint the fragment's text decorations against them.
+fn paint_text_fragment_glyphs(
+    canvas: &mut Canvas,
+    fragment: &crate::layout::InlineFragment,
+    fragment_rect: Rect,
+    text: &str,
+    resolver: &mut crate::css::StyleResolver,
+    fallback_color: Color,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    clip: Option<Rect>,
+) -> (Color, Option<VerticalPaintMode>) {
+    let font_size = fragment.metrics.font_size.max(1.0);
+
+    // Per-fragment style is used for text-transform and color so
+    // that nested inline elements (e.g. <span>) can have
+    // independent styling.
+    let frag_color = fragment_paint_color(fragment, resolver, fallback_color);
+    let text_transform = fragment_text_transform(&fragment.style);
+
+    let transformed = apply_text_transform(text, text_transform);
+    let transformed_text = transformed.as_deref().unwrap_or(text);
+    // Resolve bidi before selecting the physical paint axis.
+    // The vertical painter already maps the resulting visual
+    // sequence onto its direction-aware column cursor, so it
+    // must consume the same UAX#9 order as horizontal paint.
+    let (visual_text, vertical_mode) = fragment_text_for_paint(transformed_text, &fragment.style);
+    let display_text = visual_text.as_ref();
+    // A resolved fragment level lets rustybuzz consume the logical
+    // string with the matching direction. Without such a level, an
+    // owned value means paint-time bidi resolution rewrote the
+    // string, so preserve that established visual-order path.
+    let can_shape_logical_text =
+        fragment.style.resolved_bidi_level.is_some() || matches!(&visual_text, Cow::Borrowed(_));
+
+    // Resolve the same installed or web face used by layout,
+    // retaining the existing cluster-level fallback fonts.
+    let selected = select_fragment_font(web_fonts, fragment, fonts);
+    if let Some(primary_font) = selected.as_ref().map(AsRef::as_ref) {
+        let web_candidates = select_fragment_web_fonts(web_fonts, fragment);
+        let mut shaping_fonts: Vec<FontFallbackCandidate<'_>> = web_candidates
+            .iter()
+            .map(|candidate| FontFallbackCandidate {
+                font: candidate.font,
+                unicode_range: Some(candidate.unicode_range),
+            })
+            .collect();
+        if web_candidates.is_empty() {
+            shaping_fonts.push(FontFallbackCandidate::unrestricted(primary_font));
+        }
+        shaping_fonts.extend(
+            fonts
+                .iter()
+                .map(Arc::as_ref)
+                .map(FontFallbackCandidate::unrestricted),
+        );
+        if vertical_mode.is_some()
+            || !can_shape_logical_text
+            || paint_shaped_horizontal_text_with_candidates(
+                canvas,
+                fragment_rect,
+                transformed_text,
+                font_size,
+                fragment.metrics.ascent,
+                &shaping_fonts,
+                &fragment.style,
+                frag_color,
+                clip,
+                fragment.metrics.letter_spacing,
+            )
+            .is_none()
+        {
+            paint_fragment_text(
+                canvas,
+                fragment_rect,
+                display_text,
+                font_size,
+                fragment.metrics.ascent,
+                &shaping_fonts,
+                frag_color,
+                clip,
+                fragment.metrics.letter_spacing,
+                vertical_mode,
+            );
+        }
+    } else if !fonts.is_empty() {
+        if let Some(vertical_mode) = vertical_mode {
+            let font_refs: Vec<FontFallbackCandidate<'_>> = fonts
+                .iter()
+                .map(Arc::as_ref)
+                .map(FontFallbackCandidate::unrestricted)
+                .collect();
+            paint_fragment_text(
+                canvas,
+                fragment_rect,
+                display_text,
+                font_size,
+                fragment.metrics.ascent,
+                &font_refs,
+                frag_color,
+                clip,
+                fragment.metrics.letter_spacing,
+                Some(vertical_mode),
+            );
+        } else {
+            let font_refs: Vec<&Font> = fonts.iter().map(|font| font.as_ref()).collect();
+            if !can_shape_logical_text
+                || paint_shaped_horizontal_text(
+                    canvas,
+                    fragment_rect,
+                    transformed_text,
+                    font_size,
+                    fragment.metrics.ascent,
+                    &font_refs,
+                    &fragment.style,
+                    frag_color,
+                    clip,
+                    fragment.metrics.letter_spacing,
+                )
+                .is_none()
+            {
+                paint_text_with_font(
+                    canvas,
+                    fragment_rect,
+                    display_text,
+                    font_size,
+                    fragment.metrics.ascent,
+                    fonts,
+                    frag_color,
+                    clip,
+                    fragment.metrics.letter_spacing,
+                );
+            }
+        }
+    } else {
+        // Fallback: placeholder rectangles
+        paint_text_placeholder_with_mode(
+            canvas,
+            fragment_rect,
+            display_text,
+            font_size,
+            frag_color,
+            clip,
+            fragment.metrics.letter_spacing,
+            vertical_mode.map(|mode| mode.direction_rtl),
+        );
+    }
+
+    (frag_color, vertical_mode)
+}
+
+/// Paints every text-decoration line captured at its originating box for one
+/// text fragment, caching per-origin geometry and color for the rest of the
+/// line (descendant longhands cannot restyle or cancel an ancestor's
+/// decoration).
+fn paint_text_fragment_decorations(
+    canvas: &mut Canvas,
+    fragment: &crate::layout::InlineFragment,
+    fragment_rect: Rect,
+    line: &LineBox,
+    resolver: &mut crate::css::StyleResolver,
+    frag_color: Color,
+    vertical_mode: Option<VerticalPaintMode>,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    clip: Option<Rect>,
+    offset: super::PaintOffset,
+    decorations: &mut HashMap<DecorationOrigin, DecorationGeometry>,
+    decoration_colors: &mut HashMap<DecorationOrigin, Color>,
+) {
+    // Draw every decoration captured at its originating box.
+    // Descendant longhands therefore cannot restyle or cancel it.
+    for decoration in fragment.style.text_decorations.iter() {
+        let lines = decoration_lines(&decoration.line);
+        let color = *decoration_colors
+            .entry(decoration.origin)
+            .or_insert_with(|| decoration_paint_color(fragment, decoration, resolver, frag_color));
+        let geometry = decorations.entry(decoration.origin).or_insert_with(|| {
+            DecorationGeometry::new(decoration, line, vertical_mode.is_some(), fonts, web_fonts)
+        });
+        paint_fragment_decoration(
+            canvas,
+            fragment_rect,
+            fragment.metrics.ascent,
+            geometry,
+            lines,
+            color,
+            clip,
+            vertical_mode.is_some(),
+            offset,
+        );
+    }
+}
+
+/// Paints one form-control inline fragment: its background and border when
+/// it owns them (a block control's owning `LayoutBox` already painted its
+/// own), the current value's text or placeholder, and any selection
+/// highlight or caret.
+fn paint_form_control_fragment(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    fragment: &crate::layout::InlineFragment,
+    fragment_rect: Rect,
+    style: &ComputedStyle,
+    value: &str,
+    editing: &Option<crate::layout::TextControlPaintState>,
+    resolver: &mut crate::css::StyleResolver,
+    fallback_color: Color,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    clip: Option<Rect>,
+) {
+    let paint = fragment_box_paint_style(fragment, resolver);
+    let style = paint.as_ref().unwrap_or(style);
+    let border = EdgeSizesForPaint::from_style(style);
+    // A block control's owning LayoutBox already painted its
+    // background and border. Inline controls have no such box.
+    if fragment.node.identity() != layout.node.identity() {
+        if let Some(background) = background_color(style) {
+            canvas.fill_rect_clipped(fragment_rect, background, clip);
+        }
+        if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
+            paint_rect_borders(canvas, fragment_rect, style, border, clip);
+        }
+    }
+    let content_rect = inline_fragment_content_rect(fragment_rect, style, border);
+    let color = fragment_paint_color(fragment, resolver, fallback_color);
+    // Same font policy as the Text branch: the fragment's
+    // resolved installed or web face first, then the global fonts.
+    let web_candidates = select_fragment_web_fonts(web_fonts, fragment);
+    let mut fragment_fonts: Vec<&Font> = web_candidates
+        .iter()
+        .map(|candidate| candidate.font)
+        .collect();
+    let mut fragment_candidates: Vec<FontFallbackCandidate<'_>> = web_candidates
+        .iter()
+        .map(|candidate| FontFallbackCandidate {
+            font: candidate.font,
+            unicode_range: Some(candidate.unicode_range),
+        })
+        .collect();
+    let selected = select_fragment_font(web_fonts, fragment, fonts);
+    if web_candidates.is_empty()
+        && let Some(font) = selected.as_ref().map(AsRef::as_ref)
+    {
+        fragment_fonts.push(font);
+        fragment_candidates.push(FontFallbackCandidate::unrestricted(font));
+    }
+    fragment_fonts.extend(fonts.iter().map(|font| font.as_ref()));
+    fragment_candidates.extend(
+        fonts
+            .iter()
+            .map(Arc::as_ref)
+            .map(FontFallbackCandidate::unrestricted),
+    );
+    if fragment.node.tag_name().as_deref() == Some("textarea") {
+        let soft_wrap = !fragment
+            .node
+            .attributes()
+            .and_then(|attributes| attributes.get("wrap").cloned())
+            .is_some_and(|wrap| wrap.eq_ignore_ascii_case("off"));
+        paint_textarea_value_with_candidates(
+            canvas,
+            content_rect,
+            Rect {
+                x: fragment_rect.x + border.left,
+                y: fragment_rect.y + border.top,
+                width: (fragment_rect.width - border.total_horizontal()).max(0.0),
+                height: (fragment_rect.height - border.total_vertical()).max(0.0),
+            },
+            value,
+            *editing,
+            style,
+            &fragment.style,
+            fragment.metrics.font_size,
+            fragment.metrics.ascent,
+            &fragment_candidates,
+            color,
+            clip,
+            fragment.metrics.letter_spacing,
+            soft_wrap,
+        );
+        return;
+    }
+    let x_offset = if is_text_align_center(style) {
+        let text_width = measure_form_control_text_width_with_candidates(
+            value,
+            fragment.metrics.font_size,
+            &fragment_candidates,
+            fragment.metrics.letter_spacing,
+        );
+        ((content_rect.width - text_width) / 2.0).max(0.0)
+    } else {
+        0.0
+    };
+    let text_rect = Rect {
+        x: content_rect.x + x_offset,
+        y: content_rect.y + ((content_rect.height - fragment.metrics.font_size) / 2.0).max(0.0),
+        width: (content_rect.width - x_offset).max(0.0),
+        height: fragment.metrics.font_size,
+    };
+    let mut caret_x = None;
+    if let Some(editing) = editing.filter(|state| state.focused) {
+        let before = text_prefix_by_utf16_offset(value, editing.selection_start);
+        let selected = text_prefix_by_utf16_offset(value, editing.selection_end);
+        let start_x = text_rect.x
+            + measure_form_control_text_width_with_candidates(
+                before,
+                fragment.metrics.font_size,
+                &fragment_candidates,
+                fragment.metrics.letter_spacing,
+            );
+        let end_x = text_rect.x
+            + measure_form_control_text_width_with_candidates(
+                selected,
+                fragment.metrics.font_size,
+                &fragment_candidates,
+                fragment.metrics.letter_spacing,
+            );
+        if editing.selection_start != editing.selection_end {
+            canvas.fill_rect_clipped(
+                Rect {
+                    x: start_x,
+                    y: text_rect.y,
+                    width: (end_x - start_x).max(1.0),
+                    height: text_rect.height,
+                },
+                Color::rgba(51, 153, 255, 120),
+                clip,
+            );
+        } else {
+            caret_x = Some(start_x);
+        }
+    }
+    if !value.is_empty() {
+        if fragment_fonts.is_empty() {
+            paint_text_placeholder(
+                canvas,
+                text_rect,
+                value,
+                fragment.metrics.font_size,
+                color,
+                clip,
+                fragment.metrics.letter_spacing,
+            );
+        } else {
+            if paint_shaped_horizontal_text_with_candidates(
+                canvas,
+                text_rect,
+                value,
+                fragment.metrics.font_size,
+                fragment.metrics.ascent,
+                &fragment_candidates,
+                &fragment.style,
+                color,
+                clip,
+                fragment.metrics.letter_spacing,
+            )
+            .is_none()
+            {
+                paint_text_with_font_refs(
+                    canvas,
+                    text_rect,
+                    value,
+                    fragment.metrics.font_size,
+                    fragment.metrics.ascent,
+                    &fragment_fonts,
+                    color,
+                    clip,
+                    fragment.metrics.letter_spacing,
+                );
+            }
+        }
+    }
+    if let Some(x) = caret_x {
+        canvas.fill_rect_clipped(
+            Rect {
+                x,
+                y: text_rect.y,
+                width: 1.0,
+                height: text_rect.height,
+            },
+            color,
+            clip,
+        );
     }
 }
 
