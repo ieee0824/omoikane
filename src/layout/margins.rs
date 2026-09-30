@@ -156,6 +156,182 @@ pub(super) fn shift_flow(
     );
 }
 
+/// Computes the flags that gate margin collapsing through this box's top and
+/// bottom edges, and the height basis children's percentages resolve
+/// against.
+///
+/// Returns `(independent, top_allowed, bottom_allowed, child_height_basis)`.
+fn margin_collapse_setup(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    containing_height: f32,
+    used_height: Option<UsedHeight>,
+) -> (bool, bool, bool, f32) {
+    let independent = formatting_root(node, style, resolver);
+    let top_allowed = !independent && border.top == 0.0 && padding.top == 0.0;
+    let bottom_allowed = !independent
+        && border.bottom == 0.0
+        && padding.bottom == 0.0
+        && auto(style, "height")
+        && used_height.is_none()
+        && resolved_length(style, "min-height", containing_height).unwrap_or(0.0) == 0.0;
+    let child_height_basis = used_height
+        .and_then(UsedHeight::percentage_basis)
+        .or_else(|| {
+            resolved_length(style, "height", containing_height)
+                .map(|height| border_box_adjust_height(style, height, &padding, &border))
+        })
+        .unwrap_or(0.0);
+    (independent, top_allowed, bottom_allowed, child_height_basis)
+}
+
+/// Places one non-inline flow child: applies CSS `clear`, collapses its
+/// margins against the running vertical cursor, and dispatches to
+/// out-of-flow, float, or normal in-flow layout.
+///
+/// `cs` is `None` when the source produced no computed style (already
+/// handled by the caller's inline-flush and display:none checks); such
+/// sources are skipped.
+#[allow(clippy::too_many_arguments)]
+fn place_flow_child(
+    source: LayoutSource,
+    cs: Option<ComputedStyle>,
+    style: &ComputedStyle,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    x: f32,
+    y: f32,
+    width: f32,
+    child_height_basis: f32,
+    viewport: super::LayoutViewport,
+    positioned_ancestor: Option<BoxDimensions>,
+    resolver: &mut StyleResolver,
+    top_open: &mut bool,
+    all_through: &mut bool,
+    had_clearance: &mut bool,
+    pending: &mut Strut,
+    pending_active: &mut bool,
+    cursor_y: &mut f32,
+    info: &mut Info,
+    children: &mut Vec<LayoutBox>,
+    positioned_children: &mut Vec<(LayoutSource, ComputedStyle, Rect)>,
+    child_shifts: &mut Vec<(usize, f32)>,
+    float_regions: &mut Vec<FloatRegion>,
+) {
+    let Some(cs) = cs else {
+        return;
+    };
+    let specified_top = edge_sizes(&cs, "margin").top;
+    let predicted_delta = if *pending_active {
+        pending.value() + specified_top - pending.merge(Strut::new(specified_top)).value()
+    } else {
+        0.0
+    };
+    // With parent/first-child collapse, the hypothetical border edge is
+    // at the parent's content start. If it interferes with a float, insert
+    // clearance and stop that collapse even when the clearance itself is
+    // zero or negative after restoring the child's specified margin.
+    let collapsing_top =
+        *top_open && float_side(&cs) == FloatSide::None && !is_out_of_flow_positioned(&cs);
+    let before_clear = *cursor_y;
+    apply_clear(
+        cursor_y,
+        &cs,
+        if collapsing_top { 0.0 } else { specified_top },
+        predicted_delta,
+        float_regions,
+    );
+    let cleared = *cursor_y != before_clear;
+    if cleared && collapsing_top {
+        *cursor_y -= specified_top;
+    }
+    if cleared {
+        *top_open = false;
+        *had_clearance = true;
+    }
+    let child_y = *cursor_y - predicted_delta;
+    // Clearance places the border edge below the float. The margin edge
+    // may still overlap it and must not retain that float's width offset.
+    let float_y = if clear_side(&cs) != ClearSide::None {
+        child_y + specified_top
+    } else {
+        child_y
+    };
+    let offsets = active_float_offsets(float_regions, float_y, x, width);
+    let containing = child_containing_rect(&cs, child_y, &offsets, x, width, child_height_basis);
+    if is_out_of_flow_positioned(&cs) {
+        positioned_children.push((source, cs, containing));
+        return;
+    }
+    let side = float_side(&cs);
+    if side != FloatSide::None {
+        layout_float_child(
+            &source,
+            &cs,
+            resolver,
+            side,
+            child_y,
+            x,
+            width,
+            viewport,
+            positioned_ancestor,
+            float_regions,
+            children,
+        );
+        return;
+    }
+    let next_pos_ancestor = if establishes_positioned_containing_block(style) {
+        Some(BoxDimensions {
+            content: Rect {
+                x,
+                y,
+                width,
+                height: 0.0,
+            },
+            padding,
+            border,
+            margin,
+        })
+    } else {
+        positioned_ancestor
+    };
+    if let Some(layout) = source.layout(resolver, containing, viewport, next_pos_ancestor) {
+        let child_info = take(&layout);
+        let actual_delta = if *top_open {
+            child_info.top.value()
+        } else if *pending_active {
+            pending.value() + child_info.top.value() - pending.merge(child_info.top).value()
+        } else {
+            0.0
+        };
+        child_shifts.push((children.len(), predicted_delta - actual_delta));
+        if *top_open {
+            info.top = info.top.merge(child_info.top);
+        }
+        if child_info.through && !cleared {
+            if *top_open {
+                info.top = info.top.merge(child_info.bottom);
+            } else {
+                let joined = pending.merge(child_info.top).merge(child_info.bottom);
+                *cursor_y += joined.value() - pending.value();
+                *pending = joined;
+                *pending_active = true;
+            }
+        } else {
+            *cursor_y += layout.total_height() - actual_delta;
+            *pending = child_info.bottom;
+            *pending_active = true;
+            *top_open = false;
+            *all_through = false;
+        }
+        children.push(layout);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn layout_children(
     node: &NodeHandle,
@@ -172,14 +348,15 @@ pub(super) fn layout_children(
     positioned_ancestor: Option<BoxDimensions>,
     used_height: Option<UsedHeight>,
 ) -> BlockChildrenResult {
-    let independent = formatting_root(node, style, resolver);
-    let top_allowed = !independent && border.top == 0.0 && padding.top == 0.0;
-    let bottom_allowed = !independent
-        && border.bottom == 0.0
-        && padding.bottom == 0.0
-        && auto(style, "height")
-        && used_height.is_none()
-        && resolved_length(style, "min-height", containing_height).unwrap_or(0.0) == 0.0;
+    let (independent, top_allowed, bottom_allowed, child_height_basis) = margin_collapse_setup(
+        node,
+        resolver,
+        style,
+        padding,
+        border,
+        containing_height,
+        used_height,
+    );
     let mut info = Info::new(margin);
     let mut top_open = top_allowed;
     let mut all_through = true;
@@ -196,13 +373,6 @@ pub(super) fn layout_children(
         generated_inline_pseudo_exists(node, resolver, PseudoElement::Before);
     let include_inline_after = generated_inline_pseudo_exists(node, resolver, PseudoElement::After);
     let mut float_regions = Vec::new();
-    let child_height_basis = used_height
-        .and_then(UsedHeight::percentage_basis)
-        .or_else(|| {
-            resolved_length(style, "height", containing_height)
-                .map(|height| border_box_adjust_height(style, height, &padding, &border))
-        })
-        .unwrap_or(0.0);
 
     for source in block_flow_sources(node, resolver) {
         let child = source.node().clone();
@@ -246,115 +416,32 @@ pub(super) fn layout_children(
             pending = Strut::default();
             pending_active = false;
         }
-        let Some(cs) = cs else {
-            continue;
-        };
-        let specified_top = edge_sizes(&cs, "margin").top;
-        let predicted_delta = if pending_active {
-            pending.value() + specified_top - pending.merge(Strut::new(specified_top)).value()
-        } else {
-            0.0
-        };
-        // With parent/first-child collapse, the hypothetical border edge is
-        // at the parent's content start. If it interferes with a float, insert
-        // clearance and stop that collapse even when the clearance itself is
-        // zero or negative after restoring the child's specified margin.
-        let collapsing_top =
-            top_open && float_side(&cs) == FloatSide::None && !is_out_of_flow_positioned(&cs);
-        let before_clear = cursor_y;
-        apply_clear(
+        place_flow_child(
+            source,
+            cs,
+            style,
+            padding,
+            border,
+            margin,
+            x,
+            y,
+            width,
+            child_height_basis,
+            viewport,
+            positioned_ancestor,
+            resolver,
+            &mut top_open,
+            &mut all_through,
+            &mut had_clearance,
+            &mut pending,
+            &mut pending_active,
             &mut cursor_y,
-            &cs,
-            if collapsing_top { 0.0 } else { specified_top },
-            predicted_delta,
-            &float_regions,
+            &mut info,
+            &mut children,
+            &mut positioned_children,
+            &mut child_shifts,
+            &mut float_regions,
         );
-        let cleared = cursor_y != before_clear;
-        if cleared && collapsing_top {
-            cursor_y -= specified_top;
-        }
-        if cleared {
-            top_open = false;
-            had_clearance = true;
-        }
-        let child_y = cursor_y - predicted_delta;
-        // Clearance places the border edge below the float. The margin edge
-        // may still overlap it and must not retain that float's width offset.
-        let float_y = if clear_side(&cs) != ClearSide::None {
-            child_y + specified_top
-        } else {
-            child_y
-        };
-        let offsets = active_float_offsets(&float_regions, float_y, x, width);
-        let containing =
-            child_containing_rect(&cs, child_y, &offsets, x, width, child_height_basis);
-        if is_out_of_flow_positioned(&cs) {
-            positioned_children.push((source, cs, containing));
-            continue;
-        }
-        let side = float_side(&cs);
-        if side != FloatSide::None {
-            layout_float_child(
-                &source,
-                &cs,
-                resolver,
-                side,
-                child_y,
-                x,
-                width,
-                viewport,
-                positioned_ancestor,
-                &mut float_regions,
-                &mut children,
-            );
-            continue;
-        }
-        let next_pos_ancestor = if establishes_positioned_containing_block(style) {
-            Some(BoxDimensions {
-                content: Rect {
-                    x,
-                    y,
-                    width,
-                    height: 0.0,
-                },
-                padding,
-                border,
-                margin,
-            })
-        } else {
-            positioned_ancestor
-        };
-        if let Some(layout) = source.layout(resolver, containing, viewport, next_pos_ancestor) {
-            let child_info = take(&layout);
-            let actual_delta = if top_open {
-                child_info.top.value()
-            } else if pending_active {
-                pending.value() + child_info.top.value() - pending.merge(child_info.top).value()
-            } else {
-                0.0
-            };
-            child_shifts.push((children.len(), predicted_delta - actual_delta));
-            if top_open {
-                info.top = info.top.merge(child_info.top);
-            }
-            if child_info.through && !cleared {
-                if top_open {
-                    info.top = info.top.merge(child_info.bottom);
-                } else {
-                    let joined = pending.merge(child_info.top).merge(child_info.bottom);
-                    cursor_y += joined.value() - pending.value();
-                    pending = joined;
-                    pending_active = true;
-                }
-            } else {
-                cursor_y += layout.total_height() - actual_delta;
-                pending = child_info.bottom;
-                pending_active = true;
-                top_open = false;
-                all_through = false;
-            }
-            children.push(layout);
-        }
     }
     let previous_lines = lines.len();
     flush_pending_inline_nodes(
