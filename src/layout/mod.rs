@@ -2637,6 +2637,14 @@ fn layout_element_with_cell(
         log_unsupported_html_tag(&tag, parent_tag.as_deref());
     }
 
+    let metrics = resolve_cell_box_metrics(
+        node,
+        resolver,
+        &style,
+        containing_block,
+        table_cell,
+        used_height,
+    );
     let CellBoxMetrics {
         padding,
         border,
@@ -2645,42 +2653,14 @@ fn layout_element_with_cell(
         used_height,
         x,
         y,
-    } = resolve_cell_box_metrics(
-        node,
-        resolver,
-        &style,
-        containing_block,
-        table_cell,
-        used_height,
-    );
+    } = metrics;
 
-    let viewport = cell_fixed_containing_viewport(
-        node,
-        &style,
-        containing_block,
-        viewport,
-        padding,
-        border,
-        margin,
-        x,
-        y,
-        width,
-        used_height,
-    );
+    let viewport =
+        cell_fixed_containing_viewport(node, &style, containing_block, viewport, metrics);
 
-    if let Some(skipped) = skip_cell_for_content_visibility(
-        node,
-        &style,
-        containing_block,
-        x,
-        y,
-        width,
-        padding,
-        border,
-        margin,
-        used_height,
-        resolver,
-    ) {
+    if let Some(skipped) =
+        skip_cell_for_content_visibility(node, &style, containing_block, metrics, resolver)
+    {
         return Some(skipped);
     }
 
@@ -2691,13 +2671,7 @@ fn layout_element_with_cell(
         containing_block,
         viewport,
         positioned_ancestor,
-        x,
-        y,
-        width,
-        padding,
-        border,
-        margin,
-        used_height,
+        metrics,
     ) {
         return Some(layout);
     }
@@ -2709,13 +2683,7 @@ fn layout_element_with_cell(
         containing_block,
         viewport,
         positioned_ancestor,
-        x,
-        y,
-        width,
-        padding,
-        border,
-        margin,
-        used_height,
+        metrics,
     ) {
         return Some(layout);
     }
@@ -2727,12 +2695,7 @@ fn layout_element_with_cell(
             style,
             containing_block,
             viewport,
-            y,
-            width,
-            margin,
-            padding,
-            border,
-            used_height,
+            metrics,
         );
     }
 
@@ -2774,16 +2737,10 @@ fn layout_element_with_cell(
         node,
         resolver,
         &style,
-        padding,
-        border,
-        margin,
-        x,
-        y,
-        width,
         containing_block,
         viewport,
         positioned_ancestor,
-        used_height,
+        metrics,
     );
 
     let marker = build_list_marker(node, &style, dimensions.content.x, dimensions.content.y);
@@ -2814,6 +2771,7 @@ fn layout_element_with_cell(
 /// The padding/border/margin edges, used width and height, and content
 /// origin resolved for a table-cell-aware element, before any of the
 /// element-specific layout paths below run.
+#[derive(Clone, Copy)]
 struct CellBoxMetrics {
     padding: EdgeSizes,
     border: EdgeSizes,
@@ -2889,20 +2847,22 @@ fn resolve_cell_box_metrics(
 
 /// Narrows the viewport to this box's own dimensions when it establishes a
 /// containing block for fixed-position descendants.
-#[allow(clippy::too_many_arguments)]
 fn cell_fixed_containing_viewport(
     node: &NodeHandle,
     style: &ComputedStyle,
     containing_block: Rect,
     viewport: LayoutViewport,
-    padding: EdgeSizes,
-    border: EdgeSizes,
-    margin: EdgeSizes,
-    x: f32,
-    y: f32,
-    width: f32,
-    used_height: Option<UsedHeight>,
+    metrics: CellBoxMetrics,
 ) -> LayoutViewport {
+    let CellBoxMetrics {
+        padding,
+        border,
+        margin,
+        x,
+        y,
+        width,
+        used_height,
+    } = metrics;
     if !establishes_fixed_containing_block(style) {
         return viewport;
     }
@@ -2934,20 +2894,22 @@ fn cell_fixed_containing_viewport(
 
 /// Returns the placeholder layout box for this element if content-visibility
 /// causes its subtree layout to be skipped.
-#[allow(clippy::too_many_arguments)]
 fn skip_cell_for_content_visibility(
     node: &NodeHandle,
     style: &ComputedStyle,
     containing_block: Rect,
-    x: f32,
-    y: f32,
-    width: f32,
-    padding: EdgeSizes,
-    border: EdgeSizes,
-    margin: EdgeSizes,
-    used_height: Option<UsedHeight>,
+    metrics: CellBoxMetrics,
     resolver: &mut StyleResolver,
 ) -> Option<LayoutBox> {
+    let CellBoxMetrics {
+        padding,
+        border,
+        margin,
+        x,
+        y,
+        width,
+        used_height,
+    } = metrics;
     if content_visibility_mode(style) == ContentVisibilityMode::Visible {
         return None;
     }
@@ -2976,7 +2938,6 @@ fn skip_cell_for_content_visibility(
 /// none of their graphics. Returns `None` when this element isn't a
 /// replaced-media element, or has no image fragments to paint, so the
 /// caller can fall through to the next layout path.
-#[allow(clippy::too_many_arguments)]
 fn layout_replaced_media_cell(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -2984,14 +2945,17 @@ fn layout_replaced_media_cell(
     containing_block: Rect,
     viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
-    x: f32,
-    y: f32,
-    width: f32,
-    padding: EdgeSizes,
-    border: EdgeSizes,
-    margin: EdgeSizes,
-    used_height: Option<UsedHeight>,
+    metrics: CellBoxMetrics,
 ) -> Option<LayoutBox> {
+    let CellBoxMetrics {
+        padding,
+        border,
+        margin,
+        x,
+        y,
+        width,
+        used_height,
+    } = metrics;
     let is_positioned_img = node.has_tag_name("img") && is_out_of_flow_positioned(style);
     if is_positioned_img
         || !node.with_tag_name(|tag| {
@@ -3109,7 +3073,6 @@ fn layout_replaced_media_cell(
 /// Returns `None` when this element isn't a form control, or has no
 /// rendered fragment, so the caller can fall through to the next layout
 /// path.
-#[allow(clippy::too_many_arguments)]
 fn layout_form_control_cell(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -3117,14 +3080,17 @@ fn layout_form_control_cell(
     containing_block: Rect,
     viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
-    x: f32,
-    y: f32,
-    width: f32,
-    padding: EdgeSizes,
-    border: EdgeSizes,
-    margin: EdgeSizes,
-    used_height: Option<UsedHeight>,
+    metrics: CellBoxMetrics,
 ) -> Option<LayoutBox> {
+    let CellBoxMetrics {
+        padding,
+        border,
+        margin,
+        x,
+        y,
+        width,
+        used_height,
+    } = metrics;
     if !node.with_tag_name(|tag| {
         matches!(
             tag,
@@ -3208,20 +3174,23 @@ fn layout_form_control_cell(
 
 /// Lays out this element as a table wrapper/table box, shrinking the box to
 /// fit its column tracks first when no explicit width was specified.
-#[allow(clippy::too_many_arguments)]
 fn layout_table_cell_container(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     style: ComputedStyle,
     containing_block: Rect,
     viewport: LayoutViewport,
-    y: f32,
-    mut width: f32,
-    mut margin: EdgeSizes,
-    padding: EdgeSizes,
-    border: EdgeSizes,
-    used_height: Option<UsedHeight>,
+    metrics: CellBoxMetrics,
 ) -> Option<LayoutBox> {
+    let CellBoxMetrics {
+        padding,
+        border,
+        mut margin,
+        y,
+        mut width,
+        used_height,
+        ..
+    } = metrics;
     let is_shrink_to_fit = resolved_length(&style, "width", containing_block.width).is_none();
     if is_shrink_to_fit {
         width = shrink_to_fit_width(node, resolver, containing_block.width);
@@ -3257,28 +3226,29 @@ fn layout_table_cell_container(
 /// dimensions, and z-orders the resulting children. Returns the resolved
 /// dimensions together with the final children, lines, and multicol
 /// metadata.
-#[allow(clippy::too_many_arguments)]
 fn layout_block_cell_body(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     style: &ComputedStyle,
-    padding: EdgeSizes,
-    border: EdgeSizes,
-    margin: EdgeSizes,
-    x: f32,
-    y: f32,
-    width: f32,
     containing_block: Rect,
     viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
-    used_height: Option<UsedHeight>,
+    metrics: CellBoxMetrics,
 ) -> (
     BoxDimensions,
     Vec<LayoutBox>,
     Vec<LineBox>,
     Option<MultiColumnLayout>,
 ) {
-    let mut margin = margin;
+    let CellBoxMetrics {
+        padding,
+        border,
+        mut margin,
+        x,
+        y,
+        width,
+        used_height,
+    } = metrics;
     let BlockChildrenResult {
         mut children,
         mut lines,
