@@ -2637,317 +2637,101 @@ fn layout_element_with_cell(
         log_unsupported_html_tag(&tag, parent_tag.as_deref());
     }
 
-    let padding = edge_sizes(&style, "padding");
-    let border = table_cell.unwrap_or_else(|| edge_sizes(&style, "border"));
-    let mut margin = if table_cell.is_some() {
-        EdgeSizes::default()
-    } else {
-        edge_sizes(&style, "margin")
-    };
-    let used_height = used_height.map(|height| UsedHeight {
-        value: clamp_content_height(
-            &style,
-            height.value,
-            containing_block.height,
-            padding,
-            border,
-        ),
-        ..height
-    });
-
-    let mut width = compute_width(
+    let CellBoxMetrics {
+        padding,
+        border,
+        margin,
+        width,
+        used_height,
+        x,
+        y,
+    } = resolve_cell_box_metrics(
         node,
         resolver,
         &style,
-        containing_block.width,
+        containing_block,
+        table_cell,
+        used_height,
+    );
+
+    let viewport = cell_fixed_containing_viewport(
+        node,
+        &style,
+        containing_block,
+        viewport,
         padding,
         border,
-        &mut margin,
+        margin,
+        x,
+        y,
+        width,
+        used_height,
     );
-    if table_cell.is_some() {
-        margin = EdgeSizes::default();
-        width = (containing_block.width - padding.horizontal() - border.horizontal()).max(0.0);
-    }
-    if float_side(&style) != FloatSide::None
-        && resolved_length(&style, "width", containing_block.width).is_none()
-    {
-        width = shrink_to_fit_width(node, resolver, containing_block.width);
-    }
-    let x = containing_block.x + margin.left + border.left + padding.left;
-    let y = containing_block.y + margin.top + border.top + padding.top;
-    let viewport = if establishes_fixed_containing_block(&style) {
-        viewport.for_descendants(
-            &style,
-            BoxDimensions {
-                content: Rect {
-                    x,
-                    y,
-                    width,
-                    height: used_height.map(|height| height.value).unwrap_or_else(|| {
-                        resolve_content_height(
-                            node,
-                            &style,
-                            containing_block.height,
-                            padding,
-                            border,
-                            y,
-                            y,
-                        )
-                    }),
-                },
-                padding,
-                border,
-                margin,
-            },
-        )
-    } else {
-        viewport
-    };
 
-    if content_visibility_mode(&style) != ContentVisibilityMode::Visible {
-        let skipped = skipped_content_visibility_box(
-            node,
-            &style,
-            containing_block.height,
-            x,
-            y,
-            width,
-            padding,
-            border,
-            margin,
-            used_height,
-            resolver,
-        );
-        if content_visibility_layout_is_skipped(
-            node,
-            &style,
-            skipped.dimensions.content,
-            padding,
-            border,
-        ) {
-            return Some(skipped);
-        }
+    if let Some(skipped) = skip_cell_for_content_visibility(
+        node,
+        &style,
+        containing_block,
+        x,
+        y,
+        width,
+        padding,
+        border,
+        margin,
+        used_height,
+        resolver,
+    ) {
+        return Some(skipped);
     }
 
-    // Replaced elements that participate as block or flex/grid items still
-    // paint their image payload. Previously only inline formatting collected
-    // image fragments, so `display: block` SVGs (a common Tailwind reset) had
-    // a box but rendered none of their graphics.
-    let is_positioned_img = node.has_tag_name("img") && is_out_of_flow_positioned(&style);
-    if !is_positioned_img
-        && node.with_tag_name(|tag| {
-            matches!(
-                tag,
-                Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
-            )
-        })
-    {
-        let mut lines = layout_inline_nodes(
-            std::slice::from_ref(node),
-            resolver,
-            x,
-            y,
-            width,
-            text_align(&style),
-            0.0,
-            direction_is_rtl(&style),
-            None,
-            containing_block.height,
-            viewport,
-            positioned_ancestor,
-            false,
-        )
-        .lines;
-        if !lines.iter().any(|line| {
-            line.fragments
-                .iter()
-                .any(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
-        }) {
-            lines.clear();
-        }
-        if !lines.is_empty() {
-            let percentage_width = matches!(style.get("width"), Some(ComputedValue::Percentage(_)));
-            for line in &mut lines {
-                for fragment in &mut line.fragments {
-                    if matches!(fragment.content, InlineFragmentContent::Image(_, _))
-                        && fragment.rect.width > 0.0
-                        && width > 0.0
-                        && (percentage_width || fragment.rect.width > width)
-                    {
-                        let scale = width / fragment.rect.width;
-                        fragment.rect.width = width;
-                        fragment.rect.height *= scale;
-                    }
-                }
-                if let Some(height) = line
-                    .fragments
-                    .iter()
-                    .map(|fragment| fragment.rect.height)
-                    .reduce(f32::max)
-                {
-                    line.rect.width = width;
-                    line.rect.height = height;
-                    line.baseline = height;
-                }
-            }
-            let cursor_y = lines
-                .last()
-                .map(|line| line.rect.y + line.rect.height)
-                .unwrap_or(y);
-            let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
-                resolve_content_height(
-                    node,
-                    &style,
-                    containing_block.height,
-                    padding,
-                    border,
-                    y,
-                    cursor_y,
-                )
-            });
-            let mut layout = LayoutBox {
-                node: node.clone(),
-                pseudo: None,
-                dimensions: BoxDimensions {
-                    content: Rect {
-                        x,
-                        y,
-                        width,
-                        height: content_height,
-                    },
-                    padding,
-                    border,
-                    margin,
-                },
-                visibility: visibility(&style),
-                overflow: overflow(&style),
-                position_scheme: position_scheme(&style),
-                fixed_containing_block: establishes_fixed_containing_block(&style),
-                z_index: z_index(&style),
-                transform: AffineTransform::identity(),
-                needs_scroll_translation: false,
-                has_out_of_flow_descendants: None,
-                content_visibility_contents_skipped: false,
-                paint_scroll: None,
-                block_fragments: Vec::new(),
-                multicol: None,
-                lines,
-                children: Vec::new(),
-                marker: None,
-            };
-            apply_relative_offset(&mut layout, &style, resolver);
-            return Some(layout);
-        }
+    if let Some(layout) = layout_replaced_media_cell(
+        node,
+        resolver,
+        &style,
+        containing_block,
+        viewport,
+        positioned_ancestor,
+        x,
+        y,
+        width,
+        padding,
+        border,
+        margin,
+        used_height,
+    ) {
+        return Some(layout);
     }
 
-    // Blockification must retain a form control's value/selection fragment,
-    // even when the parent's inline formatting context never visits it.
-    if node.with_tag_name(|tag| {
-        matches!(
-            tag,
-            Some("input" | "textarea" | "select" | "button" | "progress" | "meter")
-        )
-    }) {
-        let mut lines = layout_inline_nodes(
-            std::slice::from_ref(node),
-            resolver,
-            x - padding.left - border.left,
-            y - padding.top - border.top,
-            width + padding.left + padding.right + border.left + border.right,
-            inline::TextAlign::Left,
-            0.0,
-            direction_is_rtl(&style),
-            None,
-            containing_block.height,
-            viewport,
-            positioned_ancestor,
-            false,
-        )
-        .lines;
-        if let Some(fragment) = lines.first().and_then(|line| line.fragments.first()) {
-            let intrinsic_height =
-                (fragment.rect.height - padding.top - padding.bottom - border.top - border.bottom)
-                    .max(0.0);
-            let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
-                resolve_content_height(
-                    node,
-                    &style,
-                    containing_block.height,
-                    padding,
-                    border,
-                    y,
-                    y + intrinsic_height,
-                )
-            });
-            let dimensions = BoxDimensions {
-                content: Rect {
-                    x,
-                    y,
-                    width,
-                    height: content_height,
-                },
-                padding,
-                border,
-                margin,
-            };
-            let border_box = dimensions.border_box();
-            for line in &mut lines {
-                line.rect = border_box;
-                for fragment in &mut line.fragments {
-                    fragment.rect = border_box;
-                }
-            }
-            let mut layout = LayoutBox {
-                node: node.clone(),
-                pseudo: None,
-                dimensions,
-                visibility: visibility(&style),
-                overflow: overflow(&style),
-                position_scheme: position_scheme(&style),
-                fixed_containing_block: establishes_fixed_containing_block(&style),
-                z_index: z_index(&style),
-                transform: AffineTransform::identity(),
-                needs_scroll_translation: false,
-                has_out_of_flow_descendants: None,
-                content_visibility_contents_skipped: false,
-                paint_scroll: None,
-                block_fragments: Vec::new(),
-                multicol: None,
-                lines,
-                children: Vec::new(),
-                marker: None,
-            };
-            apply_relative_offset(&mut layout, &style, resolver);
-            return Some(layout);
-        }
+    if let Some(layout) = layout_form_control_cell(
+        node,
+        resolver,
+        &style,
+        containing_block,
+        viewport,
+        positioned_ancestor,
+        x,
+        y,
+        width,
+        padding,
+        border,
+        margin,
+        used_height,
+    ) {
+        return Some(layout);
     }
 
     if is_table_container_element(node, &style) {
-        let is_shrink_to_fit = resolved_length(&style, "width", containing_block.width).is_none();
-        if is_shrink_to_fit {
-            width = shrink_to_fit_width(node, resolver, containing_block.width);
-            redistribute_auto_margins_for_table(
-                &style,
-                width,
-                &padding,
-                &border,
-                &mut margin,
-                containing_block.width,
-            );
-        }
-        let x = containing_block.x + margin.left + border.left + padding.left;
-        return layout_table_container(
+        return layout_table_cell_container(
             node,
             resolver,
             style,
+            containing_block,
+            viewport,
+            y,
+            width,
             margin,
             padding,
             border,
-            x,
-            y,
-            width,
-            viewport,
-            is_shrink_to_fit,
             used_height,
         );
     }
@@ -2986,6 +2770,515 @@ fn layout_element_with_cell(
         );
     }
 
+    let (dimensions, children, lines, multicol) = layout_block_cell_body(
+        node,
+        resolver,
+        &style,
+        padding,
+        border,
+        margin,
+        x,
+        y,
+        width,
+        containing_block,
+        viewport,
+        positioned_ancestor,
+        used_height,
+    );
+
+    let marker = build_list_marker(node, &style, dimensions.content.x, dimensions.content.y);
+    let mut layout = LayoutBox {
+        node: node.clone(),
+        pseudo: None,
+        dimensions,
+        visibility: visibility(&style),
+        overflow: overflow(&style),
+        position_scheme: position_scheme(&style),
+        fixed_containing_block: establishes_fixed_containing_block(&style),
+        z_index: z_index(&style),
+        transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
+        content_visibility_contents_skipped: false,
+        paint_scroll: None,
+        block_fragments: Vec::new(),
+        multicol,
+        lines,
+        children,
+        marker,
+    };
+    apply_relative_offset(&mut layout, &style, resolver);
+    Some(layout)
+}
+
+/// The padding/border/margin edges, used width and height, and content
+/// origin resolved for a table-cell-aware element, before any of the
+/// element-specific layout paths below run.
+struct CellBoxMetrics {
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    width: f32,
+    used_height: Option<UsedHeight>,
+    x: f32,
+    y: f32,
+}
+
+/// Resolves this cell's padding/border/margin edges, used width, and content
+/// origin from its computed style and the table/float context that
+/// `layout_element_with_cell` was called with. Table tracks assign the
+/// cell's border-box width directly, overriding both the computed width and
+/// margins.
+fn resolve_cell_box_metrics(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    containing_block: Rect,
+    table_cell: Option<EdgeSizes>,
+    used_height: Option<UsedHeight>,
+) -> CellBoxMetrics {
+    let padding = edge_sizes(style, "padding");
+    let border = table_cell.unwrap_or_else(|| edge_sizes(style, "border"));
+    let mut margin = if table_cell.is_some() {
+        EdgeSizes::default()
+    } else {
+        edge_sizes(style, "margin")
+    };
+    let used_height = used_height.map(|height| UsedHeight {
+        value: clamp_content_height(
+            style,
+            height.value,
+            containing_block.height,
+            padding,
+            border,
+        ),
+        ..height
+    });
+
+    let mut width = compute_width(
+        node,
+        resolver,
+        style,
+        containing_block.width,
+        padding,
+        border,
+        &mut margin,
+    );
+    if table_cell.is_some() {
+        margin = EdgeSizes::default();
+        width = (containing_block.width - padding.horizontal() - border.horizontal()).max(0.0);
+    }
+    if float_side(style) != FloatSide::None
+        && resolved_length(style, "width", containing_block.width).is_none()
+    {
+        width = shrink_to_fit_width(node, resolver, containing_block.width);
+    }
+    let x = containing_block.x + margin.left + border.left + padding.left;
+    let y = containing_block.y + margin.top + border.top + padding.top;
+
+    CellBoxMetrics {
+        padding,
+        border,
+        margin,
+        width,
+        used_height,
+        x,
+        y,
+    }
+}
+
+/// Narrows the viewport to this box's own dimensions when it establishes a
+/// containing block for fixed-position descendants.
+#[allow(clippy::too_many_arguments)]
+fn cell_fixed_containing_viewport(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    containing_block: Rect,
+    viewport: LayoutViewport,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    x: f32,
+    y: f32,
+    width: f32,
+    used_height: Option<UsedHeight>,
+) -> LayoutViewport {
+    if !establishes_fixed_containing_block(style) {
+        return viewport;
+    }
+    viewport.for_descendants(
+        style,
+        BoxDimensions {
+            content: Rect {
+                x,
+                y,
+                width,
+                height: used_height.map(|height| height.value).unwrap_or_else(|| {
+                    resolve_content_height(
+                        node,
+                        style,
+                        containing_block.height,
+                        padding,
+                        border,
+                        y,
+                        y,
+                    )
+                }),
+            },
+            padding,
+            border,
+            margin,
+        },
+    )
+}
+
+/// Returns the placeholder layout box for this element if content-visibility
+/// causes its subtree layout to be skipped.
+#[allow(clippy::too_many_arguments)]
+fn skip_cell_for_content_visibility(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    containing_block: Rect,
+    x: f32,
+    y: f32,
+    width: f32,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    used_height: Option<UsedHeight>,
+    resolver: &mut StyleResolver,
+) -> Option<LayoutBox> {
+    if content_visibility_mode(style) == ContentVisibilityMode::Visible {
+        return None;
+    }
+    let skipped = skipped_content_visibility_box(
+        node,
+        style,
+        containing_block.height,
+        x,
+        y,
+        width,
+        padding,
+        border,
+        margin,
+        used_height,
+        resolver,
+    );
+    content_visibility_layout_is_skipped(node, style, skipped.dimensions.content, padding, border)
+        .then_some(skipped)
+}
+
+/// Lays out `img`/`picture`/`video`/`canvas`/`svg`/`object` elements that
+/// participate as block or flex/grid items, so they still paint their image
+/// payload even though the parent isn't collecting inline image fragments.
+/// Previously only inline formatting collected image fragments, so
+/// `display: block` SVGs (a common Tailwind reset) had a box but rendered
+/// none of their graphics. Returns `None` when this element isn't a
+/// replaced-media element, or has no image fragments to paint, so the
+/// caller can fall through to the next layout path.
+#[allow(clippy::too_many_arguments)]
+fn layout_replaced_media_cell(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    containing_block: Rect,
+    viewport: LayoutViewport,
+    positioned_ancestor: Option<BoxDimensions>,
+    x: f32,
+    y: f32,
+    width: f32,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    used_height: Option<UsedHeight>,
+) -> Option<LayoutBox> {
+    let is_positioned_img = node.has_tag_name("img") && is_out_of_flow_positioned(style);
+    if is_positioned_img
+        || !node.with_tag_name(|tag| {
+            matches!(
+                tag,
+                Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
+            )
+        })
+    {
+        return None;
+    }
+
+    let mut lines = layout_inline_nodes(
+        std::slice::from_ref(node),
+        resolver,
+        x,
+        y,
+        width,
+        text_align(style),
+        0.0,
+        direction_is_rtl(style),
+        None,
+        containing_block.height,
+        viewport,
+        positioned_ancestor,
+        false,
+    )
+    .lines;
+    if !lines.iter().any(|line| {
+        line.fragments
+            .iter()
+            .any(|fragment| matches!(fragment.content, InlineFragmentContent::Image(_, _)))
+    }) {
+        lines.clear();
+    }
+    if lines.is_empty() {
+        return None;
+    }
+
+    let percentage_width = matches!(style.get("width"), Some(ComputedValue::Percentage(_)));
+    for line in &mut lines {
+        for fragment in &mut line.fragments {
+            if matches!(fragment.content, InlineFragmentContent::Image(_, _))
+                && fragment.rect.width > 0.0
+                && width > 0.0
+                && (percentage_width || fragment.rect.width > width)
+            {
+                let scale = width / fragment.rect.width;
+                fragment.rect.width = width;
+                fragment.rect.height *= scale;
+            }
+        }
+        if let Some(height) = line
+            .fragments
+            .iter()
+            .map(|fragment| fragment.rect.height)
+            .reduce(f32::max)
+        {
+            line.rect.width = width;
+            line.rect.height = height;
+            line.baseline = height;
+        }
+    }
+    let cursor_y = lines
+        .last()
+        .map(|line| line.rect.y + line.rect.height)
+        .unwrap_or(y);
+    let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
+        resolve_content_height(
+            node,
+            style,
+            containing_block.height,
+            padding,
+            border,
+            y,
+            cursor_y,
+        )
+    });
+    let mut layout = LayoutBox {
+        node: node.clone(),
+        pseudo: None,
+        dimensions: BoxDimensions {
+            content: Rect {
+                x,
+                y,
+                width,
+                height: content_height,
+            },
+            padding,
+            border,
+            margin,
+        },
+        visibility: visibility(style),
+        overflow: overflow(style),
+        position_scheme: position_scheme(style),
+        fixed_containing_block: establishes_fixed_containing_block(style),
+        z_index: z_index(style),
+        transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
+        content_visibility_contents_skipped: false,
+        paint_scroll: None,
+        block_fragments: Vec::new(),
+        multicol: None,
+        lines,
+        children: Vec::new(),
+        marker: None,
+    };
+    apply_relative_offset(&mut layout, style, resolver);
+    Some(layout)
+}
+
+/// Blockification must retain a form control's value/selection fragment,
+/// even when the parent's inline formatting context never visits it.
+/// Returns `None` when this element isn't a form control, or has no
+/// rendered fragment, so the caller can fall through to the next layout
+/// path.
+#[allow(clippy::too_many_arguments)]
+fn layout_form_control_cell(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    containing_block: Rect,
+    viewport: LayoutViewport,
+    positioned_ancestor: Option<BoxDimensions>,
+    x: f32,
+    y: f32,
+    width: f32,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    used_height: Option<UsedHeight>,
+) -> Option<LayoutBox> {
+    if !node.with_tag_name(|tag| {
+        matches!(
+            tag,
+            Some("input" | "textarea" | "select" | "button" | "progress" | "meter")
+        )
+    }) {
+        return None;
+    }
+
+    let mut lines = layout_inline_nodes(
+        std::slice::from_ref(node),
+        resolver,
+        x - padding.left - border.left,
+        y - padding.top - border.top,
+        width + padding.left + padding.right + border.left + border.right,
+        inline::TextAlign::Left,
+        0.0,
+        direction_is_rtl(style),
+        None,
+        containing_block.height,
+        viewport,
+        positioned_ancestor,
+        false,
+    )
+    .lines;
+    let fragment = lines.first().and_then(|line| line.fragments.first())?;
+    let intrinsic_height =
+        (fragment.rect.height - padding.top - padding.bottom - border.top - border.bottom).max(0.0);
+    let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
+        resolve_content_height(
+            node,
+            style,
+            containing_block.height,
+            padding,
+            border,
+            y,
+            y + intrinsic_height,
+        )
+    });
+    let dimensions = BoxDimensions {
+        content: Rect {
+            x,
+            y,
+            width,
+            height: content_height,
+        },
+        padding,
+        border,
+        margin,
+    };
+    let border_box = dimensions.border_box();
+    for line in &mut lines {
+        line.rect = border_box;
+        for fragment in &mut line.fragments {
+            fragment.rect = border_box;
+        }
+    }
+    let mut layout = LayoutBox {
+        node: node.clone(),
+        pseudo: None,
+        dimensions,
+        visibility: visibility(style),
+        overflow: overflow(style),
+        position_scheme: position_scheme(style),
+        fixed_containing_block: establishes_fixed_containing_block(style),
+        z_index: z_index(style),
+        transform: AffineTransform::identity(),
+        needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
+        content_visibility_contents_skipped: false,
+        paint_scroll: None,
+        block_fragments: Vec::new(),
+        multicol: None,
+        lines,
+        children: Vec::new(),
+        marker: None,
+    };
+    apply_relative_offset(&mut layout, style, resolver);
+    Some(layout)
+}
+
+/// Lays out this element as a table wrapper/table box, shrinking the box to
+/// fit its column tracks first when no explicit width was specified.
+#[allow(clippy::too_many_arguments)]
+fn layout_table_cell_container(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: ComputedStyle,
+    containing_block: Rect,
+    viewport: LayoutViewport,
+    y: f32,
+    mut width: f32,
+    mut margin: EdgeSizes,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    used_height: Option<UsedHeight>,
+) -> Option<LayoutBox> {
+    let is_shrink_to_fit = resolved_length(&style, "width", containing_block.width).is_none();
+    if is_shrink_to_fit {
+        width = shrink_to_fit_width(node, resolver, containing_block.width);
+        redistribute_auto_margins_for_table(
+            &style,
+            width,
+            &padding,
+            &border,
+            &mut margin,
+            containing_block.width,
+        );
+    }
+    let x = containing_block.x + margin.left + border.left + padding.left;
+    layout_table_container(
+        node,
+        resolver,
+        style,
+        margin,
+        padding,
+        border,
+        x,
+        y,
+        width,
+        viewport,
+        is_shrink_to_fit,
+        used_height,
+    )
+}
+
+/// Lays out this element's ordinary block-level children, applies the
+/// margin-collapsing correction now that the box's own margins are known,
+/// resolves out-of-flow positioned descendants against the final
+/// dimensions, and z-orders the resulting children. Returns the resolved
+/// dimensions together with the final children, lines, and multicol
+/// metadata.
+#[allow(clippy::too_many_arguments)]
+fn layout_block_cell_body(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    padding: EdgeSizes,
+    border: EdgeSizes,
+    margin: EdgeSizes,
+    x: f32,
+    y: f32,
+    width: f32,
+    containing_block: Rect,
+    viewport: LayoutViewport,
+    positioned_ancestor: Option<BoxDimensions>,
+    used_height: Option<UsedHeight>,
+) -> (
+    BoxDimensions,
+    Vec<LayoutBox>,
+    Vec<LineBox>,
+    Option<MultiColumnLayout>,
+) {
+    let mut margin = margin;
     let BlockChildrenResult {
         mut children,
         mut lines,
@@ -2998,7 +3291,7 @@ fn layout_element_with_cell(
     } = layout_block_children(
         node,
         resolver,
-        &style,
+        style,
         padding,
         border,
         margin,
@@ -3032,8 +3325,8 @@ fn layout_element_with_cell(
             child,
             correction + margin_delta,
             resolver,
-            establishes_positioned_containing_block(&style),
-            establishes_fixed_containing_block(&style),
+            establishes_positioned_containing_block(style),
+            establishes_fixed_containing_block(style),
         );
     }
     margins::shift_lines(&mut lines, margin_delta);
@@ -3045,7 +3338,7 @@ fn layout_element_with_cell(
     let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
         resolve_content_height(
             node,
-            &style,
+            style,
             containing_block.height,
             padding,
             border,
@@ -3066,11 +3359,11 @@ fn layout_element_with_cell(
         margin,
     };
 
-    let viewport = viewport.after_sizing(&style, dimensions, &mut children, resolver);
+    let viewport = viewport.after_sizing(style, dimensions, &mut children, resolver);
 
     // Resolve positioned children using the final dimensions (content_height is
     // now known, which is required for absolute positioning relative to this box).
-    let next_pos_ancestor = if establishes_positioned_containing_block(&style) {
+    let next_pos_ancestor = if establishes_positioned_containing_block(style) {
         Some(dimensions)
     } else {
         positioned_ancestor
@@ -3092,29 +3385,7 @@ fn layout_element_with_cell(
     }
     sort_children_by_z_index(&mut children);
 
-    let marker = build_list_marker(node, &style, x, y);
-    let mut layout = LayoutBox {
-        node: node.clone(),
-        pseudo: None,
-        dimensions,
-        visibility: visibility(&style),
-        overflow: overflow(&style),
-        position_scheme: position_scheme(&style),
-        fixed_containing_block: establishes_fixed_containing_block(&style),
-        z_index: z_index(&style),
-        transform: AffineTransform::identity(),
-        needs_scroll_translation: false,
-        has_out_of_flow_descendants: None,
-        content_visibility_contents_skipped: false,
-        paint_scroll: None,
-        block_fragments: Vec::new(),
-        multicol,
-        lines,
-        children,
-        marker,
-    };
-    apply_relative_offset(&mut layout, &style, resolver);
-    Some(layout)
+    (dimensions, children, lines, multicol)
 }
 
 struct BlockChildrenResult {

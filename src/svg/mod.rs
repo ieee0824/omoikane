@@ -1693,249 +1693,421 @@ fn render_svg_element(
         // Definitions are resources, not paintable descendants.
         "defs" => {}
         "g" => render_svg_children(child, canvas, sx, sy, tx, ty, paint, resources, visited),
-        "use" => {
-            let Some(id) = attribute_value(&attrs, "href")
-                .or_else(|| attribute_value(&attrs, "xlink:href"))
-                .and_then(|href| parse_fragment_reference(&href))
-            else {
-                return;
-            };
-            let Some(target) = resources.node(&id) else {
-                return;
-            };
-            if !visited.insert(target.identity()) {
-                return;
-            }
-            let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0);
-            let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0);
-            render_svg_element(
-                &target,
-                canvas,
-                sx,
-                sy,
-                tx + x * sx,
-                ty + y * sy,
-                &paint,
-                resources,
-                visited,
-            );
-            visited.remove(&target.identity());
-        }
-        "rect" => {
-            let rx = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0) * sx + tx;
-            let ry = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0) * sy + ty;
-            let rw = parse_svg_size(attribute_ref(&attrs, "width")).unwrap_or(0.0) * sx;
-            let rh = parse_svg_size(attribute_ref(&attrs, "height")).unwrap_or(0.0) * sy;
-            if rw > 0.0 && rh > 0.0 {
-                let bbox = Rect {
-                    x: rx,
-                    y: ry,
-                    width: rw,
-                    height: rh,
-                };
-                if let Some(source) = fill.as_ref() {
-                    fill_rect_source(canvas, bbox, source, transform);
-                }
-                let points = vec![(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)];
-                let stroke_color = stroke.as_ref().map(|source| {
-                    source_color(source, rx + rw / 2.0, ry + rh / 2.0, bbox, transform)
-                });
-                stroke_polyline(
-                    canvas,
-                    &points,
-                    true,
-                    stroke_color,
-                    paint.stroke_width * sx.min(sy),
-                    paint.line_cap,
-                    paint.line_join,
-                );
-            }
-        }
-        "circle" => {
-            let cx = parse_svg_coord(attribute_ref(&attrs, "cx")).unwrap_or(0.0) * sx + tx;
-            let cy = parse_svg_coord(attribute_ref(&attrs, "cy")).unwrap_or(0.0) * sy + ty;
-            let r = parse_svg_size(attribute_ref(&attrs, "r")).unwrap_or(0.0) * sx.min(sy);
-            if r > 0.0 {
-                let bbox = Rect {
-                    x: cx - r,
-                    y: cy - r,
-                    width: r * 2.0,
-                    height: r * 2.0,
-                };
-                if let Some(source) = fill.as_ref() {
-                    fill_circle_source(canvas, cx, cy, r, source, transform, bbox);
-                }
-                let stroke_color = stroke
-                    .as_ref()
-                    .map(|source| source_color(source, cx, cy, bbox, transform));
-                stroke_ellipse(
-                    canvas,
-                    cx,
-                    cy,
-                    r,
-                    r,
-                    paint.stroke_width * sx.min(sy),
-                    stroke_color,
-                );
-            }
-        }
-        "ellipse" => {
-            let cx = parse_svg_coord(attribute_ref(&attrs, "cx")).unwrap_or(0.0) * sx + tx;
-            let cy = parse_svg_coord(attribute_ref(&attrs, "cy")).unwrap_or(0.0) * sy + ty;
-            let rx = parse_svg_size(attribute_ref(&attrs, "rx")).unwrap_or(0.0) * sx;
-            let ry = parse_svg_size(attribute_ref(&attrs, "ry")).unwrap_or(0.0) * sy;
-            if rx > 0.0 && ry > 0.0 {
-                let bbox = Rect {
-                    x: cx - rx,
-                    y: cy - ry,
-                    width: rx * 2.0,
-                    height: ry * 2.0,
-                };
-                if let Some(source) = fill.as_ref() {
-                    fill_ellipse_source(canvas, cx, cy, rx, ry, source, transform, bbox);
-                }
-                let stroke_color = stroke
-                    .as_ref()
-                    .map(|source| source_color(source, cx, cy, bbox, transform));
-                stroke_ellipse(
-                    canvas,
-                    cx,
-                    cy,
-                    rx,
-                    ry,
-                    paint.stroke_width * sx.min(sy),
-                    stroke_color,
-                );
-            }
-        }
-        "line" => {
-            let x1 = parse_svg_coord(attribute_ref(&attrs, "x1")).unwrap_or(0.0) * sx + tx;
-            let y1 = parse_svg_coord(attribute_ref(&attrs, "y1")).unwrap_or(0.0) * sy + ty;
-            let x2 = parse_svg_coord(attribute_ref(&attrs, "x2")).unwrap_or(0.0) * sx + tx;
-            let y2 = parse_svg_coord(attribute_ref(&attrs, "y2")).unwrap_or(0.0) * sy + ty;
-            let bbox = rect_for_points(&[(x1, y1), (x2, y2)]);
-            let stroke_color = stroke.as_ref().map(|source| {
-                source_color(source, (x1 + x2) / 2.0, (y1 + y2) / 2.0, bbox, transform)
-            });
-            stroke_polyline(
-                canvas,
-                &[(x1, y1), (x2, y2)],
-                false,
-                stroke_color,
-                paint.stroke_width * sx.min(sy),
-                paint.line_cap,
-                paint.line_join,
-            );
-        }
-        "polyline" | "polygon" => {
-            let points = parse_svg_points(attribute_ref(&attrs, "points"))
-                .into_iter()
-                .map(|(x, y)| (x * sx + tx, y * sy + ty))
-                .collect::<Vec<_>>();
-            let closed = tag == "polygon";
-            let bbox = rect_for_points(&points);
-            if closed && points.len() >= 3 {
-                if let Some(source) = fill.as_ref() {
-                    fill_compound_source(
-                        canvas,
-                        std::slice::from_ref(&points),
-                        source,
-                        FillRule::NonZero,
-                        transform,
-                        bbox,
-                    );
-                }
-            }
-            let stroke_color = stroke.as_ref().map(|source| {
-                source_color(
-                    source,
-                    bbox.x + bbox.width / 2.0,
-                    bbox.y + bbox.height / 2.0,
-                    bbox,
-                    transform,
-                )
-            });
-            stroke_polyline(
-                canvas,
-                &points,
-                closed,
-                stroke_color,
-                paint.stroke_width * sx.min(sy),
-                paint.line_cap,
-                paint.line_join,
-            );
-        }
-        "path" => {
-            if let Some(d) = attribute_value(&attrs, "d") {
-                let fill_rule = match property_value(&attrs, "fill-rule").as_deref() {
-                    Some(value) if value.eq_ignore_ascii_case("evenodd") => FillRule::EvenOdd,
-                    _ => FillRule::NonZero,
-                };
-                render_path(
-                    canvas,
-                    &d,
-                    sx,
-                    sy,
-                    tx,
-                    ty,
-                    fill.as_ref(),
-                    fill_rule,
-                    stroke.as_ref(),
-                    paint.stroke_width * sx.min(sy),
-                    paint.line_cap,
-                    paint.line_join,
-                    transform,
-                );
-            }
-        }
-        "image" => {
-            let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0) * sx + tx;
-            let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0) * sy + ty;
-            let Some(width) = parse_svg_size(attribute_ref(&attrs, "width")) else {
-                return;
-            };
-            let Some(height) = parse_svg_size(attribute_ref(&attrs, "height")) else {
-                return;
-            };
-            let width = width * sx;
-            let height = height * sy;
-            if width <= 0.0 || height <= 0.0 {
-                return;
-            }
-            let Some(href) = attribute_value(&attrs, "href")
-                .or_else(|| attribute_value(&attrs, "xlink:href"))
-                .filter(|href| !href.trim().is_empty())
-            else {
-                return;
-            };
-            let Some(image) = decode_svg_image_reference(&href, resources.image_base_url.as_ref())
-            else {
-                return;
-            };
-            let viewport = Rect {
-                x,
-                y,
-                width,
-                height,
-            };
-            let destination = svg_image_destination(
-                viewport,
-                image.width() as f32,
-                image.height() as f32,
-                attribute_ref(&attrs, "preserveAspectRatio").map(String::as_str),
-            );
-            if destination.width <= 0.0 || destination.height <= 0.0 {
-                return;
-            }
-            canvas.draw_image_scaled_clipped_with_opacity(
-                &image,
-                destination,
-                Some(viewport),
-                paint.opacity,
-            );
-        }
+        "use" => render_svg_use(canvas, &attrs, sx, sy, tx, ty, &paint, resources, visited),
+        "rect" => render_svg_rect(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "circle" => render_svg_circle(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "ellipse" => render_svg_ellipse(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "line" => render_svg_line(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "polyline" | "polygon" => render_svg_polyline_or_polygon(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+            tag == "polygon",
+        ),
+        "path" => render_svg_path(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "image" => render_svg_image(canvas, &attrs, sx, sy, tx, ty, paint.opacity, resources),
         _ => render_svg_children(child, canvas, sx, sy, tx, ty, paint, resources, visited),
     }
+}
+
+/// Renders a `<use>` element by resolving its `href` target and recursively
+/// rendering it translated by the element's `x`/`y` attributes, guarding
+/// against reference cycles via `visited`.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_use(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    paint: &SvgPaint,
+    resources: &SvgResources,
+    visited: &mut HashSet<usize>,
+) {
+    let Some(id) = attribute_value(attrs, "href")
+        .or_else(|| attribute_value(attrs, "xlink:href"))
+        .and_then(|href| parse_fragment_reference(&href))
+    else {
+        return;
+    };
+    let Some(target) = resources.node(&id) else {
+        return;
+    };
+    if !visited.insert(target.identity()) {
+        return;
+    }
+    let x = parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0);
+    let y = parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0);
+    render_svg_element(
+        &target,
+        canvas,
+        sx,
+        sy,
+        tx + x * sx,
+        ty + y * sy,
+        paint,
+        resources,
+        visited,
+    );
+    visited.remove(&target.identity());
+}
+
+/// Renders a `<rect>` element's fill and stroke.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_rect(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    let rx = parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0) * sx + tx;
+    let ry = parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0) * sy + ty;
+    let rw = parse_svg_size(attribute_ref(attrs, "width")).unwrap_or(0.0) * sx;
+    let rh = parse_svg_size(attribute_ref(attrs, "height")).unwrap_or(0.0) * sy;
+    if rw > 0.0 && rh > 0.0 {
+        let bbox = Rect {
+            x: rx,
+            y: ry,
+            width: rw,
+            height: rh,
+        };
+        if let Some(source) = fill {
+            fill_rect_source(canvas, bbox, source, transform);
+        }
+        let points = vec![(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)];
+        let stroke_color = stroke
+            .map(|source| source_color(source, rx + rw / 2.0, ry + rh / 2.0, bbox, transform));
+        stroke_polyline(
+            canvas,
+            &points,
+            true,
+            stroke_color,
+            paint.stroke_width * sx.min(sy),
+            paint.line_cap,
+            paint.line_join,
+        );
+    }
+}
+
+/// Renders a `<circle>` element's fill and stroke.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_circle(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    let cx = parse_svg_coord(attribute_ref(attrs, "cx")).unwrap_or(0.0) * sx + tx;
+    let cy = parse_svg_coord(attribute_ref(attrs, "cy")).unwrap_or(0.0) * sy + ty;
+    let r = parse_svg_size(attribute_ref(attrs, "r")).unwrap_or(0.0) * sx.min(sy);
+    if r > 0.0 {
+        let bbox = Rect {
+            x: cx - r,
+            y: cy - r,
+            width: r * 2.0,
+            height: r * 2.0,
+        };
+        if let Some(source) = fill {
+            fill_circle_source(canvas, cx, cy, r, source, transform, bbox);
+        }
+        let stroke_color = stroke.map(|source| source_color(source, cx, cy, bbox, transform));
+        stroke_ellipse(
+            canvas,
+            cx,
+            cy,
+            r,
+            r,
+            paint.stroke_width * sx.min(sy),
+            stroke_color,
+        );
+    }
+}
+
+/// Renders an `<ellipse>` element's fill and stroke.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_ellipse(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    let cx = parse_svg_coord(attribute_ref(attrs, "cx")).unwrap_or(0.0) * sx + tx;
+    let cy = parse_svg_coord(attribute_ref(attrs, "cy")).unwrap_or(0.0) * sy + ty;
+    let rx = parse_svg_size(attribute_ref(attrs, "rx")).unwrap_or(0.0) * sx;
+    let ry = parse_svg_size(attribute_ref(attrs, "ry")).unwrap_or(0.0) * sy;
+    if rx > 0.0 && ry > 0.0 {
+        let bbox = Rect {
+            x: cx - rx,
+            y: cy - ry,
+            width: rx * 2.0,
+            height: ry * 2.0,
+        };
+        if let Some(source) = fill {
+            fill_ellipse_source(canvas, cx, cy, rx, ry, source, transform, bbox);
+        }
+        let stroke_color = stroke.map(|source| source_color(source, cx, cy, bbox, transform));
+        stroke_ellipse(
+            canvas,
+            cx,
+            cy,
+            rx,
+            ry,
+            paint.stroke_width * sx.min(sy),
+            stroke_color,
+        );
+    }
+}
+
+/// Renders a `<line>` element's stroke (lines have no fill).
+fn render_svg_line(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    let x1 = parse_svg_coord(attribute_ref(attrs, "x1")).unwrap_or(0.0) * sx + tx;
+    let y1 = parse_svg_coord(attribute_ref(attrs, "y1")).unwrap_or(0.0) * sy + ty;
+    let x2 = parse_svg_coord(attribute_ref(attrs, "x2")).unwrap_or(0.0) * sx + tx;
+    let y2 = parse_svg_coord(attribute_ref(attrs, "y2")).unwrap_or(0.0) * sy + ty;
+    let bbox = rect_for_points(&[(x1, y1), (x2, y2)]);
+    let stroke_color = stroke
+        .map(|source| source_color(source, (x1 + x2) / 2.0, (y1 + y2) / 2.0, bbox, transform));
+    stroke_polyline(
+        canvas,
+        &[(x1, y1), (x2, y2)],
+        false,
+        stroke_color,
+        paint.stroke_width * sx.min(sy),
+        paint.line_cap,
+        paint.line_join,
+    );
+}
+
+/// Renders a `<polyline>` or `<polygon>` element's fill (polygons only) and
+/// stroke.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_polyline_or_polygon(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+    closed: bool,
+) {
+    let points = parse_svg_points(attribute_ref(attrs, "points"))
+        .into_iter()
+        .map(|(x, y)| (x * sx + tx, y * sy + ty))
+        .collect::<Vec<_>>();
+    let bbox = rect_for_points(&points);
+    if closed && points.len() >= 3 {
+        if let Some(source) = fill {
+            fill_compound_source(
+                canvas,
+                std::slice::from_ref(&points),
+                source,
+                FillRule::NonZero,
+                transform,
+                bbox,
+            );
+        }
+    }
+    let stroke_color = stroke.map(|source| {
+        source_color(
+            source,
+            bbox.x + bbox.width / 2.0,
+            bbox.y + bbox.height / 2.0,
+            bbox,
+            transform,
+        )
+    });
+    stroke_polyline(
+        canvas,
+        &points,
+        closed,
+        stroke_color,
+        paint.stroke_width * sx.min(sy),
+        paint.line_cap,
+        paint.line_join,
+    );
+}
+
+/// Renders a `<path>` element's `d` attribute commands.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_path(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    if let Some(d) = attribute_value(attrs, "d") {
+        let fill_rule = match property_value(attrs, "fill-rule").as_deref() {
+            Some(value) if value.eq_ignore_ascii_case("evenodd") => FillRule::EvenOdd,
+            _ => FillRule::NonZero,
+        };
+        render_path(
+            canvas,
+            &d,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill,
+            fill_rule,
+            stroke,
+            paint.stroke_width * sx.min(sy),
+            paint.line_cap,
+            paint.line_join,
+            transform,
+        );
+    }
+}
+
+/// Renders an `<image>` element by decoding its `href` and drawing it into
+/// the viewport rect described by its `x`/`y`/`width`/`height` attributes.
+fn render_svg_image(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    opacity: f32,
+    resources: &SvgResources,
+) {
+    let x = parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0) * sx + tx;
+    let y = parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0) * sy + ty;
+    let Some(width) = parse_svg_size(attribute_ref(attrs, "width")) else {
+        return;
+    };
+    let Some(height) = parse_svg_size(attribute_ref(attrs, "height")) else {
+        return;
+    };
+    let width = width * sx;
+    let height = height * sy;
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let Some(href) = attribute_value(attrs, "href")
+        .or_else(|| attribute_value(attrs, "xlink:href"))
+        .filter(|href| !href.trim().is_empty())
+    else {
+        return;
+    };
+    let Some(image) = decode_svg_image_reference(&href, resources.image_base_url.as_ref()) else {
+        return;
+    };
+    let viewport = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let destination = svg_image_destination(
+        viewport,
+        image.width() as f32,
+        image.height() as f32,
+        attribute_ref(attrs, "preserveAspectRatio").map(String::as_str),
+    );
+    if destination.width <= 0.0 || destination.height <= 0.0 {
+        return;
+    }
+    canvas.draw_image_scaled_clipped_with_opacity(&image, destination, Some(viewport), opacity);
 }
 
 fn decode_svg_image_reference(href: &str, base_url: Option<&Url>) -> Option<Image> {
@@ -2707,16 +2879,31 @@ enum PathCommand {
     Close,
 }
 
+/// Mutable parser state threaded through the SVG path `d` command handlers:
+/// the current point, the start of the current subpath (for `Z`/`z`), and
+/// the last cubic/quadratic control point (for the `S`/`s`/`T`/`t` smooth
+/// variants).
+struct PathParseState {
+    cx: f32,
+    cy: f32,
+    subpath_start_x: f32,
+    subpath_start_y: f32,
+    last_cubic_control: Option<(f32, f32)>,
+    last_quadratic_control: Option<(f32, f32)>,
+}
+
 fn parse_path_data(d: &str) -> Vec<PathCommand> {
     let mut commands = Vec::new();
     let mut chars = d.chars().peekable();
     let mut current_command = ' ';
-    let mut cx = 0.0f32;
-    let mut cy = 0.0f32;
-    let mut subpath_start_x = 0.0f32;
-    let mut subpath_start_y = 0.0f32;
-    let mut last_cubic_control = None;
-    let mut last_quadratic_control = None;
+    let mut state = PathParseState {
+        cx: 0.0,
+        cy: 0.0,
+        subpath_start_x: 0.0,
+        subpath_start_y: 0.0,
+        last_cubic_control: None,
+        last_quadratic_control: None,
+    };
 
     while chars.peek().is_some() {
         let remaining_before = chars.clone().count();
@@ -2731,239 +2918,50 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
 
         match current_command {
             'M' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                if let Some(x) = parse_number(&mut chars) {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(y) = parse_number(&mut chars) {
-                        cx = x;
-                        cy = y;
-                        subpath_start_x = x;
-                        subpath_start_y = y;
-                        commands.push(PathCommand::MoveTo(x, y));
-                        current_command = 'L'; // subsequent coords are LineTo
-                    }
+                if let Some(next) = parse_path_move_to(&mut chars, false, &mut state, &mut commands)
+                {
+                    current_command = next;
                 }
             }
             'm' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                if let Some(dx) = parse_number(&mut chars) {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(dy) = parse_number(&mut chars) {
-                        cx += dx;
-                        cy += dy;
-                        subpath_start_x = cx;
-                        subpath_start_y = cy;
-                        commands.push(PathCommand::MoveTo(cx, cy));
-                        current_command = 'l';
-                    }
+                if let Some(next) = parse_path_move_to(&mut chars, true, &mut state, &mut commands)
+                {
+                    current_command = next;
                 }
             }
-            'L' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                if let Some(x) = parse_number(&mut chars) {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(y) = parse_number(&mut chars) {
-                        cx = x;
-                        cy = y;
-                        commands.push(PathCommand::LineTo(x, y));
-                    }
-                }
-            }
-            'l' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                if let Some(dx) = parse_number(&mut chars) {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(dy) = parse_number(&mut chars) {
-                        cx += dx;
-                        cy += dy;
-                        commands.push(PathCommand::LineTo(cx, cy));
-                    }
-                }
-            }
-            'H' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                if let Some(x) = parse_number(&mut chars) {
-                    cx = x;
-                    commands.push(PathCommand::HorizontalLineTo(x));
-                }
-            }
-            'h' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                if let Some(dx) = parse_number(&mut chars) {
-                    cx += dx;
-                    commands.push(PathCommand::HorizontalLineTo(cx));
-                }
-            }
-            'V' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                if let Some(y) = parse_number(&mut chars) {
-                    cy = y;
-                    commands.push(PathCommand::VerticalLineTo(y));
-                }
-            }
-            'v' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                if let Some(dy) = parse_number(&mut chars) {
-                    cy += dy;
-                    commands.push(PathCommand::VerticalLineTo(cy));
-                }
-            }
-            'C' => {
-                last_quadratic_control = None;
-                let mut nums = Vec::new();
-                for _ in 0..6 {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(n) = parse_number(&mut chars) {
-                        nums.push(n);
-                    }
-                }
-                if nums.len() == 6 {
-                    cx = nums[4];
-                    cy = nums[5];
-                    last_cubic_control = Some((nums[2], nums[3]));
-                    commands.push(PathCommand::CurveTo(
-                        nums[0], nums[1], nums[2], nums[3], nums[4], nums[5],
-                    ));
-                }
-            }
-            'c' => {
-                last_quadratic_control = None;
-                let mut nums = Vec::new();
-                for _ in 0..6 {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(n) = parse_number(&mut chars) {
-                        nums.push(n);
-                    }
-                }
-                if nums.len() == 6 {
-                    let start_x = cx;
-                    let start_y = cy;
-                    cx += nums[4];
-                    cy += nums[5];
-                    last_cubic_control = Some((start_x + nums[2], start_y + nums[3]));
-                    commands.push(PathCommand::CurveTo(
-                        start_x + nums[0],
-                        start_y + nums[1],
-                        start_x + nums[2],
-                        start_y + nums[3],
-                        cx,
-                        cy,
-                    ));
-                }
-            }
-            'S' | 's' => {
-                last_quadratic_control = None;
-                let mut nums = Vec::new();
-                for _ in 0..4 {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(n) = parse_number(&mut chars) {
-                        nums.push(n);
-                    }
-                }
-                if nums.len() == 4 {
-                    let cp1 = last_cubic_control
-                        .map(|(x, y)| (2.0 * cx - x, 2.0 * cy - y))
-                        .unwrap_or((cx, cy));
-                    let (cp2x, cp2y, x, y) = if current_command == 's' {
-                        (cx + nums[0], cy + nums[1], cx + nums[2], cy + nums[3])
-                    } else {
-                        (nums[0], nums[1], nums[2], nums[3])
-                    };
-                    commands.push(PathCommand::CurveTo(cp1.0, cp1.1, cp2x, cp2y, x, y));
-                    cx = x;
-                    cy = y;
-                    last_cubic_control = Some((cp2x, cp2y));
-                }
-            }
-            'Q' | 'q' => {
-                last_cubic_control = None;
-                let mut nums = Vec::new();
-                for _ in 0..4 {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(n) = parse_number(&mut chars) {
-                        nums.push(n);
-                    }
-                }
-                if nums.len() == 4 {
-                    let (cpx, cpy, x, y) = if current_command == 'q' {
-                        (cx + nums[0], cy + nums[1], cx + nums[2], cy + nums[3])
-                    } else {
-                        (nums[0], nums[1], nums[2], nums[3])
-                    };
-                    commands.push(PathCommand::QuadraticCurveTo(cpx, cpy, x, y));
-                    cx = x;
-                    cy = y;
-                    last_quadratic_control = Some((cpx, cpy));
-                }
-            }
-            'T' | 't' => {
-                last_cubic_control = None;
-                let mut nums = Vec::new();
-                for _ in 0..2 {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(n) = parse_number(&mut chars) {
-                        nums.push(n);
-                    }
-                }
-                if nums.len() == 2 {
-                    let (cpx, cpy) = last_quadratic_control
-                        .map(|(x, y)| (2.0 * cx - x, 2.0 * cy - y))
-                        .unwrap_or((cx, cy));
-                    let (x, y) = if current_command == 't' {
-                        (cx + nums[0], cy + nums[1])
-                    } else {
-                        (nums[0], nums[1])
-                    };
-                    commands.push(PathCommand::QuadraticCurveTo(cpx, cpy, x, y));
-                    cx = x;
-                    cy = y;
-                    last_quadratic_control = Some((cpx, cpy));
-                }
-            }
-            'A' | 'a' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                let mut nums = Vec::new();
-                for _ in 0..7 {
-                    skip_whitespace_and_commas(&mut chars);
-                    if let Some(n) = parse_number(&mut chars) {
-                        nums.push(n);
-                    }
-                }
-                if nums.len() == 7 {
-                    let (x, y) = if current_command == 'a' {
-                        (cx + nums[5], cy + nums[6])
-                    } else {
-                        (nums[5], nums[6])
-                    };
-                    commands.push(PathCommand::ArcTo(
-                        nums[0],
-                        nums[1],
-                        nums[2],
-                        nums[3] != 0.0,
-                        nums[4] != 0.0,
-                        x,
-                        y,
-                    ));
-                    cx = x;
-                    cy = y;
-                }
-            }
-            'Z' | 'z' => {
-                last_cubic_control = None;
-                last_quadratic_control = None;
-                commands.push(PathCommand::Close);
-                cx = subpath_start_x;
-                cy = subpath_start_y;
-            }
+            'L' => parse_path_line_to(&mut chars, false, &mut state, &mut commands),
+            'l' => parse_path_line_to(&mut chars, true, &mut state, &mut commands),
+            'H' => parse_path_horizontal_line_to(&mut chars, false, &mut state, &mut commands),
+            'h' => parse_path_horizontal_line_to(&mut chars, true, &mut state, &mut commands),
+            'V' => parse_path_vertical_line_to(&mut chars, false, &mut state, &mut commands),
+            'v' => parse_path_vertical_line_to(&mut chars, true, &mut state, &mut commands),
+            'C' => parse_path_curve_to(&mut chars, false, &mut state, &mut commands),
+            'c' => parse_path_curve_to(&mut chars, true, &mut state, &mut commands),
+            'S' | 's' => parse_path_smooth_curve_to(
+                &mut chars,
+                current_command == 's',
+                &mut state,
+                &mut commands,
+            ),
+            'Q' | 'q' => parse_path_quadratic_curve_to(
+                &mut chars,
+                current_command == 'q',
+                &mut state,
+                &mut commands,
+            ),
+            'T' | 't' => parse_path_smooth_quadratic_curve_to(
+                &mut chars,
+                current_command == 't',
+                &mut state,
+                &mut commands,
+            ),
+            'A' | 'a' => parse_path_arc_to(
+                &mut chars,
+                current_command == 'a',
+                &mut state,
+                &mut commands,
+            ),
+            'Z' | 'z' => parse_path_close(&mut state, &mut commands),
             _ => {
                 // Skip unknown commands
                 chars.next();
@@ -2978,6 +2976,298 @@ fn parse_path_data(d: &str) -> Vec<PathCommand> {
     }
 
     commands
+}
+
+/// Parses an absolute (`M`) or relative (`m`) moveto command, returning the
+/// implicit lineto command (`L`/`l`) that subsequent coordinate pairs use,
+/// or `None` if the coordinate pair was incomplete.
+fn parse_path_move_to(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    relative: bool,
+    state: &mut PathParseState,
+    commands: &mut Vec<PathCommand>,
+) -> Option<char> {
+    state.last_cubic_control = None;
+    state.last_quadratic_control = None;
+    let x = parse_number(chars)?;
+    skip_whitespace_and_commas(chars);
+    let y = parse_number(chars)?;
+    if relative {
+        state.cx += x;
+        state.cy += y;
+    } else {
+        state.cx = x;
+        state.cy = y;
+    }
+    state.subpath_start_x = state.cx;
+    state.subpath_start_y = state.cy;
+    commands.push(PathCommand::MoveTo(state.cx, state.cy));
+    Some(if relative { 'l' } else { 'L' })
+}
+
+/// Parses an absolute (`L`) or relative (`l`) lineto command.
+fn parse_path_line_to(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    relative: bool,
+    state: &mut PathParseState,
+    commands: &mut Vec<PathCommand>,
+) {
+    state.last_cubic_control = None;
+    state.last_quadratic_control = None;
+    let Some(x) = parse_number(chars) else {
+        return;
+    };
+    skip_whitespace_and_commas(chars);
+    let Some(y) = parse_number(chars) else {
+        return;
+    };
+    if relative {
+        state.cx += x;
+        state.cy += y;
+    } else {
+        state.cx = x;
+        state.cy = y;
+    }
+    commands.push(PathCommand::LineTo(state.cx, state.cy));
+}
+
+/// Parses an absolute (`H`) or relative (`h`) horizontal lineto command.
+fn parse_path_horizontal_line_to(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    relative: bool,
+    state: &mut PathParseState,
+    commands: &mut Vec<PathCommand>,
+) {
+    state.last_cubic_control = None;
+    state.last_quadratic_control = None;
+    let Some(x) = parse_number(chars) else {
+        return;
+    };
+    if relative {
+        state.cx += x;
+    } else {
+        state.cx = x;
+    }
+    commands.push(PathCommand::HorizontalLineTo(state.cx));
+}
+
+/// Parses an absolute (`V`) or relative (`v`) vertical lineto command.
+fn parse_path_vertical_line_to(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    relative: bool,
+    state: &mut PathParseState,
+    commands: &mut Vec<PathCommand>,
+) {
+    state.last_cubic_control = None;
+    state.last_quadratic_control = None;
+    let Some(y) = parse_number(chars) else {
+        return;
+    };
+    if relative {
+        state.cy += y;
+    } else {
+        state.cy = y;
+    }
+    commands.push(PathCommand::VerticalLineTo(state.cy));
+}
+
+/// Parses an absolute (`C`) or relative (`c`) cubic Bezier curveto command.
+fn parse_path_curve_to(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    relative: bool,
+    state: &mut PathParseState,
+    commands: &mut Vec<PathCommand>,
+) {
+    state.last_quadratic_control = None;
+    let mut nums = Vec::new();
+    for _ in 0..6 {
+        skip_whitespace_and_commas(chars);
+        if let Some(n) = parse_number(chars) {
+            nums.push(n);
+        }
+    }
+    if nums.len() != 6 {
+        return;
+    }
+    if relative {
+        let start_x = state.cx;
+        let start_y = state.cy;
+        state.cx += nums[4];
+        state.cy += nums[5];
+        state.last_cubic_control = Some((start_x + nums[2], start_y + nums[3]));
+        commands.push(PathCommand::CurveTo(
+            start_x + nums[0],
+            start_y + nums[1],
+            start_x + nums[2],
+            start_y + nums[3],
+            state.cx,
+            state.cy,
+        ));
+    } else {
+        state.cx = nums[4];
+        state.cy = nums[5];
+        state.last_cubic_control = Some((nums[2], nums[3]));
+        commands.push(PathCommand::CurveTo(
+            nums[0], nums[1], nums[2], nums[3], nums[4], nums[5],
+        ));
+    }
+}
+
+/// Parses an absolute (`S`) or relative (`s`) smooth cubic Bezier curveto
+/// command, reflecting the previous curve's second control point when one
+/// preceded this command.
+fn parse_path_smooth_curve_to(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    relative: bool,
+    state: &mut PathParseState,
+    commands: &mut Vec<PathCommand>,
+) {
+    state.last_quadratic_control = None;
+    let mut nums = Vec::new();
+    for _ in 0..4 {
+        skip_whitespace_and_commas(chars);
+        if let Some(n) = parse_number(chars) {
+            nums.push(n);
+        }
+    }
+    if nums.len() != 4 {
+        return;
+    }
+    let cp1 = state
+        .last_cubic_control
+        .map(|(x, y)| (2.0 * state.cx - x, 2.0 * state.cy - y))
+        .unwrap_or((state.cx, state.cy));
+    let (cp2x, cp2y, x, y) = if relative {
+        (
+            state.cx + nums[0],
+            state.cy + nums[1],
+            state.cx + nums[2],
+            state.cy + nums[3],
+        )
+    } else {
+        (nums[0], nums[1], nums[2], nums[3])
+    };
+    commands.push(PathCommand::CurveTo(cp1.0, cp1.1, cp2x, cp2y, x, y));
+    state.cx = x;
+    state.cy = y;
+    state.last_cubic_control = Some((cp2x, cp2y));
+}
+
+/// Parses an absolute (`Q`) or relative (`q`) quadratic Bezier curveto
+/// command.
+fn parse_path_quadratic_curve_to(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    relative: bool,
+    state: &mut PathParseState,
+    commands: &mut Vec<PathCommand>,
+) {
+    state.last_cubic_control = None;
+    let mut nums = Vec::new();
+    for _ in 0..4 {
+        skip_whitespace_and_commas(chars);
+        if let Some(n) = parse_number(chars) {
+            nums.push(n);
+        }
+    }
+    if nums.len() != 4 {
+        return;
+    }
+    let (cpx, cpy, x, y) = if relative {
+        (
+            state.cx + nums[0],
+            state.cy + nums[1],
+            state.cx + nums[2],
+            state.cy + nums[3],
+        )
+    } else {
+        (nums[0], nums[1], nums[2], nums[3])
+    };
+    commands.push(PathCommand::QuadraticCurveTo(cpx, cpy, x, y));
+    state.cx = x;
+    state.cy = y;
+    state.last_quadratic_control = Some((cpx, cpy));
+}
+
+/// Parses an absolute (`T`) or relative (`t`) smooth quadratic Bezier
+/// curveto command, reflecting the previous curve's control point when one
+/// preceded this command.
+fn parse_path_smooth_quadratic_curve_to(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    relative: bool,
+    state: &mut PathParseState,
+    commands: &mut Vec<PathCommand>,
+) {
+    state.last_cubic_control = None;
+    let mut nums = Vec::new();
+    for _ in 0..2 {
+        skip_whitespace_and_commas(chars);
+        if let Some(n) = parse_number(chars) {
+            nums.push(n);
+        }
+    }
+    if nums.len() != 2 {
+        return;
+    }
+    let (cpx, cpy) = state
+        .last_quadratic_control
+        .map(|(x, y)| (2.0 * state.cx - x, 2.0 * state.cy - y))
+        .unwrap_or((state.cx, state.cy));
+    let (x, y) = if relative {
+        (state.cx + nums[0], state.cy + nums[1])
+    } else {
+        (nums[0], nums[1])
+    };
+    commands.push(PathCommand::QuadraticCurveTo(cpx, cpy, x, y));
+    state.cx = x;
+    state.cy = y;
+    state.last_quadratic_control = Some((cpx, cpy));
+}
+
+/// Parses an absolute (`A`) or relative (`a`) elliptical arcto command.
+fn parse_path_arc_to(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    relative: bool,
+    state: &mut PathParseState,
+    commands: &mut Vec<PathCommand>,
+) {
+    state.last_cubic_control = None;
+    state.last_quadratic_control = None;
+    let mut nums = Vec::new();
+    for _ in 0..7 {
+        skip_whitespace_and_commas(chars);
+        if let Some(n) = parse_number(chars) {
+            nums.push(n);
+        }
+    }
+    if nums.len() != 7 {
+        return;
+    }
+    let (x, y) = if relative {
+        (state.cx + nums[5], state.cy + nums[6])
+    } else {
+        (nums[5], nums[6])
+    };
+    commands.push(PathCommand::ArcTo(
+        nums[0],
+        nums[1],
+        nums[2],
+        nums[3] != 0.0,
+        nums[4] != 0.0,
+        x,
+        y,
+    ));
+    state.cx = x;
+    state.cy = y;
+}
+
+/// Parses a `Z`/`z` closepath command, resetting the current point to the
+/// start of the current subpath.
+fn parse_path_close(state: &mut PathParseState, commands: &mut Vec<PathCommand>) {
+    state.last_cubic_control = None;
+    state.last_quadratic_control = None;
+    commands.push(PathCommand::Close);
+    state.cx = state.subpath_start_x;
+    state.cy = state.subpath_start_y;
 }
 
 fn skip_whitespace_and_commas(chars: &mut std::iter::Peekable<std::str::Chars>) {
