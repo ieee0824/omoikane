@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+pub(crate) mod angle;
 mod container;
 mod filter;
 mod logical;

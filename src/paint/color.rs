@@ -480,29 +480,19 @@ pub(crate) fn split_gradient_args(args: &str) -> Vec<&str> {
 /// Parses the direction part of a linear-gradient (e.g. `"to right"`, `"45deg"`).
 /// Returns the angle in degrees (CSS convention: 0° = to top, 90° = to right).
 pub(crate) fn parse_gradient_direction(part: &str) -> Option<f32> {
-    let lower = part.trim().to_ascii_lowercase();
-    let part = lower.as_str();
-    let finite = |value: &str| value.trim().parse::<f32>().ok().filter(|v| v.is_finite());
-
-    // Angle: "<number>deg" (or grad/turn/rad — only deg is common)
-    if let Some(deg_str) = part.strip_suffix("deg") {
-        return finite(deg_str);
-    }
-    if let Some(turn_str) = part.strip_suffix("turn") {
-        return finite(turn_str)
-            .map(|t| t * 360.0)
-            .filter(|v| v.is_finite());
-    }
-    if let Some(rad_str) = part.strip_suffix("rad") {
-        return finite(rad_str)
-            .map(|r| r.to_degrees())
-            .filter(|v| v.is_finite());
-    }
-    if let Some(grad_str) = part.strip_suffix("grad") {
-        return finite(grad_str).map(|g| g * 0.9).filter(|v| v.is_finite());
+    use crate::css::angle::{CssAngle, UnitlessZero};
+    if let Some(angle) = CssAngle::parse(part, UnitlessZero::None, true) {
+        // Preserve the old `rad`-before-`grad` suffix precedence for directions.
+        if angle.is_gradians() {
+            return None;
+        }
+        let degrees = angle.degrees();
+        return degrees.is_finite().then_some(degrees);
     }
 
     // Keyword: "to <side>" or "to <side> <side>"
+    let lower = part.trim().to_ascii_lowercase();
+    let part = lower.as_str();
     match part {
         "to top" => Some(0.0),
         "to right" => Some(90.0),
@@ -550,30 +540,10 @@ fn parse_number_with_unit(value: &str) -> Option<GradientLength> {
 }
 
 fn parse_angle(value: &str) -> Option<f32> {
-    let value = value.trim().to_ascii_lowercase();
-    let finite = |number: &str| number.parse::<f32>().ok().filter(|value| value.is_finite());
-    if let Some(zero) = parse_unitless_zero(&value) {
-        return Some(zero);
-    }
-    if let Some(number) = value.strip_suffix("deg") {
-        return finite(number);
-    }
-    if let Some(number) = value.strip_suffix("turn") {
-        return finite(number)
-            .map(|turns| turns * 360.0)
-            .filter(|value| value.is_finite());
-    }
-    if let Some(number) = value.strip_suffix("grad") {
-        return finite(number)
-            .map(|gradians| gradians * 0.9)
-            .filter(|value| value.is_finite());
-    }
-    if let Some(number) = value.strip_suffix("rad") {
-        return finite(number)
-            .map(f32::to_degrees)
-            .filter(|value| value.is_finite());
-    }
-    None
+    use crate::css::angle::{CssAngle, UnitlessZero};
+    let angle = CssAngle::parse(value, UnitlessZero::NumericPreservingSign, false)?;
+    let degrees = angle.degrees();
+    degrees.is_finite().then_some(degrees)
 }
 
 fn top_level_words(value: &str) -> Vec<&str> {
@@ -1307,6 +1277,37 @@ pub(crate) fn paint_gradient(
 #[cfg(test)]
 mod gradient_tests {
     use super::*;
+
+    #[test]
+    fn angle_input_contract() {
+        for (input, degrees) in [
+            ("-90deg", -90.0),
+            (".25TURN", 90.0),
+            ("1rad", 1.0_f32.to_degrees()),
+        ] {
+            assert_eq!(parse_angle(input), Some(degrees), "{input}");
+            assert_eq!(parse_gradient_direction(input), Some(degrees), "{input}");
+        }
+        assert_eq!(parse_angle(" 100GRAD "), Some(90.0));
+        assert_eq!(parse_gradient_direction(" 100GRAD "), None);
+        for input in ["0", "-0", "+0.0"] {
+            assert_eq!(parse_angle(input), input.parse::<f32>().ok());
+            assert_eq!(parse_gradient_direction(input), None);
+        }
+        assert!(parse_angle("-0").unwrap().is_sign_negative());
+        assert_eq!(parse_angle("90 deg"), None);
+        assert_eq!(parse_gradient_direction("90 deg"), Some(90.0));
+        for input in [
+            "1", "NaNdeg", "infturn", "3e38turn", "3e38rad", "bad", "deg",
+        ] {
+            assert_eq!(parse_angle(input), None, "{input}");
+            assert_eq!(parse_gradient_direction(input), None, "{input}");
+        }
+        assert_eq!(parse_gradient_direction("TO RIGHT TOP"), Some(45.0));
+        assert_eq!(parse_hue(".25turn"), Some(90.0));
+        assert!(parse_gradient("linear-gradient(.25turn, red, blue)").is_some());
+        assert!(parse_gradient("conic-gradient(from .25turn, red, blue)").is_some());
+    }
 
     #[test]
     fn color_hint_uses_the_css_exponential_midpoint_curve() {
