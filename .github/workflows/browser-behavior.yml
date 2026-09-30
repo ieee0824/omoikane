@@ -36,6 +36,13 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
+        # CI's `test` job runs these default-feature contracts on x86_64 Linux
+        # inside its full suite and uploads the same artifact (#1065).
+        exclude:
+          - mode: interpreter
+            platform:
+              os: ubuntu-24.04
+              target: x86_64-unknown-linux-gnu
     env:
       CARGO_BUILD_JOBS: '2'
       OMOIKANE_BROWSER_REPORT_DIR: .artifacts/browser/journeys
