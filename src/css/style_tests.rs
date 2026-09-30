@@ -208,32 +208,26 @@ fn visited_paint_colors_preserve_ordinary_style_and_alpha() {
     let mut ordinary = ComputedStyle::default();
     ordinary
         .properties
-        .insert("color".into(), ComputedValue::Color("#10203080".into()));
+        .insert("color", ComputedValue::Color("#10203080".into()));
     ordinary.properties.insert(
-        "background-color".into(),
+        "background-color",
         ComputedValue::Color("transparent".into()),
     );
+    ordinary.properties.insert("width", ComputedValue::Px(12.0));
     ordinary
         .properties
-        .insert("width".into(), ComputedValue::Px(12.0));
-    ordinary.properties.insert(
-        "background-image".into(),
-        ComputedValue::Keyword("none".into()),
-    );
+        .insert("background-image", ComputedValue::Keyword("none".into()));
 
     let mut visited = ordinary.clone();
     visited
         .properties
-        .insert("color".into(), ComputedValue::Color("#aabbccff".into()));
-    visited.properties.insert(
-        "background-color".into(),
-        ComputedValue::Color("#ff0000".into()),
-    );
+        .insert("color", ComputedValue::Color("#aabbccff".into()));
     visited
         .properties
-        .insert("width".into(), ComputedValue::Px(999.0));
+        .insert("background-color", ComputedValue::Color("#ff0000".into()));
+    visited.properties.insert("width", ComputedValue::Px(999.0));
     visited.properties.insert(
-        "background-image".into(),
+        "background-image",
         ComputedValue::Keyword("url(secret.png)".into()),
     );
 

@@ -1,10 +1,13 @@
 //! CSS cascade and computed style resolution.
 
 mod page;
+mod property_id;
 
 pub use page::{
     PageBoxGeometry, PageMarginContent, PageSelectorContext, PageSide, ResolvedPageStyle,
 };
+pub(crate) use property_id::{PropertyId, PropertyMap};
+use property_id::{SUPPORTED_PROPERTIES, is_shorthand_or_legacy_alias};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -305,7 +308,7 @@ pub(crate) struct PropagatedTextDecoration {
 /// Resolved computed style for a node.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ComputedStyle {
-    properties: BTreeMap<String, ComputedValue>,
+    properties: PropertyMap,
     /// Resolved component values for properties whose used value cannot be
     /// recovered from their CSSOM serialization alone (for example generated
     /// content containing strings and counter functions).
@@ -325,9 +328,15 @@ impl ComputedStyle {
         self.properties.get(name)
     }
 
-    /// Returns all computed properties.
-    pub fn properties(&self) -> &BTreeMap<String, ComputedValue> {
-        &self.properties
+    /// Returns a snapshot of all computed properties, keyed by name.
+    ///
+    /// The map is built on each call; use [`Self::get`] to read a single
+    /// property.
+    pub fn properties(&self) -> BTreeMap<String, ComputedValue> {
+        self.properties
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect()
     }
 
     /// Combines a separately cascaded visited style with the ordinary style
@@ -368,9 +377,7 @@ impl ComputedStyle {
                 "#{:02x}{:02x}{:02x}{:02x}",
                 visited.r, visited.g, visited.b, ordinary.a
             );
-            paint
-                .properties
-                .insert((*name).to_string(), ComputedValue::Color(value));
+            paint.properties.insert(*name, ComputedValue::Color(value));
         }
         paint
     }
@@ -381,8 +388,7 @@ impl ComputedStyle {
 
     /// Replaces a computed property with a layout-resolved CSS pixel value.
     pub(crate) fn set_resolved_px(&mut self, name: &str, value: f32) {
-        self.properties
-            .insert(name.to_string(), ComputedValue::Px(value));
+        self.properties.insert(name, ComputedValue::Px(value));
     }
 
     /// Exposes logical aliases of the final physical values to computed CSSOM.
@@ -428,7 +434,11 @@ impl ComputedStyle {
             let Some(physical) = flow.physical_name(name) else {
                 continue;
             };
-            let mut value = self.properties.get(&physical).cloned().unwrap_or_else(|| {
+            let mut value = self
+                .properties
+                .get(&physical)
+                .cloned()
+                .unwrap_or_else(|| {
                 if name.starts_with("max-") {
                     ComputedValue::Keyword("none".to_string())
                 } else if name.starts_with("min-") || name.ends_with("-size")
@@ -438,7 +448,7 @@ impl ComputedStyle {
                 } else if name.ends_with("-style") {
                     ComputedValue::Keyword("none".to_string())
                 } else if name.ends_with("-color") {
-                    self.properties.get("color").cloned()
+                    self.properties.get(&PropertyId::Color).cloned()
                         .unwrap_or_else(|| ComputedValue::Color("black".to_string()))
                 } else if name.ends_with("-width") {
                     let style = physical.replace("-width", "-style");
@@ -452,7 +462,7 @@ impl ComputedStyle {
             if name.ends_with("-color") && value.css_text().eq_ignore_ascii_case("currentcolor") {
                 value = self
                     .properties
-                    .get("color")
+                    .get(&PropertyId::Color)
                     .cloned()
                     .unwrap_or_else(|| ComputedValue::Color("black".to_string()));
             }
@@ -462,7 +472,7 @@ impl ComputedStyle {
             {
                 value = ComputedValue::Px(0.0);
             }
-            self.properties.insert(name.to_string(), value);
+            self.properties.insert(name, value);
         }
     }
 
@@ -475,7 +485,7 @@ impl ComputedStyle {
                     compute_value(&declaration.value, name, ResolutionContext::default())
                 });
             if let Some(computed @ ComputedValue::LengthPercentage(_)) = computed {
-                self.properties.insert(name.to_string(), computed);
+                self.properties.insert(name, computed);
                 return;
             }
         }
@@ -501,7 +511,7 @@ impl ComputedStyle {
         } else {
             ComputedValue::Keyword(value)
         };
-        self.properties.insert(name.to_string(), computed);
+        self.properties.insert(name, computed);
     }
 
     pub(crate) fn font_family_scope_root(&self) -> Option<usize> {
@@ -1523,7 +1533,7 @@ impl StyleResolver {
 
     fn css_font_metrics(
         &self,
-        properties: &BTreeMap<String, ComputedValue>,
+        properties: &PropertyMap,
         scope_root: Option<usize>,
         size_px: f32,
     ) -> CssRelativeFontMetrics {
@@ -1534,7 +1544,7 @@ impl StyleResolver {
             _ => None,
         };
         let family = keyword("font-family").map(FontFamilyKey::new);
-        let weight = match properties.get("font-weight") {
+        let weight = match properties.get(&PropertyId::FontWeight) {
             Some(ComputedValue::Number(value)) => FontWeight((*value as u16).clamp(1, 1000)),
             _ => keyword("font-weight")
                 .map(FontWeight::parse)
@@ -2512,7 +2522,7 @@ impl StyleResolver {
         let flow = logical_flow_from_candidates(&candidates, &custom_properties, parent_style);
         remove_reverted_candidates(&mut candidates, Some(&custom_properties), Some(flow));
 
-        let mut properties: BTreeMap<String, ComputedValue> = BTreeMap::new();
+        let mut properties = PropertyMap::new();
         let mut component_values: BTreeMap<String, Value> = BTreeMap::new();
 
         // Effective root font-size for rem resolution: use the resolver's configured value,
@@ -2537,7 +2547,7 @@ impl StyleResolver {
             || custom_properties.values().any(value_has_font_metric_unit);
         let parent_font_metrics = if uses_font_metrics {
             parent_style.map_or_else(
-                || self.css_font_metrics(&BTreeMap::new(), None, parent_font_size),
+                || self.css_font_metrics(&PropertyMap::new(), None, parent_font_size),
                 |style| {
                     self.css_font_metrics(
                         &style.properties,
@@ -2581,7 +2591,7 @@ impl StyleResolver {
                 }
                 other => other.clone(),
             };
-            properties.insert("font-size".to_string(), resolved);
+            properties.insert(PropertyId::FontSize, resolved);
             if fs_candidate.important {
                 important_properties.insert("font-size".to_string());
             }
@@ -2595,7 +2605,7 @@ impl StyleResolver {
                 .tag_name()
                 .as_deref()
                 .is_some_and(|t| t.eq_ignore_ascii_case("html"));
-            if is_root && let Some(ComputedValue::Px(px)) = properties.get("font-size") {
+            if is_root && let Some(ComputedValue::Px(px)) = properties.get(&PropertyId::FontSize) {
                 root_font_size = *px;
             }
         }
@@ -2626,7 +2636,7 @@ impl StyleResolver {
                 viewport_height: self.viewport_height,
             };
             properties.insert(
-                "line-height".to_string(),
+                PropertyId::LineHeight,
                 compute_value(&value, "line-height", ctx),
             );
             if candidate.important {
@@ -2635,7 +2645,7 @@ impl StyleResolver {
         }
         let element_line_height = used_line_height_value(
             properties
-                .get("line-height")
+                .get(&PropertyId::LineHeight)
                 .or_else(|| parent_style.and_then(|style| style.get("line-height"))),
             element_font_size,
         );
@@ -2794,7 +2804,7 @@ impl StyleResolver {
             // The initial display value applies to elements without a more
             // specific UA or author declaration, including custom elements.
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert_with(|| ComputedValue::Keyword("inline".to_string()));
         }
         resolve_column_rule_current_color(&mut properties);
@@ -2841,11 +2851,11 @@ impl StyleResolver {
     fn apply_animation_snapshot(
         &self,
         node: &NodeHandle,
-        properties: &mut BTreeMap<String, ComputedValue>,
+        properties: &mut PropertyMap,
         important_properties: &HashSet<String>,
         animation_name_scope_root: Option<usize>,
     ) {
-        let anim_name = match properties.get("animation-name") {
+        let anim_name = match properties.get(&PropertyId::AnimationName) {
             Some(ComputedValue::Keyword(name) | ComputedValue::String(name)) => name.clone(),
             _ => return,
         };
@@ -2856,21 +2866,23 @@ impl StyleResolver {
             return;
         };
 
-        let fill_mode = match properties.get("animation-fill-mode") {
+        let fill_mode = match properties.get(&PropertyId::AnimationFillMode) {
             Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
             _ => "none".to_string(),
         };
         let infinite = matches!(
-            properties.get("animation-iteration-count"),
+            properties.get(&PropertyId::AnimationIterationCount),
             Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("infinite")
         );
         let paused = matches!(
-            properties.get("animation-play-state"),
+            properties.get(&PropertyId::AnimationPlayState),
             Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("paused")
         );
         let declarations = if paused {
-            let duration = animation_seconds(properties.get("animation-duration")).unwrap_or(0.0);
-            let delay = animation_seconds(properties.get("animation-delay")).unwrap_or(0.0);
+            let duration =
+                animation_seconds(properties.get(&PropertyId::AnimationDuration)).unwrap_or(0.0);
+            let delay =
+                animation_seconds(properties.get(&PropertyId::AnimationDelay)).unwrap_or(0.0);
             if delay > 0.0 {
                 if fill_mode == "backwards" || fill_mode == "both" {
                     steps.first().map(|step| &step.declarations)
@@ -2908,8 +2920,10 @@ impl StyleResolver {
         } else if fill_mode == "forwards" || fill_mode == "both" {
             steps.last().map(|step| &step.declarations)
         } else if infinite {
-            let duration = animation_seconds(properties.get("animation-duration")).unwrap_or(0.0);
-            let delay = animation_seconds(properties.get("animation-delay")).unwrap_or(0.0);
+            let duration =
+                animation_seconds(properties.get(&PropertyId::AnimationDuration)).unwrap_or(0.0);
+            let delay =
+                animation_seconds(properties.get(&PropertyId::AnimationDelay)).unwrap_or(0.0);
             if duration <= 0.0 || STATIC_ANIMATION_TIME_SECONDS < delay {
                 None
             } else {
@@ -2930,7 +2944,7 @@ impl StyleResolver {
             animation_snapshot_progress(properties, fill_mode.as_str(), infinite, paused);
 
         let element_font_size = properties
-            .get("font-size")
+            .get(&PropertyId::FontSize)
             .and_then(|value| match value {
                 ComputedValue::Px(px) => Some(*px),
                 _ => None,
@@ -2939,7 +2953,10 @@ impl StyleResolver {
         let ctx = ResolutionContext {
             parent_font_size: element_font_size,
             root_font_size: self.root_font_size,
-            line_height: used_line_height_value(properties.get("line-height"), element_font_size),
+            line_height: used_line_height_value(
+                properties.get(&PropertyId::LineHeight),
+                element_font_size,
+            ),
             root_line_height: self.root_line_height(),
             font_metrics: CssRelativeFontMetrics::fallback(element_font_size, false),
             viewport_width: self.viewport_width,
@@ -2948,7 +2965,7 @@ impl StyleResolver {
         let custom_properties: BTreeMap<String, Value> = properties
             .iter()
             .filter(|(name, _)| name.starts_with("--"))
-            .map(|(name, value)| (name.clone(), computed_value_to_value(value)))
+            .map(|(name, value)| (name.to_string(), computed_value_to_value(value)))
             .collect();
 
         let standard_properties: HashSet<&str> = declarations
@@ -2989,7 +3006,7 @@ impl StyleResolver {
         &self,
         steps: &[KeyframeStep],
         progress: f32,
-        properties: &mut BTreeMap<String, ComputedValue>,
+        properties: &mut PropertyMap,
         ctx: ResolutionContext,
         custom_properties: &BTreeMap<String, Value>,
         important_properties: &HashSet<String>,
@@ -3167,13 +3184,13 @@ fn animation_seconds(value: Option<&ComputedValue>) -> Option<f32> {
 }
 
 fn animation_snapshot_progress(
-    properties: &BTreeMap<String, ComputedValue>,
+    properties: &PropertyMap,
     fill_mode: &str,
     infinite: bool,
     paused: bool,
 ) -> Option<f32> {
-    let duration = animation_seconds(properties.get("animation-duration")).unwrap_or(0.0);
-    let delay = animation_seconds(properties.get("animation-delay")).unwrap_or(0.0);
+    let duration = animation_seconds(properties.get(&PropertyId::AnimationDuration)).unwrap_or(0.0);
+    let delay = animation_seconds(properties.get(&PropertyId::AnimationDelay)).unwrap_or(0.0);
     let backwards = fill_mode == "backwards" || fill_mode == "both";
     let forwards = fill_mode == "forwards" || fill_mode == "both";
     if paused {
@@ -3225,20 +3242,20 @@ fn font_reference_scope_root(
 }
 
 fn propagated_text_decorations(
-    properties: &BTreeMap<String, ComputedValue>,
+    properties: &PropertyMap,
     parent_style: Option<&ComputedStyle>,
     font_family_scope_root: Option<usize>,
     origin: (usize, Option<PseudoElement>),
 ) -> Arc<[PropagatedTextDecoration]> {
     let interrupts_parent = matches!(
-        properties.get("position"),
+        properties.get(&PropertyId::Position),
         Some(ComputedValue::Keyword(value))
             if value.eq_ignore_ascii_case("absolute") || value.eq_ignore_ascii_case("fixed")
     ) || matches!(
-        properties.get("float"),
+        properties.get(&PropertyId::Float),
         Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none")
     ) || matches!(
-        properties.get("display"),
+        properties.get(&PropertyId::Display),
         Some(ComputedValue::Keyword(value))
             if matches!(
                 value.to_ascii_lowercase().as_str(),
@@ -3253,12 +3270,12 @@ fn propagated_text_decorations(
             .unwrap_or_default()
     };
     if matches!(
-        properties.get("display"),
+        properties.get(&PropertyId::Display),
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("contents")
     ) {
         return decorations;
     }
-    let Some(ComputedValue::Keyword(line)) = properties.get("text-decoration-line") else {
+    let Some(ComputedValue::Keyword(line)) = properties.get(&PropertyId::TextDecorationLine) else {
         return decorations;
     };
     if !line.split_whitespace().any(|part| {
@@ -3270,12 +3287,12 @@ fn propagated_text_decorations(
         return decorations;
     }
     let color_value = properties
-        .get("text-decoration-color")
+        .get(&PropertyId::TextDecorationColor)
         .map(computed_value_css_text)
         .unwrap_or_else(|| "currentcolor".to_string());
     let color = if color_value.eq_ignore_ascii_case("currentcolor") {
         properties
-            .get("color")
+            .get(&PropertyId::Color)
             .map(computed_value_css_text)
             .unwrap_or_else(|| "black".to_string())
     } else {
@@ -3288,32 +3305,34 @@ fn propagated_text_decorations(
         line: line.clone(),
         color,
         thickness: properties
-            .get("text-decoration-thickness")
+            .get(&PropertyId::TextDecorationThickness)
             .cloned()
             .unwrap_or_else(|| ComputedValue::Keyword("auto".to_string())),
         underline_position: properties
-            .get("text-underline-position")
+            .get(&PropertyId::TextUnderlinePosition)
             .map(computed_value_css_text)
             .unwrap_or_else(|| "auto".to_string()),
         underline_offset: properties
-            .get("text-underline-offset")
+            .get(&PropertyId::TextUnderlineOffset)
             .cloned()
             .unwrap_or_else(|| ComputedValue::Keyword("auto".to_string())),
         font_size: properties
-            .get("font-size")
+            .get(&PropertyId::FontSize)
             .and_then(|value| match value {
                 ComputedValue::Px(value) => Some(*value),
                 _ => None,
             })
             .unwrap_or(16.0),
-        font_family: properties.get("font-family").and_then(|value| match value {
-            ComputedValue::Keyword(value) | ComputedValue::String(value) => {
-                Some(crate::font::FontFamilyKey::new(value))
-            }
-            _ => None,
-        }),
+        font_family: properties
+            .get(&PropertyId::FontFamily)
+            .and_then(|value| match value {
+                ComputedValue::Keyword(value) | ComputedValue::String(value) => {
+                    Some(crate::font::FontFamilyKey::new(value))
+                }
+                _ => None,
+            }),
         font_weight: properties
-            .get("font-weight")
+            .get(&PropertyId::FontWeight)
             .and_then(|value| match value {
                 ComputedValue::Keyword(value) | ComputedValue::String(value) => {
                     Some(crate::font::FontWeight::parse(value))
@@ -3325,7 +3344,7 @@ fn propagated_text_decorations(
             })
             .unwrap_or_default(),
         font_style: properties
-            .get("font-style")
+            .get(&PropertyId::FontStyle)
             .and_then(|value| match value {
                 ComputedValue::Keyword(value) | ComputedValue::String(value) => {
                     Some(crate::font::FontStyleRange::parse(value).style)
@@ -3334,7 +3353,7 @@ fn propagated_text_decorations(
             })
             .unwrap_or_default(),
         font_style_angle: properties
-            .get("font-style")
+            .get(&PropertyId::FontStyle)
             .and_then(|value| match value {
                 ComputedValue::Keyword(value) | ComputedValue::String(value) => {
                     Some(crate::font::FontStyleRange::parse(value).requested_angle())
@@ -3343,7 +3362,7 @@ fn propagated_text_decorations(
             })
             .unwrap_or(0),
         font_stretch: properties
-            .get("font-stretch")
+            .get(&PropertyId::FontStretch)
             .and_then(|value| match value {
                 ComputedValue::Keyword(value) | ComputedValue::String(value) => {
                     Some(crate::font::FontStretch::parse(value))
@@ -3472,21 +3491,19 @@ fn logical_flow_from_candidates(
     super::logical::LogicalFlow::new(mode, direction)
 }
 
-fn logical_flow_from_properties(
-    properties: &BTreeMap<String, ComputedValue>,
-) -> super::logical::LogicalFlow {
-    let keyword = |name, default| match properties.get(name) {
+fn logical_flow_from_properties(properties: &PropertyMap) -> super::logical::LogicalFlow {
+    let keyword = |id, default| match properties.get(&id) {
         Some(ComputedValue::Keyword(value)) => value.as_str(),
         _ => default,
     };
     super::logical::LogicalFlow::new(
-        keyword("writing-mode", "horizontal-tb"),
-        keyword("direction", "ltr"),
+        keyword(PropertyId::WritingMode, "horizontal-tb"),
+        keyword(PropertyId::Direction, "ltr"),
     )
 }
 
 fn insert_computed_property(
-    properties: &mut BTreeMap<String, ComputedValue>,
+    properties: &mut PropertyMap,
     name: &str,
     mut computed: ComputedValue,
     flow: super::logical::LogicalFlow,
@@ -3508,7 +3525,7 @@ fn insert_computed_property(
     if let Some(physical_name) = flow.physical_name(name) {
         properties.insert(physical_name, computed.clone());
     }
-    properties.insert(name.to_string(), computed);
+    properties.insert(name, computed);
 }
 
 fn should_skip_computed_property(name: &str, computed: &ComputedValue) -> bool {
@@ -7459,292 +7476,6 @@ fn truncate_log_value(value: &str, max_len: usize) -> String {
     out
 }
 
-const SUPPORTED_PROPERTIES: &[&str] = &[
-    "align-items",
-    "align-content",
-    "align-self",
-    "animation",
-    "animation-delay",
-    "animation-direction",
-    "animation-duration",
-    "animation-fill-mode",
-    "animation-iteration-count",
-    "animation-name",
-    "animation-play-state",
-    "animation-timing-function",
-    "background-attachment",
-    "background-clip",
-    "background-color",
-    "background-image",
-    "background-origin",
-    "background-position-x",
-    "background-position-y",
-    "background-repeat",
-    "background-size",
-    "backdrop-filter",
-    "backface-visibility",
-    "block-size",
-    "border-block",
-    "border-block-color",
-    "border-block-end",
-    "border-block-end-color",
-    "border-block-end-style",
-    "border-block-end-width",
-    "border-block-start",
-    "border-block-start-color",
-    "border-block-start-style",
-    "border-block-start-width",
-    "border-block-style",
-    "border-block-width",
-    "border-bottom-color",
-    "border-bottom-style",
-    "border-bottom-width",
-    "border-bottom-left-radius",
-    "border-bottom-right-radius",
-    "border-top-left-radius",
-    "border-top-right-radius",
-    "border-collapse",
-    "border-color",
-    "border-end-end-radius",
-    "border-end-start-radius",
-    "border-inline",
-    "border-inline-color",
-    "border-inline-end",
-    "border-inline-end-color",
-    "border-inline-end-style",
-    "border-inline-end-width",
-    "border-inline-start",
-    "border-inline-start-color",
-    "border-inline-start-style",
-    "border-inline-start-width",
-    "border-inline-style",
-    "border-inline-width",
-    "border-left-color",
-    "border-left-style",
-    "border-left-width",
-    "border-right-color",
-    "border-right-style",
-    "border-right-width",
-    "border-spacing",
-    "border-start-end-radius",
-    "border-start-start-radius",
-    "border-style",
-    "border-width",
-    "border-top-color",
-    "border-top-style",
-    "border-top-width",
-    "bottom",
-    "break-after",
-    "break-before",
-    "break-inside",
-    "page",
-    "inset",
-    "inset-inline",
-    "inset-block",
-    "inset-inline-start",
-    "inset-inline-end",
-    "inset-block-start",
-    "inset-block-end",
-    "box-sizing",
-    "box-decoration-break",
-    "clear",
-    "clip-path",
-    "-webkit-clip-path",
-    "shape-margin",
-    "shape-outside",
-    "color",
-    "contain",
-    "contain-intrinsic-block-size",
-    "contain-intrinsic-height",
-    "contain-intrinsic-inline-size",
-    "contain-intrinsic-size",
-    "contain-intrinsic-width",
-    "content-visibility",
-    "container-name",
-    "container-type",
-    "column-count",
-    "column-fill",
-    "column-rule",
-    "column-rule-color",
-    "column-rule-style",
-    "column-rule-width",
-    "column-span",
-    "column-width",
-    "columns",
-    "content",
-    "counter-increment",
-    "counter-reset",
-    "cursor",
-    "display",
-    "direction",
-    "flex-basis",
-    "flex-direction",
-    "flex-grow",
-    "flex-shrink",
-    "flex-wrap",
-    "float",
-    "filter",
-    "font-family",
-    "font-size",
-    "font-style",
-    "font-stretch",
-    "font-weight",
-    "gap",
-    "grid-gap",
-    "grid-row-gap",
-    "grid-column-gap",
-    "grid-template-columns",
-    "grid-template-rows",
-    "grid-template-areas",
-    "grid-template",
-    "grid-area",
-    "grid-column",
-    "grid-column-start",
-    "grid-column-end",
-    "grid-row",
-    "grid-row-start",
-    "grid-row-end",
-    "height",
-    "inline-size",
-    "justify-content",
-    "justify-items",
-    "justify-self",
-    "place-content",
-    "place-items",
-    "place-self",
-    "left",
-    "line-height",
-    "margin-bottom",
-    "margin-left",
-    "margin-right",
-    "margin-top",
-    "margin-inline-start",
-    "margin-inline-end",
-    "margin-block-start",
-    "margin-block-end",
-    "max-height",
-    "max-inline-size",
-    "max-block-size",
-    "max-width",
-    "min-height",
-    "min-inline-size",
-    "min-block-size",
-    "min-width",
-    "column-gap",
-    "outline-color",
-    "outline-offset",
-    "outline-style",
-    "outline-width",
-    "orphans",
-    "overflow",
-    "overflow-x",
-    "overflow-y",
-    "overscroll-behavior",
-    "overscroll-behavior-block",
-    "overscroll-behavior-inline",
-    "overscroll-behavior-x",
-    "overscroll-behavior-y",
-    "padding-bottom",
-    "padding-left",
-    "padding-right",
-    "padding-top",
-    "padding-inline-start",
-    "padding-inline-end",
-    "padding-block-start",
-    "padding-block-end",
-    "position",
-    "perspective",
-    "perspective-origin",
-    "pointer-events",
-    "right",
-    "row-gap",
-    "scroll-behavior",
-    "scroll-snap-type",
-    "scroll-snap-align",
-    "scroll-padding",
-    "scroll-padding-top",
-    "scroll-padding-right",
-    "scroll-padding-bottom",
-    "scroll-padding-left",
-    "scroll-padding-inline",
-    "scroll-padding-block",
-    "scroll-padding-inline-start",
-    "scroll-padding-inline-end",
-    "scroll-padding-block-start",
-    "scroll-padding-block-end",
-    "scroll-margin",
-    "scroll-margin-top",
-    "scroll-margin-right",
-    "scroll-margin-bottom",
-    "scroll-margin-left",
-    "scroll-margin-inline",
-    "scroll-margin-block",
-    "scroll-margin-inline-start",
-    "scroll-margin-inline-end",
-    "scroll-margin-block-start",
-    "scroll-margin-block-end",
-    "mix-blend-mode",
-    "transform",
-    "transform-origin",
-    "transform-style",
-    "transition",
-    "transition-property",
-    "transition-duration",
-    "transition-timing-function",
-    "transition-delay",
-    "text-align",
-    "text-decoration-line",
-    "text-decoration-color",
-    "text-decoration-style",
-    "text-decoration-thickness",
-    "text-underline-position",
-    "text-underline-offset",
-    "text-indent",
-    "text-overflow",
-    "text-transform",
-    "unicode-bidi",
-    "letter-spacing",
-    "word-spacing",
-    "top",
-    "vertical-align",
-    "visibility",
-    "white-space",
-    "width",
-    "widows",
-    "word-break",
-    "overflow-wrap",
-    "word-wrap",
-    "writing-mode",
-    "z-index",
-    "box-shadow",
-    "opacity",
-    "isolation",
-    "list-style-type",
-    "list-style-position",
-    "aspect-ratio",
-    "list-style-image",
-    "object-fit",
-    "object-position",
-    "mask",
-    "mask-image",
-    "mask-position",
-    "mask-position-x",
-    "mask-position-y",
-    "mask-repeat",
-    "mask-size",
-    "mask-mode",
-    "mask-composite",
-    "-webkit-mask",
-    "-webkit-mask-image",
-    "-webkit-mask-position",
-    "-webkit-mask-position-x",
-    "-webkit-mask-position-y",
-    "-webkit-mask-repeat",
-    "-webkit-mask-size",
-    "-webkit-mask-mode",
-    "-webkit-mask-composite",
-];
-
 pub(super) fn is_supported_property(name: &str) -> bool {
     SUPPORTED_PROPERTIES.contains(&name)
 }
@@ -7761,59 +7492,6 @@ pub(super) fn all_longhand_properties() -> impl Iterator<Item = &'static str> {
             && !is_shorthand_or_legacy_alias(name)
             && canonical_property_name(name) == *name
     })
-}
-
-fn is_shorthand_or_legacy_alias(name: &str) -> bool {
-    matches!(
-        name,
-        "animation"
-            | "inset"
-            | "inset-inline"
-            | "inset-block"
-            | "border-inline"
-            | "border-block"
-            | "border-inline-start"
-            | "border-inline-end"
-            | "border-block-start"
-            | "border-block-end"
-            | "border-inline-width"
-            | "border-inline-style"
-            | "border-inline-color"
-            | "border-block-width"
-            | "border-block-style"
-            | "border-block-color"
-            | "border-color"
-            | "border-style"
-            | "border-width"
-            | "gap"
-            | "grid-gap"
-            | "grid-row-gap"
-            | "grid-column-gap"
-            | "columns"
-            | "column-rule"
-            | "contain-intrinsic-size"
-            | "grid-template"
-            | "grid-area"
-            | "grid-column"
-            | "grid-row"
-            | "mask"
-            | "mask-position"
-            | "overflow"
-            | "overscroll-behavior"
-            | "scroll-padding"
-            | "scroll-margin"
-            | "scroll-padding-inline"
-            | "scroll-padding-block"
-            | "scroll-margin-inline"
-            | "scroll-margin-block"
-            | "place-content"
-            | "place-items"
-            | "place-self"
-            | "transition"
-            | "word-wrap"
-            | "-webkit-mask"
-            | "-webkit-mask-position"
-    )
 }
 
 /// Returns whether a property/value pair is both syntactically valid and
@@ -9321,7 +8999,7 @@ fn is_svg_element_for_presentational_hints(node: &NodeHandle) -> bool {
 
 fn apply_presentational_hints(
     node: &NodeHandle,
-    properties: &mut BTreeMap<String, ComputedValue>,
+    properties: &mut PropertyMap,
     pseudo: Option<PseudoElement>,
 ) {
     if pseudo.is_some() || node.node_type() != NodeType::Element {
@@ -9338,7 +9016,7 @@ fn apply_presentational_hints(
 fn apply_presentational_hints_from_attributes(
     node: &NodeHandle,
     attributes: &BTreeMap<String, String>,
-    properties: &mut BTreeMap<String, ComputedValue>,
+    properties: &mut PropertyMap,
 ) {
     // SVG presentation attributes participate in the CSS cascade below author
     // declarations. Expose pointer-events through computed style so hit
@@ -9346,7 +9024,7 @@ fn apply_presentational_hints_from_attributes(
     // still honor explicit CSS overrides, including `auto`.
     let is_svg_element = is_svg_element_for_presentational_hints(node);
     if is_svg_element
-        && !properties.contains_key("pointer-events")
+        && !properties.contains_key(&PropertyId::PointerEvents)
         && let Some(value) = attributes
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("pointer-events"))
@@ -9358,23 +9036,23 @@ fn apply_presentational_hints_from_attributes(
             })
     {
         properties.insert(
-            "pointer-events".to_string(),
+            PropertyId::PointerEvents,
             ComputedValue::Keyword(value.to_ascii_lowercase()),
         );
     }
 
-    if !properties.contains_key("background-color")
+    if !properties.contains_key(&PropertyId::BackgroundColor)
         && let Some(background) = attributes
             .get("bgcolor")
             .and_then(|value| parse_legacy_color_hint(value))
     {
         properties.insert(
-            "background-color".to_string(),
+            PropertyId::BackgroundColor,
             ComputedValue::Color(background),
         );
     }
 
-    if !properties.contains_key("background-image")
+    if !properties.contains_key(&PropertyId::BackgroundImage)
         && let Some(background) = attributes
             .get("background")
             .map(|value| value.trim())
@@ -9382,18 +9060,18 @@ fn apply_presentational_hints_from_attributes(
     {
         let escaped = background.replace('\\', "\\\\").replace('"', "\\\"");
         properties.insert(
-            "background-image".to_string(),
+            PropertyId::BackgroundImage,
             ComputedValue::Keyword(format!("url(\"{escaped}\")")),
         );
     }
 
-    if !properties.contains_key("color")
+    if !properties.contains_key(&PropertyId::Color)
         && node.with_tag_name(|name| name.is_some_and(|name| name.eq_ignore_ascii_case("body")))
         && let Some(color) = attributes
             .get("text")
             .and_then(|value| parse_legacy_color_hint(value))
     {
-        properties.insert("color".to_string(), ComputedValue::Color(color));
+        properties.insert(PropertyId::Color, ComputedValue::Color(color));
     }
 
     if let Some(align) = attributes
@@ -9401,11 +9079,8 @@ fn apply_presentational_hints_from_attributes(
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| matches!(value.as_str(), "left" | "right" | "center" | "justify"))
     {
-        if !properties.contains_key("text-align") {
-            properties.insert(
-                "text-align".to_string(),
-                ComputedValue::Keyword(align.clone()),
-            );
+        if !properties.contains_key(&PropertyId::TextAlign) {
+            properties.insert(PropertyId::TextAlign, ComputedValue::Keyword(align.clone()));
         }
         // For block/table elements, align="center" means auto margins (structural centering)
         if align == "center" {
@@ -9418,15 +9093,15 @@ fn apply_presentational_hints_from_attributes(
                 })
             });
             if is_table_or_block {
-                if !properties.contains_key("margin-left") {
+                if !properties.contains_key(&PropertyId::MarginLeft) {
                     properties.insert(
-                        "margin-left".to_string(),
+                        PropertyId::MarginLeft,
                         ComputedValue::Keyword("auto".to_string()),
                     );
                 }
-                if !properties.contains_key("margin-right") {
+                if !properties.contains_key(&PropertyId::MarginRight) {
                     properties.insert(
-                        "margin-right".to_string(),
+                        PropertyId::MarginRight,
                         ComputedValue::Keyword("auto".to_string()),
                     );
                 }
@@ -9434,37 +9109,37 @@ fn apply_presentational_hints_from_attributes(
         }
     }
 
-    if !properties.contains_key("width")
+    if !properties.contains_key(&PropertyId::Width)
         && let Some(width) = attributes
             .get("width")
             .and_then(|value| parse_legacy_dimension_hint(value))
     {
-        properties.insert("width".to_string(), width);
+        properties.insert(PropertyId::Width, width);
     }
 
-    if !properties.contains_key("height")
+    if !properties.contains_key(&PropertyId::Height)
         && let Some(height) = attributes
             .get("height")
             .and_then(|value| parse_legacy_dimension_hint(value))
     {
-        properties.insert("height".to_string(), height);
+        properties.insert(PropertyId::Height, height);
     }
 
-    if !properties.contains_key("color")
+    if !properties.contains_key(&PropertyId::Color)
         && let Some(color) = attributes
             .get("color")
             .and_then(|value| parse_legacy_color_hint(value))
     {
-        properties.insert("color".to_string(), ComputedValue::Color(color));
+        properties.insert(PropertyId::Color, ComputedValue::Color(color));
     }
 
-    if !properties.contains_key("font-family")
+    if !properties.contains_key(&PropertyId::FontFamily)
         && let Some(face) = attributes
             .get("face")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     {
-        properties.insert("font-family".to_string(), ComputedValue::Keyword(face));
+        properties.insert(PropertyId::FontFamily, ComputedValue::Keyword(face));
     }
 }
 
@@ -9525,7 +9200,7 @@ fn is_hex_color(value: &str) -> bool {
 
 fn apply_ua_defaults(
     node: &NodeHandle,
-    properties: &mut BTreeMap<String, ComputedValue>,
+    properties: &mut PropertyMap,
     pseudo: Option<PseudoElement>,
     parent_style: Option<&ComputedStyle>,
 ) {
@@ -9535,7 +9210,7 @@ fn apply_ua_defaults(
     if pseudo == Some(PseudoElement::Backdrop) {
         if node.is_fullscreen() {
             properties
-                .entry("background-color".to_string())
+                .entry(PropertyId::BackgroundColor)
                 .or_insert(ComputedValue::Keyword("black".to_string()));
         }
         return;
@@ -9563,13 +9238,13 @@ fn apply_ua_defaults(
     };
     if let Some(display) = default_display {
         properties
-            .entry("display".to_string())
+            .entry(PropertyId::Display)
             .or_insert_with(|| ComputedValue::Keyword(display.to_string()));
     }
     let parent_font_size = inherited_font_size(parent_style, properties);
     if tag == "br" {
         properties
-            .entry("display".to_string())
+            .entry(PropertyId::Display)
             .or_insert_with(|| ComputedValue::Keyword("inline".to_string()));
     }
 
@@ -9605,25 +9280,25 @@ fn apply_ua_defaults(
     if node.get_attribute("popover").is_some() {
         if !node.is_popover_open() {
             properties.insert(
-                "display".to_string(),
+                PropertyId::Display,
                 ComputedValue::Keyword("none".to_string()),
             );
             return;
         }
         properties
-            .entry("display".to_string())
+            .entry(PropertyId::Display)
             .or_insert(ComputedValue::Keyword("block".to_string()));
         properties
-            .entry("position".to_string())
+            .entry(PropertyId::Position)
             .or_insert(ComputedValue::Keyword("fixed".to_string()));
         properties
-            .entry("left".to_string())
+            .entry(PropertyId::Left)
             .or_insert(ComputedValue::Percentage(50.0));
         properties
-            .entry("top".to_string())
+            .entry(PropertyId::Top)
             .or_insert(ComputedValue::Percentage(50.0));
         properties
-            .entry("transform".to_string())
+            .entry(PropertyId::Transform)
             .or_insert(ComputedValue::Keyword("translate(-50%, -50%)".to_string()));
     }
 
@@ -9634,7 +9309,7 @@ fn apply_ua_defaults(
         })
     {
         properties.insert(
-            "display".to_string(),
+            PropertyId::Display,
             ComputedValue::Keyword("none".to_string()),
         );
         return;
@@ -9685,26 +9360,26 @@ fn apply_ua_defaults(
         // Determine the element's final font size: use existing CSS value if present,
         // otherwise apply the UA default multiplier to the inherited size.
         let element_font_size =
-            if let Some(ComputedValue::Px(existing_px)) = properties.get("font-size") {
+            if let Some(ComputedValue::Px(existing_px)) = properties.get(&PropertyId::FontSize) {
                 *existing_px
             } else {
                 let computed = defaults.font_size_em * parent_font_size;
                 properties
-                    .entry("font-size".to_string())
+                    .entry(PropertyId::FontSize)
                     .or_insert(ComputedValue::Px(computed));
                 computed
             };
         let margin_px = defaults.margin_em * element_font_size;
         if defaults.font_weight_bold {
             properties
-                .entry("font-weight".to_string())
+                .entry(PropertyId::FontWeight)
                 .or_insert(ComputedValue::Keyword("bold".to_string()));
         }
         properties
-            .entry("margin-top".to_string())
+            .entry(PropertyId::MarginTop)
             .or_insert(ComputedValue::Px(margin_px));
         properties
-            .entry("margin-bottom".to_string())
+            .entry(PropertyId::MarginBottom)
             .or_insert(ComputedValue::Px(margin_px));
         return;
     }
@@ -9715,30 +9390,30 @@ fn apply_ua_defaults(
         "audio" => apply_audio_ua_defaults(node, properties),
         "source" => {
             properties.insert(
-                "display".to_string(),
+                PropertyId::Display,
                 ComputedValue::Keyword("none".to_string()),
             );
         }
         "details" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("block".to_string()));
         }
         "summary" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("list-item".to_string()));
         }
         "dialog" => apply_dialog_ua_defaults(node, properties),
         "time" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("inline".to_string()));
         }
         "progress" | "meter" => apply_progress_or_meter_ua_defaults(properties),
         "form" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("block".to_string()));
         }
         "input" => apply_input_ua_defaults(node, properties),
@@ -9748,12 +9423,12 @@ fn apply_ua_defaults(
         "p" => apply_p_ua_defaults(properties, parent_font_size),
         "b" | "strong" => {
             properties
-                .entry("font-weight".to_string())
+                .entry(PropertyId::FontWeight)
                 .or_insert(ComputedValue::Keyword("bold".to_string()));
         }
         "i" | "em" => {
             properties
-                .entry("font-style".to_string())
+                .entry(PropertyId::FontStyle)
                 .or_insert(ComputedValue::Keyword("italic".to_string()));
         }
         "hr" => apply_hr_ua_defaults(properties, parent_font_size),
@@ -9761,36 +9436,36 @@ fn apply_ua_defaults(
         "ol" => apply_list_ua_defaults(properties, parent_font_size, "decimal"),
         "li" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("list-item".to_string()));
         }
         "blockquote" => apply_blockquote_ua_defaults(properties, parent_font_size),
         "pre" => apply_pre_ua_defaults(properties, parent_font_size),
         "code" | "kbd" | "samp" | "tt" => {
             properties
-                .entry("font-family".to_string())
+                .entry(PropertyId::FontFamily)
                 .or_insert(ComputedValue::Keyword("monospace".to_string()));
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("inline".to_string()));
         }
         "dd" => {
             properties
-                .entry("margin-left".to_string())
+                .entry(PropertyId::MarginLeft)
                 .or_insert(ComputedValue::Px(40.0));
         }
         "th" => apply_th_ua_defaults(properties),
         "td" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("table-cell".to_string()));
         }
         "a" => {
             properties
-                .entry("text-decoration-line".to_string())
+                .entry(PropertyId::TextDecorationLine)
                 .or_insert(ComputedValue::Keyword("underline".to_string()));
             properties
-                .entry("color".to_string())
+                .entry(PropertyId::Color)
                 .or_insert(ComputedValue::Color("#0000ee".to_string()));
         }
         "sub" => apply_scaled_inline_ua_defaults(properties, parent_font_size, Some("sub")),
@@ -9798,32 +9473,32 @@ fn apply_ua_defaults(
         "small" => apply_scaled_inline_ua_defaults(properties, parent_font_size, None),
         "center" => {
             properties
-                .entry("text-align".to_string())
+                .entry(PropertyId::TextAlign)
                 .or_insert(ComputedValue::Keyword("center".to_string()));
         }
         "table" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("table".to_string()));
         }
         "tr" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("table-row".to_string()));
         }
         "thead" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("table-header-group".to_string()));
         }
         "tbody" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("table-row-group".to_string()));
         }
         "tfoot" => {
             properties
-                .entry("display".to_string())
+                .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("table-footer-group".to_string()));
         }
         _ => {}
@@ -9834,7 +9509,7 @@ fn apply_ua_defaults(
 /// color) to all four sides. Several UA default blocks below repeat this
 /// per-side loop for their tag's default border.
 fn apply_uniform_border(
-    properties: &mut BTreeMap<String, ComputedValue>,
+    properties: &mut PropertyMap,
     style: &'static str,
     width: f32,
     color: Option<&'static str>,
@@ -9856,66 +9531,66 @@ fn apply_uniform_border(
 
 /// `<iframe>`'s UA default: HTML's rendering defaults give the replaced
 /// element a 2px inset border.
-fn apply_iframe_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_iframe_ua_defaults(properties: &mut PropertyMap) {
     apply_uniform_border(properties, "inset", 2.0, None);
 }
 
 /// `<video>`/`<canvas>`/`<picture>`'s shared UA default: `inline-block`.
-fn apply_video_like_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_video_like_ua_defaults(properties: &mut PropertyMap) {
     properties
-        .entry("display".to_string())
+        .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
 }
 
 /// `<audio>`'s UA default: hidden unless it has a `controls` attribute.
-fn apply_audio_ua_defaults(node: &NodeHandle, properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_audio_ua_defaults(node: &NodeHandle, properties: &mut PropertyMap) {
     if node.get_attribute("controls").is_none() {
         properties.insert(
-            "display".to_string(),
+            PropertyId::Display,
             ComputedValue::Keyword("none".to_string()),
         );
     } else {
         properties
-            .entry("display".to_string())
+            .entry(PropertyId::Display)
             .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     }
 }
 
 /// `<dialog>`'s UA default: hidden unless it has an `open` attribute.
-fn apply_dialog_ua_defaults(node: &NodeHandle, properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_dialog_ua_defaults(node: &NodeHandle, properties: &mut PropertyMap) {
     if node.get_attribute("open").is_none() {
         properties.insert(
-            "display".to_string(),
+            PropertyId::Display,
             ComputedValue::Keyword("none".to_string()),
         );
     } else {
         properties
-            .entry("display".to_string())
+            .entry(PropertyId::Display)
             .or_insert(ComputedValue::Keyword("block".to_string()));
     }
 }
 
 /// `<progress>`/`<meter>`'s shared UA default: a fixed-size inline-block box
 /// with a light gray fill and a thin solid border.
-fn apply_progress_or_meter_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_progress_or_meter_ua_defaults(properties: &mut PropertyMap) {
     properties
-        .entry("display".to_string())
+        .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     properties
-        .entry("width".to_string())
+        .entry(PropertyId::Width)
         .or_insert(ComputedValue::Px(160.0));
     properties
-        .entry("height".to_string())
+        .entry(PropertyId::Height)
         .or_insert(ComputedValue::Px(16.0));
     properties
-        .entry("background-color".to_string())
+        .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("#e6e6e6".to_string()));
     apply_uniform_border(properties, "solid", 1.0, Some("#767676"));
 }
 
 /// `<input>`'s UA default: `type=hidden` is hidden; other types render as a
 /// bordered, padded inline-block box.
-fn apply_input_ua_defaults(node: &NodeHandle, properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_input_ua_defaults(node: &NodeHandle, properties: &mut PropertyMap) {
     let input_type = node
         .get_attribute("type")
         .unwrap_or_else(|| "text".to_string())
@@ -9923,65 +9598,65 @@ fn apply_input_ua_defaults(node: &NodeHandle, properties: &mut BTreeMap<String, 
         .to_ascii_lowercase();
     if input_type == "hidden" {
         properties.insert(
-            "display".to_string(),
+            PropertyId::Display,
             ComputedValue::Keyword("none".to_string()),
         );
         return;
     }
     properties
-        .entry("display".to_string())
+        .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     properties
-        .entry("background-color".to_string())
+        .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("white".to_string()));
     apply_uniform_border(properties, "solid", 2.0, Some("#767676"));
     properties
-        .entry("padding-top".to_string())
+        .entry(PropertyId::PaddingTop)
         .or_insert(ComputedValue::Px(1.0));
     properties
-        .entry("padding-right".to_string())
+        .entry(PropertyId::PaddingRight)
         .or_insert(ComputedValue::Px(2.0));
     properties
-        .entry("padding-bottom".to_string())
+        .entry(PropertyId::PaddingBottom)
         .or_insert(ComputedValue::Px(1.0));
     properties
-        .entry("padding-left".to_string())
+        .entry(PropertyId::PaddingLeft)
         .or_insert(ComputedValue::Px(2.0));
 }
 
 /// `<button>`'s UA default: a centered, bordered, padded inline-block box.
-fn apply_button_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_button_ua_defaults(properties: &mut PropertyMap) {
     properties
-        .entry("display".to_string())
+        .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     properties
-        .entry("background-color".to_string())
+        .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("#efefef".to_string()));
     properties
-        .entry("text-align".to_string())
+        .entry(PropertyId::TextAlign)
         .or_insert(ComputedValue::Keyword("center".to_string()));
     apply_uniform_border(properties, "solid", 2.0, Some("#767676"));
     properties
-        .entry("padding-top".to_string())
+        .entry(PropertyId::PaddingTop)
         .or_insert(ComputedValue::Px(1.0));
     properties
-        .entry("padding-right".to_string())
+        .entry(PropertyId::PaddingRight)
         .or_insert(ComputedValue::Px(6.0));
     properties
-        .entry("padding-bottom".to_string())
+        .entry(PropertyId::PaddingBottom)
         .or_insert(ComputedValue::Px(1.0));
     properties
-        .entry("padding-left".to_string())
+        .entry(PropertyId::PaddingLeft)
         .or_insert(ComputedValue::Px(6.0));
 }
 
 /// `<textarea>`'s UA default: a bordered, uniformly padded inline-block box.
-fn apply_textarea_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_textarea_ua_defaults(properties: &mut PropertyMap) {
     properties
-        .entry("display".to_string())
+        .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     properties
-        .entry("background-color".to_string())
+        .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("white".to_string()));
     apply_uniform_border(properties, "solid", 1.0, Some("#767676"));
     for side in ["top", "right", "bottom", "left"] {
@@ -9992,53 +9667,53 @@ fn apply_textarea_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) 
 }
 
 /// `<select>`'s UA default: a bordered, padded inline-block box.
-fn apply_select_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_select_ua_defaults(properties: &mut PropertyMap) {
     properties
-        .entry("display".to_string())
+        .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     properties
-        .entry("background-color".to_string())
+        .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("#efefef".to_string()));
     apply_uniform_border(properties, "solid", 1.0, Some("#767676"));
     properties
-        .entry("padding-top".to_string())
+        .entry(PropertyId::PaddingTop)
         .or_insert(ComputedValue::Px(1.0));
     properties
-        .entry("padding-right".to_string())
+        .entry(PropertyId::PaddingRight)
         .or_insert(ComputedValue::Px(4.0));
     properties
-        .entry("padding-bottom".to_string())
+        .entry(PropertyId::PaddingBottom)
         .or_insert(ComputedValue::Px(1.0));
     properties
-        .entry("padding-left".to_string())
+        .entry(PropertyId::PaddingLeft)
         .or_insert(ComputedValue::Px(4.0));
 }
 
 /// `<p>`'s UA default: one line of vertical margin on each side.
-fn apply_p_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>, parent_font_size: f32) {
+fn apply_p_ua_defaults(properties: &mut PropertyMap, parent_font_size: f32) {
     let em = parent_font_size;
     properties
-        .entry("margin-top".to_string())
+        .entry(PropertyId::MarginTop)
         .or_insert(ComputedValue::Px(em));
     properties
-        .entry("margin-bottom".to_string())
+        .entry(PropertyId::MarginBottom)
         .or_insert(ComputedValue::Px(em));
 }
 
 /// `<hr>`'s UA default: an inset top border and half-line vertical margins.
-fn apply_hr_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>, parent_font_size: f32) {
+fn apply_hr_ua_defaults(properties: &mut PropertyMap, parent_font_size: f32) {
     properties
-        .entry("border-top-style".to_string())
+        .entry(PropertyId::BorderTopStyle)
         .or_insert(ComputedValue::Keyword("inset".to_string()));
     properties
-        .entry("border-top-width".to_string())
+        .entry(PropertyId::BorderTopWidth)
         .or_insert(ComputedValue::Px(1.0));
     let half_em = parent_font_size * 0.5;
     properties
-        .entry("margin-top".to_string())
+        .entry(PropertyId::MarginTop)
         .or_insert(ComputedValue::Px(half_em));
     properties
-        .entry("margin-bottom".to_string())
+        .entry(PropertyId::MarginBottom)
         .or_insert(ComputedValue::Px(half_em));
 }
 
@@ -10046,77 +9721,74 @@ fn apply_hr_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>, parent
 /// vertical margin, and an indented left padding. `list_style_type` is the
 /// only difference between the two tags (`disc` vs. `decimal`).
 fn apply_list_ua_defaults(
-    properties: &mut BTreeMap<String, ComputedValue>,
+    properties: &mut PropertyMap,
     parent_font_size: f32,
     list_style_type: &'static str,
 ) {
     properties
-        .entry("list-style-type".to_string())
+        .entry(PropertyId::ListStyleType)
         .or_insert(ComputedValue::Keyword(list_style_type.to_string()));
     properties
-        .entry("list-style-position".to_string())
+        .entry(PropertyId::ListStylePosition)
         .or_insert(ComputedValue::Keyword("outside".to_string()));
     let em = parent_font_size;
     properties
-        .entry("margin-top".to_string())
+        .entry(PropertyId::MarginTop)
         .or_insert(ComputedValue::Px(em));
     properties
-        .entry("margin-bottom".to_string())
+        .entry(PropertyId::MarginBottom)
         .or_insert(ComputedValue::Px(em));
     properties
-        .entry("padding-left".to_string())
+        .entry(PropertyId::PaddingLeft)
         .or_insert(ComputedValue::Px(em * 2.5));
 }
 
 /// `<blockquote>`'s UA default: one line of vertical margin and a 40px
 /// horizontal inset on each side.
-fn apply_blockquote_ua_defaults(
-    properties: &mut BTreeMap<String, ComputedValue>,
-    parent_font_size: f32,
-) {
+fn apply_blockquote_ua_defaults(properties: &mut PropertyMap, parent_font_size: f32) {
     let em = parent_font_size;
     properties
-        .entry("margin-top".to_string())
+        .entry(PropertyId::MarginTop)
         .or_insert(ComputedValue::Px(em));
     properties
-        .entry("margin-bottom".to_string())
+        .entry(PropertyId::MarginBottom)
         .or_insert(ComputedValue::Px(em));
     properties
-        .entry("margin-left".to_string())
+        .entry(PropertyId::MarginLeft)
         .or_insert(ComputedValue::Px(40.0));
     properties
-        .entry("margin-right".to_string())
+        .entry(PropertyId::MarginRight)
         .or_insert(ComputedValue::Px(40.0));
 }
 
 /// `<pre>`'s UA default: a monospace, whitespace-preserving block with one
 /// line of vertical margin.
-fn apply_pre_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>, parent_font_size: f32) {
+fn apply_pre_ua_defaults(properties: &mut PropertyMap, parent_font_size: f32) {
     properties
-        .entry("font-family".to_string())
+        .entry(PropertyId::FontFamily)
         .or_insert(ComputedValue::Keyword("monospace".to_string()));
     properties
-        .entry("white-space".to_string())
+        .entry(PropertyId::WhiteSpace)
         .or_insert(ComputedValue::Keyword("pre".to_string()));
     let em = parent_font_size;
     properties
-        .entry("margin-top".to_string())
+        .entry(PropertyId::MarginTop)
         .or_insert(ComputedValue::Px(em));
     properties
-        .entry("margin-bottom".to_string())
+        .entry(PropertyId::MarginBottom)
         .or_insert(ComputedValue::Px(em));
 }
 
 /// `<th>`'s UA default: bold, centered table-cell text.
-fn apply_th_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_th_ua_defaults(properties: &mut PropertyMap) {
     properties
-        .entry("font-weight".to_string())
+        .entry(PropertyId::FontWeight)
         .or_insert(ComputedValue::Keyword("bold".to_string()));
     properties
-        .entry("text-align".to_string())
+        .entry(PropertyId::TextAlign)
         .or_insert(ComputedValue::Keyword("center".to_string()));
     properties
-        .entry("display".to_string())
+        .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("table-cell".to_string()));
 }
 
@@ -10124,21 +9796,21 @@ fn apply_th_ua_defaults(properties: &mut BTreeMap<String, ComputedValue>) {
 /// 0.833x the parent font size; `sub`/`sup` additionally set
 /// `vertical-align` (`vertical_align` is `None` for `small`).
 fn apply_scaled_inline_ua_defaults(
-    properties: &mut BTreeMap<String, ComputedValue>,
+    properties: &mut PropertyMap,
     parent_font_size: f32,
     vertical_align: Option<&'static str>,
 ) {
     properties
-        .entry("display".to_string())
+        .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline".to_string()));
     if let Some(vertical_align) = vertical_align {
         properties
-            .entry("vertical-align".to_string())
+            .entry(PropertyId::VerticalAlign)
             .or_insert(ComputedValue::Keyword(vertical_align.to_string()));
     }
     let smaller = parent_font_size * 0.833;
     properties
-        .entry("font-size".to_string())
+        .entry(PropertyId::FontSize)
         .or_insert(ComputedValue::Px(smaller));
 }
 
@@ -10329,7 +10001,7 @@ const INITIAL_VALUES: &[(&str, InitialValue)] = &[
     ("transition-delay", InitialValue::Keyword("0s")),
 ];
 
-fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
+fn apply_initial_values(properties: &mut PropertyMap) {
     for (name, initial) in INITIAL_VALUES {
         if matches!(initial, InitialValue::CurrentColor) {
             continue;
@@ -10341,7 +10013,7 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     // `currentcolor`-valued initial values are resolved once `color` (set by
     // the author or defaulted above) is known.
     let current_color = properties
-        .get("color")
+        .get(&PropertyId::Color)
         .cloned()
         .unwrap_or_else(|| ComputedValue::Color("black".to_string()));
     for (name, initial) in INITIAL_VALUES {
@@ -10369,11 +10041,11 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
             .or_insert(ComputedValue::Px(0.0));
     }
     let intrinsic_width = properties
-        .get("contain-intrinsic-width")
+        .get(&PropertyId::ContainIntrinsicWidth)
         .map(computed_value_css_text)
         .unwrap_or_else(|| "none".to_string());
     let intrinsic_height = properties
-        .get("contain-intrinsic-height")
+        .get(&PropertyId::ContainIntrinsicHeight)
         .map(computed_value_css_text)
         .unwrap_or_else(|| "none".to_string());
     properties.insert(
@@ -10386,9 +10058,9 @@ fn apply_initial_values(properties: &mut BTreeMap<String, ComputedValue>) {
     );
 }
 
-fn normalize_background_layer_lists(properties: &mut BTreeMap<String, ComputedValue>) {
+fn normalize_background_layer_lists(properties: &mut PropertyMap) {
     let image_count = properties
-        .get("background-image")
+        .get(&PropertyId::BackgroundImage)
         .map(computed_value_css_text)
         .map(|value| super::split_top_level_commas(&value).len())
         .unwrap_or(1);
@@ -10421,7 +10093,7 @@ fn computed_value_css_text(value: &ComputedValue) -> String {
     value.css_text()
 }
 
-fn resolve_initial_css_wide_keywords(properties: &mut BTreeMap<String, ComputedValue>) {
+fn resolve_initial_css_wide_keywords(properties: &mut PropertyMap) {
     let initial_names: Vec<String> = properties
         .iter()
         .filter_map(|(name, value)| {
@@ -10433,7 +10105,7 @@ fn resolve_initial_css_wide_keywords(properties: &mut BTreeMap<String, ComputedV
                         "initial" | "unset" | "revert" | "revert-layer" | "revert-rule"
                     )
             )
-            .then(|| name.clone())
+            .then(|| name.to_string())
         })
         .collect();
     for name in initial_names {
@@ -10468,7 +10140,7 @@ fn is_margin_or_padding_longhand(name: &str) -> bool {
 }
 
 /// CSS 2.1 §8.5.3: If border-style is 'none', the computed border-width is 0.
-fn zero_border_width_for_none_style(properties: &mut BTreeMap<String, ComputedValue>) {
+fn zero_border_width_for_none_style(properties: &mut PropertyMap) {
     for side in ["top", "right", "bottom", "left"] {
         let style_key = format!("border-{side}-style");
         let is_none = matches!(
@@ -10486,54 +10158,45 @@ fn zero_border_width_for_none_style(properties: &mut BTreeMap<String, ComputedVa
 /// Resolve it before general inherit resolution so other properties that reference
 /// currentColor can see the resolved color value.
 fn resolve_current_color_on_color_property(
-    properties: &mut BTreeMap<String, ComputedValue>,
+    properties: &mut PropertyMap,
     parent_style: Option<&ComputedStyle>,
 ) {
     let is_current_color = matches!(
-        properties.get("color"),
+        properties.get(&PropertyId::Color),
         Some(ComputedValue::Color(c)) if c.eq_ignore_ascii_case("currentcolor")
     ) || matches!(
-        properties.get("color"),
+        properties.get(&PropertyId::Color),
         Some(ComputedValue::Keyword(k)) if k.eq_ignore_ascii_case("currentcolor")
     );
     if is_current_color {
         if let Some(parent) = parent_style {
             if let Some(parent_color) = parent.get("color") {
-                properties.insert("color".to_string(), parent_color.clone());
+                properties.insert(PropertyId::Color, parent_color.clone());
             } else {
                 // Root element with color: currentColor → initial value (black)
-                properties.insert(
-                    "color".to_string(),
-                    ComputedValue::Color("black".to_string()),
-                );
+                properties.insert(PropertyId::Color, ComputedValue::Color("black".to_string()));
             }
         } else {
-            properties.insert(
-                "color".to_string(),
-                ComputedValue::Color("black".to_string()),
-            );
+            properties.insert(PropertyId::Color, ComputedValue::Color("black".to_string()));
         }
     }
 }
 
-fn resolve_column_rule_current_color(properties: &mut BTreeMap<String, ComputedValue>) {
-    let Some(current_color) = properties.get("color").cloned() else {
+fn resolve_column_rule_current_color(properties: &mut PropertyMap) {
+    let Some(current_color) = properties.get(&PropertyId::Color).cloned() else {
         return;
     };
     let is_current_color = matches!(
-        properties.get("column-rule-color"),
+        properties.get(&PropertyId::ColumnRuleColor),
         Some(ComputedValue::Color(value) | ComputedValue::Keyword(value))
             if value.eq_ignore_ascii_case("currentcolor")
     );
     if is_current_color {
-        properties.insert("column-rule-color".to_string(), current_color);
+        properties.insert(PropertyId::ColumnRuleColor, current_color);
     }
 }
 
-fn resolve_inherit_and_unset(
-    properties: &mut BTreeMap<String, ComputedValue>,
-    parent_style: Option<&ComputedStyle>,
-) {
+fn resolve_inherit_and_unset(properties: &mut PropertyMap, parent_style: Option<&ComputedStyle>) {
     let inherited_names: Vec<String> = properties
         .iter()
         .filter_map(|(name, value)| match value {
@@ -10541,7 +10204,7 @@ fn resolve_inherit_and_unset(
                 if keyword.eq_ignore_ascii_case("inherit")
                     || (keyword.eq_ignore_ascii_case("unset") && is_inherited_property(name)) =>
             {
-                Some(name.clone())
+                Some(name.to_string())
             }
             _ => None,
         })
@@ -10558,10 +10221,7 @@ fn resolve_inherit_and_unset(
     }
 }
 
-fn apply_inheritance(
-    properties: &mut BTreeMap<String, ComputedValue>,
-    parent_style: Option<&ComputedStyle>,
-) {
+fn apply_inheritance(properties: &mut PropertyMap, parent_style: Option<&ComputedStyle>) {
     let Some(parent_style) = parent_style else {
         return;
     };
@@ -10575,9 +10235,9 @@ fn apply_inheritance(
     }
 
     // CSS custom properties inherit by default.
-    for (name, value) in parent_style.properties() {
+    for (name, value) in &parent_style.properties {
         if name.starts_with("--") && !properties.contains_key(name) {
-            properties.insert(name.clone(), value.clone());
+            properties.insert(name, value.clone());
         }
     }
 }
@@ -10620,10 +10280,7 @@ fn is_inherited_property(name: &str) -> bool {
     name.starts_with("--") || INHERITED_PROPERTIES.contains(&name)
 }
 
-fn inherited_font_size(
-    parent_style: Option<&ComputedStyle>,
-    current: &BTreeMap<String, ComputedValue>,
-) -> f32 {
+fn inherited_font_size(parent_style: Option<&ComputedStyle>, current: &PropertyMap) -> f32 {
     if let Some(ComputedValue::Px(value)) = current.get("font-size") {
         return *value;
     }
@@ -10652,8 +10309,8 @@ fn candidate_font_properties(
     candidates: &[Candidate],
     custom_properties: &BTreeMap<String, Value>,
     parent_style: Option<&ComputedStyle>,
-) -> (BTreeMap<String, ComputedValue>, Option<usize>) {
-    let mut properties = BTreeMap::new();
+) -> (PropertyMap, Option<usize>) {
+    let mut properties = PropertyMap::new();
     let mut scope_root = parent_style.and_then(ComputedStyle::font_family_scope_root);
     for name in [
         "font-family",

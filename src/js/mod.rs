@@ -12348,10 +12348,10 @@ fn serialize_computed_style(style: &ComputedStyle) -> String {
         }
         first = false;
         json.push('"');
-        json.push_str(&escape_json_string(name));
+        json.push_str(&escape_json_string(&name));
         json.push_str("\":\"");
         json.push_str(&escape_json_string(&computed_value_to_css_string(
-            name, value,
+            &name, &value,
         )));
         json.push('"');
     }

@@ -5,10 +5,11 @@
 //! the shorthand into its four longhands. Timeline sampling lives above the
 //! CSS parser and consumes the normalized longhand values produced here.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::paint::color::{Color, parse_color};
 
+use super::style::PropertyMap;
 use super::{
     ComputedValue, Declaration, LengthPercentageMath, Value, is_css_wide_keyword,
     split_top_level_whitespace_strict as split_top_level_whitespace,
@@ -44,7 +45,7 @@ pub(crate) struct TransitionEventRecord {
 
 #[derive(Debug, Default)]
 struct ElementTransitionState {
-    base_values: BTreeMap<String, ComputedValue>,
+    base_values: PropertyMap,
     running: HashMap<String, RunningTransition>,
     initialized: bool,
 }
@@ -98,11 +99,7 @@ impl TransitionTimeline {
         false
     }
 
-    pub(crate) fn sample(
-        &mut self,
-        node_id: usize,
-        properties: &mut BTreeMap<String, ComputedValue>,
-    ) {
+    pub(crate) fn sample(&mut self, node_id: usize, properties: &mut PropertyMap) {
         let now_ms = self.now_ms;
         let state = self.elements.entry(node_id).or_default();
         if !state.initialized {
@@ -130,8 +127,8 @@ impl TransitionTimeline {
         }
 
         let mut changed_properties = BTreeSet::new();
-        changed_properties.extend(state.base_values.keys().cloned());
-        changed_properties.extend(properties.keys().cloned());
+        changed_properties.extend(state.base_values.keys().map(str::to_owned));
+        changed_properties.extend(properties.keys().map(str::to_owned));
         changed_properties.retain(|property| {
             effective_value(property, state.base_values.get(property))
                 != effective_value(property, properties.get(property))
@@ -441,7 +438,7 @@ struct TransitionConfiguration {
 }
 
 impl TransitionConfiguration {
-    fn from_properties(properties: &BTreeMap<String, ComputedValue>) -> Self {
+    fn from_properties(properties: &PropertyMap) -> Self {
         let property_text = property_keyword(properties, "transition-property", "all");
         let duration_text = property_keyword(properties, "transition-duration", "0s");
         let timing_text = property_keyword(properties, "transition-timing-function", "ease");
@@ -514,11 +511,7 @@ fn transition_property_matches(candidate: &str, property: &str) -> bool {
     }
 }
 
-fn property_keyword<'a>(
-    properties: &'a BTreeMap<String, ComputedValue>,
-    name: &str,
-    fallback: &'a str,
-) -> &'a str {
+fn property_keyword<'a>(properties: &'a PropertyMap, name: &str, fallback: &'a str) -> &'a str {
     match properties.get(name) {
         Some(ComputedValue::Keyword(value)) => value,
         _ => fallback,
@@ -763,7 +756,7 @@ pub(crate) fn normalize_transition_shorthand(input: &str) -> Option<String> {
         return Some(lower);
     }
     let descriptors = parse_transition_shorthand(input)?;
-    let mut properties = BTreeMap::new();
+    let mut properties = PropertyMap::new();
     let join = |select: fn(&TransitionDescriptor) -> &str| {
         descriptors
             .iter()
@@ -911,9 +904,7 @@ fn parse_transition_shorthand(input: &str) -> Option<Vec<TransitionDescriptor>> 
     Some(descriptors)
 }
 
-pub(crate) fn computed_transition_shorthand(
-    properties: &BTreeMap<String, ComputedValue>,
-) -> String {
+pub(crate) fn computed_transition_shorthand(properties: &PropertyMap) -> String {
     let property_items = split_keyword_property(properties, "transition-property", "all");
     if property_items.as_slice() == ["none"] {
         return "none".to_string();
@@ -958,11 +949,7 @@ pub(crate) fn computed_transition_shorthand(
         .join(", ")
 }
 
-fn split_keyword_property(
-    properties: &BTreeMap<String, ComputedValue>,
-    name: &str,
-    fallback: &str,
-) -> Vec<String> {
+fn split_keyword_property(properties: &PropertyMap, name: &str, fallback: &str) -> Vec<String> {
     split_top_level(property_keyword(properties, name, fallback), ',')
         .unwrap_or_default()
         .into_iter()
