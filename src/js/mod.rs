@@ -9170,111 +9170,17 @@ impl JsRuntime {
         let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
 
         for (script_index, script) in scripts.iter().enumerate() {
-            let attrs = script.attributes().unwrap_or_default();
-            let is_module = attrs
-                .get("type")
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("module"));
-
-            // Skip the types Omoikane does not execute at all. Modules are not
-            // among them — they run below through `eval_module_timed` — so this
-            // only filters values like `application/json` or an import map.
-            // Shares the type gate with `is_inline_classic_script` and with the
-            // dynamic-insertion path in `run_timer_payload`, so a script executes
-            // identically however it reached the tree.
-            if !is_module
-                && !is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str()))
-            {
-                if log_scripts {
-                    eprintln!(
-                        "[omoikane][script] skipped type={:?} src={:?}",
-                        attrs.get("type"),
-                        attrs.get("src")
-                    );
-                }
-                continue;
-            }
-
-            let src = attrs.get("src").cloned();
-            let has_src = src.is_some();
-            // HTML spec: defer only applies to external (src) scripts.
-            let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
-
-            let policy = self.host_state.borrow().csp_policy_for_node(script);
-            if let Some(src_url) = src.as_deref() {
-                if !policy.allows_reference(ResourceType::Script, src_url) {
-                    self.host_state.borrow_mut().record_csp_violation_for_node(
-                        script,
-                        ResourceType::Script,
-                        src_url,
-                    );
-                    continue;
-                }
-            } else if !policy.allows_inline(ResourceType::Script) {
-                self.host_state.borrow_mut().record_csp_violation_for_node(
+            let Some((is_module, is_defer, has_src, source_code, script_label)) = self
+                .fetch_or_inline_document_script_source(
                     script,
-                    ResourceType::Script,
-                    "inline",
-                );
-                continue;
-            }
-
-            let (source_code, script_label) = if let Some(src_url) = src {
-                // External script: fetch
-                let fetch_start = std::time::Instant::now();
-                let fetched = {
-                    let mut state = self.host_state.borrow_mut();
-                    fetch_script_resource_with_client(&src_url, base_url, &mut state.http_client)
-                };
-                match fetched {
-                    Some((effective_url, code, redirect_count)) => {
-                        if !policy.allows_reference_after_redirects(
-                            ResourceType::Script,
-                            &effective_url,
-                            redirect_count,
-                        ) {
-                            self.host_state.borrow_mut().record_csp_violation_for_node(
-                                script,
-                                ResourceType::Script,
-                                effective_url,
-                            );
-                            continue;
-                        }
-                        let redirected =
-                            resource_reference_was_redirected(&src_url, &effective_url, base_url);
-                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
-                        let _ = self.eval(&format!(
-                            "__omoikane_record_resource_timing({}, 'script', 200, false, {redirected}, {elapsed_ms})",
-                            serde_json::to_string(&effective_url)
-                                .unwrap_or_else(|_| "\"\"".to_string()),
-                        ));
-                        if log_scripts {
-                            eprintln!(
-                                "[omoikane][script] fetched {src_url} elapsed_ms={:.3}",
-                                elapsed_ms,
-                            );
-                        }
-                        (code, src_url.clone())
-                    }
-                    None => {
-                        let timing_name = resource_reference_timing_name(&src_url, base_url);
-                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
-                        let _ = self.eval(&format!(
-                            "__omoikane_record_resource_timing({}, 'script', 0, true, false, {elapsed_ms})",
-                            serde_json::to_string(&timing_name)
-                                .unwrap_or_else(|_| "\"\"".to_string()),
-                        ));
-                        errors.push(format!("failed to fetch script: {src_url}"));
-                        continue;
-                    }
-                }
-            } else {
-                // Inline script: collect text content
-                (
-                    collect_text_content(script),
-                    format!("inline-script-{}", script_index + 1),
+                    script_index,
+                    base_url,
+                    log_scripts,
+                    &mut errors,
                 )
+            else {
+                continue;
             };
-
             if source_code.trim().is_empty() {
                 continue;
             }
@@ -9298,50 +9204,207 @@ impl JsRuntime {
                 deferred.push((source_code, script.clone(), script_label, module_url));
                 continue;
             }
-
-            // Point `document.write`'s insertion reference at this script so any
-            // content it writes lands as the script's following siblings (the
-            // HTML tokenizer inserts written text at the "insertion point",
-            // i.e. right where the running <script> sits in the tree).
-            self.host_state.borrow_mut().write_insertion_ref = Some(script.clone());
-            let _ = self.eval(&format!(
-                "__omoikane_set_current_script({})",
-                script.identity()
-            ));
-            // Execute immediately
-            let script_context = script_source_context(&source_code);
-            let (eval_result, parse_elapsed, compile_elapsed, execute_elapsed) =
-                self.eval_safe_timed(&source_code);
-            if let Err(err) = eval_result {
-                self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
-                errors.push(format!("[script: {script_label}; {script_context}] {err}"));
-            }
-            let jobs_start = std::time::Instant::now();
-            let jobs_result = self.run_jobs();
-            let jobs_elapsed = jobs_start.elapsed();
-            if let Err(err) = jobs_result {
-                self.record_document_script_failure("DOCUMENT_SCRIPT_JOBS_FAILED");
-                errors.push(format!("[script jobs: {script_label}] {err}"));
-            }
-            if log_scripts {
-                eprintln!(
-                    "[omoikane][script] completed {script_label} parse_ms={:.3} compile_ms={:.3} execute_ms={:.3} jobs_ms={:.3}",
-                    parse_elapsed.as_secs_f64() * 1_000.0,
-                    compile_elapsed.as_secs_f64() * 1_000.0,
-                    execute_elapsed.as_secs_f64() * 1_000.0,
-                    jobs_elapsed.as_secs_f64() * 1_000.0,
-                );
-            }
-
-            // The insertion point and currentScript are only defined while a script runs.
-            let _ = self.eval("__omoikane_set_current_script(null)");
-            self.host_state.borrow_mut().write_insertion_ref = None;
+            self.run_document_script_now(
+                script,
+                &source_code,
+                &script_label,
+                log_scripts,
+                &mut errors,
+            );
         }
 
         // Execute deferred scripts. Each runs with its own insertion point set
         // to its <script> element, so a `document.write` from a deferred script
         // lands as that script's following siblings — the same treatment the
         // inline path applies above.
+        self.run_deferred_document_scripts(deferred, log_scripts, &mut errors);
+
+        self.sync_module_csp_violations();
+
+        // Fire DOMContentLoaded
+        if let Err(err) = self.fire_dom_content_loaded() {
+            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
+            errors.push(format!("{err}"));
+        }
+
+        errors
+    }
+    /// Classifies one `<script>` element, enforces its CSP policy, and
+    /// resolves its source: fetched for an external script, or its text
+    /// content for an inline one. Returns `None` (after recording any CSP
+    /// violation or fetch failure) when the script must not run at all.
+    fn fetch_or_inline_document_script_source(
+        &mut self,
+        script: &NodeHandle,
+        script_index: usize,
+        base_url: Option<&crate::http::Url>,
+        log_scripts: bool,
+        errors: &mut Vec<String>,
+    ) -> Option<(bool, bool, bool, String, String)> {
+        let attrs = script.attributes().unwrap_or_default();
+        let is_module = attrs
+            .get("type")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("module"));
+
+        // Skip the types Omoikane does not execute at all. Modules are not
+        // among them — they run below through `eval_module_timed` — so this
+        // only filters values like `application/json` or an import map.
+        // Shares the type gate with `is_inline_classic_script` and with the
+        // dynamic-insertion path in `run_timer_payload`, so a script executes
+        // identically however it reached the tree.
+        if !is_module && !is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str())) {
+            if log_scripts {
+                eprintln!(
+                    "[omoikane][script] skipped type={:?} src={:?}",
+                    attrs.get("type"),
+                    attrs.get("src")
+                );
+            }
+            return None;
+        }
+
+        let src = attrs.get("src").cloned();
+        let has_src = src.is_some();
+        // HTML spec: defer only applies to external (src) scripts.
+        let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
+
+        let policy = self.host_state.borrow().csp_policy_for_node(script);
+        if let Some(src_url) = src.as_deref() {
+            if !policy.allows_reference(ResourceType::Script, src_url) {
+                self.host_state.borrow_mut().record_csp_violation_for_node(
+                    script,
+                    ResourceType::Script,
+                    src_url,
+                );
+                return None;
+            }
+        } else if !policy.allows_inline(ResourceType::Script) {
+            self.host_state.borrow_mut().record_csp_violation_for_node(
+                script,
+                ResourceType::Script,
+                "inline",
+            );
+            return None;
+        }
+
+        let (source_code, script_label) = if let Some(src_url) = src {
+            // External script: fetch
+            let fetch_start = std::time::Instant::now();
+            let fetched = {
+                let mut state = self.host_state.borrow_mut();
+                fetch_script_resource_with_client(&src_url, base_url, &mut state.http_client)
+            };
+            match fetched {
+                Some((effective_url, code, redirect_count)) => {
+                    if !policy.allows_reference_after_redirects(
+                        ResourceType::Script,
+                        &effective_url,
+                        redirect_count,
+                    ) {
+                        self.host_state.borrow_mut().record_csp_violation_for_node(
+                            script,
+                            ResourceType::Script,
+                            effective_url,
+                        );
+                        return None;
+                    }
+                    let redirected =
+                        resource_reference_was_redirected(&src_url, &effective_url, base_url);
+                    let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
+                    let _ = self.eval(&format!(
+                            "__omoikane_record_resource_timing({}, 'script', 200, false, {redirected}, {elapsed_ms})",
+                            serde_json::to_string(&effective_url)
+                                .unwrap_or_else(|_| "\"\"".to_string()),
+                        ));
+                    if log_scripts {
+                        eprintln!(
+                            "[omoikane][script] fetched {src_url} elapsed_ms={:.3}",
+                            elapsed_ms,
+                        );
+                    }
+                    (code, src_url.clone())
+                }
+                None => {
+                    let timing_name = resource_reference_timing_name(&src_url, base_url);
+                    let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
+                    let _ = self.eval(&format!(
+                            "__omoikane_record_resource_timing({}, 'script', 0, true, false, {elapsed_ms})",
+                            serde_json::to_string(&timing_name)
+                                .unwrap_or_else(|_| "\"\"".to_string()),
+                        ));
+                    errors.push(format!("failed to fetch script: {src_url}"));
+                    return None;
+                }
+            }
+        } else {
+            // Inline script: collect text content
+            (
+                collect_text_content(script),
+                format!("inline-script-{}", script_index + 1),
+            )
+        };
+        Some((is_module, is_defer, has_src, source_code, script_label))
+    }
+
+    /// Runs one non-deferred document script immediately: wires up
+    /// `document.write`'s insertion point and `document.currentScript`,
+    /// evaluates the script and its jobs, and records any failure.
+    fn run_document_script_now(
+        &mut self,
+        script: &NodeHandle,
+        source_code: &str,
+        script_label: &str,
+        log_scripts: bool,
+        errors: &mut Vec<String>,
+    ) {
+        // Point `document.write`'s insertion reference at this script so any
+        // content it writes lands as the script's following siblings (the
+        // HTML tokenizer inserts written text at the "insertion point",
+        // i.e. right where the running <script> sits in the tree).
+        self.host_state.borrow_mut().write_insertion_ref = Some(script.clone());
+        let _ = self.eval(&format!(
+            "__omoikane_set_current_script({})",
+            script.identity()
+        ));
+        // Execute immediately
+        let script_context = script_source_context(source_code);
+        let (eval_result, parse_elapsed, compile_elapsed, execute_elapsed) =
+            self.eval_safe_timed(source_code);
+        if let Err(err) = eval_result {
+            self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
+            errors.push(format!("[script: {script_label}; {script_context}] {err}"));
+        }
+        let jobs_start = std::time::Instant::now();
+        let jobs_result = self.run_jobs();
+        let jobs_elapsed = jobs_start.elapsed();
+        if let Err(err) = jobs_result {
+            self.record_document_script_failure("DOCUMENT_SCRIPT_JOBS_FAILED");
+            errors.push(format!("[script jobs: {script_label}] {err}"));
+        }
+        if log_scripts {
+            eprintln!(
+                "[omoikane][script] completed {script_label} parse_ms={:.3} compile_ms={:.3} execute_ms={:.3} jobs_ms={:.3}",
+                parse_elapsed.as_secs_f64() * 1_000.0,
+                compile_elapsed.as_secs_f64() * 1_000.0,
+                execute_elapsed.as_secs_f64() * 1_000.0,
+                jobs_elapsed.as_secs_f64() * 1_000.0,
+            );
+        }
+
+        // The insertion point and currentScript are only defined while a script runs.
+        let _ = self.eval("__omoikane_set_current_script(null)");
+        self.host_state.borrow_mut().write_insertion_ref = None;
+    }
+
+    /// Runs every deferred (or module) document script, in order, each with
+    /// its own `document.write` insertion point and `currentScript`, exactly
+    /// as the immediate-execution path above.
+    fn run_deferred_document_scripts(
+        &mut self,
+        deferred: Vec<(String, NodeHandle, String, Option<String>)>,
+        log_scripts: bool,
+        errors: &mut Vec<String>,
+    ) {
         for (source_code, script, script_label, module_url) in deferred {
             if let Err(error) = self.run_written_scripts_before(&script) {
                 self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
@@ -9399,16 +9462,6 @@ impl JsRuntime {
             let _ = self.eval("__omoikane_set_current_script(null)");
             self.host_state.borrow_mut().write_insertion_ref = None;
         }
-
-        self.sync_module_csp_violations();
-
-        // Fire DOMContentLoaded
-        if let Err(err) = self.fire_dom_content_loaded() {
-            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
-            errors.push(format!("{err}"));
-        }
-
-        errors
     }
 
     fn with_active_host<T>(&mut self, f: impl FnOnce(&mut Context) -> JsResult<T>) -> JsResult<T> {
