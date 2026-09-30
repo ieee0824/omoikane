@@ -3844,29 +3844,28 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if let Some(validation) = validate_multicol_declaration(name, value) {
         return validation;
     }
-    if name.eq_ignore_ascii_case("content-visibility") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let keyword = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&keyword)
-                    || matches!(keyword.as_str(), "visible" | "auto" | "hidden")
-                {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(keyword))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
+
+    // Normalize the property name once; every branch below compares against
+    // this lowercase key instead of re-deriving it with `to_ascii_lowercase()`
+    // or `eq_ignore_ascii_case()` per branch.
+    let key = name.to_ascii_lowercase();
+
+    // The following checks recognize properties whose value can itself be a
+    // top-level `Value::CommaList` (handled generically further down), so
+    // they must keep running before that generic handling: a comma-separated
+    // value for one of these properties is rejected/normalized by its own
+    // dedicated grammar rather than by the generic per-layer recursion.
+    if key == "content-visibility" {
+        return validate_keyword_value(value, &["visible", "auto", "hidden"]);
     }
-    if name.eq_ignore_ascii_case("scroll-behavior") {
+    if key == "scroll-behavior" {
         return validate_keyword_value(value, &["auto", "smooth"]);
     }
     if let Some(validation) = validate_scroll_snap_declaration(name, value) {
         return validation;
     }
     if matches!(
-        name.to_ascii_lowercase().as_str(),
+        key.as_str(),
         "overscroll-behavior-x"
             | "overscroll-behavior-y"
             | "overscroll-behavior-inline"
@@ -3875,7 +3874,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return validate_keyword_value(value, &["auto", "contain", "none", "chain"]);
     }
     if matches!(
-        name.to_ascii_lowercase().as_str(),
+        key.as_str(),
         "contain-intrinsic-size"
             | "contain-intrinsic-width"
             | "contain-intrinsic-height"
@@ -3884,13 +3883,13 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     ) {
         return validate_contain_intrinsic_size(value);
     }
-    if name.eq_ignore_ascii_case("text-decoration-thickness") {
+    if key == "text-decoration-thickness" {
         return validate_text_decoration_thickness(value);
     }
-    if name.eq_ignore_ascii_case("text-underline-position") {
+    if key == "text-underline-position" {
         return validate_text_underline_position(value);
     }
-    if name.eq_ignore_ascii_case("text-underline-offset") {
+    if key == "text-underline-offset" {
         return match value {
             Value::Keyword(value) if value.eq_ignore_ascii_case("from-font") => {
                 DeclarationValidation::Invalid
@@ -3903,7 +3902,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if let Value::CommaList(values) = value {
         let is_mask_layer_property = matches!(
-            name.to_ascii_lowercase().as_str(),
+            key.as_str(),
             "mask-image"
                 | "mask-mode"
                 | "mask-composite"
@@ -3945,637 +3944,256 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             DeclarationValidation::Valid(ComputedValue::Keyword(normalized.join(", ")))
         };
     }
-    if name.eq_ignore_ascii_case("text-overflow") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "clip" | "ellipsis") {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("position") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(
-                        lower.as_str(),
-                        "static" | "relative" | "absolute" | "fixed" | "sticky"
-                    )
-                {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("direction") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "ltr" | "rtl") {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("writing-mode") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(
-                        lower.as_str(),
-                        "horizontal-tb"
-                            | "vertical-rl"
-                            | "vertical-lr"
-                            | "sideways-rl"
-                            | "sideways-lr"
-                    )
-                {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("unicode-bidi") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(
-                        lower.as_str(),
-                        "normal"
-                            | "embed"
-                            | "bidi-override"
-                            | "isolate"
-                            | "isolate-override"
-                            | "plaintext"
-                    )
-                {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("transform-style") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "flat" | "preserve-3d") {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("backface-visibility") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "visible" | "hidden") {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("mix-blend-mode") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(
-                        lower.as_str(),
-                        "normal"
-                            | "multiply"
-                            | "screen"
-                            | "overlay"
-                            | "darken"
-                            | "lighten"
-                            | "color-dodge"
-                            | "color-burn"
-                            | "hard-light"
-                            | "soft-light"
-                            | "difference"
-                            | "exclusion"
-                            | "hue"
-                            | "saturation"
-                            | "color"
-                            | "luminosity"
-                            | "plus-darker"
-                            | "plus-lighter"
-                    )
-                {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("isolation") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "auto" | "isolate") {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if matches!(
-        name.to_ascii_lowercase().as_str(),
-        "background-origin" | "background-clip"
-    ) {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(lower.as_str(), "border-box" | "padding-box" | "content-box")
-                {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("background-image") {
-        if let Value::Function { name: function, .. } = value {
-            let lower = function.to_ascii_lowercase();
-            if matches!(
-                lower.as_str(),
-                "linear-gradient"
-                    | "repeating-linear-gradient"
-                    | "radial-gradient"
-                    | "repeating-radial-gradient"
-                    | "conic-gradient"
-                    | "repeating-conic-gradient"
-            ) {
-                let rendered = render_value(value);
-                return if crate::paint::parse_gradient(&rendered).is_some() {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
-                } else {
-                    DeclarationValidation::Invalid
-                };
-            }
-        }
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || keyword.eq_ignore_ascii_case("none")
-                    || keyword.to_ascii_lowercase().starts_with("url(") =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("mask-image") {
-        if let Value::Function { name: function, .. } = value {
-            let lower = function.to_ascii_lowercase();
-            if lower == "linear-gradient"
-                || lower == "repeating-linear-gradient"
-                || lower == "radial-gradient"
-                || lower == "repeating-radial-gradient"
-                || lower == "conic-gradient"
-                || lower == "repeating-conic-gradient"
-            {
-                let rendered = render_value(value);
-                return if crate::paint::color::parse_gradient(&rendered).is_some() {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
-                } else {
-                    DeclarationValidation::Invalid
-                };
-            }
-        }
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || keyword.eq_ignore_ascii_case("none")
-                    || keyword.to_ascii_lowercase().starts_with("url(") =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("mask-mode") {
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(
-                        keyword.to_ascii_lowercase().as_str(),
-                        "alpha" | "luminance" | "match-source"
-                    ) =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("mask-composite") {
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(
-                        keyword.to_ascii_lowercase().as_str(),
-                        "add" | "subtract" | "intersect" | "exclude"
-                    ) =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("shape-outside") {
-        if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
-        {
-            return DeclarationValidation::Unvalidated;
-        }
-        let rendered = render_value(value);
-        return if crate::paint::is_valid_shape_outside_value(&rendered) {
-            DeclarationValidation::Unvalidated
-        } else {
-            DeclarationValidation::Invalid
-        };
-    }
-    if name.eq_ignore_ascii_case("shape-margin") {
-        return match value {
-            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => {
-                DeclarationValidation::Unvalidated
-            }
-            Value::Length(number, unit)
-                if *number >= 0.0
-                    && resolve_length_to_px(*number, unit, ResolutionContext::default())
-                        .is_some() =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            Value::Percentage(number) if *number >= 0.0 => DeclarationValidation::Unvalidated,
-            Value::Number(number) if *number == 0.0 => {
-                DeclarationValidation::Valid(ComputedValue::Px(0.0))
-            }
-            Value::Function { name: function, .. }
-                if is_length_percentage_math_function(function) =>
-            {
-                match compute_value(value, name, ResolutionContext::default()) {
-                    ComputedValue::Px(number) | ComputedValue::Percentage(number)
-                        if number >= 0.0 =>
-                    {
-                        DeclarationValidation::Unvalidated
-                    }
-                    ComputedValue::LengthPercentage(_) => DeclarationValidation::Unvalidated,
-                    _ => DeclarationValidation::Invalid,
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("clip-path") {
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || keyword.eq_ignore_ascii_case("none") =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            Value::Function { name: function, .. }
-                if matches!(
-                    function.to_ascii_lowercase().as_str(),
-                    "inset" | "circle" | "ellipse" | "polygon"
-                ) =>
-            {
-                let rendered = render_value(value);
-                if crate::paint::is_valid_clip_path_value(&rendered) {
-                    DeclarationValidation::Unvalidated
-                } else {
-                    DeclarationValidation::Invalid
-                }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("mask-repeat") {
-        let valid_axis = |value: &Value| {
-            matches!(
+
+    // Every remaining single-property (or small-alias-group) grammar dispatches
+    // through this match. `is_non_negative_sizing_property` and
+    // `is_position_offset_property` below are checked after it (matching their
+    // original relative position among these branches): `shape-margin` is also
+    // matched by `is_non_negative_sizing_property`, so its dedicated arm here
+    // must run and return first, exactly as the original if-chain order
+    // required; every other name in this match is disjoint from both helpers'
+    // property sets, so placing their checks after the match instead of before
+    // it does not change which branch a given property name takes.
+    match key.as_str() {
+        "text-overflow" => return validate_keyword_value(value, &["clip", "ellipsis"]),
+        "position" => {
+            return validate_keyword_value(
                 value,
+                &["static", "relative", "absolute", "fixed", "sticky"],
+            );
+        }
+        "direction" => return validate_keyword_value(value, &["ltr", "rtl"]),
+        "writing-mode" => {
+            return validate_keyword_value(
+                value,
+                &[
+                    "horizontal-tb",
+                    "vertical-rl",
+                    "vertical-lr",
+                    "sideways-rl",
+                    "sideways-lr",
+                ],
+            );
+        }
+        "unicode-bidi" => {
+            return validate_keyword_value(
+                value,
+                &[
+                    "normal",
+                    "embed",
+                    "bidi-override",
+                    "isolate",
+                    "isolate-override",
+                    "plaintext",
+                ],
+            );
+        }
+        "transform-style" => return validate_keyword_value(value, &["flat", "preserve-3d"]),
+        "backface-visibility" => return validate_keyword_value(value, &["visible", "hidden"]),
+        "mix-blend-mode" => {
+            return validate_keyword_value(
+                value,
+                &[
+                    "normal",
+                    "multiply",
+                    "screen",
+                    "overlay",
+                    "darken",
+                    "lighten",
+                    "color-dodge",
+                    "color-burn",
+                    "hard-light",
+                    "soft-light",
+                    "difference",
+                    "exclusion",
+                    "hue",
+                    "saturation",
+                    "color",
+                    "luminosity",
+                    "plus-darker",
+                    "plus-lighter",
+                ],
+            );
+        }
+        "isolation" => return validate_keyword_value(value, &["auto", "isolate"]),
+        "background-origin" | "background-clip" => {
+            return validate_keyword_value(value, &["border-box", "padding-box", "content-box"]);
+        }
+        "background-image" => return validate_background_image_declaration(value),
+        "mask-image" => return validate_mask_image_declaration(value),
+        "mask-mode" => {
+            return match value {
                 Value::Keyword(keyword)
-                    if matches!(
-                        keyword.to_ascii_lowercase().as_str(),
-                        "repeat" | "no-repeat"
-                    )
-            )
-        };
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(
-                        keyword.to_ascii_lowercase().as_str(),
-                        "repeat" | "no-repeat" | "repeat-x" | "repeat-y"
-                    ) =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            Value::List(values)
-                if (1..=2).contains(&values.len()) && values.iter().all(valid_axis) =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("background-repeat") {
-        let valid_axis = |value: &Value| matches!(value, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "repeat" | "no-repeat"));
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(
-                        keyword.to_ascii_lowercase().as_str(),
-                        "repeat" | "no-repeat" | "repeat-x" | "repeat-y"
-                    ) =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            Value::List(values)
-                if (1..=2).contains(&values.len()) && values.iter().all(valid_axis) =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("background-attachment") {
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(
-                        keyword.to_ascii_lowercase().as_str(),
-                        "scroll" | "fixed" | "local"
-                    ) =>
-            {
-                DeclarationValidation::Unvalidated
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("cursor") {
-        return match compute_cursor_value(value) {
-            Some(computed) => DeclarationValidation::Valid(computed),
-            None => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("aspect-ratio") {
-        // Normalizing needs the resolution context for `calc()`, so a valid
-        // value goes on to `compute_value` (see `render_aspect_ratio_value`).
-        let is_css_wide = matches!(
-            value,
-            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-        );
-        return if is_css_wide || aspect_ratio_parts(value).is_some() {
-            DeclarationValidation::Unvalidated
-        } else {
-            DeclarationValidation::Invalid
-        };
-    }
-    if name.eq_ignore_ascii_case("object-fit") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower)
-                    || matches!(
-                        lower.as_str(),
-                        "fill" | "contain" | "cover" | "none" | "scale-down"
-                    )
+                    if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                        || matches!(
+                            keyword.to_ascii_lowercase().as_str(),
+                            "alpha" | "luminance" | "match-source"
+                        ) =>
                 {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
+                    DeclarationValidation::Unvalidated
                 }
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("pointer-events") {
-        return match value {
-            Value::Keyword(keyword) => {
-                let lower = keyword.to_ascii_lowercase();
-                if is_css_wide_keyword(&lower) || is_supported_pointer_events_keyword(&lower) {
-                    DeclarationValidation::Valid(ComputedValue::Keyword(lower))
-                } else {
-                    DeclarationValidation::Invalid
+                _ => DeclarationValidation::Invalid,
+            };
+        }
+        "mask-composite" => {
+            return match value {
+                Value::Keyword(keyword)
+                    if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                        || matches!(
+                            keyword.to_ascii_lowercase().as_str(),
+                            "add" | "subtract" | "intersect" | "exclude"
+                        ) =>
+                {
+                    DeclarationValidation::Unvalidated
                 }
+                _ => DeclarationValidation::Invalid,
+            };
+        }
+        "shape-outside" => {
+            if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+            {
+                return DeclarationValidation::Unvalidated;
             }
-            _ => DeclarationValidation::Invalid,
-        };
+            let rendered = render_value(value);
+            return if crate::paint::is_valid_shape_outside_value(&rendered) {
+                DeclarationValidation::Unvalidated
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
+        "shape-margin" => return validate_shape_margin_declaration(name, value),
+        "clip-path" => {
+            return match value {
+                Value::Keyword(keyword)
+                    if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                        || keyword.eq_ignore_ascii_case("none") =>
+                {
+                    DeclarationValidation::Unvalidated
+                }
+                Value::Function { name: function, .. }
+                    if matches!(
+                        function.to_ascii_lowercase().as_str(),
+                        "inset" | "circle" | "ellipse" | "polygon"
+                    ) =>
+                {
+                    let rendered = render_value(value);
+                    if crate::paint::is_valid_clip_path_value(&rendered) {
+                        DeclarationValidation::Unvalidated
+                    } else {
+                        DeclarationValidation::Invalid
+                    }
+                }
+                _ => DeclarationValidation::Invalid,
+            };
+        }
+        "mask-repeat" | "background-repeat" => return validate_repeat_style_value(value),
+        "background-attachment" => {
+            return match value {
+                Value::Keyword(keyword)
+                    if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                        || matches!(
+                            keyword.to_ascii_lowercase().as_str(),
+                            "scroll" | "fixed" | "local"
+                        ) =>
+                {
+                    DeclarationValidation::Unvalidated
+                }
+                _ => DeclarationValidation::Invalid,
+            };
+        }
+        "cursor" => {
+            return match compute_cursor_value(value) {
+                Some(computed) => DeclarationValidation::Valid(computed),
+                None => DeclarationValidation::Invalid,
+            };
+        }
+        "aspect-ratio" => {
+            // Normalizing needs the resolution context for `calc()`, so a valid
+            // value goes on to `compute_value` (see `render_aspect_ratio_value`).
+            let is_css_wide = matches!(
+                value,
+                Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+            );
+            return if is_css_wide || aspect_ratio_parts(value).is_some() {
+                DeclarationValidation::Unvalidated
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
+        "object-fit" => {
+            return validate_keyword_value(
+                value,
+                &["fill", "contain", "cover", "none", "scale-down"],
+            );
+        }
+        "pointer-events" => {
+            return match value {
+                Value::Keyword(keyword) => {
+                    let lower = keyword.to_ascii_lowercase();
+                    if is_css_wide_keyword(&lower) || is_supported_pointer_events_keyword(&lower) {
+                        DeclarationValidation::Valid(ComputedValue::Keyword(lower))
+                    } else {
+                        DeclarationValidation::Invalid
+                    }
+                }
+                _ => DeclarationValidation::Invalid,
+            };
+        }
+        "object-position" => {
+            // The grammar is checked here, but normalizing keywords to percentages
+            // and lengths to pixels needs the resolution context, so the value goes
+            // through `compute_value` (see `render_object_position_value`). A
+            // CSS-wide keyword is handled by the cascade, not by this grammar.
+            let is_css_wide = matches!(
+                value,
+                Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+            );
+            return if is_css_wide || object_position_components(value).is_some() {
+                DeclarationValidation::Unvalidated
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
+        "container-type" => {
+            return validate_keyword_value(value, &["normal", "inline-size", "size"]);
+        }
+        "container-name" => return validate_container_name_declaration(value),
+        "contain" => return validate_contain_declaration(value),
+        "transform" => return validate_transform_declaration(value),
+        "perspective" => return validate_perspective_declaration(value),
+        "filter" | "backdrop-filter" => {
+            let rendered = render_value(value);
+            if is_css_wide_keyword(&rendered.to_ascii_lowercase()) {
+                return DeclarationValidation::Valid(ComputedValue::Keyword(
+                    rendered.to_ascii_lowercase(),
+                ));
+            }
+            return match super::normalize_filter_list(&rendered) {
+                Some(normalized) => {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(normalized))
+                }
+                None => DeclarationValidation::Invalid,
+            };
+        }
+        "transform-origin" => return validate_transform_origin_declaration(value),
+        "perspective-origin" => return validate_perspective_origin_declaration(value),
+        "transition-property"
+        | "transition-duration"
+        | "transition-timing-function"
+        | "transition-delay" => {
+            let rendered = render_value(value);
+            return match super::computed_transition_longhand(name, &rendered) {
+                Some(normalized) => {
+                    DeclarationValidation::Valid(ComputedValue::Keyword(normalized))
+                }
+                None => DeclarationValidation::Invalid,
+            };
+        }
+        _ => {}
     }
-    if name.eq_ignore_ascii_case("object-position") {
-        // The grammar is checked here, but normalizing keywords to percentages
-        // and lengths to pixels needs the resolution context, so the value goes
-        // through `compute_value` (see `render_object_position_value`). A
-        // CSS-wide keyword is handled by the cascade, not by this grammar.
-        let is_css_wide = matches!(
-            value,
-            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-        );
-        return if is_css_wide || object_position_components(value).is_some() {
-            DeclarationValidation::Unvalidated
-        } else {
-            DeclarationValidation::Invalid
-        };
-    }
+
     if is_non_negative_sizing_property(name) {
         return validate_sizing_value(name, value);
-    }
-    if name.eq_ignore_ascii_case("container-type") {
-        return match value {
-            Value::Keyword(keyword)
-                if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || matches!(
-                        keyword.to_ascii_lowercase().as_str(),
-                        "normal" | "inline-size" | "size"
-                    ) =>
-            {
-                DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()))
-            }
-            _ => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("container-name") {
-        let valid_custom_name = |keyword: &str| {
-            let lower = keyword.to_ascii_lowercase();
-            !is_css_wide_keyword(&lower)
-                && !matches!(lower.as_str(), "none" | "and" | "or" | "not" | "default")
-        };
-        let valid = match value {
-            Value::Keyword(keyword) => {
-                keyword.eq_ignore_ascii_case("none")
-                    || is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                    || valid_custom_name(keyword)
-            }
-            Value::List(values) => !values.is_empty()
-                && values.iter().all(
-                    |value| matches!(value, Value::Keyword(keyword) if valid_custom_name(keyword)),
-                ),
-            _ => false,
-        };
-        return if valid {
-            DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)))
-        } else {
-            DeclarationValidation::Invalid
-        };
-    }
-    if name.eq_ignore_ascii_case("contain") {
-        let keyword = |value: &Value| match value {
-            Value::Keyword(keyword) => Some(keyword.to_ascii_lowercase()),
-            _ => None,
-        };
-        let valid = match value {
-            Value::Keyword(value) => {
-                let value = value.to_ascii_lowercase();
-                is_css_wide_keyword(&value)
-                    || matches!(
-                        value.as_str(),
-                        "none" | "strict" | "content" | "size" | "layout" | "paint"
-                    )
-            }
-            Value::List(values) => {
-                let keywords = values.iter().filter_map(keyword).collect::<Vec<_>>();
-                !keywords.is_empty()
-                    && keywords.len() == values.len()
-                    && keywords
-                        .iter()
-                        .all(|value| matches!(value.as_str(), "size" | "layout" | "paint"))
-                    && keywords.iter().collect::<BTreeSet<_>>().len() == keywords.len()
-            }
-            _ => false,
-        };
-        return if valid {
-            DeclarationValidation::Valid(ComputedValue::Keyword(
-                render_value(value).to_ascii_lowercase(),
-            ))
-        } else {
-            DeclarationValidation::Invalid
-        };
-    }
-    if name.eq_ignore_ascii_case("transform") {
-        let rendered = render_value(value);
-        let reference = super::TransformReferenceBox {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-            font_size: 16.0,
-            root_font_size: 16.0,
-        };
-        return if super::parse_transform_list(&rendered, reference).is_some() {
-            DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
-        } else {
-            DeclarationValidation::Invalid
-        };
-    }
-    if name.eq_ignore_ascii_case("perspective") {
-        let rendered = render_value(value);
-        let lower = rendered.to_ascii_lowercase();
-        if is_css_wide_keyword(&lower) || lower == "none" {
-            return DeclarationValidation::Valid(ComputedValue::Keyword(lower));
-        }
-        let reference = super::TransformReferenceBox {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-            font_size: 16.0,
-            root_font_size: 16.0,
-        };
-        return if super::parse_perspective_with_origin(&rendered, "50% 50%", reference).is_some() {
-            DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
-        } else {
-            DeclarationValidation::Invalid
-        };
-    }
-    if name.eq_ignore_ascii_case("filter") || name.eq_ignore_ascii_case("backdrop-filter") {
-        let rendered = render_value(value);
-        if is_css_wide_keyword(&rendered.to_ascii_lowercase()) {
-            return DeclarationValidation::Valid(ComputedValue::Keyword(
-                rendered.to_ascii_lowercase(),
-            ));
-        }
-        return match super::normalize_filter_list(&rendered) {
-            Some(normalized) => DeclarationValidation::Valid(ComputedValue::Keyword(normalized)),
-            None => DeclarationValidation::Invalid,
-        };
-    }
-    if name.eq_ignore_ascii_case("transform-origin") {
-        let rendered = render_value(value);
-        let reference = super::TransformReferenceBox {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-            font_size: 16.0,
-            root_font_size: 16.0,
-        };
-        return if super::parse_transform_with_origin("scale(2)", &rendered, reference).is_some() {
-            DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
-        } else {
-            DeclarationValidation::Invalid
-        };
-    }
-    if name.eq_ignore_ascii_case("perspective-origin") {
-        let rendered = render_value(value);
-        let reference = super::TransformReferenceBox {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-            font_size: 16.0,
-            root_font_size: 16.0,
-        };
-        return if super::parse_perspective_origin(&rendered, reference).is_some() {
-            DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
-        } else {
-            DeclarationValidation::Invalid
-        };
-    }
-    if matches!(
-        name,
-        "transition-property"
-            | "transition-duration"
-            | "transition-timing-function"
-            | "transition-delay"
-    ) {
-        let rendered = render_value(value);
-        return match super::computed_transition_longhand(name, &rendered) {
-            Some(normalized) => DeclarationValidation::Valid(ComputedValue::Keyword(normalized)),
-            None => DeclarationValidation::Invalid,
-        };
     }
     if is_position_offset_property(name)
         && matches!(value, Value::Function { name: function, .. } if is_length_percentage_math_function(function))
@@ -4588,6 +4206,263 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+/// Validates `background-image`: gradient functions are checked with the
+/// paint module's gradient parser, and everything else must be `none`,
+/// `url(...)`, or a CSS-wide keyword (left `Unvalidated` for the generic
+/// compute path).
+fn validate_background_image_declaration(value: &Value) -> DeclarationValidation {
+    if let Value::Function { name: function, .. } = value {
+        let lower = function.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "linear-gradient"
+                | "repeating-linear-gradient"
+                | "radial-gradient"
+                | "repeating-radial-gradient"
+                | "conic-gradient"
+                | "repeating-conic-gradient"
+        ) {
+            let rendered = render_value(value);
+            return if crate::paint::parse_gradient(&rendered).is_some() {
+                DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
+    }
+    match value {
+        Value::Keyword(keyword)
+            if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                || keyword.eq_ignore_ascii_case("none")
+                || keyword.to_ascii_lowercase().starts_with("url(") =>
+        {
+            DeclarationValidation::Unvalidated
+        }
+        _ => DeclarationValidation::Invalid,
+    }
+}
+
+/// Validates `mask-image`: same shape as `background-image`, but gradients go
+/// through the paint color module's gradient parser.
+fn validate_mask_image_declaration(value: &Value) -> DeclarationValidation {
+    if let Value::Function { name: function, .. } = value {
+        let lower = function.to_ascii_lowercase();
+        if lower == "linear-gradient"
+            || lower == "repeating-linear-gradient"
+            || lower == "radial-gradient"
+            || lower == "repeating-radial-gradient"
+            || lower == "conic-gradient"
+            || lower == "repeating-conic-gradient"
+        {
+            let rendered = render_value(value);
+            return if crate::paint::color::parse_gradient(&rendered).is_some() {
+                DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
+    }
+    match value {
+        Value::Keyword(keyword)
+            if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                || keyword.eq_ignore_ascii_case("none")
+                || keyword.to_ascii_lowercase().starts_with("url(") =>
+        {
+            DeclarationValidation::Unvalidated
+        }
+        _ => DeclarationValidation::Invalid,
+    }
+}
+
+/// Validates `shape-margin`: a non-negative length, percentage, `0`, or a
+/// `calc()`-family function resolving to one of those. `name` is forwarded to
+/// `compute_value` for math-function resolution.
+fn validate_shape_margin_declaration(name: &str, value: &Value) -> DeclarationValidation {
+    match value {
+        Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => {
+            DeclarationValidation::Unvalidated
+        }
+        Value::Length(number, unit)
+            if *number >= 0.0
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some() =>
+        {
+            DeclarationValidation::Unvalidated
+        }
+        Value::Percentage(number) if *number >= 0.0 => DeclarationValidation::Unvalidated,
+        Value::Number(number) if *number == 0.0 => {
+            DeclarationValidation::Valid(ComputedValue::Px(0.0))
+        }
+        Value::Function { name: function, .. } if is_length_percentage_math_function(function) => {
+            match compute_value(value, name, ResolutionContext::default()) {
+                ComputedValue::Px(number) | ComputedValue::Percentage(number) if number >= 0.0 => {
+                    DeclarationValidation::Unvalidated
+                }
+                ComputedValue::LengthPercentage(_) => DeclarationValidation::Unvalidated,
+                _ => DeclarationValidation::Invalid,
+            }
+        }
+        _ => DeclarationValidation::Invalid,
+    }
+}
+
+/// Validates the shared `repeat`/`no-repeat`/`repeat-x`/`repeat-y` (or a
+/// 1-2 item axis list of `repeat`/`no-repeat`) grammar used by both
+/// `mask-repeat` and `background-repeat`.
+fn validate_repeat_style_value(value: &Value) -> DeclarationValidation {
+    let valid_axis = |value: &Value| {
+        matches!(
+            value,
+            Value::Keyword(keyword)
+                if matches!(keyword.to_ascii_lowercase().as_str(), "repeat" | "no-repeat")
+        )
+    };
+    match value {
+        Value::Keyword(keyword)
+            if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                || matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "repeat" | "no-repeat" | "repeat-x" | "repeat-y"
+                ) =>
+        {
+            DeclarationValidation::Unvalidated
+        }
+        Value::List(values) if (1..=2).contains(&values.len()) && values.iter().all(valid_axis) => {
+            DeclarationValidation::Unvalidated
+        }
+        _ => DeclarationValidation::Invalid,
+    }
+}
+
+/// Validates `container-name`: `none`, a CSS-wide keyword, a single custom
+/// identifier, or a non-empty list of custom identifiers (excluding the
+/// reserved `and`/`or`/`not`/`default`/`none` keywords).
+fn validate_container_name_declaration(value: &Value) -> DeclarationValidation {
+    let valid_custom_name = |keyword: &str| {
+        let lower = keyword.to_ascii_lowercase();
+        !is_css_wide_keyword(&lower)
+            && !matches!(lower.as_str(), "none" | "and" | "or" | "not" | "default")
+    };
+    let valid =
+        match value {
+            Value::Keyword(keyword) => {
+                keyword.eq_ignore_ascii_case("none")
+                    || is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                    || valid_custom_name(keyword)
+            }
+            Value::List(values) => !values.is_empty()
+                && values.iter().all(
+                    |value| matches!(value, Value::Keyword(keyword) if valid_custom_name(keyword)),
+                ),
+            _ => false,
+        };
+    if valid {
+        DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)))
+    } else {
+        DeclarationValidation::Invalid
+    }
+}
+
+/// Validates `contain`: a single keyword (`none`/`strict`/`content`/`size`/
+/// `layout`/`paint`), a CSS-wide keyword, or a list of distinct
+/// `size`/`layout`/`paint` keywords.
+fn validate_contain_declaration(value: &Value) -> DeclarationValidation {
+    let keyword = |value: &Value| match value {
+        Value::Keyword(keyword) => Some(keyword.to_ascii_lowercase()),
+        _ => None,
+    };
+    let valid = match value {
+        Value::Keyword(value) => {
+            let value = value.to_ascii_lowercase();
+            is_css_wide_keyword(&value)
+                || matches!(
+                    value.as_str(),
+                    "none" | "strict" | "content" | "size" | "layout" | "paint"
+                )
+        }
+        Value::List(values) => {
+            let keywords = values.iter().filter_map(keyword).collect::<Vec<_>>();
+            !keywords.is_empty()
+                && keywords.len() == values.len()
+                && keywords
+                    .iter()
+                    .all(|value| matches!(value.as_str(), "size" | "layout" | "paint"))
+                && keywords.iter().collect::<BTreeSet<_>>().len() == keywords.len()
+        }
+        _ => false,
+    };
+    if valid {
+        DeclarationValidation::Valid(ComputedValue::Keyword(
+            render_value(value).to_ascii_lowercase(),
+        ))
+    } else {
+        DeclarationValidation::Invalid
+    }
+}
+
+/// A reference box used only to exercise the transform/perspective grammar
+/// parsers during validation; the parsed geometry itself is discarded; layout
+/// resolves the real reference box when computing the used transform.
+fn validation_transform_reference_box() -> super::TransformReferenceBox {
+    super::TransformReferenceBox {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 100.0,
+        font_size: 16.0,
+        root_font_size: 16.0,
+    }
+}
+
+/// Validates `transform` by parsing it as a transform function list.
+fn validate_transform_declaration(value: &Value) -> DeclarationValidation {
+    let rendered = render_value(value);
+    let reference = validation_transform_reference_box();
+    if super::parse_transform_list(&rendered, reference).is_some() {
+        DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+    } else {
+        DeclarationValidation::Invalid
+    }
+}
+
+/// Validates `perspective`: `none` and CSS-wide keywords pass through
+/// directly, otherwise the value must parse as a perspective length.
+fn validate_perspective_declaration(value: &Value) -> DeclarationValidation {
+    let rendered = render_value(value);
+    let lower = rendered.to_ascii_lowercase();
+    if is_css_wide_keyword(&lower) || lower == "none" {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(lower));
+    }
+    let reference = validation_transform_reference_box();
+    if super::parse_perspective_with_origin(&rendered, "50% 50%", reference).is_some() {
+        DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+    } else {
+        DeclarationValidation::Invalid
+    }
+}
+
+/// Validates `transform-origin` by parsing it alongside a representative
+/// transform function.
+fn validate_transform_origin_declaration(value: &Value) -> DeclarationValidation {
+    let rendered = render_value(value);
+    let reference = validation_transform_reference_box();
+    if super::parse_transform_with_origin("scale(2)", &rendered, reference).is_some() {
+        DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+    } else {
+        DeclarationValidation::Invalid
+    }
+}
+
+/// Validates `perspective-origin`.
+fn validate_perspective_origin_declaration(value: &Value) -> DeclarationValidation {
+    let rendered = render_value(value);
+    let reference = validation_transform_reference_box();
+    if super::parse_perspective_origin(&rendered, reference).is_some() {
+        DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+    } else {
+        DeclarationValidation::Invalid
+    }
 }
 
 fn validate_logical_box_declaration(name: &str, value: &Value) -> Option<DeclarationValidation> {
