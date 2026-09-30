@@ -2,7 +2,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Per-process counter so fixtures created within one clock tick never share a directory.
+static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     root: PathBuf,
@@ -15,8 +19,9 @@ impl Fixture {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let seq = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "omoikane-wpt-smoke-failure-modes-{}-{unique}",
+            "omoikane-wpt-smoke-failure-modes-{}-{unique}-{seq}",
             std::process::id()
         ));
         let wpt_root = root.join("wpt");
