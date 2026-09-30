@@ -1693,249 +1693,421 @@ fn render_svg_element(
         // Definitions are resources, not paintable descendants.
         "defs" => {}
         "g" => render_svg_children(child, canvas, sx, sy, tx, ty, paint, resources, visited),
-        "use" => {
-            let Some(id) = attribute_value(&attrs, "href")
-                .or_else(|| attribute_value(&attrs, "xlink:href"))
-                .and_then(|href| parse_fragment_reference(&href))
-            else {
-                return;
-            };
-            let Some(target) = resources.node(&id) else {
-                return;
-            };
-            if !visited.insert(target.identity()) {
-                return;
-            }
-            let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0);
-            let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0);
-            render_svg_element(
-                &target,
-                canvas,
-                sx,
-                sy,
-                tx + x * sx,
-                ty + y * sy,
-                &paint,
-                resources,
-                visited,
-            );
-            visited.remove(&target.identity());
-        }
-        "rect" => {
-            let rx = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0) * sx + tx;
-            let ry = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0) * sy + ty;
-            let rw = parse_svg_size(attribute_ref(&attrs, "width")).unwrap_or(0.0) * sx;
-            let rh = parse_svg_size(attribute_ref(&attrs, "height")).unwrap_or(0.0) * sy;
-            if rw > 0.0 && rh > 0.0 {
-                let bbox = Rect {
-                    x: rx,
-                    y: ry,
-                    width: rw,
-                    height: rh,
-                };
-                if let Some(source) = fill.as_ref() {
-                    fill_rect_source(canvas, bbox, source, transform);
-                }
-                let points = vec![(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)];
-                let stroke_color = stroke.as_ref().map(|source| {
-                    source_color(source, rx + rw / 2.0, ry + rh / 2.0, bbox, transform)
-                });
-                stroke_polyline(
-                    canvas,
-                    &points,
-                    true,
-                    stroke_color,
-                    paint.stroke_width * sx.min(sy),
-                    paint.line_cap,
-                    paint.line_join,
-                );
-            }
-        }
-        "circle" => {
-            let cx = parse_svg_coord(attribute_ref(&attrs, "cx")).unwrap_or(0.0) * sx + tx;
-            let cy = parse_svg_coord(attribute_ref(&attrs, "cy")).unwrap_or(0.0) * sy + ty;
-            let r = parse_svg_size(attribute_ref(&attrs, "r")).unwrap_or(0.0) * sx.min(sy);
-            if r > 0.0 {
-                let bbox = Rect {
-                    x: cx - r,
-                    y: cy - r,
-                    width: r * 2.0,
-                    height: r * 2.0,
-                };
-                if let Some(source) = fill.as_ref() {
-                    fill_circle_source(canvas, cx, cy, r, source, transform, bbox);
-                }
-                let stroke_color = stroke
-                    .as_ref()
-                    .map(|source| source_color(source, cx, cy, bbox, transform));
-                stroke_ellipse(
-                    canvas,
-                    cx,
-                    cy,
-                    r,
-                    r,
-                    paint.stroke_width * sx.min(sy),
-                    stroke_color,
-                );
-            }
-        }
-        "ellipse" => {
-            let cx = parse_svg_coord(attribute_ref(&attrs, "cx")).unwrap_or(0.0) * sx + tx;
-            let cy = parse_svg_coord(attribute_ref(&attrs, "cy")).unwrap_or(0.0) * sy + ty;
-            let rx = parse_svg_size(attribute_ref(&attrs, "rx")).unwrap_or(0.0) * sx;
-            let ry = parse_svg_size(attribute_ref(&attrs, "ry")).unwrap_or(0.0) * sy;
-            if rx > 0.0 && ry > 0.0 {
-                let bbox = Rect {
-                    x: cx - rx,
-                    y: cy - ry,
-                    width: rx * 2.0,
-                    height: ry * 2.0,
-                };
-                if let Some(source) = fill.as_ref() {
-                    fill_ellipse_source(canvas, cx, cy, rx, ry, source, transform, bbox);
-                }
-                let stroke_color = stroke
-                    .as_ref()
-                    .map(|source| source_color(source, cx, cy, bbox, transform));
-                stroke_ellipse(
-                    canvas,
-                    cx,
-                    cy,
-                    rx,
-                    ry,
-                    paint.stroke_width * sx.min(sy),
-                    stroke_color,
-                );
-            }
-        }
-        "line" => {
-            let x1 = parse_svg_coord(attribute_ref(&attrs, "x1")).unwrap_or(0.0) * sx + tx;
-            let y1 = parse_svg_coord(attribute_ref(&attrs, "y1")).unwrap_or(0.0) * sy + ty;
-            let x2 = parse_svg_coord(attribute_ref(&attrs, "x2")).unwrap_or(0.0) * sx + tx;
-            let y2 = parse_svg_coord(attribute_ref(&attrs, "y2")).unwrap_or(0.0) * sy + ty;
-            let bbox = rect_for_points(&[(x1, y1), (x2, y2)]);
-            let stroke_color = stroke.as_ref().map(|source| {
-                source_color(source, (x1 + x2) / 2.0, (y1 + y2) / 2.0, bbox, transform)
-            });
-            stroke_polyline(
-                canvas,
-                &[(x1, y1), (x2, y2)],
-                false,
-                stroke_color,
-                paint.stroke_width * sx.min(sy),
-                paint.line_cap,
-                paint.line_join,
-            );
-        }
-        "polyline" | "polygon" => {
-            let points = parse_svg_points(attribute_ref(&attrs, "points"))
-                .into_iter()
-                .map(|(x, y)| (x * sx + tx, y * sy + ty))
-                .collect::<Vec<_>>();
-            let closed = tag == "polygon";
-            let bbox = rect_for_points(&points);
-            if closed && points.len() >= 3 {
-                if let Some(source) = fill.as_ref() {
-                    fill_compound_source(
-                        canvas,
-                        std::slice::from_ref(&points),
-                        source,
-                        FillRule::NonZero,
-                        transform,
-                        bbox,
-                    );
-                }
-            }
-            let stroke_color = stroke.as_ref().map(|source| {
-                source_color(
-                    source,
-                    bbox.x + bbox.width / 2.0,
-                    bbox.y + bbox.height / 2.0,
-                    bbox,
-                    transform,
-                )
-            });
-            stroke_polyline(
-                canvas,
-                &points,
-                closed,
-                stroke_color,
-                paint.stroke_width * sx.min(sy),
-                paint.line_cap,
-                paint.line_join,
-            );
-        }
-        "path" => {
-            if let Some(d) = attribute_value(&attrs, "d") {
-                let fill_rule = match property_value(&attrs, "fill-rule").as_deref() {
-                    Some(value) if value.eq_ignore_ascii_case("evenodd") => FillRule::EvenOdd,
-                    _ => FillRule::NonZero,
-                };
-                render_path(
-                    canvas,
-                    &d,
-                    sx,
-                    sy,
-                    tx,
-                    ty,
-                    fill.as_ref(),
-                    fill_rule,
-                    stroke.as_ref(),
-                    paint.stroke_width * sx.min(sy),
-                    paint.line_cap,
-                    paint.line_join,
-                    transform,
-                );
-            }
-        }
-        "image" => {
-            let x = parse_svg_coord(attribute_ref(&attrs, "x")).unwrap_or(0.0) * sx + tx;
-            let y = parse_svg_coord(attribute_ref(&attrs, "y")).unwrap_or(0.0) * sy + ty;
-            let Some(width) = parse_svg_size(attribute_ref(&attrs, "width")) else {
-                return;
-            };
-            let Some(height) = parse_svg_size(attribute_ref(&attrs, "height")) else {
-                return;
-            };
-            let width = width * sx;
-            let height = height * sy;
-            if width <= 0.0 || height <= 0.0 {
-                return;
-            }
-            let Some(href) = attribute_value(&attrs, "href")
-                .or_else(|| attribute_value(&attrs, "xlink:href"))
-                .filter(|href| !href.trim().is_empty())
-            else {
-                return;
-            };
-            let Some(image) = decode_svg_image_reference(&href, resources.image_base_url.as_ref())
-            else {
-                return;
-            };
-            let viewport = Rect {
-                x,
-                y,
-                width,
-                height,
-            };
-            let destination = svg_image_destination(
-                viewport,
-                image.width() as f32,
-                image.height() as f32,
-                attribute_ref(&attrs, "preserveAspectRatio").map(String::as_str),
-            );
-            if destination.width <= 0.0 || destination.height <= 0.0 {
-                return;
-            }
-            canvas.draw_image_scaled_clipped_with_opacity(
-                &image,
-                destination,
-                Some(viewport),
-                paint.opacity,
-            );
-        }
+        "use" => render_svg_use(canvas, &attrs, sx, sy, tx, ty, &paint, resources, visited),
+        "rect" => render_svg_rect(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "circle" => render_svg_circle(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "ellipse" => render_svg_ellipse(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "line" => render_svg_line(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "polyline" | "polygon" => render_svg_polyline_or_polygon(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+            tag == "polygon",
+        ),
+        "path" => render_svg_path(
+            canvas,
+            &attrs,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill.as_ref(),
+            stroke.as_ref(),
+            &paint,
+            transform,
+        ),
+        "image" => render_svg_image(canvas, &attrs, sx, sy, tx, ty, paint.opacity, resources),
         _ => render_svg_children(child, canvas, sx, sy, tx, ty, paint, resources, visited),
     }
+}
+
+/// Renders a `<use>` element by resolving its `href` target and recursively
+/// rendering it translated by the element's `x`/`y` attributes, guarding
+/// against reference cycles via `visited`.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_use(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    paint: &SvgPaint,
+    resources: &SvgResources,
+    visited: &mut HashSet<usize>,
+) {
+    let Some(id) = attribute_value(attrs, "href")
+        .or_else(|| attribute_value(attrs, "xlink:href"))
+        .and_then(|href| parse_fragment_reference(&href))
+    else {
+        return;
+    };
+    let Some(target) = resources.node(&id) else {
+        return;
+    };
+    if !visited.insert(target.identity()) {
+        return;
+    }
+    let x = parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0);
+    let y = parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0);
+    render_svg_element(
+        &target,
+        canvas,
+        sx,
+        sy,
+        tx + x * sx,
+        ty + y * sy,
+        paint,
+        resources,
+        visited,
+    );
+    visited.remove(&target.identity());
+}
+
+/// Renders a `<rect>` element's fill and stroke.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_rect(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    let rx = parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0) * sx + tx;
+    let ry = parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0) * sy + ty;
+    let rw = parse_svg_size(attribute_ref(attrs, "width")).unwrap_or(0.0) * sx;
+    let rh = parse_svg_size(attribute_ref(attrs, "height")).unwrap_or(0.0) * sy;
+    if rw > 0.0 && rh > 0.0 {
+        let bbox = Rect {
+            x: rx,
+            y: ry,
+            width: rw,
+            height: rh,
+        };
+        if let Some(source) = fill {
+            fill_rect_source(canvas, bbox, source, transform);
+        }
+        let points = vec![(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)];
+        let stroke_color = stroke
+            .map(|source| source_color(source, rx + rw / 2.0, ry + rh / 2.0, bbox, transform));
+        stroke_polyline(
+            canvas,
+            &points,
+            true,
+            stroke_color,
+            paint.stroke_width * sx.min(sy),
+            paint.line_cap,
+            paint.line_join,
+        );
+    }
+}
+
+/// Renders a `<circle>` element's fill and stroke.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_circle(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    let cx = parse_svg_coord(attribute_ref(attrs, "cx")).unwrap_or(0.0) * sx + tx;
+    let cy = parse_svg_coord(attribute_ref(attrs, "cy")).unwrap_or(0.0) * sy + ty;
+    let r = parse_svg_size(attribute_ref(attrs, "r")).unwrap_or(0.0) * sx.min(sy);
+    if r > 0.0 {
+        let bbox = Rect {
+            x: cx - r,
+            y: cy - r,
+            width: r * 2.0,
+            height: r * 2.0,
+        };
+        if let Some(source) = fill {
+            fill_circle_source(canvas, cx, cy, r, source, transform, bbox);
+        }
+        let stroke_color = stroke.map(|source| source_color(source, cx, cy, bbox, transform));
+        stroke_ellipse(
+            canvas,
+            cx,
+            cy,
+            r,
+            r,
+            paint.stroke_width * sx.min(sy),
+            stroke_color,
+        );
+    }
+}
+
+/// Renders an `<ellipse>` element's fill and stroke.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_ellipse(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    let cx = parse_svg_coord(attribute_ref(attrs, "cx")).unwrap_or(0.0) * sx + tx;
+    let cy = parse_svg_coord(attribute_ref(attrs, "cy")).unwrap_or(0.0) * sy + ty;
+    let rx = parse_svg_size(attribute_ref(attrs, "rx")).unwrap_or(0.0) * sx;
+    let ry = parse_svg_size(attribute_ref(attrs, "ry")).unwrap_or(0.0) * sy;
+    if rx > 0.0 && ry > 0.0 {
+        let bbox = Rect {
+            x: cx - rx,
+            y: cy - ry,
+            width: rx * 2.0,
+            height: ry * 2.0,
+        };
+        if let Some(source) = fill {
+            fill_ellipse_source(canvas, cx, cy, rx, ry, source, transform, bbox);
+        }
+        let stroke_color = stroke.map(|source| source_color(source, cx, cy, bbox, transform));
+        stroke_ellipse(
+            canvas,
+            cx,
+            cy,
+            rx,
+            ry,
+            paint.stroke_width * sx.min(sy),
+            stroke_color,
+        );
+    }
+}
+
+/// Renders a `<line>` element's stroke (lines have no fill).
+fn render_svg_line(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    let x1 = parse_svg_coord(attribute_ref(attrs, "x1")).unwrap_or(0.0) * sx + tx;
+    let y1 = parse_svg_coord(attribute_ref(attrs, "y1")).unwrap_or(0.0) * sy + ty;
+    let x2 = parse_svg_coord(attribute_ref(attrs, "x2")).unwrap_or(0.0) * sx + tx;
+    let y2 = parse_svg_coord(attribute_ref(attrs, "y2")).unwrap_or(0.0) * sy + ty;
+    let bbox = rect_for_points(&[(x1, y1), (x2, y2)]);
+    let stroke_color = stroke
+        .map(|source| source_color(source, (x1 + x2) / 2.0, (y1 + y2) / 2.0, bbox, transform));
+    stroke_polyline(
+        canvas,
+        &[(x1, y1), (x2, y2)],
+        false,
+        stroke_color,
+        paint.stroke_width * sx.min(sy),
+        paint.line_cap,
+        paint.line_join,
+    );
+}
+
+/// Renders a `<polyline>` or `<polygon>` element's fill (polygons only) and
+/// stroke.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_polyline_or_polygon(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+    closed: bool,
+) {
+    let points = parse_svg_points(attribute_ref(attrs, "points"))
+        .into_iter()
+        .map(|(x, y)| (x * sx + tx, y * sy + ty))
+        .collect::<Vec<_>>();
+    let bbox = rect_for_points(&points);
+    if closed && points.len() >= 3 {
+        if let Some(source) = fill {
+            fill_compound_source(
+                canvas,
+                std::slice::from_ref(&points),
+                source,
+                FillRule::NonZero,
+                transform,
+                bbox,
+            );
+        }
+    }
+    let stroke_color = stroke.map(|source| {
+        source_color(
+            source,
+            bbox.x + bbox.width / 2.0,
+            bbox.y + bbox.height / 2.0,
+            bbox,
+            transform,
+        )
+    });
+    stroke_polyline(
+        canvas,
+        &points,
+        closed,
+        stroke_color,
+        paint.stroke_width * sx.min(sy),
+        paint.line_cap,
+        paint.line_join,
+    );
+}
+
+/// Renders a `<path>` element's `d` attribute commands.
+#[allow(clippy::too_many_arguments)]
+fn render_svg_path(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    fill: Option<&PaintSource>,
+    stroke: Option<&PaintSource>,
+    paint: &SvgPaint,
+    transform: SvgTransform,
+) {
+    if let Some(d) = attribute_value(attrs, "d") {
+        let fill_rule = match property_value(attrs, "fill-rule").as_deref() {
+            Some(value) if value.eq_ignore_ascii_case("evenodd") => FillRule::EvenOdd,
+            _ => FillRule::NonZero,
+        };
+        render_path(
+            canvas,
+            &d,
+            sx,
+            sy,
+            tx,
+            ty,
+            fill,
+            fill_rule,
+            stroke,
+            paint.stroke_width * sx.min(sy),
+            paint.line_cap,
+            paint.line_join,
+            transform,
+        );
+    }
+}
+
+/// Renders an `<image>` element by decoding its `href` and drawing it into
+/// the viewport rect described by its `x`/`y`/`width`/`height` attributes.
+fn render_svg_image(
+    canvas: &mut Canvas,
+    attrs: &BTreeMap<String, String>,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    opacity: f32,
+    resources: &SvgResources,
+) {
+    let x = parse_svg_coord(attribute_ref(attrs, "x")).unwrap_or(0.0) * sx + tx;
+    let y = parse_svg_coord(attribute_ref(attrs, "y")).unwrap_or(0.0) * sy + ty;
+    let Some(width) = parse_svg_size(attribute_ref(attrs, "width")) else {
+        return;
+    };
+    let Some(height) = parse_svg_size(attribute_ref(attrs, "height")) else {
+        return;
+    };
+    let width = width * sx;
+    let height = height * sy;
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let Some(href) = attribute_value(attrs, "href")
+        .or_else(|| attribute_value(attrs, "xlink:href"))
+        .filter(|href| !href.trim().is_empty())
+    else {
+        return;
+    };
+    let Some(image) = decode_svg_image_reference(&href, resources.image_base_url.as_ref()) else {
+        return;
+    };
+    let viewport = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let destination = svg_image_destination(
+        viewport,
+        image.width() as f32,
+        image.height() as f32,
+        attribute_ref(attrs, "preserveAspectRatio").map(String::as_str),
+    );
+    if destination.width <= 0.0 || destination.height <= 0.0 {
+        return;
+    }
+    canvas.draw_image_scaled_clipped_with_opacity(&image, destination, Some(viewport), opacity);
 }
 
 fn decode_svg_image_reference(href: &str, base_url: Option<&Url>) -> Option<Image> {
