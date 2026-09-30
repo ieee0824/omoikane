@@ -246,8 +246,20 @@ pub(crate) fn paint_text_with_registry(
                         .find(|child| child.node == fragment.node)
                     {
                         super::paint_box_internal(
-                            canvas, child, resolver, clip, _viewport, true, fonts, web_fonts,
-                            offset,
+                            canvas,
+                            child,
+                            resolver,
+                            super::PaintContext {
+                                viewport: _viewport,
+                                text_fonts: fonts,
+                                web_fonts,
+                            },
+                            super::PaintBoxOptions {
+                                inherited_clip: clip,
+                                include_phase_descendants: true,
+                                paint_decorations: true,
+                                offset,
+                            },
                         );
                     }
                 }

@@ -1933,6 +1933,31 @@ pub fn diff_canvases_with_tolerance(
     (diff, changed)
 }
 
+/// Immutable render inputs borrowed only for the current paint traversal.
+/// The mutable resolver remains an explicit argument rather than being held
+/// inside a context and propagating its borrow through nested state.
+#[derive(Clone, Copy)]
+struct PaintContext<'a> {
+    viewport: Rect,
+    text_fonts: &'a [Arc<Font>],
+    web_fonts: Option<&'a WebFontRegistry>,
+}
+
+/// Per-box traversal state in the destination surface's coordinate system.
+#[derive(Clone, Copy)]
+struct PaintBoxOptions {
+    inherited_clip: Option<Rect>,
+    include_phase_descendants: bool,
+    paint_decorations: bool,
+    offset: PaintOffset,
+}
+
+#[derive(Clone, Copy)]
+struct PaintBoxGeometry {
+    border_box: Rect,
+    padding_box: Rect,
+}
+
 fn paint_box(
     canvas: &mut Canvas,
     layout: &LayoutBox,
@@ -1946,12 +1971,17 @@ fn paint_box(
         canvas,
         layout,
         resolver,
-        inherited_clip,
-        viewport,
-        true,
-        text_fonts,
-        web_fonts,
-        PaintOffset::default(),
+        PaintContext {
+            viewport,
+            text_fonts,
+            web_fonts,
+        },
+        PaintBoxOptions {
+            inherited_clip,
+            include_phase_descendants: true,
+            paint_decorations: true,
+            offset: PaintOffset::default(),
+        },
     );
 }
 
@@ -1959,13 +1989,16 @@ fn paint_box_internal(
     canvas: &mut Canvas,
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
-    inherited_clip: Option<Rect>,
-    viewport: Rect,
-    include_phase_descendants: bool,
-    text_fonts: &[Arc<Font>],
-    web_fonts: Option<&WebFontRegistry>,
-    offset: PaintOffset,
+    context: PaintContext<'_>,
+    options: PaintBoxOptions,
 ) {
+    let viewport = context.viewport;
+    let PaintBoxOptions {
+        inherited_clip,
+        include_phase_descendants,
+        offset,
+        ..
+    } = options;
     if layout.node.top_layer_order().is_some()
         && let Some(backdrop) =
             resolver.computed_pseudo_style(&layout.node, PseudoElement::Backdrop)
@@ -1995,11 +2028,13 @@ fn paint_box_internal(
                     canvas,
                     layout,
                     resolver,
-                    Some(fragment_clip),
-                    viewport,
-                    text_fonts,
-                    web_fonts,
-                    offset,
+                    context,
+                    PaintBoxOptions {
+                        inherited_clip: Some(fragment_clip),
+                        include_phase_descendants: false,
+                        paint_decorations: true,
+                        offset,
+                    },
                     fragment.target,
                 );
             }
@@ -2016,13 +2051,13 @@ fn paint_box_internal(
                 canvas,
                 layout,
                 resolver,
-                Some(content_clip),
-                viewport,
-                include_phase_descendants,
-                text_fonts,
-                web_fonts,
-                fragment.clone_content_target.is_none(),
-                offset.shifted(dx, dy),
+                context,
+                PaintBoxOptions {
+                    inherited_clip: Some(content_clip),
+                    include_phase_descendants,
+                    paint_decorations: fragment.clone_content_target.is_none(),
+                    offset: offset.shifted(dx, dy),
+                },
             );
         }
         return;
@@ -2032,26 +2067,22 @@ fn paint_box_internal(
         canvas,
         layout,
         resolver,
-        inherited_clip,
-        viewport,
-        include_phase_descendants,
-        text_fonts,
-        web_fonts,
-        true,
-        offset,
+        context,
+        PaintBoxOptions {
+            inherited_clip,
+            include_phase_descendants,
+            paint_decorations: true,
+            offset,
+        },
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint_cloned_fragment_decorations(
     canvas: &mut Canvas,
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
-    inherited_clip: Option<Rect>,
-    viewport: Rect,
-    text_fonts: &[Arc<Font>],
-    web_fonts: Option<&WebFontRegistry>,
-    offset: PaintOffset,
+    context: PaintContext<'_>,
+    options: PaintBoxOptions,
     target: Rect,
 ) {
     let padding = layout.dimensions.padding;
@@ -2090,56 +2121,28 @@ fn paint_cloned_fragment_decorations(
         canvas,
         &decoration,
         resolver,
-        inherited_clip,
-        viewport,
-        false,
-        text_fonts,
-        web_fonts,
-        true,
-        offset,
+        context,
+        PaintBoxOptions {
+            include_phase_descendants: false,
+            paint_decorations: true,
+            ..options
+        },
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint_box_internal_single(
     canvas: &mut Canvas,
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
-    inherited_clip: Option<Rect>,
-    viewport: Rect,
-    include_phase_descendants: bool,
-    text_fonts: &[Arc<Font>],
-    web_fonts: Option<&WebFontRegistry>,
-    paint_decorations: bool,
-    offset: PaintOffset,
+    context: PaintContext<'_>,
+    options: PaintBoxOptions,
 ) {
     if !layout.transform.is_identity() {
-        paint_transformed_box(
-            canvas,
-            layout,
-            resolver,
-            inherited_clip,
-            viewport,
-            text_fonts,
-            web_fonts,
-            paint_decorations,
-            offset,
-        );
+        paint_transformed_box(canvas, layout, resolver, context, options);
         return;
     }
 
-    paint_box_internal_untransformed(
-        canvas,
-        layout,
-        resolver,
-        inherited_clip,
-        viewport,
-        include_phase_descendants,
-        text_fonts,
-        web_fonts,
-        paint_decorations,
-        offset,
-    );
+    paint_box_internal_untransformed(canvas, layout, resolver, context, options);
 }
 
 /// Translation from immutable layout coordinates into the current paint surface.
@@ -2180,18 +2183,20 @@ thread_local! {
 
 const TRANSFORM_SURFACE_TILE_SIZE: u32 = 2048;
 
-#[allow(clippy::too_many_arguments)]
 fn paint_transformed_box(
     canvas: &mut Canvas,
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
-    inherited_clip: Option<Rect>,
-    viewport: Rect,
-    text_fonts: &[Arc<Font>],
-    web_fonts: Option<&WebFontRegistry>,
-    paint_decorations: bool,
-    offset: PaintOffset,
+    context: PaintContext<'_>,
+    options: PaintBoxOptions,
 ) {
+    let viewport = context.viewport;
+    let PaintBoxOptions {
+        inherited_clip,
+        paint_decorations,
+        offset,
+        ..
+    } = options;
     #[cfg(test)]
     if transform_tiles_tests::use_reference() {
         return transform_tiles_tests::paint_reference(
@@ -2200,8 +2205,8 @@ fn paint_transformed_box(
             resolver,
             inherited_clip,
             viewport,
-            text_fonts,
-            web_fonts,
+            context.text_fonts,
+            context.web_fonts,
             paint_decorations,
             offset,
         );
@@ -2273,13 +2278,16 @@ fn paint_transformed_box(
                 &mut offscreen,
                 layout,
                 resolver,
-                None,
-                translated_viewport,
-                true,
-                text_fonts,
-                web_fonts,
-                paint_decorations,
-                tile_offset,
+                PaintContext {
+                    viewport: translated_viewport,
+                    ..context
+                },
+                PaintBoxOptions {
+                    inherited_clip: None,
+                    include_phase_descendants: true,
+                    paint_decorations,
+                    offset: tile_offset,
+                },
             );
             let tile_transform =
                 transform.multiply(AffineTransform::translate(tile_x as f32, tile_y as f32));
@@ -3084,14 +3092,16 @@ fn paint_box_internal_untransformed(
     canvas: &mut Canvas,
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
-    inherited_clip: Option<Rect>,
-    viewport: Rect,
-    include_phase_descendants: bool,
-    text_fonts: &[Arc<Font>],
-    web_fonts: Option<&WebFontRegistry>,
-    paint_decorations: bool,
-    offset: PaintOffset,
+    context: PaintContext<'_>,
+    options: PaintBoxOptions,
 ) {
+    let viewport = context.viewport;
+    let PaintBoxOptions {
+        inherited_clip,
+        include_phase_descendants,
+        paint_decorations,
+        offset,
+    } = options;
     if layout.visibility == Visibility::Hidden {
         return;
     }
@@ -3199,16 +3209,21 @@ fn paint_box_internal_untransformed(
             &mut offscreen,
             layout,
             resolver,
-            offset_inherited_clip,
-            offset_viewport,
-            include_phase_descendants,
-            text_fonts,
-            web_fonts,
+            PaintContext {
+                viewport: offset_viewport,
+                ..context
+            },
             &style,
-            offset_border_box,
-            offset_padding_box,
-            paint_decorations,
-            surface_offset,
+            PaintBoxGeometry {
+                border_box: offset_border_box,
+                padding_box: offset_padding_box,
+            },
+            PaintBoxOptions {
+                inherited_clip: offset_inherited_clip,
+                include_phase_descendants,
+                paint_decorations,
+                offset: surface_offset,
+            },
         );
         apply_filters(&mut offscreen, &filters);
         offscreen.multiply_alpha(opacity_value);
@@ -3255,16 +3270,18 @@ fn paint_box_internal_untransformed(
         canvas,
         layout,
         resolver,
-        inherited_clip,
-        viewport,
-        include_phase_descendants,
-        text_fonts,
-        web_fonts,
+        context,
         &style,
-        border_box,
-        padding_box,
-        paint_decorations,
-        offset,
+        PaintBoxGeometry {
+            border_box,
+            padding_box,
+        },
+        PaintBoxOptions {
+            inherited_clip,
+            include_phase_descendants,
+            paint_decorations,
+            offset,
+        },
     );
 }
 
@@ -3870,22 +3887,30 @@ fn overflow_clip_rect(
     intersect(base, axis_clip)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint_box_internal_to(
     canvas: &mut Canvas,
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
-    inherited_clip: Option<Rect>,
-    viewport: Rect,
-    include_phase_descendants: bool,
-    text_fonts: &[Arc<Font>],
-    web_fonts: Option<&WebFontRegistry>,
+    context: PaintContext<'_>,
     style: &ComputedStyle,
-    border_box: Rect,
-    padding_box: Rect,
-    paint_decorations: bool,
-    offset: PaintOffset,
+    geometry: PaintBoxGeometry,
+    options: PaintBoxOptions,
 ) {
+    let PaintContext {
+        viewport,
+        text_fonts,
+        web_fonts,
+    } = context;
+    let PaintBoxGeometry {
+        border_box,
+        padding_box,
+    } = geometry;
+    let PaintBoxOptions {
+        inherited_clip,
+        include_phase_descendants,
+        paint_decorations,
+        offset,
+    } = options;
     let has_paint_containment = crate::layout::has_containment(style, "paint");
     let paint_containment_clip = has_paint_containment
         .then(|| intersect_optional_clip(inherited_clip, padding_box))
@@ -4044,39 +4069,37 @@ fn paint_box_internal_to(
     negative_positioned_children.sort_by_key(|child| child.z_index);
     positive_positioned_children.sort_by_key(|child| child.z_index);
 
+    let phase_options = PaintBoxOptions {
+        inherited_clip: clip,
+        include_phase_descendants: true,
+        paint_decorations: true,
+        offset,
+    };
+    let flow_options = PaintBoxOptions {
+        include_phase_descendants: false,
+        ..phase_options
+    };
     for child in negative_positioned_children {
-        paint_box_internal(
-            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts, offset,
-        );
+        paint_box_internal(canvas, child, resolver, context, phase_options);
     }
     for child in normal_block_children {
-        paint_box_internal(
-            canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts, offset,
-        );
+        paint_box_internal(canvas, child, resolver, context, flow_options);
     }
     for child in float_children {
-        paint_box_internal(
-            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts, offset,
-        );
+        paint_box_internal(canvas, child, resolver, context, phase_options);
     }
     text::paint_text_with_registry(
         canvas, layout, resolver, style, clip, viewport, text_fonts, web_fonts, offset,
     );
     text::paint_list_marker(canvas, layout, style, clip, text_fonts, offset);
     for child in inline_children {
-        paint_box_internal(
-            canvas, child, resolver, clip, viewport, false, text_fonts, web_fonts, offset,
-        );
+        paint_box_internal(canvas, child, resolver, context, flow_options);
     }
     for child in auto_positioned_children {
-        paint_box_internal(
-            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts, offset,
-        );
+        paint_box_internal(canvas, child, resolver, context, phase_options);
     }
     for child in positive_positioned_children {
-        paint_box_internal(
-            canvas, child, resolver, clip, viewport, true, text_fonts, web_fonts, offset,
-        );
+        paint_box_internal(canvas, child, resolver, context, phase_options);
     }
 }
 

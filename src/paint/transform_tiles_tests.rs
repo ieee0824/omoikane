@@ -238,13 +238,17 @@ pub(super) fn paint_reference(
                 &mut offscreen,
                 &translated_layout,
                 resolver,
-                None,
-                translated_viewport,
-                true,
-                text_fonts,
-                web_fonts,
-                paint_decorations,
-                PaintOffset::default(),
+                PaintContext {
+                    viewport: translated_viewport,
+                    text_fonts,
+                    web_fonts,
+                },
+                PaintBoxOptions {
+                    inherited_clip: None,
+                    include_phase_descendants: true,
+                    paint_decorations,
+                    offset: PaintOffset::default(),
+                },
             );
             let tile_transform = layout
                 .transform
