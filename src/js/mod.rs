@@ -4989,6 +4989,17 @@ impl Default for JsRuntime {
     }
 }
 
+/// A dynamically inserted (non-parser) script pending timer dispatch: the
+/// script node, its `src`, its classified kind, its resolved base URL, and
+/// the identity of the document that owns it.
+type DynamicScriptInfo = (
+    NodeHandle,
+    String,
+    ScriptKind,
+    Option<crate::http::Url>,
+    usize,
+);
+
 impl JsRuntime {
     /// Creates a JavaScript runtime with a default document.
     pub fn new() -> JsResult<Self> {
@@ -8576,394 +8587,439 @@ impl JsRuntime {
                 }
                 self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
             }
-            TimerPayload::ResourceLoad { node_id } => {
-                if self
-                    .host_state
-                    .borrow()
-                    .parser_inserted_scripts
-                    .contains(&node_id)
-                {
-                    return self.run_written_script(node_id);
-                }
-                let (should_dispatch, initial_scripts, dynamic_script, resource_document_id) = {
-                    let mut state = self.host_state.borrow_mut();
-                    state.pending_resource_loads.remove(&node_id);
-                    let Some(node) = state.get_node(node_id) else {
-                        state.pending_iframe_visits.remove(&node_id);
-                        return Ok(());
-                    };
-                    let resource_document_id = document_root_for_node(&node)
-                        .map(|document| document.identity())
-                        .unwrap_or_else(|| state.document.identity());
-                    if !state.node_is_in_active_document(&node) {
-                        state.pending_iframe_visits.remove(&node_id);
-                        (false, Vec::new(), None, resource_document_id)
-                    } else {
-                        let mut initial_scripts: Vec<NodeHandle> = Vec::new();
-                        // A dynamically inserted external script is classified by
-                        // the same `type` gate the parsed-document path uses, so a
-                        // script runs the same way however it reached the tree.
-                        let dynamic_script = if node
-                            .tag_name()
-                            .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
-                        {
-                            let document_id = document_root_for_node(&node)
-                                .map(|document| document.identity())
-                                .unwrap_or_else(|| state.document.identity());
-                            node.get_attribute("src").map(|src| {
-                                let kind = ScriptKind::from_type_attribute(
-                                    node.get_attribute("type").as_deref(),
-                                );
-                                (
-                                    node.clone(),
-                                    src,
-                                    kind,
-                                    state.base_url_for_document(document_id),
-                                    document_id,
-                                )
-                            })
-                        } else {
-                            None
-                        };
-                        if node
-                            .tag_name()
-                            .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
-                        {
-                            // A newly connected iframe starts a fresh navigation.
-                            // This also makes detach/reconnect reload rather than
-                            // merely replaying the old document's event.
-                            let previous_document = state
-                                .iframe_documents
-                                .get(&node_id)
-                                .map(|entry| entry.document.identity());
-                            let document = match state.iframe_content_document(&node) {
-                                Ok(document) => document,
-                                Err(error) => {
-                                    state.pending_iframe_visits.remove(&node_id);
-                                    return Err(JsNativeError::error()
-                                        .with_message(error.to_string())
-                                        .into());
-                                }
-                            };
-                            if previous_document == Some(document.identity()) {
-                                // This queued load became a no-op. A plain
-                                // contentDocument read must not clear a later
-                                // form submission's pending visit source.
-                                state.pending_iframe_visits.remove(&node_id);
-                            }
-                            let ids = state
-                                .iframe_documents
-                                .get_mut(&node_id)
-                                .map(|entry| std::mem::take(&mut entry.initial_scripts))
-                                .unwrap_or_default();
-                            initial_scripts = ids
-                                .into_iter()
-                                .filter_map(|id| state.get_node(id))
-                                .filter(|script| {
-                                    document_root_for_node(script).as_ref() == Some(&document)
-                                })
-                                .filter(is_inline_classic_script)
-                                .collect();
-                        }
-                        (true, initial_scripts, dynamic_script, resource_document_id)
-                    }
-                };
-                let dispatch_document_id = dynamic_script
-                    .as_ref()
-                    .and_then(|(script, _, _, _, _)| document_root_for_node(script))
-                    .map(|document| document.identity())
-                    .unwrap_or(resource_document_id);
-                let iframe_context = initial_scripts
-                    .first()
-                    .and_then(document_root_for_node)
-                    .map(|document| (node_id, document.identity()));
-                if should_dispatch {
-                    let forgotten = self.eval("__omoikane_forget_discarded_node_wrappers()");
-                    self.record_error_from("iframe wrapper cleanup", forgotten);
-                }
-                for script in initial_scripts {
-                    // Like top-level document scripts, one failing initial
-                    // script must not prevent later scripts or the iframe load
-                    // event from running.
-                    let (sandbox_allowed, csp_allowed) = {
-                        let mut state = self.host_state.borrow_mut();
-                        // Earlier scripts can remove the frame or replace its
-                        // Document. Never run the remaining old script nodes.
-                        if !state.node_is_in_active_document(&script)
-                            || !state.started_inserted_scripts.insert(script.identity())
-                        {
-                            continue;
-                        }
-                        (
-                            state.sandbox_allows_scripts_for_node(&script),
-                            state
-                                .csp_policy_for_node(&script)
-                                .allows_inline(ResourceType::Script),
-                        )
-                    };
-                    if !sandbox_allowed {
-                        continue;
-                    }
-                    if !csp_allowed {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            &script,
-                            ResourceType::Script,
-                            "inline",
-                        );
-                        continue;
-                    }
-                    #[cfg(test)]
-                    if let Some(document) = document_root_for_node(&script) {
-                        *self
-                            .host_state
-                            .borrow_mut()
-                            .document_script_executions
-                            .entry(document.identity())
-                            .or_default() += 1;
-                    }
-                    let source = collect_text_content(&script);
-                    let result = if let Some((iframe_id, document_id)) = iframe_context {
-                        self.eval_iframe_script(iframe_id, document_id, script.identity(), &source)
-                    } else {
-                        self.eval(&source).and_then(|_| self.run_jobs())
-                    };
-                    self.record_error_from("iframe inline script", result);
-                }
-                // A script whose type Omoikane does not execute is not fetched and
-                // does not load, so it must not go on to dispatch `load` either.
-                let mut dispatch_load = should_dispatch && {
-                    let state = self.host_state.borrow();
-                    iframe_context.is_none_or(|(iframe_id, document_id)| {
-                        state
-                            .iframe_documents
-                            .get(&iframe_id)
-                            .is_some_and(|entry| entry.document.identity() == document_id)
-                            && state
-                                .get_node(iframe_id)
-                                .is_some_and(|frame| state.node_is_in_active_document(&frame))
-                    })
-                };
-                let mut dispatch_timing: Option<(String, bool, f64)> = None;
-                if let Some((script_node, src, kind, base_url, document_id)) = dynamic_script {
-                    let _script_document = activate_module_document(&self.host_state, document_id);
-                    let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
-                    if kind == ScriptKind::NotExecutable {
-                        if log_scripts {
-                            eprintln!("[omoikane][script] skipped dynamic {src}");
-                        }
-                        dispatch_load = false;
-                    } else if !self
-                        .host_state
-                        .borrow()
-                        .sandbox_allows_scripts_for_node(&script_node)
-                    {
-                        if log_scripts {
-                            eprintln!("[omoikane][script] blocked dynamic {src} by iframe sandbox");
-                        }
-                        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
-                        let dispatched = self.eval_in_document_realm(
-                            dispatch_document_id,
-                            &dispatch_resource_timing_script(
-                                "error",
-                                node_id,
-                                &timing_name,
-                                false,
-                                0.0,
-                            ),
-                        );
-                        self.record_error_from(&src, dispatched);
-                        dispatch_load = false;
-                    } else if !self
-                        .host_state
-                        .borrow()
-                        .csp_policy_for_node(&script_node)
-                        .allows_reference(ResourceType::Script, &src)
-                    {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            &script_node,
-                            ResourceType::Script,
-                            &src,
-                        );
-                        if log_scripts {
-                            eprintln!("[omoikane][script] blocked dynamic {src} by CSP");
-                        }
-                        dispatch_load = false;
-                    } else {
-                        if log_scripts {
-                            eprintln!("[omoikane][script] loading dynamic {src} kind={kind:?}");
-                        }
-                        let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
-                        let fetch_start = std::time::Instant::now();
-                        let fetched = {
-                            let mut state = self.host_state.borrow_mut();
-                            fetch_script_resource_with_client(
-                                &src,
-                                base_url.as_ref(),
-                                &mut state.http_client,
-                            )
-                        };
-                        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
-                        match fetched {
-                            // Every failure below is the page's, not the engine's:
-                            // it is recorded and execution continues, exactly as
-                            // `execute_document_scripts` treats a parsed script.
-                            // Propagating instead would abort the event loop and,
-                            // through it, the whole navigation.
-                            None => {
-                                // A script that never arrived did not load: it
-                                // fires `error` instead, so a loader waiting on
-                                // one of the two is not left with neither.
-                                self.record_task_error(format!(
-                                    "[dynamic script: {src}] failed to fetch"
-                                ));
-                                dispatch_load = false;
-                                let dispatched = self.eval_in_document_realm(
-                                    dispatch_document_id,
-                                    &dispatch_resource_timing_script(
-                                        "error",
-                                        node_id,
-                                        &timing_name,
-                                        false,
-                                        elapsed_ms,
-                                    ),
-                                );
-                                self.record_error_from(&src, dispatched);
-                            }
-                            Some((effective_url, _source, redirect_count))
-                                if !self
-                                    .host_state
-                                    .borrow()
-                                    .csp_policy_for_node(&script_node)
-                                    .allows_reference_after_redirects(
-                                        ResourceType::Script,
-                                        &effective_url,
-                                        redirect_count,
-                                    ) =>
-                            {
-                                let redirected = resource_reference_was_redirected(
-                                    &src,
-                                    &effective_url,
-                                    base_url.as_ref(),
-                                );
-                                self.host_state.borrow_mut().record_csp_violation_for_node(
-                                    &script_node,
-                                    ResourceType::Script,
-                                    effective_url.clone(),
-                                );
-                                dispatch_load = false;
-                                let dispatched = self.eval_in_document_realm(
-                                    dispatch_document_id,
-                                    &dispatch_resource_timing_script(
-                                        "error",
-                                        node_id,
-                                        &effective_url,
-                                        redirected,
-                                        elapsed_ms,
-                                    ),
-                                );
-                                self.record_error_from(&src, dispatched);
-                            }
-                            Some((effective_url, source, _redirect_count)) => {
-                                let redirected = resource_reference_was_redirected(
-                                    &src,
-                                    &effective_url,
-                                    base_url.as_ref(),
-                                );
-                                dispatch_timing = Some((effective_url, redirected, elapsed_ms));
-                                let result = match kind {
-                                    ScriptKind::Module => {
-                                        self.eval_module_in_document_realm_timed(
-                                            dispatch_document_id,
-                                            script_node.identity(),
-                                            &source,
-                                            &module_script_url(&src, base_url.as_ref(), false),
-                                            document_root_for_node(&script_node)
-                                                .unwrap_or_else(|| self.document()),
-                                        )
-                                        .0
-                                    }
-                                    _ => self
-                                        .eval_script_in_document_realm(
-                                            dispatch_document_id,
-                                            script_node.identity(),
-                                            &source,
-                                        )
-                                        .map(|_| JsValue::undefined())
-                                        .map_err(JsEvaluationError::JavaScript),
-                                };
-                                if let Err(error) = result {
-                                    let context = script_source_context(&source);
-                                    self.record_task_error(format!(
-                                        "[dynamic script: {src}; {context}] {error}"
-                                    ));
-                                }
-                                if log_scripts {
-                                    eprintln!("[omoikane][script] completed dynamic {src}");
-                                }
-                            }
-                        }
-                    }
-                }
-                if dispatch_load {
-                    self.refresh_window_names_after_iframe_load(node_id, dispatch_document_id);
-                    let child_document_id = {
-                        let state = self.host_state.borrow();
-                        state
-                            .get_node(node_id)
-                            .filter(|node| {
-                                node.tag_name()
-                                    .is_some_and(|name| name.eq_ignore_ascii_case("iframe"))
-                            })
-                            .and_then(|_| state.iframe_documents.get(&node_id))
-                            .and_then(|entry| {
-                                // A Window load listener requires a live Realm. An inline
-                                // body/frameset onload attribute is the one exception: it
-                                // needs a Realm to be wired before dispatch.
-                                let has_inline_load = || {
-                                    ["body", "frameset"].iter().any(|tag| {
-                                        entry.document.query_selector(tag).is_some_and(|node| {
-                                            node.get_attribute("onload").is_some()
-                                        })
-                                    })
-                                };
-                                (entry.realm.is_some() || has_inline_load())
-                                    .then_some(entry.document.identity())
-                            })
-                    };
-                    if let Some(document_id) = child_document_id {
-                        match self.realm_for_document(document_id) {
-                            Ok(_) => {
-                                let dispatched = self.eval_in_document_realm(
-                                    document_id,
-                                    &format!("__omoikane_wire_inline_handlers(); {LOAD_SCRIPT}"),
-                                );
-                                self.record_error_from("iframe window load", dispatched);
-                            }
-                            Err(error) => {
-                                self.record_task_error(format!("[iframe window load] {error}"))
-                            }
-                        }
-                    }
-                    let (timing_name, redirected, elapsed_ms) =
-                        dispatch_timing.unwrap_or_else(|| (String::new(), false, 0.0));
-                    let dispatched = self.eval_in_document_realm(
-                        dispatch_document_id,
-                        &dispatch_resource_timing_script(
-                            "load",
-                            node_id,
-                            &timing_name,
-                            redirected,
-                            elapsed_ms,
-                        ),
-                    );
-                    self.record_error_from("resource load", dispatched);
-                }
-                Ok(())
-            }
+            TimerPayload::ResourceLoad { node_id } => self.run_resource_load_timer(node_id),
             TimerPayload::GeolocationTimeout { request_id } => {
                 self.run_geolocation_delivery(request_id, true)
             }
         }
+    }
+
+    /// Handles a `TimerPayload::ResourceLoad` timer for a script or iframe node:
+    /// runs a parser-inserted script directly; otherwise gathers the node's
+    /// pending initial iframe scripts and dynamic script, runs them, and
+    /// dispatches the resulting `load` (or `error`) event.
+    fn run_resource_load_timer(&mut self, node_id: usize) -> JsResult<()> {
+        if self
+            .host_state
+            .borrow()
+            .parser_inserted_scripts
+            .contains(&node_id)
+        {
+            return self.run_written_script(node_id);
+        }
+        let Some((should_dispatch, initial_scripts, dynamic_script, resource_document_id)) =
+            self.gather_resource_load_dispatch_state(node_id)?
+        else {
+            return Ok(());
+        };
+        let dispatch_document_id = dynamic_script
+            .as_ref()
+            .and_then(|(script, _, _, _, _)| document_root_for_node(script))
+            .map(|document| document.identity())
+            .unwrap_or(resource_document_id);
+        let iframe_context = initial_scripts
+            .first()
+            .and_then(document_root_for_node)
+            .map(|document| (node_id, document.identity()));
+        if should_dispatch {
+            let forgotten = self.eval("__omoikane_forget_discarded_node_wrappers()");
+            self.record_error_from("iframe wrapper cleanup", forgotten);
+        }
+        self.run_initial_iframe_scripts(initial_scripts, iframe_context);
+        // A script whose type Omoikane does not execute is not fetched and
+        // does not load, so it must not go on to dispatch `load` either.
+        let mut dispatch_load = should_dispatch && {
+            let state = self.host_state.borrow();
+            iframe_context.is_none_or(|(iframe_id, document_id)| {
+                state
+                    .iframe_documents
+                    .get(&iframe_id)
+                    .is_some_and(|entry| entry.document.identity() == document_id)
+                    && state
+                        .get_node(iframe_id)
+                        .is_some_and(|frame| state.node_is_in_active_document(&frame))
+            })
+        };
+        let mut dispatch_timing: Option<(String, bool, f64)> = None;
+        if let Some(dynamic_script) = dynamic_script {
+            let (updated_load, updated_timing) = self.run_dynamic_timer_script(
+                node_id,
+                dispatch_document_id,
+                dynamic_script,
+                dispatch_load,
+            );
+            dispatch_load = updated_load;
+            dispatch_timing = updated_timing;
+        }
+        if dispatch_load {
+            self.dispatch_resource_load_event(node_id, dispatch_document_id, dispatch_timing);
+        }
+        Ok(())
+    }
+
+    /// Gathers the initial iframe scripts and dynamic script pending on a
+    /// resource-load timer's node, and whether the timer should still
+    /// dispatch its `load`/`error` event. Returns `Ok(None)` when the node
+    /// (or its document) is no longer live, matching this timer's original
+    /// no-op early return.
+    fn gather_resource_load_dispatch_state(
+        &mut self,
+        node_id: usize,
+    ) -> JsResult<Option<(bool, Vec<NodeHandle>, Option<DynamicScriptInfo>, usize)>> {
+        let mut state = self.host_state.borrow_mut();
+        state.pending_resource_loads.remove(&node_id);
+        let Some(node) = state.get_node(node_id) else {
+            state.pending_iframe_visits.remove(&node_id);
+            return Ok(None);
+        };
+        let resource_document_id = document_root_for_node(&node)
+            .map(|document| document.identity())
+            .unwrap_or_else(|| state.document.identity());
+        if !state.node_is_in_active_document(&node) {
+            state.pending_iframe_visits.remove(&node_id);
+            Ok(Some((false, Vec::new(), None, resource_document_id)))
+        } else {
+            let mut initial_scripts: Vec<NodeHandle> = Vec::new();
+            // A dynamically inserted external script is classified by
+            // the same `type` gate the parsed-document path uses, so a
+            // script runs the same way however it reached the tree.
+            let dynamic_script = if node
+                .tag_name()
+                .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+            {
+                let document_id = document_root_for_node(&node)
+                    .map(|document| document.identity())
+                    .unwrap_or_else(|| state.document.identity());
+                node.get_attribute("src").map(|src| {
+                    let kind =
+                        ScriptKind::from_type_attribute(node.get_attribute("type").as_deref());
+                    (
+                        node.clone(),
+                        src,
+                        kind,
+                        state.base_url_for_document(document_id),
+                        document_id,
+                    )
+                })
+            } else {
+                None
+            };
+            if node
+                .tag_name()
+                .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
+            {
+                // A newly connected iframe starts a fresh navigation.
+                // This also makes detach/reconnect reload rather than
+                // merely replaying the old document's event.
+                let previous_document = state
+                    .iframe_documents
+                    .get(&node_id)
+                    .map(|entry| entry.document.identity());
+                let document = match state.iframe_content_document(&node) {
+                    Ok(document) => document,
+                    Err(error) => {
+                        state.pending_iframe_visits.remove(&node_id);
+                        return Err(JsNativeError::error()
+                            .with_message(error.to_string())
+                            .into());
+                    }
+                };
+                if previous_document == Some(document.identity()) {
+                    // This queued load became a no-op. A plain
+                    // contentDocument read must not clear a later
+                    // form submission's pending visit source.
+                    state.pending_iframe_visits.remove(&node_id);
+                }
+                let ids = state
+                    .iframe_documents
+                    .get_mut(&node_id)
+                    .map(|entry| std::mem::take(&mut entry.initial_scripts))
+                    .unwrap_or_default();
+                initial_scripts = ids
+                    .into_iter()
+                    .filter_map(|id| state.get_node(id))
+                    .filter(|script| document_root_for_node(script).as_ref() == Some(&document))
+                    .filter(is_inline_classic_script)
+                    .collect();
+            }
+            Ok(Some((
+                true,
+                initial_scripts,
+                dynamic_script,
+                resource_document_id,
+            )))
+        }
+    }
+
+    /// Runs each of an iframe's initial (parser-authored) scripts that are
+    /// still live, in document order, tolerating a script that removes the
+    /// frame or replaces its `Document` partway through.
+    fn run_initial_iframe_scripts(
+        &mut self,
+        initial_scripts: Vec<NodeHandle>,
+        iframe_context: Option<(usize, usize)>,
+    ) {
+        for script in initial_scripts {
+            // Like top-level document scripts, one failing initial
+            // script must not prevent later scripts or the iframe load
+            // event from running.
+            let (sandbox_allowed, csp_allowed) = {
+                let mut state = self.host_state.borrow_mut();
+                // Earlier scripts can remove the frame or replace its
+                // Document. Never run the remaining old script nodes.
+                if !state.node_is_in_active_document(&script)
+                    || !state.started_inserted_scripts.insert(script.identity())
+                {
+                    continue;
+                }
+                (
+                    state.sandbox_allows_scripts_for_node(&script),
+                    state
+                        .csp_policy_for_node(&script)
+                        .allows_inline(ResourceType::Script),
+                )
+            };
+            if !sandbox_allowed {
+                continue;
+            }
+            if !csp_allowed {
+                self.host_state.borrow_mut().record_csp_violation_for_node(
+                    &script,
+                    ResourceType::Script,
+                    "inline",
+                );
+                continue;
+            }
+            #[cfg(test)]
+            if let Some(document) = document_root_for_node(&script) {
+                *self
+                    .host_state
+                    .borrow_mut()
+                    .document_script_executions
+                    .entry(document.identity())
+                    .or_default() += 1;
+            }
+            let source = collect_text_content(&script);
+            let result = if let Some((iframe_id, document_id)) = iframe_context {
+                self.eval_iframe_script(iframe_id, document_id, script.identity(), &source)
+            } else {
+                self.eval(&source).and_then(|_| self.run_jobs())
+            };
+            self.record_error_from("iframe inline script", result);
+        }
+    }
+
+    /// Fetches (or skips, per sandbox/CSP) and runs a dynamically inserted
+    /// script for a resource-load timer, returning the updated
+    /// dispatch-`load` flag and the resource-timing data for its `load` or
+    /// `error` event.
+    fn run_dynamic_timer_script(
+        &mut self,
+        node_id: usize,
+        dispatch_document_id: usize,
+        dynamic_script: DynamicScriptInfo,
+        mut dispatch_load: bool,
+    ) -> (bool, Option<(String, bool, f64)>) {
+        let (script_node, src, kind, base_url, document_id) = dynamic_script;
+        let mut dispatch_timing: Option<(String, bool, f64)> = None;
+        let _script_document = activate_module_document(&self.host_state, document_id);
+        let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
+        if kind == ScriptKind::NotExecutable {
+            if log_scripts {
+                eprintln!("[omoikane][script] skipped dynamic {src}");
+            }
+            dispatch_load = false;
+        } else if !self
+            .host_state
+            .borrow()
+            .sandbox_allows_scripts_for_node(&script_node)
+        {
+            if log_scripts {
+                eprintln!("[omoikane][script] blocked dynamic {src} by iframe sandbox");
+            }
+            let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
+            let dispatched = self.eval_in_document_realm(
+                dispatch_document_id,
+                &dispatch_resource_timing_script("error", node_id, &timing_name, false, 0.0),
+            );
+            self.record_error_from(&src, dispatched);
+            dispatch_load = false;
+        } else if !self
+            .host_state
+            .borrow()
+            .csp_policy_for_node(&script_node)
+            .allows_reference(ResourceType::Script, &src)
+        {
+            self.host_state.borrow_mut().record_csp_violation_for_node(
+                &script_node,
+                ResourceType::Script,
+                &src,
+            );
+            if log_scripts {
+                eprintln!("[omoikane][script] blocked dynamic {src} by CSP");
+            }
+            dispatch_load = false;
+        } else {
+            if log_scripts {
+                eprintln!("[omoikane][script] loading dynamic {src} kind={kind:?}");
+            }
+            let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
+            let fetch_start = std::time::Instant::now();
+            let fetched = {
+                let mut state = self.host_state.borrow_mut();
+                fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
+            };
+            let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
+            match fetched {
+                // Every failure below is the page's, not the engine's:
+                // it is recorded and execution continues, exactly as
+                // `execute_document_scripts` treats a parsed script.
+                // Propagating instead would abort the event loop and,
+                // through it, the whole navigation.
+                None => {
+                    // A script that never arrived did not load: it
+                    // fires `error` instead, so a loader waiting on
+                    // one of the two is not left with neither.
+                    self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
+                    dispatch_load = false;
+                    let dispatched = self.eval_in_document_realm(
+                        dispatch_document_id,
+                        &dispatch_resource_timing_script(
+                            "error",
+                            node_id,
+                            &timing_name,
+                            false,
+                            elapsed_ms,
+                        ),
+                    );
+                    self.record_error_from(&src, dispatched);
+                }
+                Some((effective_url, _source, redirect_count))
+                    if !self
+                        .host_state
+                        .borrow()
+                        .csp_policy_for_node(&script_node)
+                        .allows_reference_after_redirects(
+                            ResourceType::Script,
+                            &effective_url,
+                            redirect_count,
+                        ) =>
+                {
+                    let redirected =
+                        resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
+                    self.host_state.borrow_mut().record_csp_violation_for_node(
+                        &script_node,
+                        ResourceType::Script,
+                        effective_url.clone(),
+                    );
+                    dispatch_load = false;
+                    let dispatched = self.eval_in_document_realm(
+                        dispatch_document_id,
+                        &dispatch_resource_timing_script(
+                            "error",
+                            node_id,
+                            &effective_url,
+                            redirected,
+                            elapsed_ms,
+                        ),
+                    );
+                    self.record_error_from(&src, dispatched);
+                }
+                Some((effective_url, source, _redirect_count)) => {
+                    let redirected =
+                        resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
+                    dispatch_timing = Some((effective_url, redirected, elapsed_ms));
+                    let result = match kind {
+                        ScriptKind::Module => {
+                            self.eval_module_in_document_realm_timed(
+                                dispatch_document_id,
+                                script_node.identity(),
+                                &source,
+                                &module_script_url(&src, base_url.as_ref(), false),
+                                document_root_for_node(&script_node)
+                                    .unwrap_or_else(|| self.document()),
+                            )
+                            .0
+                        }
+                        _ => self
+                            .eval_script_in_document_realm(
+                                dispatch_document_id,
+                                script_node.identity(),
+                                &source,
+                            )
+                            .map(|_| JsValue::undefined())
+                            .map_err(JsEvaluationError::JavaScript),
+                    };
+                    if let Err(error) = result {
+                        let context = script_source_context(&source);
+                        self.record_task_error(format!(
+                            "[dynamic script: {src}; {context}] {error}"
+                        ));
+                    }
+                    if log_scripts {
+                        eprintln!("[omoikane][script] completed dynamic {src}");
+                    }
+                }
+            }
+        }
+        (dispatch_load, dispatch_timing)
+    }
+
+    /// Dispatches a resource-load timer's `load` event: refreshes any
+    /// iframe window names, fires an iframe window `load` listener when one
+    /// is wired (or an inline `body`/`frameset` `onload` needs a realm), and
+    /// dispatches the node's own resource-timing `load` event.
+    fn dispatch_resource_load_event(
+        &mut self,
+        node_id: usize,
+        dispatch_document_id: usize,
+        dispatch_timing: Option<(String, bool, f64)>,
+    ) {
+        self.refresh_window_names_after_iframe_load(node_id, dispatch_document_id);
+        let child_document_id = {
+            let state = self.host_state.borrow();
+            state
+                .get_node(node_id)
+                .filter(|node| {
+                    node.tag_name()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("iframe"))
+                })
+                .and_then(|_| state.iframe_documents.get(&node_id))
+                .and_then(|entry| {
+                    // A Window load listener requires a live Realm. An inline
+                    // body/frameset onload attribute is the one exception: it
+                    // needs a Realm to be wired before dispatch.
+                    let has_inline_load = || {
+                        ["body", "frameset"].iter().any(|tag| {
+                            entry
+                                .document
+                                .query_selector(tag)
+                                .is_some_and(|node| node.get_attribute("onload").is_some())
+                        })
+                    };
+                    (entry.realm.is_some() || has_inline_load())
+                        .then_some(entry.document.identity())
+                })
+        };
+        if let Some(document_id) = child_document_id {
+            match self.realm_for_document(document_id) {
+                Ok(_) => {
+                    let dispatched = self.eval_in_document_realm(
+                        document_id,
+                        &format!("__omoikane_wire_inline_handlers(); {LOAD_SCRIPT}"),
+                    );
+                    self.record_error_from("iframe window load", dispatched);
+                }
+                Err(error) => self.record_task_error(format!("[iframe window load] {error}")),
+            }
+        }
+        let (timing_name, redirected, elapsed_ms) =
+            dispatch_timing.unwrap_or_else(|| (String::new(), false, 0.0));
+        let dispatched = self.eval_in_document_realm(
+            dispatch_document_id,
+            &dispatch_resource_timing_script("load", node_id, &timing_name, redirected, elapsed_ms),
+        );
+        self.record_error_from("resource load", dispatched);
     }
 
     fn refresh_window_names_after_iframe_load(&mut self, node_id: usize, document_id: usize) {
