@@ -1,0 +1,10 @@
+{
+  "pages": {
+    "/start.html": {"file": "start.html", "title": "GUI navigation start", "background_rgb": [30, 111, 217]},
+    "/destination.html": {"file": "destination.html", "title": "GUI navigation destination", "background_rgb": [217, 118, 30]}
+  },
+  "sample_region": {
+    "description": "Page-area fractions (left, top, right, bottom) that must be filled with background_rgb once the page is drawn.",
+    "fraction": [0.25, 0.25, 0.75, 0.75]
+  }
+}
