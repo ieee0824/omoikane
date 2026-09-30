@@ -3,7 +3,7 @@ mod http_fixture;
 
 use http_fixture::{
     ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
-    read_request_headers,
+    read_request_headers, read_request_headers_from,
 };
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
@@ -67,4 +67,25 @@ fn worker_is_joined_when_client_side_panics() {
 #[test]
 fn explicit_join_returns_worker_result() {
     assert_eq!(FixtureWorker::spawn(|| 42).join(), 42);
+}
+
+#[test]
+fn transport_header_reader_applies_deadlines_and_preserves_body() {
+    let header = b"POST /check HTTP/1.1\r\nContent-Length: 4\r\n\r\n";
+    let mut bytes = header.to_vec();
+    bytes.extend_from_slice(b"body");
+    let mut stream = std::io::Cursor::new(bytes);
+    let mut deadline_applied = false;
+    let timeout = Duration::from_secs(1);
+    let request = read_request_headers_from(&mut stream, timeout, |_, remaining| {
+        assert!(!remaining.is_zero() && remaining <= timeout);
+        deadline_applied = true;
+        Ok(())
+    })
+    .unwrap();
+    assert!(deadline_applied);
+    assert_eq!(request.as_bytes(), header);
+    let mut body = [0; 4];
+    stream.read_exact(&mut body).unwrap();
+    assert_eq!(&body, b"body");
 }
