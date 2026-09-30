@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use chrome_layout::ChromeLayout;
 use device_scale::{DeviceScale, blit_scaled};
+use input_routing::{InputTarget, PagePointer};
 use omoikane::cdp::CdpSession;
 use omoikane::dom::NodeHandle;
 use omoikane::error_reporting::{
@@ -39,6 +40,8 @@ use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
 mod chrome_layout;
 #[path = "omoikane/device_scale.rs"]
 mod device_scale;
+#[path = "omoikane/input_routing.rs"]
+mod input_routing;
 #[path = "omoikane/pointer_lock_host.rs"]
 mod pointer_lock_host;
 #[path = "omoikane/toolbar_paint.rs"]
@@ -157,7 +160,7 @@ struct BrowserApp {
     window_title: String,
     modifiers: InputModifiers,
     find_ui: Option<FindUi>,
-    find_key_releases: HashSet<String>,
+    chrome_key_releases: HashSet<String>,
     window_occluded: bool,
     window_minimized: bool,
     native_fullscreen: bool,
@@ -168,6 +171,16 @@ struct BrowserApp {
     trace_input: bool,
     input_trace_sequence: u64,
     url_bar: UrlBar,
+    /// URL committed in the address bar and not yet loaded.
+    // Loading the committed URL starts in #1139.
+    #[cfg_attr(not(test), allow(dead_code))]
+    requested_navigation: Option<String>,
+    /// Last cursor position in physical window pixels.
+    cursor_position: (f64, f64),
+    /// Whether the page last received the cursor, so leaving it is reported once.
+    cursor_in_page: bool,
+    /// Buttons whose press went to the page; their releases follow them.
+    page_buttons: Vec<PlatformMouseButton>,
     toolbar_font: OnceCell<Option<Font>>,
 }
 
@@ -189,7 +202,7 @@ impl BrowserApp {
             window_title: DEFAULT_WINDOW_TITLE.to_string(),
             modifiers: InputModifiers::default(),
             find_ui: None,
-            find_key_releases: HashSet::new(),
+            chrome_key_releases: HashSet::new(),
             window_occluded: false,
             window_minimized: false,
             native_fullscreen: false,
@@ -199,6 +212,10 @@ impl BrowserApp {
             trace_input: std::env::var_os("OMOIKANE_TRACE_INPUT").is_some(),
             input_trace_sequence: 0,
             url_bar: UrlBar::new(url),
+            requested_navigation: None,
+            cursor_position: (0.0, 0.0),
+            cursor_in_page: false,
+            page_buttons: Vec::new(),
             toolbar_font: OnceCell::new(),
         })
     }
@@ -491,7 +508,7 @@ impl BrowserApp {
     }
 
     fn handle_find_key(&mut self, key: &str, text: Option<&str>, pressed: bool) -> bool {
-        if !pressed && self.find_key_releases.remove(key) {
+        if !pressed && self.chrome_key_releases.remove(key) {
             return true;
         }
         if (self.modifiers.control || self.modifiers.meta)
@@ -499,7 +516,7 @@ impl BrowserApp {
             && key.eq_ignore_ascii_case("f")
         {
             if pressed {
-                self.find_key_releases.insert(key.to_string());
+                self.chrome_key_releases.insert(key.to_string());
             }
             if pressed && self.find_ui.is_none() {
                 self.find_ui = Some(FindUi {
@@ -520,7 +537,7 @@ impl BrowserApp {
         if !pressed {
             return true;
         }
-        self.find_key_releases.insert(key.to_string());
+        self.chrome_key_releases.insert(key.to_string());
         let action = match key {
             "Escape" => Some("stop"),
             "Enter" => Some(if self.modifiers.shift {
@@ -555,16 +572,24 @@ impl BrowserApp {
         let scale_factor = self.device_scale().factor();
         let result = match event {
             WindowEvent::CursorMoved { position, .. } => {
-                let (x, y) = self.chrome_layout().page_point(position.x, position.y);
-                self.input.cursor_moved(&mut self.session, x, y)
+                match self.route_cursor(self.chrome_layout(), position.x, position.y) {
+                    PagePointer::Move(x, y) => self.input.cursor_moved(&mut self.session, x, y),
+                    PagePointer::Leave => {
+                        self.input.cursor_left(&mut self.session);
+                        Ok(())
+                    }
+                    PagePointer::Ignore => Ok(()),
+                }
             }
             WindowEvent::CursorLeft { .. } => {
+                self.cursor_in_page = false;
                 self.input.cursor_left(&mut self.session);
                 Ok(())
             }
             WindowEvent::Focused(focused) => {
                 if !focused {
-                    self.find_key_releases.clear();
+                    self.chrome_key_releases.clear();
+                    self.page_buttons.clear();
                 }
                 self.input.focus_changed(&mut self.session, focused)
             }
@@ -575,11 +600,18 @@ impl BrowserApp {
                 let Some(button) = platform_mouse_button(button) else {
                     return false;
                 };
+                let pressed = state == ElementState::Pressed;
+                if !self.route_mouse_button(self.chrome_layout(), button, pressed) {
+                    return true;
+                }
                 self.input
                     .mouse_button(&mut self.session, button, state == ElementState::Pressed)
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.native_pointer_lock_raw_buttons {
+                    return false;
+                }
+                if !self.pointer_targets_page(self.chrome_layout()) {
                     return false;
                 }
                 let (delta_x, delta_y) = wheel_delta_css_pixels(delta, scale_factor);
@@ -614,7 +646,7 @@ impl BrowserApp {
                 ..
             } => {
                 if !is_synthetic
-                    && self.handle_find_key(
+                    && self.handle_chrome_key(
                         &logical_key_name(&event.logical_key),
                         event.text.as_deref(),
                         event.state == ElementState::Pressed,
@@ -637,6 +669,12 @@ impl BrowserApp {
                     },
                     is_synthetic,
                 )
+            }
+            WindowEvent::Ime(event) if self.input_target() == InputTarget::UrlBar => {
+                if let Ime::Commit(text) = event {
+                    self.url_bar.insert_text(&text);
+                }
+                Ok(())
             }
             WindowEvent::Ime(Ime::Commit(text)) if self.find_ui.is_some() => {
                 self.find_ui.as_mut().unwrap().query.push_str(&text);
