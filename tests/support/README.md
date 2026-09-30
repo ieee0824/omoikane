@@ -7,8 +7,9 @@ server worker during normal completion or client-side unwinding. Each test keeps
 its own HTTP responses, cookie/origin rules, request order, and assertions.
 
 Unit tests in `src/` import the same helper through `src/test_support/mod.rs`.
-`src/js/stylesheet.rs` is the first migrated unit-test server; the other local
-servers remain tracked by Issue #1089.
+`src/js/stylesheet.rs` and `src/http/client.rs` use it; the latter migrates nine
+local server setups while preserving its 22 tests, responses, and assertions.
+The other local unit-test servers remain tracked by Issue #1089.
 `print_page_margin_content.rs` also uses the shared fixture for its image request.
 `location_pseudo_target.rs` also uses the shared fixture for its iframe requests.
 `cookie_samesite.rs`, `error_reporting_http.rs`, `form_target.rs`, and
@@ -22,8 +23,24 @@ and the CLI example; its worker is joined when the server is dropped.
 `subresource_cookie_store.rs` also uses it for all seven tests, including the
 delayed-request regression from Issue #983. Its accepted sockets are explicitly
 returned to blocking mode before bounded header reads.
+`src/screenshot/mod.rs` uses it for three frameset fixture servers; their
+responses and path assertions are unchanged, and the file retains 11 unit tests.
+`src/paint/tests.rs` uses it for image and stylesheet servers. The local
+stylesheet responder keeps each test's original response bytes and request
+count while sharing bounded accepts, header reads, and worker joins.
 
 Issue #885 first migrates `document_cookie_bridge.rs` and
 `fetch_authorization.rs`. `http_fixture_support.rs` checks the helper's timeout,
 header/body boundary, and worker-join behavior. The remaining `src/` unit-test
 servers are tracked by Issue #1089 and should be migrated in reviewable changes.
+
+`src/ffi/mod.rs` and `src/platform_browser.rs` use the shared fixture for their
+navigation and download server tests. The platform browser's closed-port error
+test still binds and closes a listener deliberately.
+
+`src/js/document_write_tests.rs`, `src/js/module_loading_tests.rs`, and
+`src/js/font_loading_tests.rs` use it for their fixture servers. The module
+server still owns its concurrent request handlers and shutdown logic, while
+the shared helper bounds accepts and request-header reads. The dedicated
+nonblocking-socket test in `src/js/module_server_tests.rs` also uses the shared
+loopback bind and retains its socket-mode assertions.

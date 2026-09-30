@@ -1,8 +1,11 @@
 use super::JsRuntime;
 use crate::html::TreeBuilder;
+use crate::test_support::http_fixture::{
+    READ_TIMEOUT, accept_with_timeout, bind_loopback, read_request_headers,
+};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -27,22 +30,7 @@ fn read_module_request(stream: &mut TcpStream) -> std::io::Result<String> {
     // Accepted sockets can inherit the listener's nonblocking flag on BSD.
     // The accept loop polls for shutdown, but each handler waits for a request.
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let mut reader = BufReader::new(stream);
-    let mut request = String::new();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "incomplete test HTTP request",
-            ));
-        }
-        request.push_str(&line);
-        if line == "\r\n" {
-            return Ok(request);
-        }
-    }
+    read_request_headers(stream, READ_TIMEOUT)
 }
 
 fn join_module_workers(workers: impl IntoIterator<Item = thread::JoinHandle<()>>) {
@@ -65,9 +53,8 @@ fn join_module_workers(workers: impl IntoIterator<Item = thread::JoinHandle<()>>
 
 impl ModuleServer {
     fn new(routes: HashMap<String, Route>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        listener.set_nonblocking(true).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let peak = Arc::new(AtomicUsize::new(0));
         let active = Arc::new(AtomicUsize::new(0));
@@ -80,12 +67,9 @@ impl ModuleServer {
         let worker = thread::spawn(move || {
             let mut handlers = Vec::new();
             while !worker_stop.load(Ordering::Relaxed) {
-                let (mut stream, _) = match listener.accept() {
-                    Ok(connection) => connection,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
+                let mut stream = match accept_with_timeout(&listener, Duration::from_millis(20)) {
+                    Ok(stream) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
                     Err(error) => panic!("accept: {error}"),
                 };
                 let routes = routes.clone();

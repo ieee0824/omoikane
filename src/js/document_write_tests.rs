@@ -1,23 +1,25 @@
 use super::*;
 use crate::html::TreeBuilder;
+use crate::test_support::http_fixture::{
+    FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback, read_request_headers,
+};
 
 struct WriteServer {
     origin: String,
     requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    worker: Option<FixtureWorker<()>>,
 }
 
 impl WriteServer {
     fn new(routes: &[(&str, &str)]) -> Self {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::Write;
         use std::sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         };
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        listener.set_nonblocking(true).unwrap();
         let routes: HashMap<String, String> = routes
             .iter()
             .map(|(path, source)| (path.to_string(), source.to_string()))
@@ -26,32 +28,16 @@ impl WriteServer {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_requests = requests.clone();
         let thread_stop = stop.clone();
-        let thread = std::thread::spawn(move || {
+        let worker = FixtureWorker::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
-                let (mut stream, _) = match listener.accept() {
-                    Ok(stream) => stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                        continue;
-                    }
-                    Err(error) => panic!("{error}"),
-                };
-                // Accepted sockets can inherit nonblocking mode on BSD.
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                    .unwrap();
-                let mut reader = BufReader::new(&mut stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let path = line.split_whitespace().nth(1).unwrap().to_string();
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" || line.is_empty() {
-                        break;
-                    }
-                }
+                let mut stream =
+                    match accept_with_timeout(&listener, std::time::Duration::from_millis(20)) {
+                        Ok(stream) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+                        Err(error) => panic!("{error}"),
+                    };
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let path = request.split_whitespace().nth(1).unwrap().to_string();
                 thread_requests.lock().unwrap().push(path.clone());
                 let body = routes
                     .get(&path)
@@ -63,7 +49,7 @@ impl WriteServer {
             origin,
             requests,
             stop,
-            thread: Some(thread),
+            worker: Some(worker),
         }
     }
 }
@@ -71,7 +57,7 @@ impl WriteServer {
 impl Drop for WriteServer {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.thread.take().unwrap().join().unwrap();
+        drop(self.worker.take());
     }
 }
 

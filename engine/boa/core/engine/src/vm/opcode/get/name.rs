@@ -1,5 +1,5 @@
 use crate::{
-    Context, JsResult, JsValue,
+    Context, JsObject, JsResult, JsValue,
     error::JsNativeError,
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::PropertyKey,
@@ -93,6 +93,11 @@ impl GetNameGlobal {
                     .with_message(format!("{name} is not defined"))
                     .into());
             };
+            // A getter can return a fresh object that is not reachable from
+            // the VM stack yet. Cache installation allocates weak shape
+            // handles, so root the result until the destination register owns
+            // the edge.
+            let result_root = result.as_object().map(JsObject::root);
 
             // Cache the property.
             let slot = *context.slot();
@@ -104,6 +109,7 @@ impl GetNameGlobal {
             }
 
             context.vm.set_register(dst.into(), result);
+            drop(result_root);
             return Ok(());
         }
 

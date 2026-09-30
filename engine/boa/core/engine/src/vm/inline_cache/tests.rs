@@ -561,3 +561,98 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
 
     Ok(())
 }
+
+#[derive(Debug, boa_gc::Trace, crate::JsData)]
+struct CacheGetterResult {
+    #[unsafe_ignore_trace]
+    finalized: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl boa_gc::Finalize for CacheGetterResult {
+    fn finalize(&self) {
+        self.finalized.set(true);
+    }
+}
+
+#[derive(boa_gc::Trace)]
+struct CacheFillGarbage {
+    #[unsafe_ignore_trace]
+    _padding: [u8; 8192],
+    #[unsafe_ignore_trace]
+    finalized: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl boa_gc::Finalize for CacheFillGarbage {
+    fn finalize(&self) {
+        self.finalized.set(self.finalized.get() + 1);
+    }
+}
+
+#[derive(boa_gc::Finalize, boa_gc::Trace)]
+struct CacheGetterCaptures {
+    #[unsafe_ignore_trace]
+    result_finalized: std::rc::Rc<std::cell::Cell<bool>>,
+    #[unsafe_ignore_trace]
+    garbage_finalized: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+fn assert_getter_result_survives_cache_fill(source: &str) -> JsResult<()> {
+    use std::{cell::Cell, rc::Rc};
+
+    let context = &mut Context::default();
+    let result_finalized = Rc::new(Cell::new(false));
+    let garbage_finalized = Rc::new(Cell::new(0));
+    let getter = crate::object::FunctionObjectBuilder::new(
+        context.realm(),
+        crate::NativeFunction::from_copy_closure_with_captures(
+            |_, _, captures, _| {
+                let result = JsObject::from_proto_and_data(
+                    None,
+                    CacheGetterResult {
+                        finalized: Rc::clone(&captures.result_finalized),
+                    },
+                );
+                // Exceed the nursery threshold while the getter runs, then let
+                // the inline cache's next allocation perform the collection.
+                let _no_gc = boa_gc::NoGcScope::new();
+                for _ in 0..512 {
+                    let _garbage = boa_gc::GcEdge::new(CacheFillGarbage {
+                        _padding: [0; 8192],
+                        finalized: Rc::clone(&captures.garbage_finalized),
+                    });
+                }
+                Ok(result.into())
+            },
+            CacheGetterCaptures {
+                result_finalized: Rc::clone(&result_finalized),
+                garbage_finalized: Rc::clone(&garbage_finalized),
+            },
+        ),
+    )
+    .build();
+    context.global_object().define_property_or_throw(
+        js_string!("fresh"),
+        PropertyDescriptor::builder().get(getter).configurable(true),
+        context,
+    )?;
+    let result = context.eval(Source::from_bytes(source))?;
+    assert!(garbage_finalized.get() > 0, "cache fill must collect");
+    // Check finalization before touching the result so the regression fails
+    // without dereferencing the object that the buggy cache fill has freed.
+    assert!(
+        !result_finalized.get(),
+        "getter result was collected during cache fill"
+    );
+    assert!(result.as_object().unwrap().is::<CacheGetterResult>());
+    Ok(())
+}
+
+#[test]
+fn named_property_getter_result_survives_cache_fill() -> JsResult<()> {
+    assert_getter_result_survives_cache_fill("globalThis.fresh")
+}
+
+#[test]
+fn global_getter_result_survives_cache_fill() -> JsResult<()> {
+    assert_getter_result_survives_cache_fill("fresh")
+}

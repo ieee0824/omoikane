@@ -510,9 +510,12 @@ fn content_disposition_filename(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers,
+    };
+    use std::io::Write;
     use std::net::TcpListener;
-    use std::thread;
 
     fn navigate_url(html: &str) -> String {
         let encoded = html
@@ -562,12 +565,11 @@ mod tests {
 
     #[test]
     fn download_uses_content_disposition_and_emits_ordered_lifecycle() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = bind_loopback().unwrap();
         let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 1024];
-            let _ = stream.read(&mut request).unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=report.txt\r\n\r\nhello",
@@ -578,7 +580,7 @@ mod tests {
         let id = browser
             .download(&format!("http://{address}/download"), None)
             .unwrap();
-        server.join().unwrap();
+        server.join();
         let download = browser.download_info(id).unwrap();
         assert_eq!(download.filename, "report.txt");
         assert_eq!(download.bytes, b"hello");

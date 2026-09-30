@@ -535,29 +535,22 @@ mod tests {
 
     // --- Integration tests with local TCP server ---
 
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers,
+    };
+    use std::io::{Read, Write};
 
     #[test]
     fn client_follows_redirect() {
         // Server: first request returns 302 -> /final, second returns 200.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        std::thread::spawn(move || {
+        let worker = FixtureWorker::spawn(move || {
             // First request: 302 redirect
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            // Consume headers
-            loop {
-                let mut h = String::new();
-                reader.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
 
             let resp =
                 format!("HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n");
@@ -566,23 +559,14 @@ mod tests {
             drop(stream);
 
             // Second request: 200 OK
-            let (mut stream2, _) = listener.accept().unwrap();
-            let mut reader2 = BufReader::new(&stream2);
-            let mut line2 = String::new();
-            reader2.read_line(&mut line2).unwrap();
+            let mut stream2 = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream2, READ_TIMEOUT).unwrap();
+            let line2 = request.lines().next().unwrap();
             assert!(
                 line2.contains("/final"),
                 "expected /final, got: {}",
                 line2.trim()
             );
-            // Consume headers
-            loop {
-                let mut h = String::new();
-                reader2.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
 
             let resp2 = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone";
             stream2.write_all(resp2.as_bytes()).unwrap();
@@ -596,6 +580,7 @@ mod tests {
         assert_eq!(resp.status_code(), 200);
         assert_eq!(resp.body(), b"done");
         assert_eq!(resp.effective_url().unwrap().path(), "/final");
+        worker.join();
     }
 
     #[test]
@@ -605,28 +590,21 @@ mod tests {
         };
 
         for cors_fetch in [false, true] {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let listener = bind_loopback().unwrap();
             let url: Url = format!("http://{}/start", listener.local_addr().unwrap())
                 .parse()
                 .unwrap();
-            let worker = std::thread::spawn(move || {
+            let worker = FixtureWorker::spawn(move || {
                 for (path, response) in [
                     ("/start", "302 Found\r\nLocation: /other"),
                     ("/other", "307 Temporary Redirect\r\nLocation: /start"),
                     ("/start", "200 OK"),
                     ("/start", "200 OK"),
                 ] {
-                    let (mut stream, _) = listener.accept().unwrap();
-                    stream
-                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                        .unwrap();
-                    let mut reader = BufReader::new(&stream);
-                    let mut request = String::new();
-                    reader.read_line(&mut request).unwrap();
+                    let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                    let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
                     assert_eq!(request.split_whitespace().nth(1), Some(path));
-                    loop {
-                        let mut line = String::new();
-                        reader.read_line(&mut line).unwrap();
+                    for line in request.split_inclusive("\r\n").skip(1) {
                         assert!(!line.is_empty());
                         if line == "\r\n" {
                             break;
@@ -660,28 +638,19 @@ mod tests {
                 assert_eq!(response.effective_url(), Some(&url));
                 assert_eq!(response.redirect_count(), expected, "cors={cors_fetch}");
             }
-            worker.join().unwrap();
+            worker.join();
         }
     }
 
     #[test]
     fn client_stores_cookies_across_requests() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        std::thread::spawn(move || {
+        let worker = FixtureWorker::spawn(move || {
             // First request: set cookie
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            loop {
-                let mut h = String::new();
-                reader.read_line(&mut h).unwrap();
-                if h.trim().is_empty() {
-                    break;
-                }
-            }
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
 
             let resp =
                 "HTTP/1.1 200 OK\r\nSet-Cookie: token=xyz; Path=/\r\nContent-Length: 2\r\n\r\nok";
@@ -690,19 +659,12 @@ mod tests {
             drop(stream);
 
             // Second request: verify cookie is sent
-            let (mut stream2, _) = listener.accept().unwrap();
-            let mut reader2 = BufReader::new(&stream2);
-            let mut line2 = String::new();
-            reader2.read_line(&mut line2).unwrap();
+            let mut stream2 = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream2, READ_TIMEOUT).unwrap();
 
             let mut cookie_header = None;
-            loop {
-                let mut h = String::new();
-                reader2.read_line(&mut h).unwrap();
+            for h in request.lines().skip(1) {
                 let trimmed = h.trim().to_string();
-                if trimmed.is_empty() {
-                    break;
-                }
                 if trimmed.to_ascii_lowercase().starts_with("cookie:") {
                     cookie_header = Some(trimmed);
                 }
@@ -734,27 +696,19 @@ mod tests {
         let resp2 = client.get(&url2).unwrap();
         assert_eq!(resp2.status_code(), 200);
         assert_eq!(resp2.body(), b"cookied");
+        worker.join();
     }
 
     #[test]
     fn client_detects_redirect_loop() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        std::thread::spawn(move || {
+        let worker = FixtureWorker::spawn(move || {
             // Always respond with redirect to same URL
             for _ in 0..=DEFAULT_MAX_REDIRECTS {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(&stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                loop {
-                    let mut h = String::new();
-                    reader.read_line(&mut h).unwrap();
-                    if h.trim().is_empty() {
-                        break;
-                    }
-                }
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
 
                 let resp =
                     format!("HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n");
@@ -768,28 +722,22 @@ mod tests {
         let result = client.get(&url);
 
         assert!(result.is_err());
+        worker.join();
     }
 
     #[test]
     fn client_uses_default_user_agent() {
         let default_user_agent = default_user_agent();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+        let worker = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
 
             let mut user_agent = None;
-            loop {
-                let mut header = String::new();
-                reader.read_line(&mut header).unwrap();
+            for header in request.lines().skip(1) {
                 let trimmed = header.trim().to_string();
-                if trimmed.is_empty() {
-                    break;
-                }
                 if let Some((name, value)) = trimmed.split_once(':') {
                     if name.trim().eq_ignore_ascii_case("user-agent") {
                         user_agent = Some(value.trim().to_string());
@@ -808,19 +756,19 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/ua");
         let resp = client.get(&url).unwrap();
         assert_eq!(resp.status_code(), 200);
+        worker.join();
     }
 
     #[test]
     fn client_can_override_default_user_agent() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        std::thread::spawn(move || {
+        let worker = FixtureWorker::spawn(move || {
             for expected_path in ["/start", "/final"] {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(&stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let line = request.lines().next().unwrap();
                 assert!(
                     line.contains(expected_path),
                     "unexpected path: {}",
@@ -828,13 +776,8 @@ mod tests {
                 );
 
                 let mut user_agent = None;
-                loop {
-                    let mut header = String::new();
-                    reader.read_line(&mut header).unwrap();
+                for header in request.lines().skip(1) {
                     let trimmed = header.trim().to_string();
-                    if trimmed.is_empty() {
-                        break;
-                    }
                     if let Some((name, value)) = trimmed.split_once(':') {
                         if name.trim().eq_ignore_ascii_case("user-agent") {
                             user_agent = Some(value.trim().to_string());
@@ -860,27 +803,21 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/start");
         let resp = client.get(&url).unwrap();
         assert_eq!(resp.status_code(), 200);
+        worker.join();
     }
 
     #[test]
     fn explicit_request_user_agent_wins_over_client_default() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+        let worker = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
 
             let mut user_agent = None;
-            loop {
-                let mut header = String::new();
-                reader.read_line(&mut header).unwrap();
+            for header in request.lines().skip(1) {
                 let trimmed = header.trim().to_string();
-                if trimmed.is_empty() {
-                    break;
-                }
                 if let Some((name, value)) = trimmed.split_once(':') {
                     if name.trim().eq_ignore_ascii_case("user-agent") {
                         user_agent = Some(value.trim().to_string());
@@ -903,42 +840,34 @@ mod tests {
 
         let resp = client.send(request).unwrap();
         assert_eq!(resp.status_code(), 200);
+        worker.join();
     }
 
     #[test]
     fn cross_origin_redirect_drops_credentials_and_rewritten_body_headers() {
-        let redirect = TcpListener::bind("127.0.0.1:0").unwrap();
-        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirect = bind_loopback().unwrap();
+        let destination = bind_loopback().unwrap();
         let destination_port = destination.local_addr().unwrap().port();
         let redirect_port = redirect.local_addr().unwrap().port();
 
-        let source_thread = std::thread::spawn(move || {
-            let (mut stream, _) = redirect.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
-                }
-            }
+        let source_thread = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&redirect, ACCEPT_TIMEOUT).unwrap();
+            read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            // Drain the POST body before closing the socket; otherwise macOS
+            // can reset the connection before the client reads the redirect.
+            let mut body = [0; 4];
+            stream.read_exact(&mut body).unwrap();
             write!(stream, "HTTP/1.1 303 See Other\r\nLocation: http://127.0.0.1:{destination_port}/next\r\nContent-Length: 0\r\n\r\n").unwrap();
         });
-        let destination_thread = std::thread::spawn(move || {
-            let (mut stream, _) = destination.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut first = String::new();
-            reader.read_line(&mut first).unwrap();
-            let mut headers = String::new();
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
-                }
-                headers.push_str(&line.to_ascii_lowercase());
-            }
+        let destination_thread = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&destination, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let mut lines = request.lines();
+            let first = format!("{}\r\n", lines.next().unwrap());
+            let headers = lines
+                .map(|line| format!("{line}\r\n"))
+                .collect::<String>()
+                .to_ascii_lowercase();
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
@@ -955,8 +884,8 @@ mod tests {
         request.set_header("Content-Type", "text/plain");
         let mut client = Client::new();
         assert_eq!(client.send(request).unwrap().status_code(), 200);
-        source_thread.join().unwrap();
-        let (first, headers) = destination_thread.join().unwrap();
+        source_thread.join();
+        let (first, headers) = destination_thread.join();
         assert!(first.starts_with("GET /next HTTP/1.1"));
         for absent in [
             "authorization:",

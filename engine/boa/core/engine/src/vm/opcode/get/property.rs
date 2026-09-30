@@ -130,6 +130,11 @@ impl GetPropertyByName {
 
         let context = &mut InternalMethodPropertyContext::new(context);
         let result = object.__get__(&key, receiver.clone(), context)?;
+        // A getter can return a fresh object that is not reachable from the VM
+        // stack yet. Installing the cache below allocates weak shape handles
+        // and can trigger a collection, so keep an object result rooted until
+        // it has been written to its destination register.
+        let result_root = result.as_object().map(JsObject::root);
 
         // Cache the property.
         let slot = *context.slot();
@@ -141,6 +146,7 @@ impl GetPropertyByName {
         }
 
         context.vm.set_register(dst.into(), result);
+        drop(result_root);
         Ok(())
     }
 }
