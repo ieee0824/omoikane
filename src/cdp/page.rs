@@ -606,6 +606,7 @@ impl CdpSession {
         if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
             runtime.set_error_reporter(reporter, surface);
         }
+        runtime.enable_live_css_animations();
         runtime.set_shared_cookie_store(Arc::clone(&self.cookie_store));
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         runtime.set_user_agent(self.http_client.user_agent().to_string());
@@ -688,6 +689,7 @@ impl CdpSession {
         if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
             runtime.set_error_reporter(reporter, surface);
         }
+        runtime.enable_live_css_animations();
         runtime.set_shared_cookie_store(Arc::clone(&self.cookie_store));
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         runtime.set_user_agent(self.http_client.user_agent().to_string());

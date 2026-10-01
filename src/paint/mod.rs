@@ -1,5 +1,6 @@
 //! Pixel-based painting primitives and layout tree rendering.
 
+pub(crate) mod animation;
 pub(crate) mod border;
 pub(crate) mod color;
 pub(crate) mod form_control;
@@ -191,11 +192,13 @@ pub(crate) use text::{
 pub(crate) use text::{paint_list_marker_placeholder, paint_text_with_registry};
 
 /// A decoded RGBA image.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Image {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+    animation_regions: Vec<animation::AnimationRegion>,
+    animated_pixels: Option<animation::AnimatedPixels>,
 }
 
 /// GIF disposal operation applied after a frame's display interval.
@@ -234,6 +237,7 @@ impl ImageFrame {
 pub struct ImageAnimation {
     frames: Vec<ImageFrame>,
     duration_ms: u64,
+    plays: Option<u64>,
 }
 
 impl ImageAnimation {
@@ -247,6 +251,12 @@ impl ImageAnimation {
     }
     /// Selects the frame visible at an elapsed frame-scheduler timestamp.
     pub fn frame_at(&self, elapsed_ms: u64) -> &ImageFrame {
+        if self
+            .plays
+            .is_some_and(|plays| elapsed_ms >= self.duration_ms.saturating_mul(plays))
+        {
+            return &self.frames[self.frames.len() - 1];
+        }
         let mut position = if self.duration_ms == 0 {
             0
         } else {
@@ -274,6 +284,8 @@ impl Image {
             width,
             height,
             pixels,
+            animation_regions: Vec::new(),
+            animated_pixels: None,
         })
     }
 
@@ -409,11 +421,12 @@ pub(crate) enum BorderRegion {
 }
 
 /// A simple RGBA bitmap canvas.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Canvas {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+    animation_regions: Vec<animation::AnimationRegion>,
 }
 
 impl Canvas {
@@ -423,6 +436,7 @@ impl Canvas {
             width,
             height,
             pixels: vec![0; width as usize * height as usize * 4],
+            animation_regions: Vec::new(),
         }
     }
 
@@ -432,6 +446,7 @@ impl Canvas {
             width,
             height,
             pixels,
+            animation_regions: Vec::new(),
         })
     }
 
@@ -934,6 +949,11 @@ impl Canvas {
         let y0 = area.y.floor().max(0.0) as i32;
         let x1 = (area.x + area.width).ceil().min(self.width as f32) as i32;
         let y1 = (area.y + area.height).ceil().min(self.height as f32) as i32;
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        self.observe_scaled_image(image, destination, area);
+        let image = image.sampled_image(crate::layout::image_animation_time_ms());
         let shrink_x = destination.width < image.width as f32;
         let shrink_y = destination.height < image.height as f32;
         let source_per_dest_x = image.width as f32 / destination.width;
@@ -3303,6 +3323,15 @@ fn paint_box_internal_untransformed(
             apply_clip_path_shape(&mut offscreen, &shape);
         }
         // メインキャンバスに合成
+        canvas.observe_canvas(
+            &offscreen,
+            AffineTransform {
+                e: buf_x as f32,
+                f: buf_y as f32,
+                ..AffineTransform::identity()
+            },
+            inherited_clip,
+        );
         let dst_w = canvas.width() as i32;
         let dst_h = canvas.height() as i32;
         let src_w = buf_w as i32;
@@ -3364,6 +3393,7 @@ fn composite_affine(
     let Some(inverse) = transform.inverse() else {
         return;
     };
+    destination.observe_canvas(source, transform, clip);
     let width = source.width() as i32;
     let height = source.height() as i32;
     let hint_x0 = source_hint.x.floor().max(0.0).min(width as f32) as i32;
@@ -3726,6 +3756,25 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
         // zero or exceeds the allocation cap) falls back to painting without
         // a mask rather than making the entire element transparent.
         return;
+    }
+    for (tile, tile_width, tile_height, repeat_x, repeat_y, position_x, position_y, _, _) in
+        &prepared
+    {
+        let destination = Rect {
+            x: if *repeat_x {
+                area.x
+            } else {
+                area.x + position_x
+            },
+            y: if *repeat_y {
+                area.y
+            } else {
+                area.y + position_y
+            },
+            width: if *repeat_x { area.width } else { *tile_width },
+            height: if *repeat_y { area.height } else { *tile_height },
+        };
+        canvas.observe_scaled_image(tile, destination, area);
     }
     let width = canvas.width as i32;
     let height = canvas.height as i32;
@@ -5638,6 +5687,15 @@ fn apply_backdrop_filters(
 /// The region must be within the canvas bounds.
 fn copy_region_out(canvas: &Canvas, x: usize, y: usize, width: usize, height: usize) -> Canvas {
     let mut region = Canvas::new(width as u32, height as u32);
+    region.observe_canvas(
+        canvas,
+        AffineTransform {
+            e: -(x as f32),
+            f: -(y as f32),
+            ..AffineTransform::identity()
+        },
+        None,
+    );
     let row_bytes = width * 4;
     for row in 0..height {
         let source_start = ((y + row) * canvas.width as usize + x) * 4;
@@ -5663,6 +5721,20 @@ fn copy_region_in(
     width: usize,
     height: usize,
 ) {
+    canvas.observe_canvas(
+        region,
+        AffineTransform {
+            e: dest_x as f32 - source_x as f32,
+            f: dest_y as f32 - source_y as f32,
+            ..AffineTransform::identity()
+        },
+        Some(Rect {
+            x: dest_x as f32,
+            y: dest_y as f32,
+            width: width as f32,
+            height: height as f32,
+        }),
+    );
     let row_bytes = width * 4;
     for row in 0..height {
         let source_start = ((source_y + row) * region.width as usize + source_x) * 4;
@@ -7287,6 +7359,9 @@ impl Canvas {
 
     /// キャンバスの全ピクセルの alpha に `factor` (0.0〜1.0) を乗算する。
     pub fn multiply_alpha(&mut self, factor: f32) {
+        if factor <= 0.0 {
+            self.animation_regions.clear();
+        }
         let factor = factor.clamp(0.0, 1.0);
         for pixel in self.pixels.chunks_exact_mut(4) {
             let a = pixel[3] as f32;

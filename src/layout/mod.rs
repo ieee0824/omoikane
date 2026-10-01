@@ -69,7 +69,7 @@ pub(crate) use inline::split_words_preserving_spaces_cjk;
 // Thread-local cache for fetched images and fonts to avoid redundant loads
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
-    static IMAGE_ANIMATION_CACHE: RefCell<HashMap<String, crate::paint::ImageAnimation>> = RefCell::new(HashMap::new());
+    static IMAGE_ANIMATION_CACHE: RefCell<HashMap<String, Arc<crate::paint::ImageAnimation>>> = RefCell::new(HashMap::new());
     static IMAGE_ANIMATION_TIME_MS: Cell<u64> = const { Cell::new(0) };
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
     static LAYOUT_FONTS: RefCell<Option<LayoutFontContext>> = const { RefCell::new(None) };
@@ -5602,3 +5602,6 @@ mod margin_collapse_tests;
 
 #[cfg(test)]
 mod inline_box_tests;
+
+mod image_animation;
+pub(crate) use image_animation::{image_animation_time_ms, with_image_animation_timeline};

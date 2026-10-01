@@ -1,5 +1,6 @@
 //! CSS cascade and computed style resolution.
 
+mod animation;
 mod page;
 mod property_id;
 
@@ -641,6 +642,7 @@ pub struct StyleResolver {
     next_font_face_source_order: usize,
     /// Before/after style snapshots and running CSS transitions.
     transition_timeline: super::transition::TransitionTimeline,
+    animation_timeline: Option<RefCell<animation::AnimationTimeline>>,
     /// Node identities whose inline `style` attribute is blocked by the
     /// owning Document's CSP `style-src` policy.
     blocked_inline_style_nodes: HashSet<usize>,
@@ -2817,8 +2819,9 @@ impl StyleResolver {
         // CSS Animations contribute below CSS Transitions in the cascade. The
         // transition compares and samples the animation-adjusted before/after
         // values, then its active value wins for the transitioned property.
-        self.apply_animation_snapshot(
+        self.apply_animation_effect(
             node,
+            pseudo,
             &mut properties,
             &important_properties,
             animation_name_scope_root,

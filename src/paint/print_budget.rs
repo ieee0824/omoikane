@@ -101,6 +101,7 @@ pub(super) fn new_canvas(width: u32, height: u32) -> Result<Canvas, PaintError> 
         width,
         height,
         pixels,
+        animation_regions: Vec::new(),
     })
 }
 
