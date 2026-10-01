@@ -249,6 +249,20 @@ The scenario covers scale factor 1 on Linux X11 only. Loading blocks the event
 loop until the page is fetched (#1139); asynchronous loading, macOS windows and
 external sites are not covered.
 
+The render-demand scenario (#1217) uses the same private desktop and synthetic
+fixtures to verify three idle seconds with zero page paints, toolbar-only
+composition, a 500 ms timer after idle, and rAF, CSS transitions/keyframes,
+GIF playback and smooth scrolling. Each animation must move and then stop
+painting after completion or cancellation. `OMOIKANE_TRACE_PAINT` records only
+actual page paints; an uninstrumented binary cannot pass the idle assertion.
+Initial page colors differ, so an old frame cannot satisfy navigation readiness.
+
+```sh
+/usr/bin/python3 scripts/test-gui-render-demand.py --verify --binary target/debug/omoikane --artifacts .artifacts/gui-render-demand
+# Separate CPU measurement; CPU percentages are evidence, not a CI threshold.
+/usr/bin/python3 scripts/test-gui-render-demand.py --binary target/debug/omoikane --artifacts .artifacts/gui-idle-cpu --seconds 10
+```
+
 Xvfb validates the X11 path with synthetic device input; physical devices,
 Wayland and macOS still need desktop validation. `cargo check --locked --features
 gui` only checks compilation. `unadjustedMovement: true` is currently rejected

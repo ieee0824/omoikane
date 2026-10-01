@@ -3,10 +3,10 @@ name: GUI Pointer Lock
 on:
   pull_request:
     branches: [main]
-    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
   push:
     branches: [main]
-    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
   workflow_dispatch:
 
 permissions:
@@ -64,6 +64,8 @@ jobs:
           test "$status" -eq 1 || { echo "expected REGRESSION (1), got $status"; exit 1; }
       - name: Verify native X11 input and cursor lifecycle
         run: /usr/bin/python3 scripts/test-pointer-lock-x11.py --binary target/debug/omoikane --artifacts .artifacts/gui-pointer-lock
+      - name: Verify idle paints and real animation deadlines
+        run: /usr/bin/python3 scripts/test-gui-render-demand.py --verify --binary target/debug/omoikane --artifacts .artifacts/gui-render-demand
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -71,6 +73,7 @@ jobs:
           path: |
             .artifacts/gui-pointer-lock/
             .artifacts/gui-scale/
+            .artifacts/gui-render-demand/
             .artifacts/gui-url-entry/
             .artifacts/gui-url-entry-negative/
           include-hidden-files: true
