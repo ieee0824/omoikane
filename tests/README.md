@@ -225,6 +225,30 @@ failure-path tests with the same GUI binary:
 /usr/bin/python3 scripts/test-gui-x11.py --binary target/debug/omoikane --artifacts .artifacts/gui-scale
 ```
 
+The URL-entry acceptance scenario (#1131) starts the GUI on the
+[`gui-navigation`](fixtures/gui-navigation/README.md) start page, clicks the
+visible URL field, presses Ctrl+A, types the destination URL with XTEST and
+presses Enter. It passes only when the fixture server logged the destination
+request and the page area shows the destination colour; it does not use CDP,
+in-page JavaScript or the window title. Whether the build has URL entry is
+declared (`URL_ENTRY_UI` or `--url-entry`), so the result separates `PASS` (0),
+`REGRESSION` (1), `NOT_IMPLEMENTED` (2), `ENV_ERROR` (3, desktop, launch or
+start page never ready) and `UNKNOWN` (4, declared unimplemented but passed).
+`--negative stale-page` serves the start page at the destination URL; CI
+requires it to fail as `REGRESSION`. Each run saves `outcome.json`,
+`requests.json`, logs and original/compressed screenshots.
+
+```sh
+/usr/bin/python3 -m unittest discover -s scripts/tests -p test_gui_url_entry.py
+/usr/bin/python3 scripts/test-gui-url-entry.py --binary target/debug/omoikane --artifacts .artifacts/gui-url-entry
+# Baseline before URL entry (eec3e01c): expected NOT_IMPLEMENTED, exit 2
+/usr/bin/python3 scripts/test-gui-url-entry.py --binary <eec3e01c build> --artifacts .artifacts/gui-url-entry-baseline --url-entry unimplemented
+```
+
+The scenario covers scale factor 1 on Linux X11 only. Loading blocks the event
+loop until the page is fetched (#1139); asynchronous loading, macOS windows and
+external sites are not covered.
+
 Xvfb validates the X11 path with synthetic device input; physical devices,
 Wayland and macOS still need desktop validation. `cargo check --locked --features
 gui` only checks compilation. `unadjustedMovement: true` is currently rejected
