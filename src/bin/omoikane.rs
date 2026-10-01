@@ -171,10 +171,6 @@ struct BrowserApp {
     trace_input: bool,
     input_trace_sequence: u64,
     url_bar: UrlBar,
-    /// URL committed in the address bar and not yet loaded.
-    // Loading the committed URL starts in #1139.
-    #[cfg_attr(not(test), allow(dead_code))]
-    requested_navigation: Option<String>,
     /// Last cursor position in physical window pixels.
     cursor_position: (f64, f64),
     /// Whether the page last received the cursor, so leaving it is reported once.
@@ -212,7 +208,6 @@ impl BrowserApp {
             trace_input: std::env::var_os("OMOIKANE_TRACE_INPUT").is_some(),
             input_trace_sequence: 0,
             url_bar: UrlBar::new(url),
-            requested_navigation: None,
             cursor_position: (0.0, 0.0),
             cursor_in_page: false,
             page_buttons: Vec::new(),
@@ -331,6 +326,7 @@ impl BrowserApp {
             ),
         };
         self.sync_find_document();
+        self.sync_url_bar();
         let title = find_window_title(
             document_window_title(&mut self.session).map_err(|error| {
                 report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
@@ -495,6 +491,15 @@ impl BrowserApp {
             }
         }
         Ok(())
+    }
+
+    /// Shows the current document's URL in the address bar, following the
+    /// initial, page-initiated and redirected navigations. An edit in
+    /// progress is kept by [`UrlBar::set_page_url`].
+    fn sync_url_bar(&mut self) {
+        if self.url_bar.page_url() != self.session.current_url() {
+            self.url_bar.set_page_url(self.session.current_url());
+        }
     }
 
     fn sync_find_document(&mut self) {

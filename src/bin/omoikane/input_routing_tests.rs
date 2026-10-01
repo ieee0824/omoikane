@@ -86,11 +86,100 @@ fn shortcut_focuses_url_bar_and_typing_edits_it_without_reaching_the_page() {
         json!(r#"["keydown:a","keyup:a"]"#)
     );
 
-    type_key(&mut app, "Enter", None);
-    assert_eq!(app.requested_navigation.as_deref(), Some("ho"));
+    type_key(&mut app, "Escape", None);
     assert_eq!(app.input_target(), InputTarget::Page);
     type_key(&mut app, "b", Some("b"));
     assert_eq!(evaluate(&mut app, "field.value"), json!("ab"));
+}
+
+fn type_text(app: &mut BrowserApp, text: &str) {
+    for ch in text.chars() {
+        let ch = ch.to_string();
+        type_key(app, &ch, Some(&ch));
+    }
+}
+
+fn commit_url(app: &mut BrowserApp, url: &str) {
+    with_shortcut(app, "l");
+    type_text(app, url);
+    type_key(app, "Enter", None);
+}
+
+#[test]
+fn committing_a_url_navigates_once_and_page_input_keeps_working() {
+    let mut app = app();
+    let target = "data:text/html,<title>B</title><input id=next>";
+    commit_url(&mut app, target);
+    assert_eq!(app.session.current_url(), target);
+    assert!(!app.url_bar.is_editing());
+    assert_eq!(app.url_bar.display_text(), target);
+    assert_eq!(evaluate(&mut app, "document.title"), json!("B"));
+    // One history entry per commit: the start page plus the target.
+    assert_eq!(evaluate(&mut app, "history.length"), json!(2));
+
+    render_browser_frame(&mut app.session, 320, 200, 1).unwrap();
+    evaluate(&mut app, "document.getElementById('next').focus()");
+    type_key(&mut app, "z", Some("z"));
+    assert_eq!(
+        evaluate(&mut app, "document.getElementById('next').value"),
+        json!("z")
+    );
+}
+
+#[test]
+fn rejected_and_failed_urls_stay_in_the_bar_without_navigating() {
+    for text in [
+        "example.test/path",
+        "javascript:document.title='ran'",
+        "http://",
+    ] {
+        let mut app = app();
+        commit_url(&mut app, text);
+        assert_eq!(app.session.current_url(), START_URL, "{text}");
+        assert_eq!(app.input_target(), InputTarget::UrlBar, "{text}");
+        assert_eq!(app.url_bar.display_text(), text);
+        assert_eq!(app.url_bar.page_url(), START_URL);
+        assert_ne!(evaluate(&mut app, "document.title"), json!("ran"));
+        type_key(&mut app, "Escape", None);
+        assert_eq!(app.url_bar.display_text(), START_URL);
+    }
+}
+
+#[test]
+fn page_initiated_and_redirected_navigation_updates_the_bar_but_not_a_draft() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let read = stream.read(&mut request).unwrap();
+            let response = if String::from_utf8_lossy(&request[..read]).starts_with("GET /old ") {
+                "HTTP/1.1 302 Found\r\nLocation: /new\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+            } else {
+                let body = "<title>new</title>";
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    let mut app = app();
+    commit_url(&mut app, &format!("{base}/old"));
+    server.join().unwrap();
+    assert_eq!(app.url_bar.display_text(), format!("{base}/new"));
+
+    with_shortcut(&mut app, "l");
+    type_text(&mut app, "draft");
+    evaluate(&mut app, "history.pushState(null, '', '/pushed')");
+    app.sync_url_bar();
+    assert_eq!(app.url_bar.display_text(), "draft");
+    assert_eq!(app.url_bar.page_url(), format!("{base}/pushed"));
+    type_key(&mut app, "Escape", None);
+    assert_eq!(app.url_bar.display_text(), format!("{base}/pushed"));
 }
 
 #[test]
