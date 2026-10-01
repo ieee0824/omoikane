@@ -575,6 +575,18 @@ impl EventLoop {
         self.now_ms
     }
 
+    /// Reads the earliest timer deadline, or zero for already queued tasks.
+    /// This neither advances the clock nor moves a timer into a task queue.
+    pub(crate) fn next_timer_delay_ms(&self) -> Option<u64> {
+        if !self.order.is_empty() {
+            return Some(0);
+        }
+        self.timers
+            .iter()
+            .map(|timer| timer.next_run_at.saturating_sub(self.now_ms))
+            .min()
+    }
+
     pub(crate) fn has_pending_timers(&self) -> bool {
         !self.timers.is_empty()
             || self.queues.values().any(|queue| {

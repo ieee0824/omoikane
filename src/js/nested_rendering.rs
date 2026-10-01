@@ -90,8 +90,7 @@ fn child_snapshot(
             })
         })
     });
-    let (width, height) = (canvas.width(), canvas.height());
-    crate::paint::Image::new(width, height, canvas.into_pixels()).map(Some)
+    Ok(Some(canvas.into_image()))
 }
 
 /// Descends through nested viewport boxes for embedder pointer input.

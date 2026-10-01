@@ -1195,3 +1195,9 @@ mod tests {
         );
     }
 }
+
+/// Evaluates the shared CSS easing curve from explicit inputs.
+pub(crate) fn animation_timing_progress(input: &str, progress: f32) -> f32 {
+    TimingFunction::parse(input)
+        .map_or(progress, |timing| timing.sample(f64::from(progress)) as f32)
+}

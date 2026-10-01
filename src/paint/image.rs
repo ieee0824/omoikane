@@ -104,9 +104,14 @@ pub(crate) fn decode_gif_animation(bytes: &[u8]) -> Result<ImageAnimation, Paint
         .iter()
         .map(|frame| u64::from(frame.delay_ms.max(1)))
         .sum();
+    let plays = match decoder.repeat() {
+        gif::Repeat::Infinite => None,
+        gif::Repeat::Finite(repeats) => Some(u64::from(repeats) + 1),
+    };
     Ok(ImageAnimation {
         frames,
         duration_ms,
+        plays,
     })
 }
 
