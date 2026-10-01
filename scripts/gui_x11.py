@@ -103,8 +103,18 @@ class GuiSession:
         finally:
             os.close(write_fd)
         try:
-            assert select.select([read_fd], [], [], 10)[0], 'Xvfb startup timeout'
-            number = os.read(read_fd, 64).decode().strip()
+            # Xvfb writes the number and the newline separately and exits if
+            # the pipe is closed in between, so read through the newline.
+            data = b''
+            deadline = time.monotonic() + 10
+            while not data.endswith(b'\n'):
+                remaining = deadline - time.monotonic()
+                assert remaining > 0 and select.select([read_fd], [], [], remaining)[0], \
+                    'Xvfb startup timeout'
+                chunk = os.read(read_fd, 64)
+                assert chunk, 'Xvfb closed the display pipe'
+                data += chunk
+            number = data.decode().strip()
             assert number.isdecimal() and process.poll() is None, 'Xvfb startup failed'
             self.env['DISPLAY'] = ':' + number
         finally:
