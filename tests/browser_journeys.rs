@@ -314,22 +314,20 @@ fn http_page_input_fetch_and_dom_changes_reach_the_painted_frame_impl() {
     );
     click(&mut browser, "#apply");
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut elapsed = 16;
     while evaluate(&mut browser, "journey.updated === true") != true {
         assert!(
             Instant::now() < deadline,
             "page update did not settle: {}",
             evaluate(&mut browser, "JSON.stringify(journey)")
         );
-        elapsed += 16;
         browser
             .active_session_mut()
             .unwrap()
-            .drive_event_loop(elapsed)
+            .drive_event_loop(16)
             .unwrap();
         thread::sleep(Duration::from_millis(1));
     }
-    let after = browser.render_active(640, 480, elapsed + 16).unwrap();
+    let after = browser.render_active(640, 480, 16).unwrap();
     save_frame("page-after-input", &after);
     assert_eq!(pixel(&after, 300, 290), [20, 150, 80, 255]);
     let changed_input_pixels = (154..179)
@@ -397,7 +395,7 @@ fn form_submission_and_back_navigation_preserve_saved_state_impl() {
     );
     click(&mut browser, "#submit");
     // The frontend commits navigation during the next event-loop/frame tick.
-    let submitted = browser.render_active(640, 480, 32).unwrap();
+    let submitted = browser.render_active(640, 480, 16).unwrap();
     save_frame("page-after-submit", &submitted);
     assert_eq!(
         browser.active_session_mut().unwrap().current_url(),
@@ -426,7 +424,7 @@ fn form_submission_and_back_navigation_preserve_saved_state_impl() {
         evaluate(&mut browser, "localStorage.getItem('journey-name')"),
         "Ada Lovelace"
     );
-    let frame = browser.render_active(640, 480, 32).unwrap();
+    let frame = browser.render_active(640, 480, 16).unwrap();
     save_frame("page-after-back", &frame);
     record(
         "form-history",
@@ -545,13 +543,11 @@ fn worker_clone_and_child_realm_complete_through_the_page_event_loop_impl() {
         requestAnimationFrame(()=>eventOrder.push('frame'));"#,
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut elapsed = 16;
     loop {
-        elapsed += 16;
         browser
             .active_session_mut()
             .unwrap()
-            .drive_event_loop(elapsed)
+            .drive_event_loop(16)
             .unwrap();
         if evaluate(
             &mut browser,
@@ -612,7 +608,7 @@ fn linked_stylesheets_share_cascade_geometry_and_paint_across_updates_impl() {
         &mut browser,
         "document.getElementById('target').style.backgroundColor='rgb(20,150,80)'",
     );
-    let changed = browser.render_active(640, 480, 32).unwrap();
+    let changed = browser.render_active(640, 480, 16).unwrap();
     assert_eq!(pixel(&changed, 80, 60), [20, 150, 80, 255]);
     evaluate(
         &mut browser,
@@ -635,7 +631,7 @@ fn linked_stylesheets_share_cascade_geometry_and_paint_across_updates_impl() {
         "document.getElementById('sheet').setAttribute('media','screen')",
     );
     assert_eq!(evaluate(&mut browser, rect), "[55,70,70,30]");
-    let after = browser.render_active(640, 480, 48).unwrap();
+    let after = browser.render_active(640, 480, 16).unwrap();
     assert_eq!(pixel(&after, 80, 80), [20, 150, 80, 255]);
     for path in [
         "/assets/composed.css",
@@ -711,7 +707,7 @@ fn normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates_i
         evaluate(&mut browser, "document.getElementById('name').value"),
         "Lin"
     );
-    let typed = browser.render_active(320, 240, 32).unwrap();
+    let typed = browser.render_active(320, 240, 16).unwrap();
     assert_ne!(
         first.pixels(),
         typed.pixels(),
@@ -719,7 +715,7 @@ fn normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates_i
     );
     save_frame("inline-form-typed", &typed);
     click(&mut browser, "#submit");
-    browser.render_active(320, 240, 48).unwrap();
+    browser.render_active(320, 240, 16).unwrap();
     assert_eq!(
         browser.active_session_mut().unwrap().current_url(),
         server.url("/submit")
