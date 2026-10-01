@@ -9956,3 +9956,36 @@ fn invalid_scroll_offset_shorthand_does_not_partially_override_longhands() {
     );
     assert!(!supports_declaration("scroll-padding", "10px inherit"));
 }
+
+#[test]
+fn color4_container_geometry_is_requested_only_for_color_unit_dependencies() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { container-type: inline-size; color: lab(50 20 30); }").unwrap(),
+    );
+    resolver.computed_style(&title);
+    assert!(!resolver.needs_container_contexts());
+
+    title.set_attribute(
+        "style",
+        "color: color(srgb calc(0.5 + (sign(2cqw - 10px) * 0.1)) 0 0)",
+    );
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style(&title);
+    assert!(resolver.needs_container_contexts());
+
+    title.set_attribute("style", "color: lab(50 20 30)");
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style(&title);
+    assert!(!resolver.needs_container_contexts());
+
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: color(srgb calc(sign(2cqw - 10px)) 0 0); }").unwrap(),
+    );
+    resolver.computed_style(&title);
+    // The inline declaration overrides the earlier container-dependent color.
+    assert!(!resolver.needs_container_contexts());
+}

@@ -134,6 +134,16 @@ fn color4_reaches_background_text_border_gradient_shadow_and_svg() {
                 "{color}: missing {path}"
             );
         }
+        let text_pixels = (10..60)
+            .flat_map(|y| (80..180).map(move |x| (x, y)))
+            .filter_map(|(x, y)| expected.pixel(x, y))
+            .collect::<Vec<_>>();
+        let background = omoikane::paint::Color::rgb(68, 68, 68);
+        assert!(
+            text_pixels.iter().any(|pixel| *pixel != background)
+                && text_pixels.iter().any(|pixel| *pixel == background),
+            "{color}: text region must contain both glyphs and background"
+        );
         let differences = actual
             .pixels()
             .iter()
@@ -186,4 +196,24 @@ fn color_components_resolve_relative_math_when_font_and_container_change() {
         actual,
         "[\"color(srgb 0.6 0 0 / 0.5)\",\"color(srgb 0.4 0 0 / 0.5)\"]"
     );
+}
+
+#[test]
+fn registered_color_components_follow_container_size_changes() {
+    let mut runtime = JsRuntime::with_document(
+        TreeBuilder::parse(
+            "<style>#container{container-type:inline-size;width:1000px}</style>\
+         <div id='container'><div id='target'></div></div>",
+        )
+        .document(),
+    )
+    .unwrap();
+    let actual = runtime.eval(
+        "(() => { CSS.registerProperty({name:'--tint',syntax:'<color>',inherits:false,initialValue:'red'}); \
+         const e=document.getElementById('target'), c=document.getElementById('container'); \
+         e.style.setProperty('--tint','color(srgb calc(0.5 + (sign(2cqw - 10px) * 0.1)) 0 0)'); \
+         const first=getComputedStyle(e).getPropertyValue('--tint'); c.style.width='100px'; \
+         return JSON.stringify([first,getComputedStyle(e).getPropertyValue('--tint')]); })()"
+    ).unwrap().as_string().unwrap().to_std_string_escaped();
+    assert_eq!(actual, "[\"color(srgb 0.6 0 0)\",\"color(srgb 0.4 0 0)\"]");
 }

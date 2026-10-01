@@ -12272,32 +12272,37 @@ fn format_css_number(value: f32) -> String {
     }
 }
 
+/// Serializes colors without quantizing Color 4 channels or their alpha.
+fn computed_color_to_css_string(color: &str) -> String {
+    if let Some(parsed) = crate::paint::color4::CssColor::parse(color) {
+        return parsed.serialize_computed();
+    }
+    if color.starts_with("rgba(") {
+        return color.to_string();
+    }
+    crate::paint::color::parse_color(color).map_or_else(
+        || color.to_string(),
+        |parsed| {
+            if parsed.a == 255 {
+                format!("rgb({}, {}, {})", parsed.r, parsed.g, parsed.b)
+            } else {
+                format!(
+                    "rgba({}, {}, {}, {})",
+                    parsed.r,
+                    parsed.g,
+                    parsed.b,
+                    format_css_number(f32::from(parsed.a) / 255.0)
+                )
+            }
+        },
+    )
+}
+
 /// Serializes a single [`ComputedValue`] to its CSS string form.
 fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> String {
     match value {
         ComputedValue::Keyword(keyword) => keyword.clone(),
-        ComputedValue::Color(color) if crate::paint::color4::CssColor::parse(color).is_some() => {
-            crate::paint::color4::CssColor::parse(color)
-                .unwrap()
-                .serialize_computed()
-        }
-        ComputedValue::Color(color) if color.starts_with("rgba(") => color.clone(),
-        ComputedValue::Color(color) => crate::paint::color::parse_color(color).map_or_else(
-            || color.clone(),
-            |parsed| {
-                if parsed.a == 255 {
-                    format!("rgb({}, {}, {})", parsed.r, parsed.g, parsed.b)
-                } else {
-                    format!(
-                        "rgba({}, {}, {}, {})",
-                        parsed.r,
-                        parsed.g,
-                        parsed.b,
-                        format_css_number(f32::from(parsed.a) / 255.0)
-                    )
-                }
-            },
-        ),
+        ComputedValue::Color(color) => computed_color_to_css_string(color),
         ComputedValue::String(string) => string.clone(),
         ComputedValue::Px(px) => format!("{}px", format_css_number(*px)),
         ComputedValue::Percentage(pct) => format!("{}%", format_css_number(*pct)),

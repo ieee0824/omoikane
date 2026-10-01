@@ -1123,9 +1123,7 @@ fn registered_value_matches_kind(value: &Value, kind: &RegisteredSyntaxKind) -> 
             ),
             _ => false,
         },
-        RegisteredSyntaxKind::Color => {
-            crate::paint::color::parse_color(&render_value(value)).is_some()
-        }
+        RegisteredSyntaxKind::Color => is_valid_css_color_text(&render_value(value)),
         RegisteredSyntaxKind::Angle => {
             matches!(value, Value::Length(_, unit) if matches!(unit.to_ascii_lowercase().as_str(), "deg" | "grad" | "rad" | "turn"))
         }
@@ -1593,13 +1591,19 @@ impl StyleResolver {
 
     /// Whether size queries or size-container units need a geometry snapshot.
     pub(crate) fn needs_container_contexts(&self) -> bool {
-        self.cache.values().any(|style| {
-            matches!(style.get("container-type"),
-            Some(ComputedValue::Keyword(value)) if value == "size" || value == "inline-size")
-        }) || self
-            .stylesheets
-            .iter()
-            .any(|input| contains_at_rule_named(&input.stylesheet.rules, "container"))
+        self.cache
+            .values()
+            .chain(self.pseudo_cache.values())
+            .any(|style| {
+                style
+                    .component_values
+                    .values()
+                    .any(color_uses_container_units)
+            })
+            || self
+                .stylesheets
+                .iter()
+                .any(|input| contains_at_rule_named(&input.stylesheet.rules, "container"))
     }
 
     /// Returns the number of distinct `@media` prelude strings currently held
@@ -2684,6 +2688,9 @@ impl StyleResolver {
             viewport_height: self.viewport_height,
             color_container_size: self.color_container_size(node),
         };
+        for (name, value) in &specified_custom_properties {
+            record_component_value(&mut component_values, name, value);
+        }
         let (computed_custom_properties, typed_custom_properties) =
             compute_registered_custom_properties(
                 &specified_custom_properties,
@@ -3151,14 +3158,37 @@ fn record_component_value(
     property_name: &str,
     value: &Value,
 ) {
-    if !matches!(
-        property_name.to_ascii_lowercase().as_str(),
-        "content" | "counter-reset" | "counter-increment"
-    ) {
-        return;
-    }
     let name = property_name.to_ascii_lowercase();
-    values.insert(name, value.clone());
+    if matches!(
+        name.as_str(),
+        "content" | "counter-reset" | "counter-increment"
+    ) || color_uses_container_units(value)
+    {
+        values.insert(name, value.clone());
+    } else {
+        values.remove(&name);
+    }
+}
+
+/// Retains only color expressions that need a layout-provided container size.
+fn color_uses_container_units(value: &Value) -> bool {
+    fn contains_unit(value: &Value) -> bool {
+        match value {
+            Value::Length(_, unit) => matches!(
+                unit.to_ascii_lowercase().as_str(),
+                "cqw" | "cqh" | "cqi" | "cqb"
+            ),
+            Value::Function {
+                arguments: args, ..
+            }
+            | Value::List(args)
+            | Value::CommaList(args) => args.iter().any(contains_unit),
+            _ => false,
+        }
+    }
+    matches!(value, Value::Function { name, .. }
+        if matches!(name.to_ascii_lowercase().as_str(), "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color")
+            && contains_unit(value))
 }
 
 fn resolve_component_css_wide_keywords(
@@ -3674,10 +3704,8 @@ fn validate_color_value(value: &Value) -> DeclarationValidation {
     }
 
     let valid = match value {
-        Value::Keyword(color) | Value::Color(color) => {
-            crate::paint::color::parse_color(color).is_some()
-        }
-        Value::Function { .. } => crate::paint::color::parse_color(&render_value(value)).is_some(),
+        Value::Keyword(color) | Value::Color(color) => is_valid_css_color_text(color),
+        Value::Function { .. } => is_valid_css_color_text(&render_value(value)),
         _ => false,
     };
     if valid {
@@ -3685,6 +3713,12 @@ fn validate_color_value(value: &Value) -> DeclarationValidation {
     } else {
         DeclarationValidation::Invalid
     }
+}
+
+/// Validates Color 4 syntax without performing conversion or gamut mapping.
+fn is_valid_css_color_text(text: &str) -> bool {
+    crate::paint::color4::CssColor::parse(text).is_some()
+        || crate::paint::color::parse_color(text).is_some()
 }
 
 pub(super) fn is_valid_color_value(value: &Value) -> bool {
