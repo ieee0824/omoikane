@@ -63,6 +63,21 @@ objdumpの近隣symbol表示は参照対象の証明ではなく、データ・�
 動的coverageも未検証。この範囲の処理命令の追加を支持しないが、配置が時間差の原因とは
 断定しない。全calleeを比較したものでもない。
 
+追加でactive script取得、ObjectTemplate::createのFunction/Object版、共有shapeからの
+Object生成、register_root、collection block開始、Rust alloc入口、GC allocのFunction/Object版
+の計9関数を比較した。264/456/272/168/320/68/4/584/552 bytesで前後同サイズ。
+命令差はADRP/ADD/LDRの参照先部分で、Rust alloc入口は正規化後に一致した。
+3か所のLDR差はthin_vec::EMPTY_HEADERのslot移動で、exact relocation targetの16 bytesは
+両版とも全0だった。alloc_gcのObject版には同名symbolが複数あったため、実際のcallerの
+直接callアドレスで選択した（Arrayとの同address aliasを名前だけで誤帰属しない）。
+[追加証跡](measurements/issue667/allocation-manifest.json)にhashと範囲を記録する。
+残るvtableデータ・さらに深いcallee・動的coverageは同一性未検証で、配置の因果証明ではない。
+
+Linux ARM64でself software task clock（kernel/hypervisor除外）をperf_event_openで
+読み取り専用に試行したがEACCES（errno13）。perf_event_paranoid=4、実効capability=0。
+host設定は変更していない。実CPU cache/branch/cycleの寄与を確定するには、計測可能な
+環境での追加profileが必要。Callgrind simulationで代用した確定判断はしない。
+
 ## 不採用の3対照
 
 同じworktree/compiler/locks/profile/featuresでビルドし、変更なしreferenceの4バイナリは
@@ -141,3 +156,16 @@ closure/onは10/10組で遅い。array/offは6/10組で遅い。
 残った。元の+5.87%という大きさが一致しないことだけを「再現なし」とせず、openを維持する。
 直接原因は未確定。今後は元実行経路のCPU/配置・非collection処理の証拠が必要であり、
 良い結果が出るまで同じ計測を繰り返すことはしない。
+
+## 完了条件との照合
+
+| Issueの条件 | 現時点の証拠と判定 |
+| --- | --- |
+| 同fixture・回数・features、サンプル差し替えなしの再確認 | 元保存バイナリの2比較、全raw/inputs/hash記録で確認済み |
+| profile/codeから原因を絞り、候補を全11項目・代表ページで比較 | 3候補の全比較は完了。命令数増・native生成増・collection回数増は診断で支持されないが、時間増加の因果的な切り分けは未完了 |
+| 文字列改善・結果・GC/JIT契約の保持、他悪化と不確実性の開示 | 文字列短縮・結果/counter/page記録一致を確認。候補の他項目悪化を開示し不採用、実行コード/GC/JIT APIは変更なし |
+| 採用時の3環境検証gate | 修正は採用しておらず条件は未発生。未実行を成功扱いしない |
+
+「再現できなければclose」の条件はclosure/onの残差再現により満たさない。
+調査証跡の共有PRは性能差の解決を意味しない。原因の切り分けが未完了なので、
+本Issueと調査目標を完了扱いにしない。

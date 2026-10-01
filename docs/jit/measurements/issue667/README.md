@@ -20,6 +20,12 @@ GC全320passのcollection回数も前後で比較する。元バイナリの再�
 handlerと主要calleeのassembly・正規化命令・差分を含む。失敗した初回解析は含まない。
 `constant-function-relocation.json`は、命令差として残したLDRの参照先をELF relocationと
 exact symbolで照合した追補。diagnostics内の旧「未検証」分類を上書きせず補足している。
+`allocation-diagnostics.json.gz`は追加9関数のassembly/差分/集計とperf権限試行の記録。
+これは主検査スクリプトの7bundleとは別の追補で、integrityは次で確認する：
+
+```sh
+python3 -c 'import gzip,hashlib,json,pathlib; p=pathlib.Path("docs/jit/measurements/issue667"); m=json.loads((p/"allocation-manifest.json").read_text()); b=(p/"allocation-diagnostics.json.gz").read_bytes(); assert len(b)==m["bytes"] and hashlib.sha256(b).hexdigest()==m["sha256"]; assert len(json.loads(gzip.decompress(b)))==m["files"]; print("allocation bundle integrity OK")'
+```
 
 実行バイナリ、PNG画素、Callgrindの全eventファイル、build出力は**ここには含まれない**。
 これらは元PCにのみ保持され、hashだけで別PCから内容を復元することはできない。
