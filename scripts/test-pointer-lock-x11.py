@@ -6,37 +6,30 @@ import ctypes as C
 import http.server
 import hashlib
 import json
-import os
 from pathlib import Path
-import select
 import signal
-import subprocess as S
 import threading
 import time
 
-from PIL import Image, ImageChops, ImageGrab
+from PIL import ImageChops, ImageGrab
+
+from gui_x11 import GuiSession, geometry as window_geometry
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, required=True, help='GUI executable built with --features gui')
 parser.add_argument('--artifacts', type=Path, required=True, help='new directory for logs and original/compressed screenshots')
 args = parser.parse_args()
-OUT = args.artifacts.resolve()
-OUT.mkdir(parents=True, exist_ok=False)
+session = GuiSession(args.artifacts, {'OMOIKANE_TRACE_INPUT': '1'})
+OUT = session.out
+env = session.env
+evidence = session.evidence
+command = session.command
+wait_for = session.wait_for
 (OUT / 'harness.py').write_bytes(Path(__file__).read_bytes())
 FIXTURE = (ROOT / 'tests/fixtures/anonymized-pointer-lock/native.html').read_bytes()
 (OUT / 'fixture.html').write_bytes(FIXTURE)
-(OUT / 'inputs.json').write_text(json.dumps({
-    'revision': S.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
-    'binary': str(args.binary.resolve()),
-    'binary_sha256': hashlib.sha256(args.binary.read_bytes()).hexdigest(),
-    'fixture_sha256': hashlib.sha256(FIXTURE).hexdigest(),
-}, indent=2) + '\n')
-processes = []
-logs = []
-evidence = []
-env = os.environ.copy()
-env['OMOIKANE_TRACE_INPUT'] = '1'
+session.inputs['fixture_sha256'] = hashlib.sha256(FIXTURE).hexdigest()
 
 def input_events():
     path = OUT / 'browser.log'
@@ -45,28 +38,6 @@ def input_events():
     return [json.loads(line.removeprefix('OMOIKANE_INPUT '))
             for line in path.read_text().splitlines(keepends=True)
             if line.startswith('OMOIKANE_INPUT ') and line.endswith('\n')]
-
-def start(command, name, **kwargs):
-    log = (OUT / (name + '.log')).open('w')
-    logs.append(log)
-    p = S.Popen(command, env=env, stdout=log, stderr=S.STDOUT, **kwargs)
-    processes.append(p)
-    return p
-
-def command(*args):
-    return S.check_output(args, env=env, text=True, timeout=5).strip()
-
-def wait_for(label, probe, predicate, seconds=20):
-    deadline = time.monotonic() + seconds
-    last = None
-    while time.monotonic() < deadline:
-        last = probe()
-        if predicate(last):
-            evidence.append({'step': label, 'result': last})
-            print(label, json.dumps(last), flush=True)
-            return last
-        time.sleep(.1)
-    raise AssertionError((label, last))
 
 def screenshot(name):
     marker = {'before': (204,217,232), 'locked': (128,201,155),
@@ -78,13 +49,9 @@ def screenshot(name):
         if marker_pixels > 100000 or time.monotonic() >= deadline:
             break
         time.sleep(.1)
-    original = OUT / (name + '.original.png')
-    compressed = OUT / (name + '.png')
-    im.save(original, compress_level=0)
-    im.save(compressed, compress_level=9)
-    assert Image.open(compressed).tobytes() == im.tobytes()
-    evidence.append({'image': name, 'size': im.size, 'original_bytes': original.stat().st_size,
-                     'compressed_bytes': compressed.stat().st_size, 'marker_pixels': marker_pixels})
+    im = session.screenshot(name)
+    marker_pixels = sum(count for count,color in im.getcolors(im.width*im.height) if color==marker)
+    evidence.append({'image': name, 'marker_pixels': marker_pixels})
     assert marker_pixels > 100000, ('page was not painted', name, marker_pixels)
     return im
 
@@ -106,18 +73,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
-    read_fd, write_fd = os.pipe()
-    xvfb = start(['Xvfb', '-displayfd', str(write_fd), '-screen', '0', '1600x1000x24',
-                  '-nolisten', 'tcp'], 'xvfb', pass_fds=(write_fd,))
-    os.close(write_fd)
-    assert select.select([read_fd], [], [], 10)[0], 'Xvfb startup timeout'
-    with os.fdopen(read_fd) as display_number:
-        env['DISPLAY'] = ':' + display_number.readline().strip()
-    assert env['DISPLAY'] != ':'
-    env['WINIT_UNIX_BACKEND'] = 'x11'
-    env['WINIT_X11_SCALE_FACTOR'] = '1'
-    start(['openbox'], 'openbox')
-    (OUT / 'display.txt').write_text(command('xdpyinfo'))
+    session.__enter__()
     x = C.CDLL('libX11.so.6')
     x.XOpenDisplay.argtypes = [C.c_char_p]; x.XOpenDisplay.restype = C.c_void_p
     d = x.XOpenDisplay(env['DISPLAY'].encode())
@@ -159,25 +115,14 @@ try:
         return v
     xtst=C.CDLL('libXtst.so.6')
     xtst.XTestFakeRelativeMotionEvent.argtypes=[C.c_void_p,C.c_int,C.c_int,C.c_ulong]
-    app_command=[str(args.binary.resolve()),f'http://127.0.0.1:{server.server_port}/']
-    app=start(app_command, 'browser')
-    def find_window():
-        assert app.poll() is None, ('GUI process exited', app.returncode)
-        r=S.run(['xdotool','search','--name','^PLTEST:'],env=env,capture_output=True,text=True)
-        return r.stdout.splitlines()
-    win=wait_for('window created',find_window,bool)[0]
+    app = session.launch(args.binary, [f'http://127.0.0.1:{server.server_port}/'])
+    win = session.window(app)
     command('xdotool','windowsize','--sync',win,'1000','700')
     command('xdotool','windowmove','--sync',win,'50','50')
     command('xdotool','windowactivate','--sync',win)
     def geometry(command_name):
         return {key:int(value) for key,value in (line.split('=',1) for line in command_name.splitlines())}
-    bounds=geometry(command('xdotool','getwindowgeometry','--shell',win))
-    # Translate the client origin directly; WM reparenting adds decorations
-    # whose offsets some xdotool versions count twice in getwindowgeometry.
-    x.XTranslateCoordinates.argtypes=[C.c_void_p,C.c_ulong,C.c_ulong,C.c_int,C.c_int,C.POINTER(C.c_int),C.POINTER(C.c_int),C.POINTER(C.c_ulong)]
-    origin_x=C.c_int(); origin_y=C.c_int(); child_window=C.c_ulong()
-    assert x.XTranslateCoordinates(d,int(win),root,0,0,C.byref(origin_x),C.byref(origin_y),C.byref(child_window))
-    bounds['X']=origin_x.value; bounds['Y']=origin_y.value
+    bounds = window_geometry(session, win)
     def title(): return command('xdotool','getwindowname',win)
     def state():
         value=title()
@@ -291,16 +236,12 @@ try:
     screenshot('navigated')
     evidence.append({'status':'PASS'})
     print('PASS', flush=True)
-except Exception as error:
-    evidence.append({'status':'FAIL', 'error':str(error)})
+except BaseException as error:
+    session.__exit__(type(error), error, error.__traceback__)
     raise
+else:
+    session.__exit__(None, None, None)
 finally:
-    (OUT/'results.json').write_text(json.dumps(evidence,indent=2)+'\n')
     (OUT/'input-events.json').write_text(json.dumps(input_events(),indent=2)+'\n')
-    for p in reversed(processes):
-        if p.poll() is None:
-            p.terminate()
-            try: p.wait(timeout=5)
-            except S.TimeoutExpired: p.kill(); p.wait()
     server.shutdown()
-    for log in logs: log.close()
+    server.server_close()
