@@ -16272,7 +16272,7 @@
   // (`style.whiteSpace`), `cssFloat`, `getPropertyValue('white-space')`,
   // `length`, and indexed/item access. The provider is read for every operation
   // so retained resolved declarations stay live after DOM or CSSOM mutations.
-  function __makeComputedStyle(source) {
+  function __makeComputedStyle(source, valueSource) {
     const readMap = typeof source === "function"
       ? () => {
           try {
@@ -16283,6 +16283,12 @@
           }
         }
       : () => source;
+    // Resolve every named read without constructing an entire property map.
+    // Missing properties still use the map for logical shorthand synthesis.
+    const readValue = (key) => {
+      if (typeof valueSource !== "function") return undefined;
+      try { return valueSource(key); } catch (_) { return undefined; }
+    };
     const indexedName = (map, prop) => {
       if (typeof prop !== "string" || !/^(0|[1-9][0-9]*)$/.test(prop)) return null;
       const index = Number(prop);
@@ -16291,8 +16297,13 @@
     };
     const decl = {
       getPropertyValue(name) {
+        const property = String(name);
+        const key = property.startsWith("--")
+          ? property
+          : __styleNameToCss(property).toLowerCase();
+        const value = readValue(key);
+        if (value !== undefined) return value;
         const map = readMap();
-        const key = __styleNameToCss(name).toLowerCase();
         return Object.prototype.hasOwnProperty.call(map, key) ? map[key] :
           (computedLogicalShorthand(map, key) ?? (key === "z-index" ? "auto" : ""));
       },
@@ -16308,10 +16319,12 @@
     return new Proxy(decl, {
       get(target, prop) {
         if (typeof prop === "symbol" || prop in target) return target[prop];
+        const key = __styleNameToCss(prop);
+        const value = readValue(key);
+        if (value !== undefined) return value;
         const map = readMap();
         const indexed = indexedName(map, prop);
         if (indexed !== null) return indexed;
-        const key = __styleNameToCss(prop);
         return Object.prototype.hasOwnProperty.call(map, key) ? map[key] :
           (computedLogicalShorthand(map, key) ?? (key === "z-index" ? "auto" : ""));
       },
@@ -16364,20 +16377,26 @@
       const nodeId = element.__id;
       try {
         if (pseudo === null) {
-          JSON.parse(__omoikane_computed_style(nodeId));
+          __omoikane_computed_style(nodeId, null, true, true);
           const style = __makeComputedStyle(() => {
             flushStyleSheets();
-            return JSON.parse(__omoikane_computed_style(nodeId));
+            return __omoikane_computed_style(nodeId, null, true);
+          }, (key) => {
+            flushStyleSheets();
+            return __omoikane_computed_style(nodeId, null, true, false, key);
           });
           __dispatchPendingTransitionEvents();
           return style;
         }
         // Resolve once before dispatching transition events, preserving the
         // synchronous behavior of getComputedStyle itself.
-        JSON.parse(__omoikane_computed_style(nodeId, pseudo));
+        __omoikane_computed_style(nodeId, pseudo, true, true);
         const style = __makeComputedStyle(() => {
           flushStyleSheets();
-          return JSON.parse(__omoikane_computed_style(nodeId, pseudo));
+          return __omoikane_computed_style(nodeId, pseudo, true);
+        }, (key) => {
+          flushStyleSheets();
+          return __omoikane_computed_style(nodeId, pseudo, true, false, key);
         });
         __dispatchPendingTransitionEvents();
         return style;

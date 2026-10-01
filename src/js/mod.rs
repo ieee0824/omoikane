@@ -12362,26 +12362,37 @@ fn format_css_number(value: f32) -> String {
     }
 }
 
+/// Serializes colors without quantizing Color 4 channels or their alpha.
+fn computed_color_to_css_string(color: &str) -> String {
+    if let Some(parsed) = crate::paint::color4::CssColor::parse(color) {
+        return parsed.serialize_computed();
+    }
+    if color.starts_with("rgba(") {
+        return color.to_string();
+    }
+    crate::paint::color::parse_color(color).map_or_else(
+        || color.to_string(),
+        |parsed| {
+            if parsed.a == 255 {
+                format!("rgb({}, {}, {})", parsed.r, parsed.g, parsed.b)
+            } else {
+                format!(
+                    "rgba({}, {}, {}, {})",
+                    parsed.r,
+                    parsed.g,
+                    parsed.b,
+                    format_css_number(f32::from(parsed.a) / 255.0)
+                )
+            }
+        },
+    )
+}
+
 /// Serializes a single [`ComputedValue`] to its CSS string form.
 fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> String {
     match value {
         ComputedValue::Keyword(keyword) => keyword.clone(),
-        ComputedValue::Color(color) => crate::paint::color::parse_color(color).map_or_else(
-            || color.clone(),
-            |parsed| {
-                if parsed.a == 255 {
-                    format!("rgb({}, {}, {})", parsed.r, parsed.g, parsed.b)
-                } else {
-                    format!(
-                        "rgba({}, {}, {}, {})",
-                        parsed.r,
-                        parsed.g,
-                        parsed.b,
-                        format_css_number(f32::from(parsed.a) / 255.0)
-                    )
-                }
-            },
-        ),
+        ComputedValue::Color(color) => computed_color_to_css_string(color),
         ComputedValue::String(string) => string.clone(),
         ComputedValue::Px(px) => format!("{}px", format_css_number(*px)),
         ComputedValue::Percentage(pct) => format!("{}%", format_css_number(*pct)),
@@ -12985,6 +12996,49 @@ fn computed_style_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    let style = resolve_native_computed_style(args, context)?;
+    // A synchronous flush samples transitions before event dispatch, but its
+    // caller does not need to materialize a property map until a later read.
+    if args.get(3).is_some_and(JsValue::to_boolean) {
+        return Ok(JsValue::undefined());
+    }
+    // A named CSSOM read needs only one serialized property. Resolve afresh as
+    // above, but avoid allocating the complete JavaScript property map.
+    if let Some(name) = args.get(4).and_then(JsValue::as_string) {
+        let name = name.to_std_string_escaped();
+        return Ok(style
+            .as_ref()
+            .and_then(|style| style.get(&name))
+            .map_or_else(JsValue::undefined, |value| {
+                js_string!(computed_value_to_css_string(&name, value)).into()
+            }));
+    }
+    if args.get(2).is_some_and(JsValue::to_boolean) {
+        // CSSOM uses an object directly, avoiding an escaped JSON round trip.
+        let object = JsObject::with_object_proto(context.intrinsics());
+        if let Some(style) = style {
+            for (name, value) in style.properties() {
+                let value = computed_value_to_css_string(&name, &value);
+                object.create_data_property_or_throw(
+                    js_string!(name.as_str()),
+                    js_string!(value.as_str()),
+                    context,
+                )?;
+            }
+        }
+        return Ok(object.into());
+    }
+    let json = style
+        .as_ref()
+        .map_or_else(|| "{}".to_string(), serialize_computed_style);
+    Ok(js_string!(json.as_str()).into())
+}
+
+/// Resolves an owned CSSOM snapshot before constructing any JavaScript objects.
+fn resolve_native_computed_style(
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<Option<ComputedStyle>> {
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     let pseudo = match args.get(1) {
@@ -12994,7 +13048,7 @@ fn computed_style_native(
                 match name.trim().to_ascii_lowercase().as_str() {
                     ":before" | "::before" => Some(PseudoElement::Before),
                     ":after" | "::after" => Some(PseudoElement::After),
-                    _ => return Ok(js_string!("{}").into()),
+                    _ => return Ok(None),
                 }
             } else {
                 None
@@ -13004,87 +13058,80 @@ fn computed_style_native(
     };
     form_validation::flush(node_id, context)?;
     with_host_state(|state| {
-        let node = state.borrow().get_node(node_id);
-        let Some(node) = node else {
-            return Ok(js_string!("{}").into());
+        let Some(node) = state.borrow().get_node(node_id) else {
+            return Ok(None);
         };
         if node.node_type() != NodeType::Element {
-            return Ok(js_string!("{}").into());
+            return Ok(None);
         }
-        // Resolve against the cascade of the document this node actually lives
-        // in, so a sub-document (iframe) node uses the iframe's `<style>` rules
-        // and never the main document's, and vice versa. A detached node has no
-        // document root and keeps the empty-object result.
+        // Use the owning document's cascade for iframe nodes; detached nodes
+        // have no document and expose an empty declaration.
         let Some(document) = document_root_for_node(&node) else {
-            return Ok(js_string!("{}").into());
+            return Ok(None);
         };
         let document_id = document.identity();
-        let json = {
-            let mut state = state.borrow_mut();
-            // Ordinary styles initialize the resolver while resolving layout;
-            // pseudo-elements skip layout but still need the current sheets.
-            if pseudo.is_some() {
-                state.ensure_style_resolver(&document);
-            }
-            let used_size = if pseudo.is_none() {
-                resolved_layout_size(&mut state, &document, &node)
-            } else {
-                None
-            };
-            match state
-                .document_styles
-                .get_mut(&document_id)
-                .and_then(|entry| entry.resolver.as_mut())
-            {
-                Some(resolver) => {
-                    let Some(mut style) = (match pseudo {
-                        Some(pseudo) => resolver.computed_pseudo_style(&node, pseudo),
-                        None => Some(resolver.computed_style(&node)),
-                    }) else {
-                        return Ok(js_string!("{}").into());
-                    };
-                    if let Some(used_size) = used_size {
-                        let border_box = crate::layout::is_border_box(&style);
-                        if resolved_width_applies(&style) {
-                            style.set_resolved_px(
-                                "width",
-                                if border_box {
-                                    used_size.border_width
-                                } else {
-                                    used_size.content_width
-                                },
-                            );
-                        }
-                        if resolved_height_applies(&style) {
-                            style.set_resolved_px(
-                                "height",
-                                if border_box {
-                                    used_size.border_height
-                                } else {
-                                    used_size.content_height
-                                },
-                            );
-                        }
-                    }
-                    let auto_min_size = ["min-width", "min-height"].iter().any(|name| {
-                        matches!(style.get(name), Some(ComputedValue::Keyword(value)) if value == "auto")
-                    });
-                    let flex_or_grid_item = pseudo.is_none() && auto_min_size
-                        && node.parent_node().is_some_and(|parent| {
-                            matches!(
-                                resolver.computed_style(&parent).get("display"),
-                                Some(ComputedValue::Keyword(display))
-                                    if matches!(display.as_str(), "flex" | "inline-flex" | "grid" | "inline-grid")
-                            )
-                        });
-                    style.populate_logical_cssom(flex_or_grid_item);
-                    serialize_computed_style(&style)
-                }
-                None => "{}".to_string(),
-            }
+        let mut state = state.borrow_mut();
+        if pseudo.is_some() {
+            state.ensure_style_resolver(&document);
+        }
+        let used_size = if pseudo.is_none() {
+            resolved_layout_size(&mut state, &document, &node)
+        } else {
+            None
         };
-        Ok(js_string!(json.as_str()).into())
+        let Some(resolver) = state
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+        else {
+            return Ok(None);
+        };
+        let Some(mut style) = (match pseudo {
+            Some(pseudo) => resolver.computed_pseudo_style(&node, pseudo),
+            None => Some(resolver.computed_style(&node)),
+        }) else {
+            return Ok(None);
+        };
+        if let Some(used_size) = used_size {
+            apply_cssom_used_size(&mut style, used_size);
+        }
+        let auto_min_size = ["min-width", "min-height"].iter().any(|name| {
+            matches!(style.get(name), Some(ComputedValue::Keyword(value)) if value == "auto")
+        });
+        let flex_or_grid_item = pseudo.is_none() && auto_min_size
+            && node.parent_node().is_some_and(|parent| {
+                matches!(resolver.computed_style(&parent).get("display"),
+                    Some(ComputedValue::Keyword(display))
+                        if matches!(display.as_str(), "flex" | "inline-flex" | "grid" | "inline-grid"))
+            });
+        style.populate_logical_cssom(flex_or_grid_item);
+        Ok(Some(style))
     })
+}
+
+/// Applies CSSOM's resolved width and height while retaining box sizing rules.
+fn apply_cssom_used_size(style: &mut ComputedStyle, size: LayoutUsedSize) {
+    let border_box = crate::layout::is_border_box(style);
+    if resolved_width_applies(style) {
+        style.set_resolved_px(
+            "width",
+            if border_box {
+                size.border_width
+            } else {
+                size.content_width
+            },
+        );
+    }
+    if resolved_height_applies(style) {
+        style.set_resolved_px(
+            "height",
+            if border_box {
+                size.border_height
+            } else {
+                size.content_height
+            },
+        );
+    }
 }
 
 /// Resolves an optional native node argument used by content-visibility hooks.
@@ -15220,7 +15267,14 @@ fn css_declarations_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    let declarations = font_descriptors::declarations(&block);
+    let declarations = font_descriptors::declarations(&block)
+        .into_iter()
+        .map(|(name, value)| {
+            let value = crate::paint::color4::CssColor::parse(&value)
+                .map_or(value, |color| color.serialize());
+            (name, value)
+        })
+        .collect::<Vec<_>>();
     let declarations = serde_json::to_string(&declarations)
         .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
     Ok(js_string!(declarations.as_str()).into())
@@ -15478,7 +15532,8 @@ fn normalize_style_value_native(
             {
                 "0px".to_string()
             } else {
-                value
+                crate::paint::color4::CssColor::parse(&value)
+                    .map_or(value, |color| color.serialize())
             }
         })
     } else {

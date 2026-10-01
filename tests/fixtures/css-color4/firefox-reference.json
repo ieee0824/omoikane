@@ -1,0 +1,344 @@
+{
+  "capabilities": {
+    "browserName": "firefox",
+    "browserVersion": "157.0",
+    "moz:buildID": "20260924084938",
+    "moz:geckodriverVersion": "0.37.1",
+    "platformName": "linux",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:157.0) Gecko/20100101 Firefox/157.0"
+  },
+  "records": [
+    {
+      "computed": "rgb(255, 0, 0)",
+      "input": "hwb(0 0% 0%)",
+      "pixel": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "specified": "rgb(255, 0, 0)"
+    },
+    {
+      "computed": "rgba(51, 179, 179, 0.5)",
+      "input": "hwb(.5turn 20% 30% / 50%)",
+      "pixel": [
+        51,
+        179,
+        179,
+        128
+      ],
+      "specified": "rgba(51, 179, 179, 0.5)"
+    },
+    {
+      "computed": "rgba(255, 0, 0, 0)",
+      "input": "hwb(none none none / none)",
+      "pixel": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "specified": "rgba(255, 0, 0, 0)"
+    },
+    {
+      "computed": "rgb(128, 128, 128)",
+      "input": "hwb(120 80% 80%)",
+      "pixel": [
+        128,
+        128,
+        128,
+        255
+      ],
+      "specified": "rgb(128, 128, 128)"
+    },
+    {
+      "computed": "lab(50 125 -125 / none)",
+      "input": "lab(50% 100% -100% / none)",
+      "pixel": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "specified": "lab(50 125 -125 / none)"
+    },
+    {
+      "computed": "lab(100 0 0)",
+      "input": "lab(100 0 0)",
+      "pixel": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "specified": "lab(100 0 0)"
+    },
+    {
+      "computed": "lab(none none none)",
+      "input": "lab(none none none)",
+      "pixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "specified": "lab(none none none)"
+    },
+    {
+      "computed": "lch(50 150 0)",
+      "input": "lch(50% 100% 400grad)",
+      "pixel": [
+        255,
+        0,
+        128,
+        255
+      ],
+      "specified": "lch(50 150 0)"
+    },
+    {
+      "computed": "lch(40 20 180 / 0.25)",
+      "input": "lch(40 20 3.141592653589793rad / .25)",
+      "pixel": [
+        51,
+        103,
+        95,
+        64
+      ],
+      "specified": "lch(40 20 180 / 0.25)"
+    },
+    {
+      "computed": "oklab(0.5 0.4 none)",
+      "input": "oklab(50% 100% none)",
+      "pixel": [
+        240,
+        0,
+        90,
+        255
+      ],
+      "specified": "oklab(0.5 0.4 none)"
+    },
+    {
+      "computed": "oklab(1 0 0 / 0.2)",
+      "input": "oklab(1 0 0 / 20%)",
+      "pixel": [
+        255,
+        255,
+        255,
+        51
+      ],
+      "specified": "oklab(1 0 0 / 0.2)"
+    },
+    {
+      "computed": "oklch(0.5 0.4 180)",
+      "input": "oklch(50% 100% 180deg)",
+      "pixel": [
+        0,
+        152,
+        108,
+        255
+      ],
+      "specified": "oklch(0.5 0.4 180)"
+    },
+    {
+      "computed": "color(srgb 1 0 0)",
+      "input": "color(srgb 1 0 0)",
+      "pixel": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "specified": "color(srgb 1 0 0)"
+    },
+    {
+      "computed": "color(srgb-linear 0.5 0.2 0.1 / 0.5)",
+      "input": "color(srgb-linear .5 .2 .1 / .5)",
+      "pixel": [
+        187,
+        123,
+        89,
+        128
+      ],
+      "specified": "color(srgb-linear 0.5 0.2 0.1 / 0.5)"
+    },
+    {
+      "computed": "color(display-p3 1 0 0)",
+      "input": "color(display-p3 1 0 0)",
+      "pixel": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "specified": "color(display-p3 1 0 0)"
+    },
+    {
+      "computed": "color(display-p3 0 1 0)",
+      "input": "color(display-p3 0 1 0)",
+      "pixel": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "specified": "color(display-p3 0 1 0)"
+    },
+    {
+      "computed": "color(display-p3-linear 1 0 0)",
+      "input": "color(display-p3-linear 1 0 0)",
+      "pixel": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "specified": "color(display-p3-linear 1 0 0)"
+    },
+    {
+      "computed": "color(a98-rgb 0.8 0.4 0.2)",
+      "input": "color(a98-rgb .8 .4 .2)",
+      "pixel": [
+        231,
+        102,
+        43,
+        255
+      ],
+      "specified": "color(a98-rgb 0.8 0.4 0.2)"
+    },
+    {
+      "computed": "color(prophoto-rgb 0.8 0.4 0.2)",
+      "input": "color(prophoto-rgb .8 .4 .2)",
+      "pixel": [
+        255,
+        82,
+        47,
+        255
+      ],
+      "specified": "color(prophoto-rgb 0.8 0.4 0.2)"
+    },
+    {
+      "computed": "color(rec2020 0.8 0.4 0.2)",
+      "input": "color(rec2020 .8 .4 .2)",
+      "pixel": [
+        250,
+        96,
+        51,
+        255
+      ],
+      "specified": "color(rec2020 0.8 0.4 0.2)"
+    },
+    {
+      "computed": "color(xyz-d50 0.2 0.3 0.4)",
+      "input": "color(xyz-d50 .2 .3 .4)",
+      "pixel": [
+        0,
+        168,
+        189,
+        255
+      ],
+      "specified": "color(xyz-d50 0.2 0.3 0.4)"
+    },
+    {
+      "computed": "color(xyz-d65 none 0.5 -1)",
+      "input": "color(xyz none 50% -1 / 200%)",
+      "pixel": [
+        0,
+        243,
+        0,
+        255
+      ],
+      "specified": "color(xyz-d65 none 0.5 -1)"
+    },
+    {
+      "computed": "color(xyz-d65 0.2 0.3 0.4)",
+      "input": "color(xyz-d65 .2 .3 .4)",
+      "pixel": [
+        0,
+        167,
+        164,
+        255
+      ],
+      "specified": "color(xyz-d65 0.2 0.3 0.4)"
+    },
+    {
+      "computed": "rgb(255, 0, 0)",
+      "input": "hwb(0 0 0)",
+      "pixel": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "specified": "rgb(255, 0, 0)"
+    },
+    {
+      "computed": "rgb(0, 0, 0)",
+      "input": "lab(0, 0, 0)",
+      "pixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "specified": ""
+    },
+    {
+      "computed": "rgb(0, 0, 0)",
+      "input": "lch(50 10 10%)",
+      "pixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "specified": ""
+    },
+    {
+      "computed": "rgb(0, 0, 0)",
+      "input": "color(unknown 1 0 0)",
+      "pixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "specified": ""
+    },
+    {
+      "computed": "oklab(0 0 0)",
+      "input": "oklab(min(NaN, .5) 0 0)",
+      "pixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "specified": "oklab(calc(NaN) 0 0)"
+    },
+    {
+      "computed": "lab(0 0 0)",
+      "input": "lab(max(NaN, 50) 0 0)",
+      "pixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "specified": "lab(calc(NaN) 0 0)"
+    },
+    {
+      "computed": "lab(0 0 0)",
+      "input": "lab(clamp(0, NaN, 100) 0 0)",
+      "pixel": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "specified": "lab(calc(NaN) 0 0)"
+    }
+  ],
+  "values_sha256": "e45b9a5dd7d5325bbd6e2a0cb00c7a5b90b9b4e2e46761dc9623b9906ce09725",
+  "recorded_date": "2026-10-01"
+}

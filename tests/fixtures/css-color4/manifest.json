@@ -1,0 +1,16 @@
+[
+  {
+    "name": "color4-paths",
+    "path": "render.html",
+    "width": 500,
+    "height": 210,
+    "fixture_sha256": "846369ca1a39e5e650e4a03ebf5e9003f23e47424f638dbc6e19fb4aa0f9020b"
+  },
+  {
+    "name": "color4-chromatic-paths",
+    "path": "render-colors.html",
+    "width": 500,
+    "height": 210,
+    "fixture_sha256": "4c92180a5501754c56e1134f8816c69e94223f6712a140a54fef5b0f7f27a007"
+  }
+]

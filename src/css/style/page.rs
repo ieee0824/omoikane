@@ -117,6 +117,7 @@ impl ResolvedPageStyle {
         self.margin_box_property(margin_box, "font-size")
             .and_then(|value| {
                 let context = ResolutionContext {
+                    color_container_size: None,
                     parent_font_size: page_font,
                     ..ResolutionContext::default()
                 };
@@ -139,6 +140,7 @@ impl ResolvedPageStyle {
         let value = self.margin_box_property(margin_box, name)?;
         let font_size = self.margin_box_font_size(margin_box);
         let context = ResolutionContext {
+            color_container_size: None,
             parent_font_size: font_size,
             root_font_size: 16.0,
             line_height: font_size * 1.2,
@@ -187,6 +189,7 @@ impl ResolvedPageStyle {
     ) -> Option<f32> {
         let value = self.get(name)?;
         let context = ResolutionContext {
+            color_container_size: None,
             parent_font_size: self
                 .get("font-size")
                 .and_then(|value| {

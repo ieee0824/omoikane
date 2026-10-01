@@ -1219,7 +1219,12 @@ impl Parser {
     }
 
     fn parse_declaration(&mut self) -> Result<Vec<Declaration>, CssParseError> {
-        let name = self.expect_ident()?.to_ascii_lowercase();
+        let name = self.expect_ident()?;
+        let name = if name.starts_with("--") {
+            name
+        } else {
+            name.to_ascii_lowercase()
+        };
         self.skip_whitespace();
         self.expect_colon()?;
         self.skip_whitespace();
@@ -1600,6 +1605,11 @@ fn parse_value_sequence_with_mode(
             CssToken::Whitespace | CssToken::Comma => {
                 index += 1;
             }
+            CssToken::ParenOpen if preserve_math_delims => {
+                let (group, end) = parse_math_group(tokens, index)?;
+                values.push(group);
+                index = end;
+            }
             CssToken::Ident(name) if matches!(tokens.get(index + 1), Some(CssToken::ParenOpen)) => {
                 let mut depth = 0usize;
                 let start = index + 2;
@@ -1694,6 +1704,45 @@ fn parse_value_sequence_with_mode(
     }
 
     Ok(values)
+}
+
+/// Represents parenthesized math with a nested calc, preserving precedence
+/// without introducing a borrowed or public AST variant.
+fn parse_math_group(tokens: &[CssToken], start: usize) -> Result<(Value, usize), CssParseError> {
+    let mut depth = 1usize;
+    let mut end = start + 1;
+    while end < tokens.len() {
+        match tokens[end] {
+            CssToken::ParenOpen => {
+                depth += 1;
+                if depth > 32 {
+                    return Err(CssParseError::InvalidDeclaration);
+                }
+            }
+            CssToken::ParenClose => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        end += 1;
+    }
+    if end == tokens.len() {
+        return Err(CssParseError::UnexpectedEndOfInput);
+    }
+    let arguments = parse_function_arguments_with_mode(&tokens[start + 1..end], true)?;
+    if arguments.len() != 1 {
+        return Err(CssParseError::InvalidDeclaration);
+    }
+    Ok((
+        Value::Function {
+            name: "calc".to_string(),
+            arguments,
+        },
+        end + 1,
+    ))
 }
 
 fn is_math_operator_token(token: Option<&CssToken>) -> bool {

@@ -544,6 +544,8 @@ struct ResolutionContext {
     root_line_height: f32,
     /// Font-table and glyph measures for the font-relative length units.
     font_metrics: CssRelativeFontMetrics,
+    /// Nearest query container dimensions for color-component CSS math.
+    color_container_size: Option<[f32; 2]>,
     /// Viewport width in px (used for `vw`, `vmin`, `vmax`).
     viewport_width: f32,
     /// Viewport height in px (used for `vh`, `vmin`, `vmax`).
@@ -560,6 +562,7 @@ impl Default for ResolutionContext {
             font_metrics: CssRelativeFontMetrics::fallback(16.0, false),
             viewport_width: 0.0,
             viewport_height: 0.0,
+            color_container_size: None,
         }
     }
 }
@@ -1122,9 +1125,7 @@ fn registered_value_matches_kind(value: &Value, kind: &RegisteredSyntaxKind) -> 
             ),
             _ => false,
         },
-        RegisteredSyntaxKind::Color => {
-            crate::paint::color::parse_color(&render_value(value)).is_some()
-        }
+        RegisteredSyntaxKind::Color => is_valid_css_color_text(&render_value(value)),
         RegisteredSyntaxKind::Angle => {
             matches!(value, Value::Length(_, unit) if matches!(unit.to_ascii_lowercase().as_str(), "deg" | "grad" | "rad" | "turn"))
         }
@@ -1533,6 +1534,17 @@ impl StyleResolver {
         }
     }
 
+    fn color_container_size(&self, node: &NodeHandle) -> Option<[f32; 2]> {
+        let mut ancestor = node.parent_node();
+        while let Some(node) = ancestor {
+            if let Some(context) = self.container_contexts.get(&node.identity()) {
+                return Some([context.width, context.height]);
+            }
+            ancestor = node.parent_node();
+        }
+        None
+    }
+
     fn css_font_metrics(
         &self,
         properties: &PropertyMap,
@@ -1579,11 +1591,21 @@ impl StyleResolver {
         )
     }
 
-    /// Whether any loaded stylesheet contains a size container query.
-    pub(crate) fn has_container_queries(&self) -> bool {
-        self.stylesheets
-            .iter()
-            .any(|input| contains_at_rule_named(&input.stylesheet.rules, "container"))
+    /// Whether size queries or size-container units need a geometry snapshot.
+    pub(crate) fn needs_container_contexts(&self) -> bool {
+        self.cache
+            .values()
+            .chain(self.pseudo_cache.values())
+            .any(|style| {
+                style
+                    .component_values
+                    .values()
+                    .any(color_uses_container_units)
+            })
+            || self
+                .stylesheets
+                .iter()
+                .any(|input| contains_at_rule_named(&input.stylesheet.rules, "container"))
     }
 
     /// Returns the number of distinct `@media` prelude strings currently held
@@ -2581,6 +2603,7 @@ impl StyleResolver {
                 font_metrics: parent_font_metrics,
                 viewport_width: self.viewport_width,
                 viewport_height: self.viewport_height,
+                color_container_size: None,
             };
             let computed = compute_value(&resolved_value, "font-size", ctx);
             // Resolve font-size keywords "smaller" / "larger" relative to parent.
@@ -2636,6 +2659,7 @@ impl StyleResolver {
                 font_metrics: element_font_metrics,
                 viewport_width: self.viewport_width,
                 viewport_height: self.viewport_height,
+                color_container_size: None,
             };
             properties.insert(
                 PropertyId::LineHeight,
@@ -2664,7 +2688,11 @@ impl StyleResolver {
             font_metrics: element_font_metrics,
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
+            color_container_size: self.color_container_size(node),
         };
+        for (name, value) in &specified_custom_properties {
+            record_component_value(&mut component_values, name, value);
+        }
         let (computed_custom_properties, typed_custom_properties) =
             compute_registered_custom_properties(
                 &specified_custom_properties,
@@ -2742,6 +2770,7 @@ impl StyleResolver {
                 font_metrics: element_font_metrics,
                 viewport_width: self.viewport_width,
                 viewport_height: self.viewport_height,
+                color_container_size: self.color_container_size(node),
             };
             if candidate.name == "gap" || candidate.name == "grid-gap" {
                 if let Some((row_gap, column_gap)) = compute_gap_shorthand(&resolved_value, ctx) {
@@ -2964,6 +2993,7 @@ impl StyleResolver {
             font_metrics: CssRelativeFontMetrics::fallback(element_font_size, false),
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
+            color_container_size: None,
         };
         let custom_properties: BTreeMap<String, Value> = properties
             .iter()
@@ -3131,14 +3161,37 @@ fn record_component_value(
     property_name: &str,
     value: &Value,
 ) {
-    if !matches!(
-        property_name.to_ascii_lowercase().as_str(),
-        "content" | "counter-reset" | "counter-increment"
-    ) {
-        return;
-    }
     let name = property_name.to_ascii_lowercase();
-    values.insert(name, value.clone());
+    if matches!(
+        name.as_str(),
+        "content" | "counter-reset" | "counter-increment"
+    ) || color_uses_container_units(value)
+    {
+        values.insert(name, value.clone());
+    } else {
+        values.remove(&name);
+    }
+}
+
+/// Retains only color expressions that need a layout-provided container size.
+fn color_uses_container_units(value: &Value) -> bool {
+    fn contains_unit(value: &Value) -> bool {
+        match value {
+            Value::Length(_, unit) => matches!(
+                unit.to_ascii_lowercase().as_str(),
+                "cqw" | "cqh" | "cqi" | "cqb"
+            ),
+            Value::Function {
+                arguments: args, ..
+            }
+            | Value::List(args)
+            | Value::CommaList(args) => args.iter().any(contains_unit),
+            _ => false,
+        }
+    }
+    matches!(value, Value::Function { name, .. }
+        if matches!(name.to_ascii_lowercase().as_str(), "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color")
+            && contains_unit(value))
 }
 
 fn resolve_component_css_wide_keywords(
@@ -3654,10 +3707,8 @@ fn validate_color_value(value: &Value) -> DeclarationValidation {
     }
 
     let valid = match value {
-        Value::Keyword(color) | Value::Color(color) => {
-            crate::paint::color::parse_color(color).is_some()
-        }
-        Value::Function { .. } => crate::paint::color::parse_color(&render_value(value)).is_some(),
+        Value::Keyword(color) | Value::Color(color) => is_valid_css_color_text(color),
+        Value::Function { .. } => is_valid_css_color_text(&render_value(value)),
         _ => false,
     };
     if valid {
@@ -3665,6 +3716,12 @@ fn validate_color_value(value: &Value) -> DeclarationValidation {
     } else {
         DeclarationValidation::Invalid
     }
+}
+
+/// Validates Color 4 syntax without performing conversion or gamut mapping.
+fn is_valid_css_color_text(text: &str) -> bool {
+    crate::paint::color4::CssColor::parse(text).is_some()
+        || crate::paint::color::parse_color(text).is_some()
 }
 
 pub(super) fn is_valid_color_value(value: &Value) -> bool {
@@ -7704,6 +7761,26 @@ pub(super) fn value_contains_var_function(value: &Value) -> bool {
     }
 }
 
+/// Resolves Color 4 components against an explicit geometry/font snapshot.
+fn compute_color4_value(value: &Value, ctx: ResolutionContext) -> ComputedValue {
+    let text = render_value(value);
+    let context = crate::paint::color4::ColorContext {
+        font: f64::from(ctx.parent_font_size),
+        root_font: f64::from(ctx.root_font_size),
+        viewport: [
+            f64::from(ctx.viewport_width),
+            f64::from(ctx.viewport_height),
+        ],
+        container: ctx
+            .color_container_size
+            .unwrap_or([ctx.viewport_width, ctx.viewport_height])
+            .map(f64::from),
+    };
+    crate::paint::color4::CssColor::parse_with_context(&text, Some(context))
+        .map(|color| ComputedValue::Color(color.serialize_computed()))
+        .unwrap_or_else(|| ComputedValue::Keyword(text))
+}
+
 /// Reject a second top-level declaration while preserving semicolons inside
 /// strings and functions such as data URLs.
 fn contains_top_level_semicolon(value: &str) -> bool {
@@ -7877,6 +7954,14 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         Value::Color(color) => ComputedValue::Color(color.clone()),
         Value::String(value) => ComputedValue::String(value.clone()),
         Value::Number(value) => ComputedValue::Number(*value),
+        Value::Function { name, .. }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color"
+            ) =>
+        {
+            compute_color4_value(value, ctx)
+        }
         Value::Function { name, arguments }
             if name.eq_ignore_ascii_case("rgb") || name.eq_ignore_ascii_case("rgba") =>
         {
@@ -8386,6 +8471,7 @@ fn calc_unitless_number(arguments: &[Value]) -> Option<f32> {
         font_metrics: CssRelativeFontMetrics::fallback(16.0, false),
         viewport_width: 0.0,
         viewport_height: 0.0,
+        color_container_size: None,
     };
     match evaluate_calc(arguments, placeholder) {
         Some(quantity) if quantity.unit == CalcUnit::Unitless => Some(quantity.value),
@@ -10573,7 +10659,11 @@ fn compute_rgb_function(arguments: &[Value]) -> Option<String> {
         _ => return None,
     };
 
-    format_color_hex(r, g, b, a)
+    if let Some(alpha) = a.filter(|alpha| *alpha < 1.0) {
+        Some(format!("rgba({r}, {g}, {b}, {})", alpha.clamp(0.0, 1.0)))
+    } else {
+        format_color_hex(r, g, b, a)
+    }
 }
 
 /// Converts an `hsl()` or `hsla()` argument list into a hex color string.

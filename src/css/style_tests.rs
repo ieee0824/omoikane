@@ -3624,7 +3624,7 @@ fn resolves_calc_with_var_lengths_without_operator_whitespace() {
 }
 
 #[test]
-fn computes_rgba_function_to_hex_with_alpha() {
+fn computes_rgba_function_retaining_unquantized_alpha() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
@@ -3633,10 +3633,10 @@ fn computes_rgba_function_to_hex_with_alpha() {
     );
 
     let style = resolver.computed_style(&title);
-    // rgba(255, 0, 0, 0.5) → r=255 g=0 b=0 a=128(0x80)
+    // Preserve 0.5 for CSSOM; the rasterizer separately quantizes alpha to 128.
     assert_eq!(
         style.get("color"),
-        Some(&ComputedValue::Color("#ff000080".to_string()))
+        Some(&ComputedValue::Color("rgba(255, 0, 0, 0.5)".to_string()))
     );
 }
 
@@ -3717,10 +3717,10 @@ fn computes_rgb_modern_syntax_with_alpha() {
     );
 
     let style = resolver.computed_style(&title);
-    // rgb(255 0 0 / 0.5) → semi-transparent red a=128(0x80)
+    // Modern RGB likewise retains the unquantized alpha.
     assert_eq!(
         style.get("color"),
-        Some(&ComputedValue::Color("#ff000080".to_string()))
+        Some(&ComputedValue::Color("rgba(255, 0, 0, 0.5)".to_string()))
     );
 }
 
@@ -3781,10 +3781,10 @@ fn computes_rgba_percentage_alpha() {
         parse_stylesheet("h1 { color: rgba(255, 0, 0, 50%); }").unwrap(),
     );
     let style = resolver.computed_style(&title);
-    // 50% alpha = 0.5 → hex alpha 80
+    // Percentage alpha resolves to 0.5 without an 8-bit round trip.
     assert_eq!(
         style.get("color"),
-        Some(&ComputedValue::Color("#ff000080".to_string()))
+        Some(&ComputedValue::Color("rgba(255, 0, 0, 0.5)".to_string()))
     );
 }
 
@@ -9955,4 +9955,37 @@ fn invalid_scroll_offset_shorthand_does_not_partially_override_longhands() {
         Some(&ComputedValue::Px(3.0))
     );
     assert!(!supports_declaration("scroll-padding", "10px inherit"));
+}
+
+#[test]
+fn color4_container_geometry_is_requested_only_for_color_unit_dependencies() {
+    let (_document, _body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { container-type: inline-size; color: lab(50 20 30); }").unwrap(),
+    );
+    resolver.computed_style(&title);
+    assert!(!resolver.needs_container_contexts());
+
+    title.set_attribute(
+        "style",
+        "color: color(srgb calc(0.5 + (sign(2cqw - 10px) * 0.1)) 0 0)",
+    );
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style(&title);
+    assert!(resolver.needs_container_contexts());
+
+    title.set_attribute("style", "color: lab(50 20 30)");
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style(&title);
+    assert!(!resolver.needs_container_contexts());
+
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("h1 { color: color(srgb calc(sign(2cqw - 10px)) 0 0); }").unwrap(),
+    );
+    resolver.computed_style(&title);
+    // The inline declaration overrides the earlier container-dependent color.
+    assert!(!resolver.needs_container_contexts());
 }
