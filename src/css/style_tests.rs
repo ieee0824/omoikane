@@ -3624,7 +3624,7 @@ fn resolves_calc_with_var_lengths_without_operator_whitespace() {
 }
 
 #[test]
-fn computes_rgba_function_to_hex_with_alpha() {
+fn computes_rgba_function_retaining_unquantized_alpha() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
@@ -3633,10 +3633,10 @@ fn computes_rgba_function_to_hex_with_alpha() {
     );
 
     let style = resolver.computed_style(&title);
-    // rgba(255, 0, 0, 0.5) → r=255 g=0 b=0 a=128(0x80)
+    // Preserve 0.5 for CSSOM; the rasterizer separately quantizes alpha to 128.
     assert_eq!(
         style.get("color"),
-        Some(&ComputedValue::Color("#ff000080".to_string()))
+        Some(&ComputedValue::Color("rgba(255, 0, 0, 0.5)".to_string()))
     );
 }
 
@@ -3717,10 +3717,10 @@ fn computes_rgb_modern_syntax_with_alpha() {
     );
 
     let style = resolver.computed_style(&title);
-    // rgb(255 0 0 / 0.5) → semi-transparent red a=128(0x80)
+    // Modern RGB likewise retains the unquantized alpha.
     assert_eq!(
         style.get("color"),
-        Some(&ComputedValue::Color("#ff000080".to_string()))
+        Some(&ComputedValue::Color("rgba(255, 0, 0, 0.5)".to_string()))
     );
 }
 
@@ -3781,10 +3781,10 @@ fn computes_rgba_percentage_alpha() {
         parse_stylesheet("h1 { color: rgba(255, 0, 0, 50%); }").unwrap(),
     );
     let style = resolver.computed_style(&title);
-    // 50% alpha = 0.5 → hex alpha 80
+    // Percentage alpha resolves to 0.5 without an 8-bit round trip.
     assert_eq!(
         style.get("color"),
-        Some(&ComputedValue::Color("#ff000080".to_string()))
+        Some(&ComputedValue::Color("rgba(255, 0, 0, 0.5)".to_string()))
     );
 }
 

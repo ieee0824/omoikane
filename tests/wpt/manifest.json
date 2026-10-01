@@ -1,5 +1,14 @@
 {
   "tests": [
+    { "path": "css/css-color/parsing/color-computed-color-function.html" },
+    { "path": "css/css-color/parsing/color-computed-hwb.html" },
+    { "path": "css/css-color/parsing/color-computed-lab.html" },
+    { "path": "css/css-color/parsing/color-invalid-color-function.html" },
+    { "path": "css/css-color/parsing/color-invalid-hwb.html" },
+    { "path": "css/css-color/parsing/color-invalid-lab.html" },
+    { "path": "css/css-color/parsing/color-valid-color-function.html" },
+    { "path": "css/css-color/parsing/color-valid-hwb.html" },
+    { "path": "css/css-color/parsing/color-valid-lab.html" },
     { "path": "dom/events/AddEventListenerOptions-once.any.js" },
     { "path": "dom/events/AddEventListenerOptions-passive.any.js" },
     { "path": "dom/events/AddEventListenerOptions-signal.any.js" },

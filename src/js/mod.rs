@@ -12276,6 +12276,12 @@ fn format_css_number(value: f32) -> String {
 fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> String {
     match value {
         ComputedValue::Keyword(keyword) => keyword.clone(),
+        ComputedValue::Color(color) if crate::paint::color4::CssColor::parse(color).is_some() => {
+            crate::paint::color4::CssColor::parse(color)
+                .unwrap()
+                .serialize_computed()
+        }
+        ComputedValue::Color(color) if color.starts_with("rgba(") => color.clone(),
         ComputedValue::Color(color) => crate::paint::color::parse_color(color).map_or_else(
             || color.clone(),
             |parsed| {
@@ -15130,7 +15136,14 @@ fn css_declarations_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    let declarations = font_descriptors::declarations(&block);
+    let declarations = font_descriptors::declarations(&block)
+        .into_iter()
+        .map(|(name, value)| {
+            let value = crate::paint::color4::CssColor::parse(&value)
+                .map_or(value, |color| color.serialize());
+            (name, value)
+        })
+        .collect::<Vec<_>>();
     let declarations = serde_json::to_string(&declarations)
         .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
     Ok(js_string!(declarations.as_str()).into())
@@ -15388,7 +15401,8 @@ fn normalize_style_value_native(
             {
                 "0px".to_string()
             } else {
-                value
+                crate::paint::color4::CssColor::parse(&value)
+                    .map_or(value, |color| color.serialize())
             }
         })
     } else {

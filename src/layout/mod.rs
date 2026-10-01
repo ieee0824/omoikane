@@ -1357,7 +1357,7 @@ pub(crate) fn layout_tree_with_content_visibility(
         let snapshot = report.borrow().clone();
         return (None, snapshot);
     };
-    if resolver.has_container_queries() {
+    if resolver.needs_container_contexts() {
         for _ in 0..4 {
             let mut contexts = HashMap::new();
             collect_container_contexts(&layout, resolver, &mut contexts);

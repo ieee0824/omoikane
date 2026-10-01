@@ -133,6 +133,10 @@ pub(crate) fn parse_color(value: &str) -> Option<Color> {
         };
     }
 
+    if let Some(color) = super::color4::CssColor::parse(value) {
+        return Some(color.to_color());
+    }
+
     // Functional color notations handled directly for robustness
     if let Some(color) = parse_color_function(&lower) {
         return Some(color);

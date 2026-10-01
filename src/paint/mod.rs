@@ -2,6 +2,7 @@
 
 pub(crate) mod border;
 pub(crate) mod color;
+pub(crate) mod color4;
 pub(crate) mod form_control;
 pub(crate) mod image;
 mod print_budget;

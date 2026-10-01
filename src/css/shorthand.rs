@@ -1651,7 +1651,7 @@ fn is_background_image_function(name: &str) -> bool {
 fn is_color_function(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "rgb" | "rgba" | "hsl" | "hsla"
+        "rgb" | "rgba" | "hsl" | "hsla" | "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color"
     )
 }
 
