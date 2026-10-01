@@ -55,7 +55,10 @@ Vm::set_register（184）、CodeBlock::constant_function（216）、unregister_r
 前後同サイズだった。symbol付き呼出し・分岐アドレスを正規化し、即値を保持した命令を
 同じ位置で比較すると、handler2件とconstant_function以外の4関数では、差はADRPと
 直後のADDによるアドレス生成だけだった。set_registerは正規化後に完全一致した。
-constant_functionにはこれらに加えてLDRのoffset差が1命令あり、未検証として残す。
+constant_functionにはこれらに加えてLDRのoffset差が1命令あった。
+ADRPのpageと即値から求めたslotのELF relocationを照合すると、両版ともpanicメッセージの
+usize整形関数を参照していた（同addressのu64 aliasも保持）。通常のconstant取得経路の
+演算差ではない。[参照先の証拠](measurements/issue667/constant-function-relocation.json)を参照。
 objdumpの近隣symbol表示は参照対象の証明ではなく、データ・間接call先の同一性や
 動的coverageも未検証。この範囲の処理命令の追加を支持しないが、配置が時間差の原因とは
 断定しない。全calleeを比較したものでもない。

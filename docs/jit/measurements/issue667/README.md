@@ -18,6 +18,8 @@ GC全320passのcollection回数も前後で比較する。元バイナリの再�
 `profile-totals.json`は大きなCallgrind集計からeventsと反復当たり増分を抽出したもの。
 元集計のhashを残す。診断bundleはGC全raw log/index・harness・identity、prefix/closure fixture、
 handlerと主要calleeのassembly・正規化命令・差分を含む。失敗した初回解析は含まない。
+`constant-function-relocation.json`は、命令差として残したLDRの参照先をELF relocationと
+exact symbolで照合した追補。diagnostics内の旧「未検証」分類を上書きせず補足している。
 
 実行バイナリ、PNG画素、Callgrindの全eventファイル、build出力は**ここには含まれない**。
 これらは元PCにのみ保持され、hashだけで別PCから内容を復元することはできない。
