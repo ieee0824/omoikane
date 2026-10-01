@@ -36,6 +36,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-ipafont-mincho \
     && rm -rf /var/lib/apt/lists/*
 
+# GUI（--features gui）の X11 E2E テスト用。CI（.github/workflows/gui-pointer-lock.yml）と同じ
+# xvfb / xdotool / x11-utils / openbox / libxkbcommon-x11-0 / python3-pil に加え、
+# winit が実行時に dlopen する X11 ライブラリ（Xcursor / Xrandr / Xi）と、
+# scripts/test-pointer-lock-x11.py が ctypes で読み込む libX11 / libXfixes を明示する。
+# 実行例は tests/README.md の GUI 節（scripts/test-gui-x11.py 等）を参照。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        xvfb \
+        xdotool \
+        x11-utils \
+        openbox \
+        libx11-6 \
+        libxcursor1 \
+        libxrandr2 \
+        libxi6 \
+        libxfixes3 \
+        libxkbcommon-x11-0 \
+        python3-pil \
+    && rm -rf /var/lib/apt/lists/*
+
 # Firefox（Mozilla 公式 APT リポジトリ）。レンダリング結果の比較用ブラウザとして使う。
 # 署名鍵は Mozilla が公開するフィンガープリントと完全一致することを確認してから登録する。
 RUN install -d -m 0755 /etc/apt/keyrings \
