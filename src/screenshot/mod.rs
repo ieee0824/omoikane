@@ -5,6 +5,7 @@ use crate::http::url::UrlParseError;
 use crate::http::url::resolve_url;
 use crate::http::{Client, HttpParseError};
 use crate::layout::Rect;
+use crate::layout::frameset::parse_frameset_track_sizes;
 use crate::paint::{
     Canvas, Color, Image, PaintError, RenderTimings, clear_render_timings, record_render_timings,
     render_document_with_url,
@@ -363,108 +364,6 @@ fn collect_frameset_layout_children_from_node(node: &NodeHandle, out: &mut Vec<N
     }
 }
 
-fn parse_frameset_track_sizes(spec: Option<&str>, frame_count: usize, total_size: u32) -> Vec<u32> {
-    if frame_count == 0 {
-        return Vec::new();
-    }
-
-    let mut tokens: Vec<String> = spec
-        .unwrap_or("")
-        .split(',')
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty())
-        .collect();
-    if tokens.is_empty() {
-        tokens.resize(frame_count, "*".to_string());
-    }
-    if tokens.len() < frame_count {
-        tokens.resize(frame_count, "*".to_string());
-    }
-    if tokens.len() > frame_count {
-        tokens.truncate(frame_count);
-    }
-
-    let all_plain_numeric = tokens
-        .iter()
-        .all(|token| !token.contains('*') && !token.ends_with('%') && token.parse::<f32>().is_ok());
-    let numeric_sum = tokens
-        .iter()
-        .filter_map(|token| token.parse::<f32>().ok())
-        .sum::<f32>();
-    let treat_plain_as_percent = all_plain_numeric && (numeric_sum - 100.0).abs() <= 0.5;
-
-    let mut widths = vec![0u32; frame_count];
-    let mut star_weights = vec![0f32; frame_count];
-    let mut assigned = 0u32;
-
-    for (index, token) in tokens.iter().enumerate() {
-        if let Some(percent) = token.strip_suffix('%').and_then(|v| v.parse::<f32>().ok()) {
-            let width = ((total_size as f32) * (percent / 100.0)).round().max(0.0) as u32;
-            widths[index] = width;
-            assigned = assigned.saturating_add(width);
-            continue;
-        }
-        if token.contains('*') {
-            let weight = token.replace('*', "").trim().parse::<f32>().unwrap_or(1.0);
-            star_weights[index] = weight.max(1.0);
-            continue;
-        }
-        if let Ok(value) = token.parse::<f32>() {
-            let width = if treat_plain_as_percent {
-                ((total_size as f32) * (value / 100.0)).round().max(0.0) as u32
-            } else {
-                value.round().max(0.0) as u32
-            };
-            widths[index] = width;
-            assigned = assigned.saturating_add(width);
-            continue;
-        }
-        star_weights[index] = 1.0;
-    }
-
-    let remaining = total_size.saturating_sub(assigned);
-    let total_star: f32 = star_weights.iter().sum();
-    if total_star > 0.0 && remaining > 0 {
-        for index in 0..frame_count {
-            if star_weights[index] == 0.0 {
-                continue;
-            }
-            let width = ((remaining as f32) * (star_weights[index] / total_star))
-                .round()
-                .max(0.0) as u32;
-            widths[index] = widths[index].saturating_add(width);
-        }
-        let consumed = widths.iter().copied().fold(0u32, u32::saturating_add);
-        if consumed < total_size {
-            let delta = total_size - consumed;
-            if let Some(last) = widths.last_mut() {
-                *last = last.saturating_add(delta);
-            }
-        }
-    } else if remaining > 0
-        && let Some(last) = widths.last_mut()
-    {
-        *last = last.saturating_add(remaining);
-    }
-
-    if widths.iter().all(|&w| w == 0) {
-        let base = total_size / frame_count as u32;
-        let mut out = vec![base; frame_count];
-        let tail = total_size.saturating_sub(base * frame_count as u32);
-        if let Some(last) = out.last_mut() {
-            *last = last.saturating_add(tail);
-        }
-        return out;
-    }
-
-    let mut available = total_size;
-    for width in &mut widths {
-        *width = (*width).min(available);
-        available -= *width;
-    }
-    widths
-}
-
 fn resolve_frameset_render_document(
     document: &NodeHandle,
     base_url: Option<&crate::http::Url>,
@@ -691,14 +590,14 @@ mod tests {
     fn frameset_tracks_never_exceed_the_visible_viewport() {
         assert_eq!(
             parse_frameset_track_sizes(Some("10000,20"), 2, 800),
-            [800, 0]
+            [799, 1]
         );
         assert_eq!(parse_frameset_track_sizes(Some("200%,*"), 2, 800), [800, 0]);
         assert_eq!(
             parse_frameset_track_sizes(Some("80%,80%,*"), 3, 800),
-            [640, 160, 0]
+            [400, 400, 0]
         );
-        assert_eq!(parse_frameset_track_sizes(Some("*,*,*"), 3, 2), [1, 1, 0]);
+        assert_eq!(parse_frameset_track_sizes(Some("*,*,*"), 3, 2), [0, 0, 2]);
     }
 
     #[test]

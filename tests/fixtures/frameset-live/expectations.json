@@ -1,0 +1,16 @@
+{
+  "pages": {
+    "/": {
+      "file": "index.html"
+    },
+    "/left": {
+      "file": "left.html"
+    },
+    "/right": {
+      "file": "right.html"
+    },
+    "/next": {
+      "file": "next.html"
+    }
+  }
+}

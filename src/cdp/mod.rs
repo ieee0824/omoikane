@@ -753,3 +753,6 @@ fn js_error(error: boa_engine::JsError) -> JsonRpcError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod frameset_tests;

@@ -3,6 +3,8 @@
 //! The layout phase consumes DOM nodes together with computed styles and
 //! produces a tree of rectangular block boxes.
 
+pub(crate) mod frameset;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -1785,6 +1787,14 @@ fn layout_document(
     viewport: LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
 ) -> Option<LayoutBox> {
+    if let Some(frameset) = node.query_selector("frameset") {
+        return Some(frameset::layout_frameset_document(
+            node,
+            &frameset,
+            resolver,
+            containing_block,
+        ));
+    }
     let mut children = Vec::new();
     let mut positioned_children = Vec::new();
     let mut cursor_y = containing_block.y;
@@ -5326,13 +5336,11 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
 
 // ── Display / visibility / overflow ─────────────────────────────────────────
 
+// Source elements supply media resources rather than rendered content. UA
+// display defaults for other elements are resolved in the normal cascade so
+// author display declarations can expose them.
 fn is_non_rendered_html_element(node: &NodeHandle) -> bool {
-    node.with_tag_name(|tag| {
-        matches!(
-            tag,
-            Some("head" | "title" | "meta" | "style" | "script" | "link" | "noscript" | "source")
-        )
-    })
+    node.has_tag_name("source")
 }
 
 fn visibility(style: &ComputedStyle) -> Visibility {

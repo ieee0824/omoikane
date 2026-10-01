@@ -1716,9 +1716,11 @@ fn is_void_element(tag_name: &str) -> bool {
         tag_name,
         "area"
             | "base"
+            | "basefont"
             | "br"
             | "col"
             | "embed"
+            | "frame"
             | "hr"
             | "img"
             | "input"
@@ -1775,6 +1777,21 @@ fn should_close_p_before_start_tag(tag_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_frames_are_void_siblings_inside_framesets() {
+        let document = super::TreeBuilder::parse(
+            "<html><frameset cols='50%,*'><frame name='left'><frame name='right'><frameset rows='*'><frame name='nested'></frameset></frameset></html>"
+        ).document();
+        let frameset = document.query_selector("frameset").unwrap();
+        let children = frameset.child_nodes();
+        assert_eq!(children.len(), 3);
+        assert!(children[0].has_tag_name("frame"));
+        assert!(children[1].has_tag_name("frame"));
+        assert!(children[2].has_tag_name("frameset"));
+        assert!(children[0].child_nodes().is_empty());
+        assert!(children[1].child_nodes().is_empty());
+    }
+
     use crate::dom::Node;
 
     use super::*;

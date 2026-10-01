@@ -44,7 +44,7 @@ impl HostState {
     }
 
     fn named_form_target(&self, root: &NodeHandle, name: &str) -> Option<NodeHandle> {
-        if root.tag_name().as_deref() == Some("iframe") {
+        if matches!(root.tag_name().as_deref(), Some("iframe" | "frame")) {
             let current_name = self
                 .browsing_context_names
                 .get(&root.identity())

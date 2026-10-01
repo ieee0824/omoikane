@@ -180,6 +180,7 @@ pub(crate) fn render_glyph_cache_stats() -> (usize, usize) {
 /// When `web_fonts` is `Some`, the fragment's `font_family`, `font_weight`, and
 /// `font_style` are used to select the best web font variant before falling back
 /// to the global `fonts` list.
+#[cfg(test)]
 pub(crate) fn paint_text_with_registry(
     canvas: &mut Canvas,
     layout: &LayoutBox,
@@ -191,6 +192,35 @@ pub(crate) fn paint_text_with_registry(
     web_fonts: Option<&WebFontRegistry>,
     offset: super::PaintOffset,
 ) {
+    paint_text_with_context(
+        canvas,
+        layout,
+        resolver,
+        style,
+        clip,
+        super::PaintContext {
+            viewport: _viewport,
+            text_fonts: fonts,
+            web_fonts,
+            nested_documents: None,
+        },
+        offset,
+    );
+}
+
+/// Paints text and atomic inline boxes with the current traversal snapshots.
+pub(super) fn paint_text_with_context(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut crate::css::StyleResolver,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+    context: super::PaintContext<'_>,
+    offset: super::PaintOffset,
+) {
+    let _viewport = context.viewport;
+    let fonts = context.text_fonts;
+    let web_fonts = context.web_fonts;
     // Fallback color from the containing block's style (used when fragment
     // style has no explicit color).
     let fallback_color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
@@ -249,11 +279,7 @@ pub(crate) fn paint_text_with_registry(
                             canvas,
                             child,
                             resolver,
-                            super::PaintContext {
-                                viewport: _viewport,
-                                text_fonts: fonts,
-                                web_fonts,
-                            },
+                            context,
                             super::PaintBoxOptions {
                                 inherited_clip: clip,
                                 include_phase_descendants: true,

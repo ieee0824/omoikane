@@ -9229,8 +9229,9 @@ fn apply_ua_defaults(
         | "dl" | "dt" | "fieldset" | "figcaption" | "figure" | "footer" | "form" | "h1" | "h2"
         | "h3" | "h4" | "h5" | "h6" | "header" | "hgroup" | "hr" | "html" | "legend" | "main"
         | "menu" | "nav" | "ol" | "p" | "pre" | "section" | "ul" => Some("block"),
-        "area" | "base" | "head" | "link" | "meta" | "noscript" | "param" | "script" | "style"
-        | "template" | "title" | "track" => Some("none"),
+        "area" | "base" | "basefont" | "datalist" | "head" | "link" | "meta" | "noembed"
+        | "noframes" | "noscript" | "param" | "rp" | "script" | "style" | "template" | "title"
+        | "track" => Some("none"),
         "caption" => Some("table-caption"),
         "col" => Some("table-column"),
         "colgroup" => Some("table-column-group"),

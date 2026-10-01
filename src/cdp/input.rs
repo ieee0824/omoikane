@@ -134,10 +134,11 @@ impl CdpSession {
             .and_then(Value::as_u64)
             .filter(|id| *id > 0)
             .unwrap_or(1);
-        let (scroll_x, scroll_y) = self.runtime.window_scroll_offset();
+        let (client_x, client_y, scroll_x, scroll_y) =
+            self.runtime.input_position_for_node(&target_node, x, y);
         let mut init = json!({
-            "clientX": x, "clientY": y,
-            "pageX": x + scroll_x as f64, "pageY": y + scroll_y as f64,
+            "clientX": client_x, "clientY": client_y,
+            "pageX": client_x + scroll_x as f64, "pageY": client_y + scroll_y as f64,
             "screenX": x, "screenY": y,
             "movementX": movement_x, "movementY": movement_y,
             // CDP uses -1/"none" when no button changed, while MouseEvent.button
