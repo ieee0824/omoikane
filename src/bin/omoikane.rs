@@ -22,7 +22,6 @@ use omoikane::frame::{BrowserFrameCache, PlatformFramePlan, PlatformFrameSchedul
 use omoikane::js::{FindInPageResult, FullscreenTransition, PointerLockTransition};
 use omoikane::platform_input::{
     InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
-    PlatformTouchPhase,
 };
 use serde_json::json;
 use softbuffer::{Context, Surface};
@@ -31,8 +30,7 @@ use url_bar::UrlBar;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{
-    DeviceEvent, DeviceId, ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase,
-    WindowEvent,
+    DeviceEvent, DeviceId, ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
@@ -187,6 +185,8 @@ struct BrowserApp {
     cursor_in_page: bool,
     /// Buttons whose press went to the page; their releases follow them.
     page_buttons: Vec<PlatformMouseButton>,
+    /// Touch IDs whose start went to the page; tracked until end or cancellation.
+    page_touches: HashSet<u64>,
     toolbar_font: OnceCell<Option<Font>>,
 }
 
@@ -228,6 +228,7 @@ impl BrowserApp {
             cursor_position: (0.0, 0.0),
             cursor_in_page: false,
             page_buttons: Vec::new(),
+            page_touches: HashSet::new(),
             toolbar_font: OnceCell::new(),
         })
     }
@@ -595,18 +596,7 @@ impl BrowserApp {
                 let (delta_x, delta_y) = wheel_delta_css_pixels(delta, scale_factor);
                 self.input.wheel(&mut self.session, delta_x, delta_y)
             }
-            WindowEvent::Touch(touch) => {
-                let (x, y) = self
-                    .chrome_layout()
-                    .page_point(touch.location.x, touch.location.y);
-                let phase = match touch.phase {
-                    TouchPhase::Started => PlatformTouchPhase::Started,
-                    TouchPhase::Moved => PlatformTouchPhase::Moved,
-                    TouchPhase::Ended => PlatformTouchPhase::Ended,
-                    TouchPhase::Cancelled => PlatformTouchPhase::Cancelled,
-                };
-                self.input.touch(&mut self.session, touch.id, phase, x, y)
-            }
+            WindowEvent::Touch(touch) => self.dispatch_touch(touch),
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();
                 self.modifiers = InputModifiers {

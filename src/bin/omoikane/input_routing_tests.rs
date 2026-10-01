@@ -275,3 +275,117 @@ fn a_page_drag_keeps_the_page_as_target_over_the_toolbar() {
     assert!(!app.url_bar.is_editing());
     assert_eq!(app.route_cursor(layout, 50.0, 10.0), PagePointer::Leave);
 }
+
+#[test]
+fn toolbar_touches_never_reach_the_page_even_after_entering_it() {
+    use PlatformTouchPhase::*;
+    let mut app = app();
+    let layout = layout();
+    assert_eq!(app.route_touch(layout, 7, Started, 100.0, 20.0), None);
+    assert!(app.url_bar.is_editing());
+    assert_eq!(app.route_touch(layout, 7, Moved, 100.0, 100.0), None);
+    assert_eq!(app.route_touch(layout, 7, Ended, 100.0, 100.0), None);
+    assert!(app.page_touches.is_empty());
+
+    app.url_bar.cancel();
+    assert_eq!(app.route_touch(layout, 8, Started, 1.0, 1.0), None);
+    assert!(!app.url_bar.is_editing());
+    assert_eq!(app.route_touch(layout, 8, Cancelled, 100.0, 100.0), None);
+    assert_eq!(app.route_touch(layout, 9, Started, -1.0, 100.0), None);
+    assert_eq!(app.route_touch(layout, 9, Moved, 100.0, 100.0), None);
+}
+
+#[test]
+fn native_contacts_outside_the_window_do_not_dispatch_dom_touch_events() {
+    let mut app = app();
+    evaluate(
+        &mut app,
+        "for (const type of ['touchstart','touchmove','touchend','touchcancel']) \
+         document.addEventListener(type, e => log.push(type));",
+    );
+    // No native window is attached in this unit test: all coordinates are
+    // outside its empty layout. Exercise the actual WindowEvent dispatch path.
+    for phase in [TouchPhase::Started, TouchPhase::Moved, TouchPhase::Ended] {
+        assert!(app.dispatch_input(winit::event::WindowEvent::Touch(Touch {
+            device_id: winit::event::DeviceId::dummy(),
+            phase,
+            location: winit::dpi::PhysicalPosition::new(100.0, 20.0),
+            force: None,
+            id: 7,
+        })));
+    }
+    assert_eq!(evaluate(&mut app, "log"), json!([]));
+}
+
+#[test]
+fn page_touches_keep_their_target_until_end_or_cancellation() {
+    use PlatformTouchPhase::*;
+    let mut app = app();
+    let layout = layout();
+    app.focus_url_bar();
+    for terminal in [Ended, Cancelled] {
+        assert_eq!(
+            app.route_touch(layout, 7, Started, 100.0, 100.0),
+            Some((100.0, 60.0))
+        );
+        assert!(!app.url_bar.is_editing());
+        assert_eq!(
+            app.route_touch(layout, 7, Moved, 100.0, 20.0),
+            Some((100.0, -20.0))
+        );
+        assert_eq!(
+            app.route_touch(layout, 7, terminal, 100.0, 20.0),
+            Some((100.0, -20.0))
+        );
+        assert!(app.page_touches.is_empty());
+        assert_eq!(app.route_touch(layout, 7, Moved, 100.0, 100.0), None);
+        assert_eq!(app.route_touch(layout, 7, terminal, 100.0, 100.0), None);
+    }
+    // The platform may reuse a completed page contact's ID over the toolbar.
+    assert_eq!(app.route_touch(layout, 7, Started, 100.0, 20.0), None);
+    assert_eq!(app.route_touch(layout, 7, Ended, 100.0, 100.0), None);
+}
+
+#[test]
+fn simultaneous_page_and_toolbar_touches_have_independent_targets() {
+    use PlatformTouchPhase::*;
+    let mut app = app();
+    let layout = layout();
+    assert_eq!(
+        app.route_touch(layout, 1, Started, 100.0, 100.0),
+        Some((100.0, 60.0))
+    );
+    assert_eq!(app.route_touch(layout, 2, Started, 100.0, 20.0), None);
+    assert_eq!(app.route_touch(layout, 2, Moved, 100.0, 100.0), None);
+    assert_eq!(
+        app.route_touch(layout, 1, Moved, 100.0, 20.0),
+        Some((100.0, -20.0))
+    );
+    assert_eq!(app.route_touch(layout, 2, Cancelled, 100.0, 100.0), None);
+    assert_eq!(
+        app.route_touch(layout, 1, Ended, 100.0, 20.0),
+        Some((100.0, -20.0))
+    );
+    assert!(app.page_touches.is_empty());
+}
+
+#[test]
+fn touch_routing_uses_css_pixels_and_the_current_fullscreen_layout() {
+    use PlatformTouchPhase::*;
+    let mut app = app();
+    let scaled = ChromeLayout::new(640, 480, DeviceScale::new(2.0), true);
+    assert_eq!(app.route_touch(scaled, 1, Started, 200.0, 40.0), None);
+    assert_eq!(
+        app.route_touch(scaled, 2, Started, 200.0, 200.0),
+        Some((100.0, 60.0))
+    );
+    let fullscreen = ChromeLayout::new(640, 480, DeviceScale::new(2.0), false);
+    assert_eq!(
+        app.route_touch(fullscreen, 2, Ended, 200.0, 40.0),
+        Some((100.0, 20.0))
+    );
+    assert_eq!(
+        app.route_touch(fullscreen, 3, Started, 200.0, 40.0),
+        Some((100.0, 20.0))
+    );
+}
