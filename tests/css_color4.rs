@@ -252,3 +252,19 @@ fn registered_color_components_follow_container_size_changes() {
     ).unwrap().as_string().unwrap().to_std_string_escaped();
     assert_eq!(actual, "[\"color(srgb 0.6 0 0)\",\"color(srgb 0.4 0 0)\"]");
 }
+
+#[test]
+fn computed_color_does_not_depend_on_page_json_parser() {
+    let mut runtime = JsRuntime::with_document(
+        TreeBuilder::parse("<div id='target' style='color:lab(50 20 30)'></div>").document(),
+    )
+    .unwrap();
+    assert!(runtime.eval(
+        "(() => { const e=document.getElementById('target'); const live=getComputedStyle(e); \
+         const parse=JSON.parse; JSON.parse=function(...args) { const value=parse.apply(this,args); \
+         if (value && typeof value==='object' && 'color' in value && 'font-size' in value) \
+         throw new Error('page parser rejects style maps'); return value; }; \
+         try { return live.color==='lab(50 20 30)' && getComputedStyle(e).color==='lab(50 20 30)'; } \
+         finally { JSON.parse=parse; } })()"
+    ).unwrap().to_boolean());
+}

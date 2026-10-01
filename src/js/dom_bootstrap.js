@@ -16344,20 +16344,20 @@
       const nodeId = element.__id;
       try {
         if (pseudo === null) {
-          JSON.parse(__omoikane_computed_style(nodeId));
+          __omoikane_computed_style(nodeId, null, true, true);
           const style = __makeComputedStyle(() => {
             flushStyleSheets();
-            return JSON.parse(__omoikane_computed_style(nodeId));
+            return __omoikane_computed_style(nodeId, null, true);
           });
           __dispatchPendingTransitionEvents();
           return style;
         }
         // Resolve once before dispatching transition events, preserving the
         // synchronous behavior of getComputedStyle itself.
-        JSON.parse(__omoikane_computed_style(nodeId, pseudo));
+        __omoikane_computed_style(nodeId, pseudo, true, true);
         const style = __makeComputedStyle(() => {
           flushStyleSheets();
-          return JSON.parse(__omoikane_computed_style(nodeId, pseudo));
+          return __omoikane_computed_style(nodeId, pseudo, true);
         });
         __dispatchPendingTransitionEvents();
         return style;
