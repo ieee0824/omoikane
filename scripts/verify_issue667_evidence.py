@@ -83,6 +83,8 @@ def verify_gc(files):
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError('Run without -O: assertion-based evidence checks must remain enabled')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory', type=Path, default=Path(__file__).resolve().parents[1]/'docs/jit/measurements/issue667')
     args = parser.parse_args()
