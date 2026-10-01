@@ -13002,6 +13002,17 @@ fn computed_style_native(
     if args.get(3).is_some_and(JsValue::to_boolean) {
         return Ok(JsValue::undefined());
     }
+    // A named CSSOM read needs only one serialized property. Resolve afresh as
+    // above, but avoid allocating the complete JavaScript property map.
+    if let Some(name) = args.get(4).and_then(JsValue::as_string) {
+        let name = name.to_std_string_escaped();
+        return Ok(style
+            .as_ref()
+            .and_then(|style| style.get(&name))
+            .map_or_else(JsValue::undefined, |value| {
+                js_string!(computed_value_to_css_string(&name, value)).into()
+            }));
+    }
     if args.get(2).is_some_and(JsValue::to_boolean) {
         // CSSOM uses an object directly, avoiding an escaped JSON round trip.
         let object = JsObject::with_object_proto(context.intrinsics());

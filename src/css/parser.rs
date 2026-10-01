@@ -1219,7 +1219,12 @@ impl Parser {
     }
 
     fn parse_declaration(&mut self) -> Result<Vec<Declaration>, CssParseError> {
-        let name = self.expect_ident()?.to_ascii_lowercase();
+        let name = self.expect_ident()?;
+        let name = if name.starts_with("--") {
+            name
+        } else {
+            name.to_ascii_lowercase()
+        };
         self.skip_whitespace();
         self.expect_colon()?;
         self.skip_whitespace();

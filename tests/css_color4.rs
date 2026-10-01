@@ -268,3 +268,35 @@ fn computed_color_does_not_depend_on_page_json_parser() {
          finally { JSON.parse=parse; } })()"
     ).unwrap().to_boolean());
 }
+
+#[test]
+fn retained_color_declarations_keep_named_reads_and_enumeration_live() {
+    let mut runtime = JsRuntime::with_document(
+        TreeBuilder::parse(
+            "<style>#target::before{content:'A';color:inherit}</style>\
+             <div id='target' style='color:lab(50 20 30);inset-inline:3px 4px;--Tint:one'></div>",
+        )
+        .document(),
+    )
+    .unwrap();
+    let actual = runtime.eval(
+        "(() => { const e=document.getElementById('target'); \
+         const live=getComputedStyle(e), pseudo=getComputedStyle(e,'::before'); \
+         const before=[live.color,pseudo.color,live.getPropertyValue('--Tint'),live.getPropertyValue('inset-inline')]; \
+         e.style.color='oklch(0.6 0.1 40)'; e.style.setProperty('--Tint','two'); \
+         const names=Array.from(live); \
+         return JSON.stringify({before,after:[live.color,pseudo.getPropertyValue('color'), \
+           live.getPropertyValue('--Tint'),live.getPropertyValue('--tint')], \
+           enumeration:[names.includes('color'),names.length===live.length,live[0]===live.item(0), \
+           live.getPropertyValue(live[0])!=='',live.cssText.includes('color: oklch(0.6 0.1 40);')]}); })()"
+    ).unwrap().as_string().unwrap().to_std_string_escaped();
+    let actual: serde_json::Value = serde_json::from_str(&actual).unwrap();
+    assert_eq!(
+        actual,
+        serde_json::json!({
+            "before": ["lab(50 20 30)", "lab(50 20 30)", "one", "3px 4px"],
+            "after": ["oklch(0.6 0.1 40)", "oklch(0.6 0.1 40)", "two", ""],
+            "enumeration": [true, true, true, true, true]
+        })
+    );
+}
