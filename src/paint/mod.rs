@@ -4,6 +4,9 @@ pub(crate) mod border;
 pub(crate) mod color;
 pub(crate) mod form_control;
 pub(crate) mod image;
+mod print_budget;
+
+pub use print_budget::{MAX_PRINT_DOCUMENT_PIXELS, MAX_PRINT_PAGE_DIMENSION};
 pub(crate) mod stylesheet;
 pub(crate) mod text;
 
@@ -379,6 +382,10 @@ pub enum PaintError {
     DecompressionFailed,
     InvalidJpeg,
     UnsupportedJpegFormat,
+    /// A printed page dimension or the document pixel total exceeds its budget.
+    PrintCanvasBudgetExceeded,
+    /// The allocator could not reserve a validated printed page RGBA buffer.
+    PrintCanvasAllocationFailed,
 }
 
 /// Parsed contents of a `data:` URI.
@@ -1143,6 +1150,12 @@ pub fn render_document(document: &NodeHandle, viewport: Rect) -> Result<Canvas, 
 }
 
 /// Renders a static document as a sequence of printed page canvases.
+///
+/// Default and resolved sheet dimensions must be positive and finite, and must
+/// not exceed [`MAX_PRINT_PAGE_DIMENSION`] after rounding up. All returned pages
+/// together must fit [`MAX_PRINT_DOCUMENT_PIXELS`]. These limits are checked
+/// before any page canvas is allocated; excess returns
+/// [`PaintError::PrintCanvasBudgetExceeded`].
 pub fn render_document_pages(
     document: &NodeHandle,
     default_sheet: Rect,
@@ -1151,11 +1164,17 @@ pub fn render_document_pages(
 }
 
 /// Renders printed pages with linked CSS and assets resolved against `base_url`.
+///
+/// Uses the same allocation limits as [`render_document_pages`], including
+/// named and blank pages. Rotation preserves the validated pixel total and PNG
+/// size bounds. Invalid dimensions return [`PaintError::InvalidImageBuffer`];
+/// failure to reserve RGBA storage returns [`PaintError::PrintCanvasAllocationFailed`].
 pub fn render_document_pages_with_url(
     document: &NodeHandle,
     default_sheet: Rect,
     base_url: Option<&crate::http::Url>,
 ) -> Result<Vec<Canvas>, PaintError> {
+    print_budget::dimensions(default_sheet)?;
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     resolver.set_viewport(default_sheet.width, default_sheet.height);
@@ -1194,76 +1213,76 @@ pub fn render_document_pages_with_url(
     )
     .ok_or(PaintError::InvalidImageBuffer)?;
 
+    let dimensions = print_budget::validate_document(paged.pages.iter().map(|page| page.sheet))?;
     let mut canvases = Vec::with_capacity(paged.pages.len());
-    for page in &paged.pages {
+    for (page, dimensions) in paged.pages.iter().zip(dimensions) {
         paged.restore_style_context_for_page(page, &mut resolver);
-        let layout = paged.layout_for_page(page);
-        let mut canvas = Canvas::new(
-            page.sheet.width.ceil().max(1.0) as u32,
-            page.sheet.height.ceil().max(1.0) as u32,
-        );
-        let page_paint_style = page_context_paint_style(page, None);
-        let page_background = page
-            .style
-            .get("background-color")
-            .and_then(|value| color::parse_color(&crate::css::serialize_specified_value(value)))
-            .unwrap_or(Color::rgb(255, 255, 255));
-        canvas.fill_rect(page.sheet, page_background);
-        let margin_boxes = ordered_page_margin_boxes(page);
-        crate::layout::with_image_base_url(effective_base.clone(), || {
-            paint_background_image(&mut canvas, &page_paint_style, page.sheet, None, page.sheet);
-        });
-        text::with_render_glyph_cache(|| {
-            crate::layout::with_image_base_url(effective_base.clone(), || {
-                for &(z_index, margin_box, rect) in &margin_boxes {
-                    if z_index >= 0 {
-                        break;
-                    }
-                    paint_page_margin_box(&mut canvas, page, margin_box, rect, &fonts, web_fonts);
-                }
-            });
-        });
-        if let Some(background) = viewport_background_color(&layout, &mut resolver) {
-            canvas.fill_rect(page.content, background);
-        }
-        let page_border = border::EdgeSizesForPaint::from_style(&page_paint_style);
-        border::paint_rect_borders(
-            &mut canvas,
-            page.content,
-            &page_paint_style,
-            page_border,
-            None,
-        );
-        text::with_render_glyph_cache(|| {
-            paint_page_content_fragments(
-                &mut canvas,
-                layout,
-                page,
-                &mut resolver,
-                &fonts,
-                web_fonts,
-            );
-            crate::layout::with_image_base_url(effective_base.clone(), || {
-                for &(z_index, margin_box, rect) in &margin_boxes {
-                    if z_index >= 0 {
-                        paint_page_margin_box(
-                            &mut canvas,
-                            page,
-                            margin_box,
-                            rect,
-                            &fonts,
-                            web_fonts,
-                        );
-                    }
-                }
-            });
-        });
-        canvases.push(orient_printed_page(
-            canvas,
-            page.style.get("page-orientation"),
-        ));
+        canvases.push(paint_printed_page(
+            paged.layout_for_page(page),
+            page,
+            &mut resolver,
+            &fonts,
+            web_fonts,
+            effective_base.as_ref(),
+            dimensions,
+        )?);
     }
     Ok(canvases)
+}
+
+fn paint_printed_page(
+    layout: &LayoutBox,
+    page: &PagedPage,
+    resolver: &mut StyleResolver,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    effective_base: Option<&crate::http::Url>,
+    dimensions: (u32, u32),
+) -> Result<Canvas, PaintError> {
+    let mut canvas = print_budget::new_canvas(dimensions.0, dimensions.1)?;
+    let page_paint_style = page_context_paint_style(page, None);
+    let page_background = page
+        .style
+        .get("background-color")
+        .and_then(|value| color::parse_color(&crate::css::serialize_specified_value(value)))
+        .unwrap_or(Color::rgb(255, 255, 255));
+    canvas.fill_rect(page.sheet, page_background);
+    let margin_boxes = ordered_page_margin_boxes(page);
+    crate::layout::with_image_base_url(effective_base.cloned(), || {
+        paint_background_image(&mut canvas, &page_paint_style, page.sheet, None, page.sheet);
+    });
+    text::with_render_glyph_cache(|| {
+        crate::layout::with_image_base_url(effective_base.cloned(), || {
+            for &(z_index, margin_box, rect) in &margin_boxes {
+                if z_index >= 0 {
+                    break;
+                }
+                paint_page_margin_box(&mut canvas, page, margin_box, rect, fonts, web_fonts);
+            }
+        });
+    });
+    if let Some(background) = viewport_background_color(layout, resolver) {
+        canvas.fill_rect(page.content, background);
+    }
+    let page_border = border::EdgeSizesForPaint::from_style(&page_paint_style);
+    border::paint_rect_borders(
+        &mut canvas,
+        page.content,
+        &page_paint_style,
+        page_border,
+        None,
+    );
+    text::with_render_glyph_cache(|| {
+        paint_page_content_fragments(&mut canvas, layout, page, resolver, fonts, web_fonts);
+        crate::layout::with_image_base_url(effective_base.cloned(), || {
+            for &(z_index, margin_box, rect) in &margin_boxes {
+                if z_index >= 0 {
+                    paint_page_margin_box(&mut canvas, page, margin_box, rect, fonts, web_fonts);
+                }
+            }
+        });
+    });
+    orient_printed_page(canvas, page.style.get("page-orientation"))
 }
 
 fn paint_page_content_fragments(
@@ -1302,16 +1321,16 @@ fn paint_page_content_fragments(
     }
 }
 
-fn orient_printed_page(canvas: Canvas, orientation: Option<&Value>) -> Canvas {
+fn orient_printed_page(canvas: Canvas, orientation: Option<&Value>) -> Result<Canvas, PaintError> {
     let direction = match orientation {
         Some(Value::Keyword(value)) if value.eq_ignore_ascii_case("rotate-left") => -1,
         Some(Value::Keyword(value)) if value.eq_ignore_ascii_case("rotate-right") => 1,
-        _ => return canvas,
+        _ => return Ok(canvas),
     };
     let width = canvas.width as usize;
     let height = canvas.height as usize;
     let source = canvas.into_pixels();
-    let mut rotated = Canvas::new(height as u32, width as u32);
+    let mut rotated = print_budget::new_canvas(height as u32, width as u32)?;
     for (index, pixel) in source.chunks_exact(4).enumerate() {
         let x = index % width;
         let y = index / width;
@@ -1323,7 +1342,7 @@ fn orient_printed_page(canvas: Canvas, orientation: Option<&Value>) -> Canvas {
         let destination = (destination_y * height + destination_x) * 4;
         rotated.pixels[destination..destination + 4].copy_from_slice(pixel);
     }
-    rotated
+    Ok(rotated)
 }
 
 const PAGE_MARGIN_PAINT_ORDER: [PageMarginBox; 16] = [

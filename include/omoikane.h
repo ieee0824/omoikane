@@ -12,6 +12,19 @@
 #include <stdlib.h>
 
 /**
+ * Maximum width or height of a printed page canvas, in CSS pixels.
+ */
+#define MAX_PRINT_PAGE_DIMENSION 16384
+
+/**
+ * Maximum combined pixels retained by all canvases in one printed document.
+ *
+ * This limits returned RGBA buffers to 256 MiB. Temporary paint surfaces,
+ * orientation buffers and PNG encoding buffers are additional allocations.
+ */
+#define MAX_PRINT_DOCUMENT_PIXELS 67108864
+
+/**
  * Opaque browser handle for the C ABI.
  */
 typedef struct OmoikaneBrowser {
