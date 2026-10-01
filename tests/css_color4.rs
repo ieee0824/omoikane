@@ -89,36 +89,80 @@ fn color4_paint_cases() -> Vec<(String, String)> {
 }
 
 fn color4_render_markup(color: &str) -> String {
+    use base64::Engine;
+    let font = base64::engine::general_purpose::STANDARD.encode(include_bytes!(
+        "fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"
+    ));
     format!(
-        "<style>body{{margin:0;background:#444}}div{{position:absolute;left:10px;top:10px;\
+        "<style>@font-face{{font-family:ColorFixture;src:url(data:font/ttf;base64,{font})}}\
+     html,body{{margin:0;background:#444;width:200px;height:180px}}div{{position:absolute;left:10px;top:10px;\
      width:50px;height:50px;background:{color};color:{color};border:3px solid {color};\
      box-shadow:8px 8px 0 {color}}}p{{position:absolute;left:80px;top:0;color:{color};\
-     font-size:20px}}section{{position:absolute;left:10px;top:90px;width:100px;height:20px;\
-     background:linear-gradient({color},{color})}}</style><div></div><p>Color</p><section></section>\
+     margin:0;font:20px/30px ColorFixture}}section{{position:absolute;left:10px;top:90px;width:100px;height:20px;\
+     background:linear-gradient({color},{color})}}</style><div></div><p>AB</p><section></section>\
      <svg width='40' height='40' style='position:absolute;left:100px;top:120px'>\
      <rect x='5' y='5' width='20' height='20' fill='{color}' stroke='{color}' stroke-width='4'/></svg>"
     )
 }
 
+fn assert_color4_text_rendered(expected: &omoikane::paint::Canvas, color: &str) {
+    let text_pixels = (0..40)
+        .flat_map(|y| (80..180).map(move |x| (x, y)))
+        .filter_map(|(x, y)| expected.pixel(x, y))
+        .collect::<Vec<_>>();
+    let background = omoikane::paint::Color::rgb(68, 68, 68);
+    if !text_pixels.iter().any(|pixel| *pixel != background)
+        || !text_pixels.iter().any(|pixel| *pixel == background)
+    {
+        std::fs::create_dir_all(".artifacts/issue840").unwrap();
+        std::fs::write(
+            format!(".artifacts/issue840/text-region-{}.png", std::process::id()),
+            expected.encode_png(),
+        )
+        .unwrap();
+    }
+    assert!(
+        text_pixels.iter().any(|pixel| *pixel != background)
+            && text_pixels.iter().any(|pixel| *pixel == background),
+        "{color}: text region must contain both glyphs and background"
+    );
+}
+
+fn render_color4_fixture(color: &str, viewport: omoikane::layout::Rect) -> omoikane::paint::Canvas {
+    let (canvas, selections) = omoikane::font::with_font_selection_diagnostics(|| {
+        omoikane::paint::render_document(
+            &TreeBuilder::parse(&color4_render_markup(color)).document(),
+            viewport,
+        )
+        .unwrap()
+    });
+    assert!(
+        canvas.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255),
+        "the fixture background must cover the entire canvas"
+    );
+    assert!(
+        selections.iter().any(|record| record.phase == "paint"
+            && record.source == "web"
+            && record
+                .requested_families
+                .iter()
+                .any(|family| family == "colorfixture")),
+        "embedded fixture font must paint the text: {selections:?}"
+    );
+    canvas
+}
+
 #[test]
 fn color4_reaches_background_text_border_gradient_shadow_and_svg() {
-    use omoikane::{layout::Rect, paint::render_document};
+    use omoikane::layout::Rect;
     let viewport = Rect {
         width: 200.0,
         height: 180.0,
         ..Rect::default()
     };
     for (color, equivalent) in color4_paint_cases() {
-        let actual = render_document(
-            &TreeBuilder::parse(&color4_render_markup(&color)).document(),
-            viewport,
-        )
-        .unwrap();
-        let expected = render_document(
-            &TreeBuilder::parse(&color4_render_markup(&equivalent)).document(),
-            viewport,
-        )
-        .unwrap();
+        let actual = render_color4_fixture(&color, viewport);
+        let expected = render_color4_fixture(&equivalent, viewport);
         // A comparison cannot pass merely because both paths omit a shape.
         for (x, y, path) in [
             (20, 20, "background"),
@@ -134,16 +178,7 @@ fn color4_reaches_background_text_border_gradient_shadow_and_svg() {
                 "{color}: missing {path}"
             );
         }
-        let text_pixels = (10..60)
-            .flat_map(|y| (80..180).map(move |x| (x, y)))
-            .filter_map(|(x, y)| expected.pixel(x, y))
-            .collect::<Vec<_>>();
-        let background = omoikane::paint::Color::rgb(68, 68, 68);
-        assert!(
-            text_pixels.iter().any(|pixel| *pixel != background)
-                && text_pixels.iter().any(|pixel| *pixel == background),
-            "{color}: text region must contain both glyphs and background"
-        );
+        assert_color4_text_rendered(&expected, &color);
         let differences = actual
             .pixels()
             .iter()

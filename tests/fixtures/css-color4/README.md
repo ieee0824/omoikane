@@ -39,7 +39,9 @@ cargo test --locked --lib paint::color4
 `manifest.json` selects `render.html` and `render-colors.html`: all six functions
 across background, border, gradient, box shadow and SVG fill/stroke. The
 integration test additionally covers text, every independent gamut vector and
-six alpha cases. Render through Firefox WebDriver and the production C FFI:
+six alpha cases. Its text uses the committed CC0 A/B font fixture, verifies web
+font selection and visible glyphs, and explicitly sizes the opaque background
+to cover the canvas. Render through Firefox WebDriver and the production C FFI:
 
 ```sh
 GECKODRIVER=/path/to/geckodriver python3 scripts/compare-firefox-rendering.py \
