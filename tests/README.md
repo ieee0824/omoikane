@@ -203,6 +203,28 @@ cargo build --locked --features gui --bin omoikane
 /usr/bin/python3 scripts/test-pointer-lock-x11.py --binary target/debug/omoikane --artifacts .artifacts/gui-pointer-lock
 ```
 
+`scripts/gui_x11.py` provides the shared `GuiSession` context manager. It
+allocates its own DISPLAY using Xvfb's `-displayfd`, waits for Openbox readiness,
+finds visible application windows by PID, and provides bounded xdotool commands
+and lossless screenshots. Callers supply their own fixtures and assertions.
+`launch(binary, arguments)` records the revision, executable SHA-256/size,
+arguments, environment overrides and desktop commands in `inputs.json`.
+`GuiSession(artifacts, environment={...})` accepts GUI environment overrides,
+including `WINIT_X11_SCALE_FACTOR`, but always selects its private X11 display.
+Each artifact directory must be new. Exceptions retain logs, JSON failure details
+and, when the desktop is available, original/compressed failure screenshots.
+Cleanup terminates only processes started by that session.
+
+The startup-URL smoke scenario checks an independently positioned colored DOM
+target's physical dimensions and native click coordinates at scale factors 1
+and 2. It also verifies the CSS viewport dimensions. Run both scenarios and the
+failure-path tests with the same GUI binary:
+
+```sh
+/usr/bin/python3 -m unittest discover -s scripts/tests -p test_gui_x11.py
+/usr/bin/python3 scripts/test-gui-x11.py --binary target/debug/omoikane --artifacts .artifacts/gui-scale
+```
+
 Xvfb validates the X11 path with synthetic device input; physical devices,
 Wayland and macOS still need desktop validation. `cargo check --locked --features
 gui` only checks compilation. `unadjustedMovement: true` is currently rejected
