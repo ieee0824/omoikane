@@ -56,5 +56,8 @@ jobs:
         if: always()
         with:
           name: gui-pointer-lock-${{ runner.arch }}
-          path: .artifacts/
-          if-no-files-found: warn
+          path: |
+            .artifacts/gui-pointer-lock/
+            .artifacts/gui-scale/
+          include-hidden-files: true
+          if-no-files-found: error
