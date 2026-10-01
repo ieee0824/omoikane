@@ -34,6 +34,9 @@ use crate::js::{
     PointerLockTransition, StorageManager, VisitSource,
 };
 
+mod render_demand;
+pub use render_demand::{NextRendering, PaintStateKey, RenderDemand};
+
 mod accessibility;
 mod browser_session;
 mod dom;
@@ -303,6 +306,7 @@ impl CdpSession {
             storage_session_id,
         )
         .map_err(CdpSessionError::JavaScript)?;
+        runtime.enable_live_css_animations();
         runtime.set_shared_cookie_store(Arc::clone(&cookie_store));
         let mut http_client = Client::new();
         http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
@@ -528,6 +532,8 @@ impl CdpSession {
     }
 
     /// Advances the active page event loop and commits script navigation.
+    /// `elapsed_ms` is a delta in milliseconds since the previous opportunity,
+    /// not an absolute timestamp. It advances page, worker and worklet clocks.
     ///
     /// This is the browser-session lifecycle entry point for a future GUI
     /// frame pump: timer tasks and their microtasks run first, then one
@@ -753,3 +759,9 @@ fn js_error(error: boa_engine::JsError) -> JsonRpcError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod frameset_tests;
+
+#[cfg(test)]
+mod render_demand_tests;

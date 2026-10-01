@@ -400,6 +400,9 @@ fn expand_css_wide_shorthand(
             "animation-name",
             "animation-fill-mode",
             "animation-duration",
+            "animation-delay",
+            "animation-timing-function",
+            "animation-direction",
             "animation-iteration-count",
             "animation-play-state",
             "animation",
@@ -2527,110 +2530,78 @@ fn is_background_color_keyword(keyword: &str) -> bool {
     crate::paint::color::parse_color(keyword).is_some()
 }
 
-/// Expand `animation` shorthand into longhands.
-///
-/// Simplified parser that extracts the animation longhands used by static
-/// rendering. Unsupported timing details remain available in the original
-/// `animation` declaration for future use.
+/// Expands a single animation's clock and playback longhands.
 fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration> {
     let values = match &value {
-        Value::List(vs) => vs.clone(),
-        other => vec![other.clone()],
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
     };
-
-    let mut name: Option<String> = None;
-    let mut fill_mode: Option<String> = None;
-    let mut duration: Option<Value> = None;
-    let mut iteration_count: Option<String> = None;
-    let mut play_state: Option<String> = None;
-
-    for item in &values {
-        if let Value::Keyword(kw) = item {
-            let lower = kw.to_ascii_lowercase();
-            match lower.as_str() {
-                "none" => {
-                    // "none" is primarily animation-name: none (clears animation).
-                    if name.is_none() {
-                        name = Some("none".to_string());
-                    }
-                }
-                "forwards" | "backwards" | "both" => {
-                    if fill_mode.is_none() {
-                        fill_mode = Some(lower);
-                    }
-                }
-                "normal" | "reverse" | "alternate" | "alternate-reverse" => {
-                    // animation-direction — skip for now
-                }
-                "infinite" => {
-                    iteration_count = Some(lower);
-                }
-                "ease" | "ease-in" | "ease-out" | "ease-in-out" | "linear" | "step-start"
-                | "step-end" => {
-                    // animation-timing-function — skip for now
-                }
-                "running" | "paused" => {
-                    if play_state.is_none() {
-                        play_state = Some(lower);
-                    }
-                }
-                _ => {
-                    if name.is_none() {
-                        name = Some(kw.clone());
-                    }
+    let mut name = Value::Keyword("none".into());
+    let mut duration = None;
+    let mut delay = Value::Length(0.0, "s".into());
+    let mut timing = Value::Keyword("ease".into());
+    let mut iterations = Value::Number(1.0);
+    let mut direction = Value::Keyword("normal".into());
+    let mut fill = Value::Keyword("none".into());
+    let mut play = Value::Keyword("running".into());
+    for item in values {
+        match item {
+            Value::Length(_, unit) if unit == "s" || unit == "ms" => {
+                if duration.is_none() {
+                    duration = Some(item.clone());
+                } else {
+                    delay = item.clone();
                 }
             }
-        } else if let Value::Length(_, unit) = item
-            && (unit == "s" || unit == "ms")
-            && duration.is_none()
-        {
-            duration = Some(item.clone());
+            Value::Number(_) => iterations = item.clone(),
+            Value::Function { name: function, .. }
+                if matches!(
+                    function.to_ascii_lowercase().as_str(),
+                    "steps" | "cubic-bezier" | "linear"
+                ) =>
+            {
+                timing = item.clone()
+            }
+            Value::Keyword(keyword) => match keyword.to_ascii_lowercase().as_str() {
+                "forwards" | "backwards" | "both" => fill = item.clone(),
+                "normal" | "reverse" | "alternate" | "alternate-reverse" => {
+                    direction = item.clone()
+                }
+                "infinite" => iterations = item.clone(),
+                "running" | "paused" => play = item.clone(),
+                "ease" | "ease-in" | "ease-out" | "ease-in-out" | "linear" | "step-start"
+                | "step-end" => timing = item.clone(),
+                _ => name = item.clone(),
+            },
+            _ => {}
         }
     }
-
-    let mut decls = Vec::new();
-    if let Some(name) = name {
-        decls.push(Declaration {
-            name: "animation-name".to_string(),
-            value: Value::Keyword(name),
-            important,
-        });
-    }
-    if let Some(fill_mode) = fill_mode {
-        decls.push(Declaration {
-            name: "animation-fill-mode".to_string(),
-            value: Value::Keyword(fill_mode),
-            important,
-        });
-    }
-    if let Some(duration) = duration {
-        decls.push(Declaration {
-            name: "animation-duration".to_string(),
-            value: duration,
-            important,
-        });
-    }
-    if let Some(iteration_count) = iteration_count {
-        decls.push(Declaration {
-            name: "animation-iteration-count".to_string(),
-            value: Value::Keyword(iteration_count),
-            important,
-        });
-    }
-    decls.push(Declaration {
-        name: "animation-play-state".to_string(),
-        value: Value::Keyword(play_state.unwrap_or_else(|| "running".to_string())),
+    let mut declarations: Vec<_> = [
+        ("animation-name", name),
+        (
+            "animation-duration",
+            duration.unwrap_or(Value::Length(0.0, "s".into())),
+        ),
+        ("animation-delay", delay),
+        ("animation-timing-function", timing),
+        ("animation-iteration-count", iterations),
+        ("animation-direction", direction),
+        ("animation-fill-mode", fill),
+        ("animation-play-state", play),
+    ]
+    .into_iter()
+    .map(|(name, value)| Declaration {
+        name: name.into(),
+        value,
         important,
-    });
-
-    // Keep original animation declaration as well for properties we don't expand
-    decls.push(Declaration {
-        name: "animation".to_string(),
+    })
+    .collect();
+    declarations.push(Declaration {
+        name: "animation".into(),
         value,
         important,
     });
-
-    decls
+    declarations
 }
 
 /// Expand `outline` shorthand into `outline-style`, `outline-width`, `outline-color`.

@@ -35,13 +35,13 @@ pub(super) enum UrlBarOutcome {
 }
 
 /// Address bar state: the shown page's URL plus an optional edit in progress.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct UrlBar {
     page_url: String,
     draft: Option<Draft>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Draft {
     text: String,
     caret: usize,

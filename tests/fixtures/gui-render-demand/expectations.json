@@ -1,0 +1,60 @@
+{
+  "pages": {
+    "/": {
+      "file": "static.html",
+      "initial_rgb": [
+        10,
+        20,
+        30
+      ]
+    },
+    "/timer.html": {
+      "file": "timer.html",
+      "initial_rgb": [
+        11,
+        21,
+        31
+      ]
+    },
+    "/raf.html": {
+      "file": "raf.html",
+      "initial_rgb": [
+        12,
+        22,
+        32
+      ]
+    },
+    "/transition.html": {
+      "file": "transition.html",
+      "initial_rgb": [
+        13,
+        23,
+        33
+      ]
+    },
+    "/keyframes.html": {
+      "file": "keyframes.html",
+      "initial_rgb": [
+        14,
+        24,
+        34
+      ]
+    },
+    "/smooth.html": {
+      "file": "smooth.html",
+      "initial_rgb": [
+        15,
+        25,
+        35
+      ]
+    },
+    "/gif.html": {
+      "file": "gif.html",
+      "initial_rgb": [
+        255,
+        0,
+        0
+      ]
+    }
+  }
+}

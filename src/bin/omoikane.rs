@@ -16,7 +16,9 @@ use omoikane::error_reporting::{
     ReporterConfig, RetentionPolicy, install_panic_reporter,
 };
 use omoikane::font::{Font, load_system_font};
-use omoikane::frame::{BrowserFrame, PlatformFrameScheduler, render_browser_frame};
+#[cfg(test)]
+use omoikane::frame::render_browser_frame;
+use omoikane::frame::{BrowserFrameCache, PlatformFramePlan, PlatformFrameScheduler};
 use omoikane::js::{FindInPageResult, FullscreenTransition, PointerLockTransition};
 use omoikane::platform_input::{
     InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
@@ -44,6 +46,8 @@ mod device_scale;
 mod input_routing;
 #[path = "omoikane/pointer_lock_host.rs"]
 mod pointer_lock_host;
+#[path = "omoikane/render_pump.rs"]
+mod render_pump;
 #[path = "omoikane/toolbar_paint.rs"]
 mod toolbar_paint;
 #[path = "omoikane/url_bar.rs"]
@@ -156,6 +160,12 @@ struct BrowserApp {
     context: Option<Context<Arc<Window>>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     frame_scheduler: PlatformFrameScheduler,
+    frame_cache: BrowserFrameCache,
+    clock_document: u64,
+    last_chrome: Option<(ChromeLayout, UrlBar)>,
+    trace_paint: bool,
+    paint_sequence: u64,
+    started_at: Instant,
     input: PlatformInput,
     window_title: String,
     modifiers: InputModifiers,
@@ -187,6 +197,7 @@ impl BrowserApp {
         session.set_pointer_lock_deferred(true);
         session.dispatch("Page.navigate", json!({ "url": url }))?;
         let started_at = Instant::now();
+        let clock_document = session.document_generation();
         Ok(Self {
             session,
             error_reporter: None,
@@ -194,6 +205,12 @@ impl BrowserApp {
             context: None,
             surface: None,
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
+            frame_cache: BrowserFrameCache::default(),
+            clock_document,
+            last_chrome: None,
+            trace_paint: std::env::var_os("OMOIKANE_TRACE_PAINT").is_some(),
+            paint_sequence: 0,
+            started_at,
             input: PlatformInput::new(),
             window_title: DEFAULT_WINDOW_TITLE.to_string(),
             modifiers: InputModifiers::default(),
@@ -300,52 +317,8 @@ impl BrowserApp {
         }
     }
 
-    fn draw(&mut self, elapsed_ms: u64) -> Result<(), Box<dyn Error>> {
-        let Some(window) = self.window.clone() else {
-            return Ok(());
-        };
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
-        }
-        let layout = self.chrome_layout();
-        // A window no taller than the toolbar has no page area to paint.
-        let frame = match layout.page_viewport() {
-            (0, _) | (_, 0) => None,
-            (width, height) => Some(
-                render_browser_frame(&mut self.session, width, height, elapsed_ms).map_err(
-                    |error| {
-                        report_gui_failure(
-                            self.error_reporter.as_deref(),
-                            GuiFailure::Frame,
-                            &error,
-                        );
-                        error
-                    },
-                )?,
-            ),
-        };
-        self.sync_find_document();
-        self.sync_url_bar();
-        let title = find_window_title(
-            document_window_title(&mut self.session).map_err(|error| {
-                report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
-                error
-            })?,
-            self.find_ui.as_ref(),
-        );
-        if let Some(title) = changed_window_title(&mut self.window_title, title) {
-            window.set_title(&title);
-        }
-        self.present(&layout, frame.as_ref())
-    }
-
     /// Composites the page frame below the toolbar and shows the result.
-    fn present(
-        &mut self,
-        layout: &ChromeLayout,
-        frame: Option<&BrowserFrame>,
-    ) -> Result<(), Box<dyn Error>> {
+    fn present(&mut self, layout: &ChromeLayout) -> Result<(), Box<dyn Error>> {
         let (toolbar, page) = (layout.toolbar(), layout.page());
         let (Some(width), Some(height)) = (
             NonZeroU32::new(page.width),
@@ -372,7 +345,7 @@ impl BrowserApp {
             );
             error
         })?;
-        if let Some(frame) = frame {
+        if let Some(frame) = self.frame_cache.frame().filter(|_| page.height > 0) {
             // The page spans whole surface rows, so its rows are contiguous.
             let rows = page.y as usize * page.width as usize
                 ..(page.y + page.height) as usize * page.width as usize;
@@ -886,6 +859,9 @@ impl ApplicationHandler for BrowserApp {
         {
             return;
         }
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            self.sync_page_time_before_input(Instant::now());
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.session.set_host_visibility(true);
@@ -920,8 +896,9 @@ impl ApplicationHandler for BrowserApp {
                     .request_rendering_opportunity(Instant::now());
             }
             WindowEvent::RedrawRequested => {
-                let elapsed_ms = self.frame_scheduler.begin_frame(Instant::now());
-                if let Err(error) = self.draw(elapsed_ms) {
+                let force_present = !self.frame_scheduler.redraw_pending();
+                let elapsed_ms = self.consume_page_delta(Instant::now(), true);
+                if let Err(error) = self.draw(elapsed_ms, force_present) {
                     eprintln!("frame failed: {error}");
                 }
             }
@@ -943,6 +920,7 @@ impl ApplicationHandler for BrowserApp {
         if !self.native_pointer_lock {
             return;
         }
+        self.sync_page_time_before_input(Instant::now());
         let result = match event {
             DeviceEvent::MouseMotion { delta } => {
                 self.input
@@ -1007,14 +985,20 @@ impl ApplicationHandler for BrowserApp {
         self.sync_pointer_lock();
         if let Some(window) = &self.window {
             let now = Instant::now();
-            if self.frame_scheduler.queue_redraw_if_due(now) {
-                window.request_redraw();
-            }
-            if self.frame_scheduler.redraw_pending() {
-                event_loop.set_control_flow(ControlFlow::Wait);
-            } else {
-                event_loop
-                    .set_control_flow(ControlFlow::WaitUntil(self.frame_scheduler.deadline()));
+            match self
+                .frame_scheduler
+                .plan(now, self.frame_cache.demand(&self.session))
+            {
+                PlatformFramePlan::Redraw => {
+                    if self.frame_scheduler.queue_redraw() {
+                        window.request_redraw();
+                    }
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                }
+                PlatformFramePlan::Wait => event_loop.set_control_flow(ControlFlow::Wait),
+                PlatformFramePlan::WaitUntil(deadline) => {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                }
             }
         }
     }

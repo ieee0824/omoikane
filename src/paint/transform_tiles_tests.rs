@@ -242,6 +242,7 @@ pub(super) fn paint_reference(
                     viewport: translated_viewport,
                     text_fonts,
                     web_fonts,
+                    nested_documents: None,
                 },
                 PaintBoxOptions {
                     inherited_clip: None,

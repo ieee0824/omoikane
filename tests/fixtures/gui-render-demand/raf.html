@@ -1,0 +1,1 @@
+<style>body{margin:0;min-height:100vh;background:rgb(12,22,32)}</style><script>let id;function loop(t){document.body.style.background=(Math.floor(t/200)%2)?'red':'blue';id=requestAnimationFrame(loop)}document.onclick=()=>{id=requestAnimationFrame(loop)};document.onkeydown=()=>cancelAnimationFrame(id)</script>

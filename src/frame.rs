@@ -1,8 +1,8 @@
-//! Continuous browser-frame rendering for native and embedded frontends.
+//! Browser frame advancement, painting and native rendering scheduling.
 
 use std::time::{Duration, Instant};
 
-use crate::cdp::{CdpSession, JsonRpcError};
+use crate::cdp::{CdpSession, JsonRpcError, NextRendering, PaintStateKey, RenderDemand};
 use crate::paint::{Color, PaintError};
 
 /// Coordinates a platform window's redraw requests with browser rendering
@@ -15,9 +15,11 @@ use crate::paint::{Color, PaintError};
 #[derive(Debug, Clone)]
 pub struct PlatformFrameScheduler {
     origin: Instant,
+    last_elapsed_ms: u64,
     interval: Duration,
     next_deadline: Instant,
     redraw_pending: bool,
+    externally_invalidated: bool,
 }
 
 impl PlatformFrameScheduler {
@@ -28,9 +30,11 @@ impl PlatformFrameScheduler {
     pub fn new(origin: Instant, interval: Duration) -> Self {
         Self {
             origin,
+            last_elapsed_ms: 0,
             interval: interval.max(Duration::from_nanos(1)),
             next_deadline: origin,
             redraw_pending: false,
+            externally_invalidated: true,
         }
     }
 
@@ -48,6 +52,7 @@ impl PlatformFrameScheduler {
     /// Pulls the next deadline forward for an external invalidation such as
     /// input or resize. An already pending platform redraw remains coalesced.
     pub fn request_rendering_opportunity(&mut self, now: Instant) {
+        self.externally_invalidated = true;
         if now < self.next_deadline {
             self.next_deadline = now;
         }
@@ -65,17 +70,75 @@ impl PlatformFrameScheduler {
         true
     }
 
-    /// Begins delivery of a frame and returns its animation timestamp.
+    /// Begins delivery and returns milliseconds since the previous opportunity.
+    /// The first delivery measures from the scheduler origin. Callback timestamps
+    /// are accumulated by the page event loop, rather than by the host caller.
     ///
     /// The next deadline is based on the actual delivery time. This avoids
     /// catch-up bursts after the window was blocked, occluded, or suspended.
     pub fn begin_frame(&mut self, now: Instant) -> u64 {
         self.redraw_pending = false;
+        self.externally_invalidated = false;
         self.next_deadline = now + self.interval;
-        now.saturating_duration_since(self.origin)
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64
+        self.advance_time(now)
     }
+
+    /// Consumes elapsed host time without delivering an animation frame.
+    /// Native hosts use this before input, so timers created by input callbacks
+    /// start at the current page time even after a long idle interval.
+    pub fn advance_time(&mut self, now: Instant) -> u64 {
+        let elapsed = now
+            .saturating_duration_since(self.origin)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let delta = elapsed.saturating_sub(self.last_elapsed_ms);
+        self.last_elapsed_ms = self.last_elapsed_ms.max(elapsed);
+        delta
+    }
+
+    /// Selects the next host action without changing state or reading a clock.
+    /// Timer delays are anchored to the last consumed page time, so repeated
+    /// OS wakeups cannot move the same timer's deadline into the future.
+    pub fn plan(&self, now: Instant, demand: RenderDemand) -> PlatformFramePlan {
+        if self.redraw_pending {
+            return PlatformFramePlan::Wait;
+        }
+        if self.externally_invalidated || demand.needs_paint {
+            return PlatformFramePlan::Redraw;
+        }
+        let deadline = match demand.next {
+            NextRendering::Idle => return PlatformFramePlan::Wait,
+            NextRendering::EveryFrame => self.next_deadline,
+            NextRendering::After(delay) => {
+                self.origin + Duration::from_millis(self.last_elapsed_ms) + delay
+            }
+        };
+        if now >= deadline {
+            PlatformFramePlan::Redraw
+        } else {
+            PlatformFramePlan::WaitUntil(deadline)
+        }
+    }
+
+    /// Coalesces a redraw selected by [`Self::plan`].
+    pub fn queue_redraw(&mut self) -> bool {
+        if self.redraw_pending {
+            return false;
+        }
+        self.redraw_pending = true;
+        true
+    }
+}
+
+/// A platform-independent decision for a native window event loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformFramePlan {
+    /// Sleep until an external event arrives.
+    Wait,
+    /// Sleep until the explicit page or frame deadline.
+    WaitUntil(Instant),
+    /// Request one rendering opportunity immediately.
+    Redraw,
 }
 
 /// An opaque, row-major RGBA browser frame.
@@ -125,19 +188,35 @@ impl std::error::Error for FrameError {}
 
 /// Drives rendering opportunities and snapshots the current DOM into raw RGBA.
 ///
-/// `elapsed_ms` is an absolute monotonic timestamp, matching the timestamp
-/// supplied to `requestAnimationFrame` callbacks.
+/// `elapsed_ms` is the delta since the previous opportunity (or initialization).
+/// The page accumulates this delta for timer deadlines and the absolute
+/// timestamps supplied to `requestAnimationFrame` callbacks.
 pub fn render_browser_frame(
     session: &mut CdpSession,
     width: u32,
     height: u32,
     elapsed_ms: u64,
 ) -> Result<BrowserFrame, FrameError> {
+    advance_browser_frame(session, width, height, elapsed_ms)?;
+    paint_browser_frame(session)
+}
+
+/// Advances jobs, timers and one animation frame without painting the page.
+/// `elapsed_ms` is the delta since the previous page-clock advancement.
+pub fn advance_browser_frame(
+    session: &mut CdpSession,
+    width: u32,
+    height: u32,
+    elapsed_ms: u64,
+) -> Result<(), FrameError> {
     session.set_viewport(width, height);
     session
         .drive_event_loop(elapsed_ms)
-        .map_err(FrameError::EventLoop)?;
+        .map_err(FrameError::EventLoop)
+}
 
+/// Paints the current page without advancing its event loop or animation clock.
+pub fn paint_browser_frame(session: &mut CdpSession) -> Result<BrowserFrame, FrameError> {
     let mut canvas = session
         .paint_current_document()
         .map_err(FrameError::Paint)?;
@@ -149,6 +228,48 @@ pub fn render_browser_frame(
         pixels: canvas.into_pixels(),
     })
 }
+
+/// Owns the last painted page pixels and the native inputs that produced them.
+/// Toolbar composition can borrow the cached frame without repainting the page.
+#[derive(Debug, Default)]
+pub struct BrowserFrameCache {
+    frame: Option<BrowserFrame>,
+    presented: Option<PaintStateKey>,
+}
+
+impl BrowserFrameCache {
+    /// Returns the retained page frame, if it has been painted successfully.
+    pub fn frame(&self) -> Option<&BrowserFrame> {
+        self.frame.as_ref()
+    }
+
+    /// Queries page demand relative to this cache without changing either one.
+    pub fn demand(&self, session: &CdpSession) -> RenderDemand {
+        session.render_demand(self.presented.as_ref())
+    }
+
+    /// Advances the page and paints only if its native paint inputs changed.
+    /// Returns whether new page pixels were produced. A false result lets hosts
+    /// skip surface transfer unless native chrome or an OS exposure changed.
+    pub fn update(
+        &mut self,
+        session: &mut CdpSession,
+        width: u32,
+        height: u32,
+        elapsed_ms: u64,
+    ) -> Result<bool, FrameError> {
+        advance_browser_frame(session, width, height, elapsed_ms)?;
+        if !self.demand(session).needs_paint {
+            return Ok(false);
+        }
+        self.frame = Some(paint_browser_frame(session)?);
+        self.presented = Some(session.paint_state_key());
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod demand_tests;
 
 #[cfg(test)]
 mod tests {
@@ -212,6 +333,26 @@ mod tests {
     }
 
     #[test]
+    fn platform_frames_advance_page_time_by_delivery_intervals() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<script>window.fired=false;window.stamps=[];setTimeout(()=>fired=true,100);function frame(t){stamps.push(t);requestAnimationFrame(frame)}requestAnimationFrame(frame)</script>",
+        );
+        let origin = Instant::now();
+        let mut scheduler = PlatformFrameScheduler::new(origin, Duration::from_millis(16));
+        for index in 1..=7 {
+            let delta = scheduler.begin_frame(origin + Duration::from_millis(index * 16));
+            render_browser_frame(&mut session, 4, 4, delta).unwrap();
+            assert_eq!(evaluate(&mut session, "fired"), json!(index == 7));
+        }
+        assert_eq!(
+            evaluate(&mut session, "stamps"),
+            json!([16, 32, 48, 64, 80, 96, 112])
+        );
+    }
+
+    #[test]
     fn returns_opaque_raw_rgba_at_requested_size() {
         let mut session = CdpSession::new().unwrap();
         navigate(
@@ -237,7 +378,7 @@ mod tests {
         );
 
         let first = render_browser_frame(&mut session, 2, 2, 16).unwrap();
-        let second = render_browser_frame(&mut session, 2, 2, 32).unwrap();
+        let second = render_browser_frame(&mut session, 2, 2, 16).unwrap();
 
         assert_eq!(evaluate(&mut session, "globalThis.runs"), json!(1));
         assert_eq!(&first.pixels()[..4], &[255, 0, 0, 255]);

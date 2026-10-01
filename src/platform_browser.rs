@@ -331,6 +331,8 @@ impl PlatformBrowser {
         Ok(&tab.info)
     }
 
+    /// Drives and paints the active tab, advancing its clock by the supplied
+    /// `elapsed_ms` delta since the previous opportunity or initialization.
     pub fn render_active(
         &mut self,
         width: u32,

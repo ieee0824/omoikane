@@ -19,10 +19,10 @@ use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
     BoxDimensions, EdgeSizes, FontMetrics, FragmentStyle, HTTP_CLIENT, IMAGE_ANIMATION_CACHE,
-    IMAGE_ANIMATION_TIME_MS, IMAGE_BASE_URL, IMAGE_CACHE, IMAGE_COOKIE_CONTEXT, InlineFragment,
-    InlineFragmentContent, LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState,
-    TextOverflowPaint, VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length,
-    is_border_box, is_non_rendered_html_element,
+    IMAGE_BASE_URL, IMAGE_CACHE, IMAGE_COOKIE_CONTEXT, InlineFragment, InlineFragmentContent,
+    LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState, TextOverflowPaint,
+    VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length, is_border_box,
+    is_non_rendered_html_element,
 };
 
 mod boxes;
@@ -1819,9 +1819,8 @@ fn decode_data_uri_image(uri: &str) -> Option<Image> {
             {
                 Image::decode_jpeg(&data).ok()
             } else if mime_type.eq_ignore_ascii_case("image/gif") {
-                let animation = Image::decode_gif_animation(&data).ok()?;
-                let time = IMAGE_ANIMATION_TIME_MS.with(|cell| cell.get());
-                Some(animation.frame_at(time).image().clone())
+                let animation = std::sync::Arc::new(Image::decode_gif_animation(&data).ok()?);
+                Some(super::image_animation::sample(&animation, uri))
             } else if mime_type.eq_ignore_ascii_case("image/webp") {
                 Image::decode_webp(&data).ok()
             } else if mime_type.eq_ignore_ascii_case("image/svg+xml") {
@@ -1873,12 +1872,11 @@ const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
 /// Fetch an image from an HTTP/HTTPS URL with caching.
 fn fetch_image(url: &str) -> Option<Image> {
     super::ensure_image_cache_context();
-    let time = IMAGE_ANIMATION_TIME_MS.with(|cell| cell.get());
     if let Some(image) = IMAGE_ANIMATION_CACHE.with(|cache| {
         cache
             .borrow()
             .get(url)
-            .map(|animation| animation.frame_at(time).image().clone())
+            .map(|animation| super::image_animation::sample(animation, url))
     }) {
         return Some(image);
     }
@@ -1940,9 +1938,8 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         .unwrap_or_default();
 
     if content_type.contains("image/gif") || url.ends_with(".gif") || body.starts_with(b"GIF8") {
-        let animation = Image::decode_gif_animation(body).ok()?;
-        let time = IMAGE_ANIMATION_TIME_MS.with(|cell| cell.get());
-        let image = animation.frame_at(time).image().clone();
+        let animation = std::sync::Arc::new(Image::decode_gif_animation(body).ok()?);
+        let image = super::image_animation::sample(&animation, url);
         IMAGE_ANIMATION_CACHE.with(|cache| {
             cache.borrow_mut().insert(url.to_string(), animation);
         });

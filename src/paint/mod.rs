@@ -1,5 +1,6 @@
 //! Pixel-based painting primitives and layout tree rendering.
 
+pub(crate) mod animation;
 pub(crate) mod border;
 pub(crate) mod color;
 pub(crate) mod color4;
@@ -12,7 +13,7 @@ pub(crate) mod stylesheet;
 pub(crate) mod text;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -184,19 +185,21 @@ pub(crate) use text::{
     TextDecorationLines, apply_text_transform, inline_fragment_content_rect,
     is_cjk_preferred_character, load_text_fonts, paint_inline_image_fragment, paint_list_marker,
     paint_text_placeholder, paint_text_placeholder_with_mode, paint_text_with_font,
-    paint_text_with_font_refs, paint_text_with_registry, rasterize_with_fallback,
-    rasterize_with_fallback_refs, text_color, with_render_glyph_cache,
+    paint_text_with_font_refs, rasterize_with_fallback, rasterize_with_fallback_refs, text_color,
+    with_render_glyph_cache,
 };
 
 #[cfg(test)]
-pub(crate) use text::paint_list_marker_placeholder;
+pub(crate) use text::{paint_list_marker_placeholder, paint_text_with_registry};
 
 /// A decoded RGBA image.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Image {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+    animation_regions: Vec<animation::AnimationRegion>,
+    animated_pixels: Option<animation::AnimatedPixels>,
 }
 
 /// GIF disposal operation applied after a frame's display interval.
@@ -235,6 +238,7 @@ impl ImageFrame {
 pub struct ImageAnimation {
     frames: Vec<ImageFrame>,
     duration_ms: u64,
+    plays: Option<u64>,
 }
 
 impl ImageAnimation {
@@ -248,6 +252,12 @@ impl ImageAnimation {
     }
     /// Selects the frame visible at an elapsed frame-scheduler timestamp.
     pub fn frame_at(&self, elapsed_ms: u64) -> &ImageFrame {
+        if self
+            .plays
+            .is_some_and(|plays| elapsed_ms >= self.duration_ms.saturating_mul(plays))
+        {
+            return &self.frames[self.frames.len() - 1];
+        }
         let mut position = if self.duration_ms == 0 {
             0
         } else {
@@ -275,6 +285,8 @@ impl Image {
             width,
             height,
             pixels,
+            animation_regions: Vec::new(),
+            animated_pixels: None,
         })
     }
 
@@ -410,11 +422,12 @@ pub(crate) enum BorderRegion {
 }
 
 /// A simple RGBA bitmap canvas.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Canvas {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+    animation_regions: Vec<animation::AnimationRegion>,
 }
 
 impl Canvas {
@@ -424,6 +437,7 @@ impl Canvas {
             width,
             height,
             pixels: vec![0; width as usize * height as usize * 4],
+            animation_regions: Vec::new(),
         }
     }
 
@@ -433,6 +447,7 @@ impl Canvas {
             width,
             height,
             pixels,
+            animation_regions: Vec::new(),
         })
     }
 
@@ -935,6 +950,11 @@ impl Canvas {
         let y0 = area.y.floor().max(0.0) as i32;
         let x1 = (area.x + area.width).ceil().min(self.width as f32) as i32;
         let y1 = (area.y + area.height).ceil().min(self.height as f32) as i32;
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        self.observe_scaled_image(image, destination, area);
+        let image = image.sampled_image(crate::layout::image_animation_time_ms());
         let shrink_x = destination.width < image.width as f32;
         let shrink_y = destination.height < image.height as f32;
         let source_per_dest_x = image.width as f32 / destination.width;
@@ -1122,8 +1142,8 @@ pub fn paint_layout_with_web_fonts(
     canvas
 }
 
-/// Paints a layout tree with a private visited-link color snapshot. The
-/// snapshot is discarded before callers can query the resolver again.
+/// Paints with a private visited-link color snapshot, restored before return.
+#[cfg(test)]
 pub(crate) fn paint_layout_with_visited_links(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
@@ -1132,8 +1152,56 @@ pub(crate) fn paint_layout_with_visited_links(
     web_fonts: Option<&WebFontRegistry>,
     visited_link_ids: impl IntoIterator<Item = usize>,
 ) -> Canvas {
+    paint_layout_with_document_snapshots(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        &HashMap::new(),
+    )
+}
+
+/// Paints live nested document snapshots in the ordinary stacking traversal,
+/// together with a private visited-link snapshot. All inputs are scoped to
+/// this call; the resolver is restored before returning to CSSOM callers.
+pub(crate) fn paint_layout_with_document_snapshots(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+) -> Canvas {
     resolver.begin_visited_paint(visited_link_ids);
-    let canvas = paint_layout_with_web_fonts(layout, resolver, viewport, fonts, web_fonts);
+    let mut canvas = Canvas::new(
+        viewport.width.ceil().max(1.0) as u32,
+        viewport.height.ceil().max(1.0) as u32,
+    );
+    if let Some(background) = viewport_background_color(layout, resolver) {
+        canvas.fill_rect(viewport, background);
+    }
+    text::with_render_glyph_cache(|| {
+        paint_box_internal(
+            &mut canvas,
+            layout,
+            resolver,
+            PaintContext {
+                viewport,
+                text_fonts: &fonts,
+                web_fonts,
+                nested_documents: Some(nested_documents),
+            },
+            PaintBoxOptions {
+                inherited_clip: None,
+                include_phase_descendants: true,
+                paint_decorations: true,
+                offset: PaintOffset::default(),
+            },
+        );
+    });
     resolver.end_visited_paint();
     canvas
 }
@@ -1961,6 +2029,7 @@ struct PaintContext<'a> {
     viewport: Rect,
     text_fonts: &'a [Arc<Font>],
     web_fonts: Option<&'a WebFontRegistry>,
+    nested_documents: Option<&'a HashMap<usize, Image>>,
 }
 
 /// Per-box traversal state in the destination surface's coordinate system.
@@ -1995,6 +2064,7 @@ fn paint_box(
             viewport,
             text_fonts,
             web_fonts,
+            nested_documents: None,
         },
         PaintBoxOptions {
             inherited_clip,
@@ -3254,6 +3324,15 @@ fn paint_box_internal_untransformed(
             apply_clip_path_shape(&mut offscreen, &shape);
         }
         // メインキャンバスに合成
+        canvas.observe_canvas(
+            &offscreen,
+            AffineTransform {
+                e: buf_x as f32,
+                f: buf_y as f32,
+                ..AffineTransform::identity()
+            },
+            inherited_clip,
+        );
         let dst_w = canvas.width() as i32;
         let dst_h = canvas.height() as i32;
         let src_w = buf_w as i32;
@@ -3315,6 +3394,7 @@ fn composite_affine(
     let Some(inverse) = transform.inverse() else {
         return;
     };
+    destination.observe_canvas(source, transform, clip);
     let width = source.width() as i32;
     let height = source.height() as i32;
     let hint_x0 = source_hint.x.floor().max(0.0).min(width as f32) as i32;
@@ -3678,6 +3758,25 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
         // a mask rather than making the entire element transparent.
         return;
     }
+    for (tile, tile_width, tile_height, repeat_x, repeat_y, position_x, position_y, _, _) in
+        &prepared
+    {
+        let destination = Rect {
+            x: if *repeat_x {
+                area.x
+            } else {
+                area.x + position_x
+            },
+            y: if *repeat_y {
+                area.y
+            } else {
+                area.y + position_y
+            },
+            width: if *repeat_x { area.width } else { *tile_width },
+            height: if *repeat_y { area.height } else { *tile_height },
+        };
+        canvas.observe_scaled_image(tile, destination, area);
+    }
     let width = canvas.width as i32;
     let height = canvas.height as i32;
     let area_x0 = area.x.floor().max(0.0) as i32;
@@ -3907,6 +4006,27 @@ fn overflow_clip_rect(
     intersect(base, axis_clip)
 }
 
+fn paint_nested_document_snapshot(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    nested_documents: Option<&HashMap<usize, Image>>,
+    clip: Option<Rect>,
+    offset: PaintOffset,
+) {
+    if let Some(image) =
+        nested_documents.and_then(|documents| documents.get(&layout.node.identity()))
+    {
+        let destination = offset.rect(layout.dimensions.content);
+        let image_clip = match clip {
+            Some(clip) => intersect(clip, destination),
+            None => Some(destination),
+        };
+        if let Some(image_clip) = image_clip {
+            canvas.draw_image_scaled_clipped(image, destination, Some(image_clip));
+        }
+    }
+}
+
 fn paint_box_internal_to(
     canvas: &mut Canvas,
     layout: &LayoutBox,
@@ -3919,7 +4039,8 @@ fn paint_box_internal_to(
     let PaintContext {
         viewport,
         text_fonts,
-        web_fonts,
+        nested_documents,
+        ..
     } = context;
     let PaintBoxGeometry {
         border_box,
@@ -4030,6 +4151,8 @@ fn paint_box_internal_to(
         inherited_clip
     };
 
+    paint_nested_document_snapshot(canvas, layout, nested_documents, clip, offset);
+
     paint_column_rules(canvas, layout, style, clip, offset);
 
     let mut negative_positioned_children = Vec::new();
@@ -4108,9 +4231,7 @@ fn paint_box_internal_to(
     for child in float_children {
         paint_box_internal(canvas, child, resolver, context, phase_options);
     }
-    text::paint_text_with_registry(
-        canvas, layout, resolver, style, clip, viewport, text_fonts, web_fonts, offset,
-    );
+    text::paint_text_with_context(canvas, layout, resolver, style, clip, context, offset);
     text::paint_list_marker(canvas, layout, style, clip, text_fonts, offset);
     for child in inline_children {
         paint_box_internal(canvas, child, resolver, context, flow_options);
@@ -5567,6 +5688,15 @@ fn apply_backdrop_filters(
 /// The region must be within the canvas bounds.
 fn copy_region_out(canvas: &Canvas, x: usize, y: usize, width: usize, height: usize) -> Canvas {
     let mut region = Canvas::new(width as u32, height as u32);
+    region.observe_canvas(
+        canvas,
+        AffineTransform {
+            e: -(x as f32),
+            f: -(y as f32),
+            ..AffineTransform::identity()
+        },
+        None,
+    );
     let row_bytes = width * 4;
     for row in 0..height {
         let source_start = ((y + row) * canvas.width as usize + x) * 4;
@@ -5592,6 +5722,20 @@ fn copy_region_in(
     width: usize,
     height: usize,
 ) {
+    canvas.observe_canvas(
+        region,
+        AffineTransform {
+            e: dest_x as f32 - source_x as f32,
+            f: dest_y as f32 - source_y as f32,
+            ..AffineTransform::identity()
+        },
+        Some(Rect {
+            x: dest_x as f32,
+            y: dest_y as f32,
+            width: width as f32,
+            height: height as f32,
+        }),
+    );
     let row_bytes = width * 4;
     for row in 0..height {
         let source_start = ((source_y + row) * region.width as usize + source_x) * 4;
@@ -7216,6 +7360,9 @@ impl Canvas {
 
     /// キャンバスの全ピクセルの alpha に `factor` (0.0〜1.0) を乗算する。
     pub fn multiply_alpha(&mut self, factor: f32) {
+        if factor <= 0.0 {
+            self.animation_regions.clear();
+        }
         let factor = factor.clamp(0.0, 1.0);
         for pixel in self.pixels.chunks_exact_mut(4) {
             let a = pixel[3] as f32;

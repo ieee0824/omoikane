@@ -29401,7 +29401,7 @@ fn render_generations_separate_style_layout_and_paint_invalidation() {
 }
 
 #[test]
-fn render_generations_ignore_iframe_only_style_invalidation() {
+fn iframe_style_invalidation_repaints_without_rebuilding_parent_layout() {
     let mut runtime = runtime_from_html(
         r#"<html><body><iframe id="frame"></iframe><div style="width: 10px"></div></body></html>"#,
     );
@@ -29420,10 +29420,12 @@ fn render_generations_ignore_iframe_only_style_invalidation() {
         )
         .unwrap();
 
-    assert_eq!(
-        runtime.render_generations(),
-        main_generations,
-        "iframe-only style changes must not invalidate the top-level render cache"
+    let next = runtime.render_generations();
+    assert_eq!(next.style, main_generations.style);
+    assert_eq!(next.layout, main_generations.layout);
+    assert!(
+        next.paint > main_generations.paint,
+        "child style changes must invalidate the composited paint output"
     );
 }
 

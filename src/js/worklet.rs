@@ -20,6 +20,15 @@ pub(super) struct State {
     registrations: HashSet<String>,
 }
 
+impl State {
+    pub(super) fn has_pending_render_work(&self) -> bool {
+        !self.terminated
+            && self.runtime.as_ref().is_some_and(|runtime| {
+                runtime.borrow().next_rendering() != crate::cdp::NextRendering::Idle
+            })
+    }
+}
+
 impl Default for State {
     fn default() -> Self {
         Self {
