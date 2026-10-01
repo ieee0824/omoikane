@@ -7,11 +7,13 @@
 //! everything to the page.
 
 use omoikane::platform_input::PlatformMouseButton;
+use serde_json::json;
 
 use super::BrowserApp;
 use super::chrome_layout::{ChromeLayout, WindowRegion};
 use super::toolbar_paint::url_field;
-use super::url_bar::{UrlBarKey, UrlBarOutcome};
+
+use super::url_bar::{UrlBarKey, UrlBarOutcome, UrlRejection, navigation_target};
 
 /// The single receiver of keyboard and IME input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,9 +110,35 @@ impl BrowserApp {
             UrlBarOutcome::Ignored
         };
         if let UrlBarOutcome::Navigate(url) = outcome {
-            self.requested_navigation = Some(url);
+            self.navigate_from_url_bar(&url);
         }
         true
+    }
+
+    /// Loads a URL committed in the address bar through the page's normal
+    /// navigation path. A rejected or failed URL goes back into the bar for
+    /// correction, and the page and its shown URL stay unchanged.
+    ///
+    /// `Page.navigate` completes the request synchronously, so the event loop
+    /// stops until the page has loaded. Making it asynchronous is out of
+    /// scope for #1139.
+    fn navigate_from_url_bar(&mut self, text: &str) {
+        let result = match navigation_target(text) {
+            Ok(url) => self
+                .session
+                .dispatch("Page.navigate", json!({ "url": url }))
+                .map(drop)
+                .map_err(|error| error.message),
+            Err(UrlRejection::MissingScheme) => Err("URL must start with a scheme".into()),
+            Err(UrlRejection::JavaScript) => Err("javascript: URLs are not run".into()),
+        };
+        match result {
+            Ok(()) => self.url_bar.set_page_url(self.session.current_url()),
+            Err(message) => {
+                eprintln!("navigation to {text:?} failed: {message}");
+                self.url_bar.edit(text);
+            }
+        }
     }
 
     /// Returns whether pointer input at the last cursor position belongs to

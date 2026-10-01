@@ -5,9 +5,6 @@
 //! URL once as [`UrlBarOutcome::Navigate`], and the host decides how to load it.
 //! Caret and selection positions are byte offsets on `char` boundaries.
 
-// BrowserApp starts routing input to this state in #1138–#1139.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::ops::Range;
 
 /// Editing keys understood by the address bar, independent of the windowing
@@ -107,6 +104,18 @@ impl UrlBar {
             });
         }
         UrlBarOutcome::Edited
+    }
+
+    /// Starts editing with `text` and the caret at its end, so a rejected or
+    /// failed URL stays visible for correction.
+    pub(super) fn edit(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        let end = text.len();
+        self.draft = Some(Draft {
+            text,
+            caret: end,
+            anchor: end,
+        });
     }
 
     /// Abandons the edit and shows the page URL again.
@@ -217,6 +226,34 @@ impl Draft {
     }
 }
 
+/// Why typed text was not sent to navigation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UrlRejection {
+    /// The text has no `scheme:` prefix; completing one is out of scope.
+    MissingScheme,
+    /// `javascript:` URLs are never run from the address bar.
+    JavaScript,
+}
+
+/// Accepts committed text as a navigation target only when it is an absolute
+/// URL with a scheme other than `javascript:`. The URL itself is validated by
+/// the navigation path.
+pub(super) fn navigation_target(text: &str) -> Result<&str, UrlRejection> {
+    let scheme = text
+        .split_once(':')
+        .map(|(scheme, _)| scheme)
+        .filter(|scheme| {
+            let mut chars = scheme.chars();
+            chars.next().is_some_and(|ch| ch.is_ascii_alphabetic())
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+        })
+        .ok_or(UrlRejection::MissingScheme)?;
+    if scheme.eq_ignore_ascii_case("javascript") {
+        return Err(UrlRejection::JavaScript);
+    }
+    Ok(text)
+}
+
 fn previous_boundary(text: &str, offset: usize) -> usize {
     text[..offset]
         .chars()
@@ -240,6 +277,44 @@ mod tests {
         bar.focus();
         bar.key(UrlBarKey::End, false);
         bar
+    }
+
+    #[test]
+    fn navigation_accepts_only_absolute_urls_without_javascript() {
+        for url in [
+            "http://127.0.0.1:8000/a",
+            "https://example.test/",
+            "data:text/html,x",
+            "about:blank",
+        ] {
+            assert_eq!(navigation_target(url), Ok(url));
+        }
+        for text in [
+            "example.test",
+            "127.0.0.1:8000/a",
+            "/path",
+            "1http://x",
+            ":x",
+            "a b:c",
+        ] {
+            assert_eq!(
+                navigation_target(text),
+                Err(UrlRejection::MissingScheme),
+                "{text}"
+            );
+        }
+        for text in ["javascript:alert(1)", "JavaScript:void 0"] {
+            assert_eq!(navigation_target(text), Err(UrlRejection::JavaScript));
+        }
+    }
+
+    #[test]
+    fn edit_shows_given_text_with_caret_at_end() {
+        let mut bar = UrlBar::new("https://page.test/");
+        bar.edit("bad url");
+        assert_eq!(bar.display_text(), "bad url");
+        assert_eq!(bar.caret(), Some(7));
+        assert_eq!(bar.selection(), None);
     }
 
     #[test]
