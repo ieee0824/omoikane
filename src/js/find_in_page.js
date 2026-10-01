@@ -33,7 +33,7 @@
   function childrenInOrder(node) {
     if (node.nodeType !== 1) return Array.from(node.childNodes || []);
     const tag = node.localName;
-    if (tag === "iframe") {
+    if (tag === "iframe" || tag === "frame") {
       const child = node.contentDocument;
       return child ? [child] : [];
     }
@@ -67,8 +67,8 @@
         const style = view.getComputedStyle(node);
         if (style.display === "none" || style.contentVisibility === "hidden") continue;
         visible = style.visibility !== "hidden" && style.visibility !== "collapse";
-        if (!visible && tag === "iframe") continue;
-        boundary = tag === "iframe" || tag === "br" ||
+        if (!visible && (tag === "iframe" || tag === "frame")) continue;
+        boundary = (tag === "iframe" || tag === "frame") || tag === "br" ||
           (style.display !== "inline" && style.display !== "contents");
       } else if (node.nodeType === 3 && node.data) {
         if (visible) result.push(node);

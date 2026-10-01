@@ -11,7 +11,7 @@ pub(crate) mod stylesheet;
 pub(crate) mod text;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -183,12 +183,12 @@ pub(crate) use text::{
     TextDecorationLines, apply_text_transform, inline_fragment_content_rect,
     is_cjk_preferred_character, load_text_fonts, paint_inline_image_fragment, paint_list_marker,
     paint_text_placeholder, paint_text_placeholder_with_mode, paint_text_with_font,
-    paint_text_with_font_refs, paint_text_with_registry, rasterize_with_fallback,
-    rasterize_with_fallback_refs, text_color, with_render_glyph_cache,
+    paint_text_with_font_refs, rasterize_with_fallback, rasterize_with_fallback_refs, text_color,
+    with_render_glyph_cache,
 };
 
 #[cfg(test)]
-pub(crate) use text::paint_list_marker_placeholder;
+pub(crate) use text::{paint_list_marker_placeholder, paint_text_with_registry};
 
 /// A decoded RGBA image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1121,8 +1121,8 @@ pub fn paint_layout_with_web_fonts(
     canvas
 }
 
-/// Paints a layout tree with a private visited-link color snapshot. The
-/// snapshot is discarded before callers can query the resolver again.
+/// Paints with a private visited-link color snapshot, restored before return.
+#[cfg(test)]
 pub(crate) fn paint_layout_with_visited_links(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
@@ -1131,8 +1131,56 @@ pub(crate) fn paint_layout_with_visited_links(
     web_fonts: Option<&WebFontRegistry>,
     visited_link_ids: impl IntoIterator<Item = usize>,
 ) -> Canvas {
+    paint_layout_with_document_snapshots(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        &HashMap::new(),
+    )
+}
+
+/// Paints live nested document snapshots in the ordinary stacking traversal,
+/// together with a private visited-link snapshot. All inputs are scoped to
+/// this call; the resolver is restored before returning to CSSOM callers.
+pub(crate) fn paint_layout_with_document_snapshots(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+) -> Canvas {
     resolver.begin_visited_paint(visited_link_ids);
-    let canvas = paint_layout_with_web_fonts(layout, resolver, viewport, fonts, web_fonts);
+    let mut canvas = Canvas::new(
+        viewport.width.ceil().max(1.0) as u32,
+        viewport.height.ceil().max(1.0) as u32,
+    );
+    if let Some(background) = viewport_background_color(layout, resolver) {
+        canvas.fill_rect(viewport, background);
+    }
+    text::with_render_glyph_cache(|| {
+        paint_box_internal(
+            &mut canvas,
+            layout,
+            resolver,
+            PaintContext {
+                viewport,
+                text_fonts: &fonts,
+                web_fonts,
+                nested_documents: Some(nested_documents),
+            },
+            PaintBoxOptions {
+                inherited_clip: None,
+                include_phase_descendants: true,
+                paint_decorations: true,
+                offset: PaintOffset::default(),
+            },
+        );
+    });
     resolver.end_visited_paint();
     canvas
 }
@@ -1960,6 +2008,7 @@ struct PaintContext<'a> {
     viewport: Rect,
     text_fonts: &'a [Arc<Font>],
     web_fonts: Option<&'a WebFontRegistry>,
+    nested_documents: Option<&'a HashMap<usize, Image>>,
 }
 
 /// Per-box traversal state in the destination surface's coordinate system.
@@ -1994,6 +2043,7 @@ fn paint_box(
             viewport,
             text_fonts,
             web_fonts,
+            nested_documents: None,
         },
         PaintBoxOptions {
             inherited_clip,
@@ -3906,6 +3956,27 @@ fn overflow_clip_rect(
     intersect(base, axis_clip)
 }
 
+fn paint_nested_document_snapshot(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    nested_documents: Option<&HashMap<usize, Image>>,
+    clip: Option<Rect>,
+    offset: PaintOffset,
+) {
+    if let Some(image) =
+        nested_documents.and_then(|documents| documents.get(&layout.node.identity()))
+    {
+        let destination = offset.rect(layout.dimensions.content);
+        let image_clip = match clip {
+            Some(clip) => intersect(clip, destination),
+            None => Some(destination),
+        };
+        if let Some(image_clip) = image_clip {
+            canvas.draw_image_scaled_clipped(image, destination, Some(image_clip));
+        }
+    }
+}
+
 fn paint_box_internal_to(
     canvas: &mut Canvas,
     layout: &LayoutBox,
@@ -3918,7 +3989,8 @@ fn paint_box_internal_to(
     let PaintContext {
         viewport,
         text_fonts,
-        web_fonts,
+        nested_documents,
+        ..
     } = context;
     let PaintBoxGeometry {
         border_box,
@@ -4029,6 +4101,8 @@ fn paint_box_internal_to(
         inherited_clip
     };
 
+    paint_nested_document_snapshot(canvas, layout, nested_documents, clip, offset);
+
     paint_column_rules(canvas, layout, style, clip, offset);
 
     let mut negative_positioned_children = Vec::new();
@@ -4107,9 +4181,7 @@ fn paint_box_internal_to(
     for child in float_children {
         paint_box_internal(canvas, child, resolver, context, phase_options);
     }
-    text::paint_text_with_registry(
-        canvas, layout, resolver, style, clip, viewport, text_fonts, web_fonts, offset,
-    );
+    text::paint_text_with_context(canvas, layout, resolver, style, clip, context, offset);
     text::paint_list_marker(canvas, layout, style, clip, text_fonts, offset);
     for child in inline_children {
         paint_box_internal(canvas, child, resolver, context, flow_options);

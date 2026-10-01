@@ -77,6 +77,7 @@ mod form_validation;
 mod fullscreen_tests;
 mod iframe_navigation;
 mod input_bridge;
+mod nested_rendering;
 pub use form_state::{FormStateRestoreMode, FormStateSnapshot};
 #[cfg(test)]
 mod layout_metrics_tests;
@@ -1535,8 +1536,8 @@ struct HostState {
     /// The area selected on each axis, retained across layout changes.
     scroll_snap_selection: HashMap<usize, scroll_snap::Selection>,
     /// CSSOM geometry also observes child document roots and their lifetime.
-    /// Advance this from the existing invalidation paths without changing the
-    /// main document's public render generations for iframe-only mutations.
+    /// Child document changes also invalidate the composited paint output,
+    /// while retaining the top-level document's style and layout generations.
     layout_metrics_generation: u64,
     adjusted_layout_cache: Option<AdjustedLayoutCache>,
     #[cfg(test)]
@@ -1767,7 +1768,11 @@ struct WorkerRuntime {
     terminated: bool,
 }
 
-/// A loaded sub-browsing-context document owned by an `<iframe>` element.
+fn is_nested_frame_tag(tag: &str) -> bool {
+    tag.eq_ignore_ascii_case("iframe") || tag.eq_ignore_ascii_case("frame")
+}
+
+/// A loaded sub-browsing-context document owned by an `<iframe>` or `<frame>` element.
 #[derive(Debug)]
 struct IframeDocument {
     /// Root document node of the sub-browsing context.
@@ -1879,6 +1884,8 @@ struct DocumentStyleEntry {
     /// Cached resolver seeded with this document's author stylesheets, or
     /// `None` until first built.
     resolver: Option<StyleResolver>,
+    /// Viewport used when constructing this document's cascade.
+    viewport_size: Option<(f32, f32)>,
     resources: stylesheet::StylesheetLoader,
     web_fonts: Arc<crate::font::WebFontRegistry>,
     /// `true` when this document was mutated since `resolver` was built, so the
@@ -1948,6 +1955,7 @@ impl HostState {
         document_styles.insert(
             document.identity(),
             DocumentStyleEntry {
+                viewport_size: None,
                 resolver: None,
                 resources: Default::default(),
                 web_fonts: Default::default(),
@@ -2296,7 +2304,7 @@ impl HostState {
                     node,
                 ))
                 .is_empty();
-            let is_resource = tag.eq_ignore_ascii_case("iframe")
+            let is_resource = is_nested_frame_tag(&tag)
                 || style_has_import
                 || (include_scripts
                     && tag.eq_ignore_ascii_case("script")
@@ -2308,7 +2316,7 @@ impl HostState {
                         .attributes()
                         .is_some_and(|attrs| attrs.contains_key("data")));
             if is_resource && state.pending_resource_loads.insert(node.identity()) {
-                if tag.eq_ignore_ascii_case("iframe") {
+                if is_nested_frame_tag(&tag) {
                     state.note_iframe_navigation_source(node);
                 }
                 state.event_loop.enqueue_timer(TimerPayload::ResourceLoad {
@@ -2347,11 +2355,12 @@ impl HostState {
             return;
         }
         let attributes = node.attributes().unwrap_or_default();
-        let is_iframe = node
-            .tag_name()
-            .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"));
+        let is_iframe = node.tag_name().is_some_and(|tag| is_nested_frame_tag(&tag));
         let (effective_attribute, new_resource) = if is_iframe {
-            match attributes.get("srcdoc") {
+            match attributes
+                .get("srcdoc")
+                .filter(|_| node.has_tag_name("iframe"))
+            {
                 Some(srcdoc) => ("srcdoc", srcdoc.clone()),
                 None => (
                     "src",
@@ -2419,9 +2428,12 @@ impl HostState {
         let attributes = iframe.attributes().unwrap_or_default();
         let is_iframe = iframe
             .tag_name()
-            .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"));
+            .is_some_and(|tag| is_nested_frame_tag(&tag));
         let (resource_attribute, resource) = if is_iframe {
-            match attributes.get("srcdoc") {
+            match attributes
+                .get("srcdoc")
+                .filter(|_| iframe.has_tag_name("iframe"))
+            {
                 Some(srcdoc) => ("srcdoc", srcdoc.clone()),
                 None => (
                     "src",
@@ -2498,7 +2510,7 @@ impl HostState {
                 .as_deref()
                 .and_then(|url| url.parse::<crate::http::Url>().ok())
         };
-        let sandbox = if is_iframe {
+        let sandbox = if iframe.has_tag_name("iframe") {
             IframeSandboxPolicy::from_iframe(iframe)
         } else {
             IframeSandboxPolicy::default()
@@ -2590,6 +2602,7 @@ impl HostState {
         self.document_styles.insert(
             document.identity(),
             DocumentStyleEntry {
+                viewport_size: None,
                 resolver: None,
                 resources: Default::default(),
                 web_fonts: Default::default(),
@@ -2700,6 +2713,7 @@ impl HostState {
         self.document_styles.insert(
             document_id,
             DocumentStyleEntry {
+                viewport_size: None,
                 resolver: None,
                 resources: Default::default(),
                 web_fonts: Default::default(),
@@ -2807,6 +2821,7 @@ impl HostState {
         self.document_styles.insert(
             document_id,
             DocumentStyleEntry {
+                viewport_size: None,
                 resolver: None,
                 resources: Default::default(),
                 web_fonts: Default::default(),
@@ -3570,7 +3585,7 @@ impl HostState {
             self.layout_root = None;
             self.invalidate_paint_cache();
         } else {
-            self.invalidate_layout_metrics_cache();
+            self.invalidate_paint_cache();
         }
     }
 
@@ -3591,7 +3606,7 @@ impl HostState {
             self.layout_root = None;
             self.invalidate_paint_cache();
         } else {
-            self.invalidate_layout_metrics_cache();
+            self.invalidate_paint_cache();
         }
     }
 
@@ -3614,7 +3629,7 @@ impl HostState {
         if let Some(document) = document_root_for_node(node) {
             self.invalidate_document_style_cache(&document);
         }
-        if node.tag_name().as_deref() == Some("iframe")
+        if matches!(node.tag_name().as_deref(), Some("iframe" | "frame"))
             && let Some(child) = self.iframe_documents.get(&node.identity())
         {
             let child_document = child.document.clone();
@@ -3783,7 +3798,7 @@ impl HostState {
         // The iframe element belongs to the parent document, but its rendered
         // content-box establishes the child document's viewport. A width/height
         // style or attribute mutation must therefore invalidate both caches.
-        if node.tag_name().as_deref() == Some("iframe")
+        if matches!(node.tag_name().as_deref(), Some("iframe" | "frame"))
             && let Some(child) = self.iframe_documents.get(&node.identity())
         {
             let child_document = child.document.clone();
@@ -3836,8 +3851,12 @@ impl HostState {
     /// The same resolver feeds computed style, geometry, hit testing and paint.
     fn ensure_style_resolver(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
+        let viewport = self.viewport_for_document(document);
+        let viewport_size = Some((viewport.width, viewport.height));
         let needs_rebuild = match self.document_styles.get(&document_id) {
-            Some(entry) => entry.dirty || entry.resolver.is_none(),
+            Some(entry) => {
+                entry.dirty || entry.resolver.is_none() || entry.viewport_size != viewport_size
+            }
             None => true,
         };
         if !needs_rebuild {
@@ -3869,7 +3888,6 @@ impl HostState {
             .and_then(|entry| entry.resolver.as_mut())
             .map(StyleResolver::take_transition_timeline);
         let transition_time_ms = self.event_loop.rendering_time_ms();
-        let viewport = self.viewport_for_document(document);
         let mut resolver = StyleResolver::new();
         if let Some(timeline) = timeline {
             resolver.install_transition_timeline(timeline);
@@ -3984,6 +4002,7 @@ impl HostState {
         self.document_styles.insert(
             document_id,
             DocumentStyleEntry {
+                viewport_size,
                 resolver: Some(resolver),
                 resources,
                 web_fonts,
@@ -4027,6 +4046,21 @@ impl HostState {
             };
         }
 
+        if let Some(parent) = owner_document_for_node(&iframe)
+            && parent.identity() != self.document.identity()
+        {
+            let parent_viewport = self.viewport_for_document(&parent);
+            if let Some(root) = build_child_document_layout(self, &parent, parent_viewport)
+                && let Some(owner) = find_layout_box(&root, &iframe)
+            {
+                return Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: owner.dimensions.content.width.max(0.0),
+                    height: owner.dimensions.content.height.max(0.0),
+                };
+            }
+        }
         let attrs = iframe.attributes().unwrap_or_default();
         let parse_dimension = |name: &str, default: f32| {
             attrs
@@ -4144,6 +4178,7 @@ impl HostState {
             return false;
         }
         self.iframe_window_scrolls.insert(document_id, next);
+        self.invalidate_paint_cache();
         self.queue_scroll_target(document_id);
         true
     }
@@ -5715,11 +5750,6 @@ impl JsRuntime {
         }
     }
 
-    /// Returns the top-level Window scroll offset in CSS pixels.
-    pub(crate) fn window_scroll_offset(&self) -> (f32, f32) {
-        self.host_state.borrow().window_scroll
-    }
-
     /// Returns the virtual frame-scheduler timestamp used for rendering.
     pub(crate) fn rendering_time_ms(&self) -> u64 {
         self.host_state.borrow().event_loop.rendering_time_ms() as u64
@@ -5758,11 +5788,13 @@ impl JsRuntime {
         let image_cookies = Arc::clone(&state.cookie_store);
         let animation_time = state.event_loop.rendering_time_ms() as u64;
         let state = &mut *state;
-        let layout = &state
+        let layout = state
             .adjusted_layout_cache
             .as_ref()
             .ok_or(crate::paint::PaintError::InvalidImageBuffer)?
-            .root;
+            .root
+            .clone();
+        let snapshots = nested_rendering::collect_snapshots(state, &layout, 0)?;
         let entry = state
             .document_styles
             .get_mut(&document_id)
@@ -5776,13 +5808,14 @@ impl JsRuntime {
             crate::layout::with_image_cookie_store(image_cookies, image_site, document_id, || {
                 crate::layout::with_image_base_url(base, || {
                     crate::layout::with_image_animation_time(animation_time, || {
-                        crate::paint::paint_layout_with_visited_links(
-                            layout,
+                        crate::paint::paint_layout_with_document_snapshots(
+                            &layout,
                             resolver,
                             viewport,
                             crate::paint::text::load_text_fonts(),
                             Some(&entry.web_fonts),
                             visited_link_ids,
+                            &snapshots,
                         )
                     })
                 })
@@ -5816,7 +5849,24 @@ impl JsRuntime {
                 .and_then(|entry| entry.resolver.as_mut())?;
             crate::paint::hit_test_layout(layout, resolver, viewport, x, y)
         }?;
+        let layout = layout.clone();
+        let target = nested_rendering::hit_child(state, &layout, target, x, y, 0);
         Some(state.retarget_content_visibility_hit(target))
+    }
+
+    /// Converts embedder pointer coordinates to the target document's viewport
+    /// and returns that document's scroll offset for MouseEvent page positions.
+    pub(crate) fn input_position_for_node(
+        &mut self,
+        node: &NodeHandle,
+        x: f64,
+        y: f64,
+    ) -> (f64, f64, f32, f32) {
+        let mut state = self.host_state.borrow_mut();
+        let document = owner_document_for_node(node).unwrap_or_else(|| state.document.clone());
+        let origin = nested_rendering::document_origin(&mut state, &document);
+        let scroll = state.window_scroll_for_document(document.identity());
+        (x - origin.0, y - origin.1, scroll.0, scroll.1)
     }
 
     /// Sets the User-Agent exposed to scripts in this runtime.
@@ -8704,10 +8754,7 @@ impl JsRuntime {
             } else {
                 None
             };
-            if node
-                .tag_name()
-                .is_some_and(|tag| tag.eq_ignore_ascii_case("iframe"))
-            {
+            if node.tag_name().is_some_and(|tag| is_nested_frame_tag(&tag)) {
                 // A newly connected iframe starts a fresh navigation.
                 // This also makes detach/reconnect reload rather than
                 // merely replaying the old document's event.
@@ -8982,7 +9029,7 @@ impl JsRuntime {
                 .get_node(node_id)
                 .filter(|node| {
                     node.tag_name()
-                        .is_some_and(|name| name.eq_ignore_ascii_case("iframe"))
+                        .is_some_and(|name| is_nested_frame_tag(&name))
                 })
                 .and_then(|_| state.iframe_documents.get(&node_id))
                 .and_then(|entry| {
@@ -9029,7 +9076,7 @@ impl JsRuntime {
             .get_node(node_id)
             .is_some_and(|node| {
                 node.tag_name()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("iframe"))
+                    .is_some_and(|name| is_nested_frame_tag(&name))
             });
         if !is_iframe {
             return;
@@ -13908,7 +13955,7 @@ fn subtree_has_window_name_native(
                         && node
                             .get_attribute("name")
                             .is_some_and(|name| !name.is_empty());
-                    if has_id || tag == "iframe" || has_name {
+                    if has_id || matches!(tag.as_str(), "iframe" | "frame") || has_name {
                         return Ok(JsValue::from(true));
                     }
                     pending.extend(node.child_nodes());
@@ -15606,7 +15653,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         let resource_attr = node.tag_name().and_then(|tag| {
             if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("srcdoc") {
                 Some("srcdoc")
-            } else if (tag.eq_ignore_ascii_case("iframe") || tag.eq_ignore_ascii_case("script"))
+            } else if (is_nested_frame_tag(&tag) || tag.eq_ignore_ascii_case("script"))
                 && name.eq_ignore_ascii_case("src")
             {
                 Some("src")
@@ -15683,7 +15730,7 @@ fn set_attribute_ns_native(
             node.tag_name().and_then(|tag| {
                 if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
                     Some("srcdoc")
-                } else if (tag.eq_ignore_ascii_case("iframe") || tag.eq_ignore_ascii_case("script"))
+                } else if (is_nested_frame_tag(&tag) || tag.eq_ignore_ascii_case("script"))
                     && qualified_name == "src"
                 {
                     Some("src")
@@ -18700,7 +18747,7 @@ fn remove_attribute_native(
         let resource_attr = node.tag_name().and_then(|tag| {
             if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("srcdoc") {
                 Some("srcdoc")
-            } else if (tag.eq_ignore_ascii_case("iframe") || tag.eq_ignore_ascii_case("script"))
+            } else if (is_nested_frame_tag(&tag) || tag.eq_ignore_ascii_case("script"))
                 && name.eq_ignore_ascii_case("src")
             {
                 Some("src")
@@ -18770,7 +18817,7 @@ fn remove_attribute_ns_native(
             node.tag_name().and_then(|tag| {
                 if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
                     Some("srcdoc")
-                } else if (tag.eq_ignore_ascii_case("iframe") || tag.eq_ignore_ascii_case("script"))
+                } else if (is_nested_frame_tag(&tag) || tag.eq_ignore_ascii_case("script"))
                     && qualified_name == "src"
                 {
                     Some("src")
@@ -19028,6 +19075,7 @@ fn create_document_native(
         state.document_styles.insert(
             id,
             DocumentStyleEntry {
+                viewport_size: None,
                 resolver: None,
                 resources: Default::default(),
                 web_fonts: Default::default(),
@@ -19064,6 +19112,7 @@ fn parse_xml_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
         state.document_styles.insert(
             id,
             DocumentStyleEntry {
+                viewport_size: None,
                 resolver: None,
                 resources: Default::default(),
                 web_fonts: Default::default(),
@@ -19822,5 +19871,9 @@ mod tests;
 #[cfg(test)]
 mod inline_geometry_tests;
 
+#[cfg(test)]
+mod frameset_tests;
+#[cfg(test)]
+mod ua_display_tests;
 #[cfg(test)]
 mod visited_link_tests;

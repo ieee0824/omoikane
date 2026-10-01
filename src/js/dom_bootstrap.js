@@ -2037,6 +2037,7 @@
       case "select":
       case "textarea":
       case "iframe":
+      case "frame":
       case "embed":
         return true;
       case "audio":
@@ -8541,7 +8542,7 @@
     const rootType = root.nodeType;
     if (rootType !== 1 && rootType !== 9 && rootType !== 11) return;
     if (rootType === 1 &&
-        asciiLowercase(internalNodeLocalName(root) || "") === "iframe") {
+        ["iframe", "frame"].includes(asciiLowercase(internalNodeLocalName(root) || ""))) {
       retireIframeWindowProxy(root);
     }
     const children = root.childNodes || [];
@@ -8558,7 +8559,7 @@
     const rootType = root.nodeType;
     if (rootType !== 1 && rootType !== 9 && rootType !== 11) return;
     if (rootType === 1 &&
-        asciiLowercase(internalNodeLocalName(root) || "") === "iframe") {
+        ["iframe", "frame"].includes(asciiLowercase(internalNodeLocalName(root) || ""))) {
       const documentId = nativeExistingIframeDocument(root.__id);
       if (documentId !== null && documentId !== undefined &&
           !browsingInput.visibilityHiddenDocumentIds.has(documentId)) {
@@ -8622,6 +8623,10 @@
   // about:blank skeleton, while a src is fetched and parsed (only HTML content
   // types become a real DOM tree). Reading contentDocument again after changing
   // src reloads it.
+  function hasFrameSrcdoc(frame) {
+    return internalNodeLocalName(frame) === "iframe" && frame.hasAttribute("srcdoc");
+  }
+
   class HTMLIFrameElement extends HTMLElement {
     __prepareResourceNavigation() {
       if (!this.isConnected) return;
@@ -8739,7 +8744,7 @@
           return effectiveDocumentBaseURL(globalThis.document);
         };
         const captureHistoryEntry = (generation, nextAccess) => {
-          const attribute = iframe.hasAttribute("srcdoc") ? "srcdoc" : "src";
+          const attribute = hasFrameSrcdoc(iframe) ? "srcdoc" : "src";
           const value = iframe.getAttribute(attribute) || "";
           const documentId = nativeIframeContentDocument(iframe.__id);
           forgetDiscardedNodeWrappers();
@@ -9163,7 +9168,7 @@
             if (property === "opener") return null;
             if (property === "length") {
               const document = iframe.contentDocument;
-              return document ? document.querySelectorAll("iframe").length : 0;
+              return document ? document.querySelectorAll("iframe, frame").length : 0;
             }
             if (property === "location") return locationFacade;
             if (property === "close" || property === "focus" || property === "blur") return () => {};
@@ -9316,12 +9321,12 @@
     setAttribute(name, value) {
       const attribute = String(name).toLowerCase();
       const normalized = String(value);
-      if (attribute === "src" || attribute === "srcdoc") {
+      if (attribute === "src" || (attribute === "srcdoc" && internalNodeLocalName(this) === "iframe")) {
         this.__prepareResourceNavigation();
         const previous = this.getAttribute(attribute);
         const changesResource = attribute === "srcdoc"
           ? previous !== normalized
-          : !this.hasAttribute("srcdoc") &&
+          : !hasFrameSrcdoc(this) &&
             (previous ?? "").trim() !== normalized.trim();
         if (changesResource && this.isConnected) {
           dispatchIframeNavigationDeparture(this);
@@ -9332,15 +9337,24 @@
 
     removeAttribute(name) {
       const attribute = String(name).toLowerCase();
-      if ((attribute === "src" || attribute === "srcdoc") && this.hasAttribute(name)) {
+      if ((attribute === "src" || (attribute === "srcdoc" && internalNodeLocalName(this) === "iframe")) && this.hasAttribute(name)) {
         this.__prepareResourceNavigation();
         if (this.isConnected &&
-            (attribute === "srcdoc" || !this.hasAttribute("srcdoc"))) {
+            (attribute === "srcdoc" || !hasFrameSrcdoc(this))) {
           dispatchIframeNavigationDeparture(this);
         }
       }
       super.removeAttribute(name);
     }
+  }
+
+  // Legacy frames reuse the same Window facade without inheriting iframe's
+  // distinct interface or iframe-only sandbox/srcdoc attributes.
+  class HTMLFrameElement extends HTMLElement {}
+  for (const name of Object.getOwnPropertyNames(HTMLIFrameElement.prototype)) {
+    if (["constructor", "sandbox", "srcdoc", "allowFullscreen"].includes(name)) continue;
+    Object.defineProperty(HTMLFrameElement.prototype, name,
+      Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, name));
   }
 
   class HTMLObjectElement extends HTMLElement {
@@ -14165,7 +14179,7 @@
   );
   distributePrototypeMembers(Node.prototype, [
     HTMLFormElement.prototype, HTMLInputElement.prototype, HTMLButtonElement.prototype,
-    HTMLSelectElement.prototype, HTMLTextAreaElement.prototype, HTMLIFrameElement.prototype,
+    HTMLSelectElement.prototype, HTMLTextAreaElement.prototype, HTMLIFrameElement.prototype, HTMLFrameElement.prototype,
     HTMLObjectElement.prototype, HTMLImageElement.prototype,
   ], ["name"]);
   // Input and button provide their own type behavior; the generic fallback must
@@ -14222,6 +14236,7 @@
     option: HTMLOptionElement,
     output: HTMLOutputElement,
     iframe: HTMLIFrameElement,
+    frame: HTMLFrameElement,
     object: HTMLObjectElement,
     audio: HTMLAudioElement,
     video: HTMLVideoElement,
@@ -15233,6 +15248,7 @@
   globalThis.HTMLLinkElement = HTMLLinkElement;
   globalThis.HTMLScriptElement = HTMLScriptElement;
   globalThis.HTMLIFrameElement = HTMLIFrameElement;
+  globalThis.HTMLFrameElement = HTMLFrameElement;
   globalThis.HTMLObjectElement = HTMLObjectElement;
   globalThis.HTMLMediaElement = HTMLMediaElement;
   globalThis.HTMLAudioElement = HTMLAudioElement;
@@ -15329,7 +15345,7 @@
     const visit = node => {
       for (const child of windowNameChildren(node)) {
         if (internalNodeType(child) !== 1) continue;
-        if (!firstFrameFound && internalNodeLocalName(child) === "iframe" &&
+        if (!firstFrameFound && ["iframe", "frame"].includes(internalNodeLocalName(child)) &&
             windowNameAttribute(child, "name") === name) {
           firstFrameFound = true;
           if (child.contentDocument !== null) frame = child.contentWindow;
@@ -15359,7 +15375,7 @@
       for (const child of windowNameChildren(node)) {
         if (internalNodeType(child) !== 1) continue;
         const tag = internalNodeLocalName(child) || "";
-        if (tag === "iframe") {
+        if (tag === "iframe" || tag === "frame") {
           const index = `${frameIndex++}`;
           if (!Object.prototype.hasOwnProperty.call(globalThis, index)) {
             Object.defineProperty(globalThis, index, {
@@ -15375,7 +15391,7 @@
         if (name && (tag === "embed" || tag === "form" || tag === "img" || tag === "object")) {
           names.add(name);
         }
-        if (name && tag === "iframe" && !firstFrameNames.has(name)) {
+        if (name && (tag === "iframe" || tag === "frame") && !firstFrameNames.has(name)) {
           firstFrameNames.set(name, child.contentDocument !== null);
         }
         visit(child);
@@ -15422,6 +15438,10 @@
   }
   globalThis.self = globalThis;
   globalThis.frames = globalThis;
+  Object.defineProperty(globalThis, "length", {
+    configurable: true,
+    get() { return globalThis.document.querySelectorAll("iframe, frame").length; },
+  });
   Object.defineProperty(globalThis, "__listeners", {
     configurable: true,
     value: new Map(),
@@ -23099,7 +23119,7 @@
           if (String(url) !== "") searchWindow.location.href = String(url);
           return searchWindow;
         }
-        const frame = Array.from(searchDocument.querySelectorAll("iframe[name]"))
+        const frame = Array.from(searchDocument.querySelectorAll("iframe[name], frame[name]"))
           .find(candidate => candidate.getAttribute("name") === targetName);
         const frameWindow = frame?.contentWindow;
         if (frameWindow) {
@@ -23335,6 +23355,7 @@
     // browsing-context objects before user script evaluates.
     try { delete globalThis.document; } catch (_) { globalThis.document = undefined; }
     try { delete globalThis.window; } catch (_) { globalThis.window = undefined; }
+    try { delete globalThis.length; } catch (_) {}
     try { delete globalThis.open; } catch (_) { globalThis.open = undefined; }
     try { delete globalThis.customElements; } catch (_) { globalThis.customElements = undefined; }
     for (const domName of [
@@ -23342,7 +23363,7 @@
       "CharacterData", "Attr", "ShadowRoot", "HTMLCollection", "NodeList", "Range",
       "MutationObserver", "ResizeObserver", "IntersectionObserver", "CustomElementRegistry",
       "HTMLDivElement", "HTMLSpanElement", "HTMLBodyElement", "HTMLCanvasElement",
-      "HTMLImageElement", "HTMLIFrameElement", "HTMLScriptElement", "SVGElement",
+      "HTMLImageElement", "HTMLIFrameElement", "HTMLFrameElement", "HTMLScriptElement", "SVGElement",
       "SVGSVGElement", "HTMLTemplateElement", "HTMLFormElement", "HTMLInputElement",
       "HTMLTextAreaElement", "HTMLButtonElement", "HTMLSelectElement", "HTMLOptionElement",
       "HTMLMediaElement", "HTMLAudioElement", "HTMLVideoElement", "Audio",
