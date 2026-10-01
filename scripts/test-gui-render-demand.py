@@ -56,17 +56,22 @@ def click_page(gui):
     gui.command('xdotool', 'click', '1')
 
 
-def verify_timer(gui, window, fixture, bounds):
+def verify_timer(gui, window, fixture, bounds, delay_ms=500):
     navigate(gui, window, fixture, '/timer.html', bounds)
     idle(gui, 'timer page before input')
+    if delay_ms == 1000:
+        gui.command('xdotool', 'keydown', '--window', window, 'Shift_L')
     started = time.monotonic()
     click_page(gui)
+    if delay_ms == 1000:
+        gui.command('xdotool', 'keyup', '--window', window, 'Shift_L')
     time.sleep(.15)
     assert pixel(gui, bounds) == tuple(fixture.expectations['pages']['/timer.html']['initial_rgb']), 'timer fired too early after idle'
-    gui.wait_for('500ms timer painted', lambda: pixel(gui, bounds), lambda c: c == (0, 0, 255))
+    gui.wait_for(f'{delay_ms}ms timer painted', lambda: pixel(gui, bounds), lambda c: c == (0, 0, 255))
     elapsed = time.monotonic() - started
-    assert .45 <= elapsed <= 1.8, ('timer real deadline', elapsed)
-    gui.evidence.append({'step': 'timer deadline', 'seconds_from_input': elapsed})
+    delay = delay_ms / 1000
+    assert delay - .05 <= elapsed <= delay + 1.3, ('timer real deadline', delay_ms, elapsed)
+    gui.evidence.append({'step': 'timer deadline', 'delay_ms': delay_ms, 'seconds_from_input': elapsed})
     idle(gui, 'timer finished')
 
 
@@ -95,11 +100,14 @@ def verify_finite_motion(gui, window, fixture, bounds, path, duration):
     click_page(gui)
     time.sleep(.15)
     middle = pixel(gui, bounds)
+    if path == '/transition.html':
+        initial = tuple(fixture.expectations['pages'][path]['initial_rgb'])
+        middle = gui.wait_for('transition intermediate color', lambda: pixel(gui, bounds),
+                              lambda color: color not in [initial, (0, 0, 255)], seconds=.5)
     gui.wait_for(path + ' ended', lambda: pixel(gui, bounds), lambda c: c == (0, 0, 255))
     elapsed = time.monotonic() - started
     assert elapsed <= duration + 1.0, (path, elapsed)
     if path == '/transition.html':
-        initial = tuple(fixture.expectations['pages'][path]['initial_rgb'])
         assert middle not in [initial, (0, 0, 255)], ('transition midpoint', middle)
         assert elapsed >= .9, ('transition ended early', elapsed)
     gui.evidence.append({'step': path, 'midpoint': middle, 'seconds': elapsed})
@@ -131,6 +139,7 @@ def verify(binary, artifacts):
             gui.screenshot('toolbar-only')
             gui.command('xdotool', 'key', '--window', window, 'Escape')
             verify_timer(gui, window, fixture, bounds)
+            verify_timer(gui, window, fixture, bounds, delay_ms=1000)
             verify_motion(gui, window, fixture, bounds, '/raf.html')
             verify_finite_motion(gui, window, fixture, bounds, '/transition.html', 1)
             verify_motion(gui, window, fixture, bounds, '/keyframes.html')

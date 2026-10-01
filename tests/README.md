@@ -251,7 +251,7 @@ external sites are not covered.
 
 The render-demand scenario (#1217) uses the same private desktop and synthetic
 fixtures to verify three idle seconds with zero page paints, toolbar-only
-composition, a 500 ms timer after idle, and rAF, CSS transitions/keyframes,
+composition, 500 ms and 1 second timers after idle, and rAF, CSS transitions/keyframes,
 GIF playback and smooth scrolling. Each animation must move and then stop
 painting after completion or cancellation. `OMOIKANE_TRACE_PAINT` records only
 actual page paints; an uninstrumented binary cannot pass the idle assertion.
