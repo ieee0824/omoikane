@@ -529,3 +529,50 @@ fn setting_an_unchanged_viewport_preserves_the_presented_key() {
     session.set_viewport(200, 100);
     assert_eq!(session.paint_state_key(), presented);
 }
+
+#[test]
+fn uppercase_paused_keyword_stops_live_keyframes() {
+    let mut session = page(
+        "<style>body{margin:0;min-height:100vh;animation:color 1s linear infinite;animation-play-state:PAUSED}@keyframes color{from{background-color:red}to{background-color:blue}}</style>",
+    );
+    assert_eq!(
+        session.paint_current_document().unwrap().pixel(100, 80),
+        Some(Color::rgb(255, 0, 0))
+    );
+    let presented = session.paint_state_key();
+    assert_eq!(
+        session.render_demand(Some(&presented)).next,
+        NextRendering::Idle
+    );
+    session.drive_event_loop(500).unwrap();
+    assert_eq!(
+        session.paint_current_document().unwrap().pixel(100, 80),
+        Some(Color::rgb(255, 0, 0))
+    );
+    eval(
+        &mut session,
+        "document.body.style.animationPlayState='RUNNING'",
+    );
+    session.paint_current_document().unwrap();
+    session.drive_event_loop(500).unwrap();
+    assert_eq!(
+        session.paint_current_document().unwrap().pixel(100, 80),
+        Some(Color::rgb(128, 0, 128))
+    );
+}
+
+#[test]
+fn uppercase_none_keyword_removes_live_keyframes() {
+    let mut session = page(
+        "<style>body{margin:0;min-height:100vh;animation:color 1s linear infinite}@keyframes color{from{background-color:red}to{background-color:blue}}</style>",
+    );
+    session.paint_current_document().unwrap();
+    assert_eq!(session.render_demand(None).next, NextRendering::EveryFrame);
+    eval(&mut session, "document.body.style.display='NONE'");
+    session.paint_current_document().unwrap();
+    let presented = session.paint_state_key();
+    assert_eq!(
+        session.render_demand(Some(&presented)).next,
+        NextRendering::Idle
+    );
+}

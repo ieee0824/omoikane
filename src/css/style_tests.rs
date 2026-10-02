@@ -9989,3 +9989,48 @@ fn color4_container_geometry_is_requested_only_for_color_unit_dependencies() {
     // The inline declaration overrides the earlier container-dependent color.
     assert!(!resolver.needs_container_contexts());
 }
+
+#[test]
+fn live_animation_paused_keyword_is_ascii_case_insensitive() {
+    for keyword in ["paused", "PAUSED", "PaUsEd"] {
+        let element = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&format!(
+            "@keyframes fade {{ from {{ opacity: 0 }} to {{ opacity: 1 }} }} div {{ animation: fade 1s linear infinite; animation-play-state: {keyword} }}"
+        )).unwrap());
+        resolver.set_animation_time_ms(0.0);
+        let initial = resolver.computed_style(&element);
+        assert!(
+            !resolver.has_running_animations(),
+            "{keyword} should pause playback"
+        );
+        resolver.set_animation_time_ms(500.0);
+        let later = resolver.computed_style(&element);
+        assert_eq!(
+            initial.get("opacity"),
+            later.get("opacity"),
+            "{keyword} must hold the sampled value"
+        );
+    }
+}
+
+#[test]
+fn live_animation_display_none_keyword_is_ascii_case_insensitive() {
+    for keyword in ["none", "NONE", "NoNe"] {
+        let element = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&format!(
+            "@keyframes fade {{ from {{ opacity: 0 }} to {{ opacity: 1 }} }} div {{ display: {keyword}; animation: fade 1s linear infinite }}"
+        )).unwrap());
+        resolver.set_animation_time_ms(0.0);
+        resolver.computed_style(&element);
+        assert!(
+            !resolver.has_running_animations(),
+            "{keyword} should suppress playback"
+        );
+        assert!(
+            resolver.animation_node_ids().is_empty(),
+            "hidden elements must not retain animation clocks"
+        );
+    }
+}
