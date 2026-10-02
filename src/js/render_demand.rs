@@ -1,4 +1,4 @@
-//! Native snapshots used by the host's read-only demand query.
+//! Live animation setup and native snapshots for the host's read-only demand query.
 
 use super::*;
 use crate::cdp::NextRendering;
@@ -19,6 +19,85 @@ pub(crate) struct RuntimePaintKey {
     selection: Vec<usize>,
     visited_links: u64,
     images: Vec<(Arc<crate::paint::animation::ImagePlayback>, usize)>,
+}
+
+impl JsRuntime {
+    /// Selects the browser's live animation clock rather than static snapshots.
+    pub(crate) fn enable_live_css_animations(&mut self) {
+        let mut state = self.host_state.borrow_mut();
+        state.live_css_animations = true;
+        state.mark_all_document_styles_dirty();
+    }
+
+    pub(crate) fn paint_state_key(&self) -> RuntimePaintKey {
+        let state = self.host_state.borrow();
+        let mut selection: Vec<_> = state
+            .content_visibility_selection_nodes
+            .iter()
+            .copied()
+            .collect();
+        selection.sort_unstable();
+        RuntimePaintKey {
+            document: state.document.identity(),
+            style: state.style_generation,
+            layout: state.layout_generation,
+            paint: state.paint_generation,
+            scroll: state.scroll_generation,
+            viewport: state.viewport,
+            visual_viewport: state.visual_viewport,
+            window_scroll: state.window_scroll,
+            focus: state.focus_subjects.clone(),
+            focus_visible: state.focus_visible_id,
+            selection,
+            visited_links: state.storage_manager.visited_generation(),
+            images: state
+                .visible_image_playbacks
+                .iter()
+                .map(|playback| {
+                    (
+                        Arc::clone(playback),
+                        playback.frame_index(state.event_loop.rendering_time_ms() as u64),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Reads pending queues and native state, without polling futures or
+    /// constructing computed styles. Background work is initially polled each
+    /// frame until the worker/worklet/module queues have drained.
+    pub(crate) fn next_rendering(&self) -> NextRendering {
+        let state = self.host_state.borrow();
+        let visual_work = !state.page_hidden
+            && (state.event_loop.has_pending_animation_frames()
+                || !state.smooth_scrolls.is_empty()
+                || state
+                    .visible_image_playbacks
+                    .iter()
+                    .any(|playback| playback.running(state.event_loop.rendering_time_ms() as u64))
+                || state.document_styles.values().any(|entry| {
+                    entry.resolver.as_ref().is_some_and(|resolver| {
+                        resolver.has_running_transitions() || resolver.has_running_animations()
+                    })
+                }));
+        // Completed downloads still need an opportunity to resume their promise.
+        let modules = !self.module_loader.pending.borrow().is_empty();
+        let workers = state.workers.values().any(|worker| {
+            let worker = worker.borrow();
+            !worker.terminated
+                && (!worker.outgoing.is_empty()
+                    || worker.startup_error.is_some()
+                    || worker.runtime.next_rendering() != NextRendering::Idle)
+        });
+        if visual_work || modules || workers || state.worklet.has_pending_render_work() {
+            return NextRendering::EveryFrame;
+        }
+        state
+            .event_loop
+            .next_timer_delay_ms()
+            .map(|delay| NextRendering::After(Duration::from_millis(delay)))
+            .unwrap_or(NextRendering::Idle)
+    }
 }
 
 #[cfg(test)]
@@ -145,84 +224,5 @@ mod tests {
         assert_eq!(runtime.next_rendering(), NextRendering::EveryFrame);
         runtime.module_loader.pending.borrow_mut().remove(&key);
         assert_eq!(runtime.next_rendering(), NextRendering::Idle);
-    }
-}
-
-impl JsRuntime {
-    /// Selects the browser's live animation clock rather than static snapshots.
-    pub(crate) fn enable_live_css_animations(&mut self) {
-        let mut state = self.host_state.borrow_mut();
-        state.live_css_animations = true;
-        state.mark_all_document_styles_dirty();
-    }
-
-    pub(crate) fn paint_state_key(&self) -> RuntimePaintKey {
-        let state = self.host_state.borrow();
-        let mut selection: Vec<_> = state
-            .content_visibility_selection_nodes
-            .iter()
-            .copied()
-            .collect();
-        selection.sort_unstable();
-        RuntimePaintKey {
-            document: state.document.identity(),
-            style: state.style_generation,
-            layout: state.layout_generation,
-            paint: state.paint_generation,
-            scroll: state.scroll_generation,
-            viewport: state.viewport,
-            visual_viewport: state.visual_viewport,
-            window_scroll: state.window_scroll,
-            focus: state.focus_subjects.clone(),
-            focus_visible: state.focus_visible_id,
-            selection,
-            visited_links: state.storage_manager.visited_generation(),
-            images: state
-                .visible_image_playbacks
-                .iter()
-                .map(|playback| {
-                    (
-                        Arc::clone(playback),
-                        playback.frame_index(state.event_loop.rendering_time_ms() as u64),
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    /// Reads pending queues and native state, without polling futures or
-    /// constructing computed styles. Background work is initially polled each
-    /// frame until the worker/worklet/module queues have drained.
-    pub(crate) fn next_rendering(&self) -> NextRendering {
-        let state = self.host_state.borrow();
-        let visual_work = !state.page_hidden
-            && (state.event_loop.has_pending_animation_frames()
-                || !state.smooth_scrolls.is_empty()
-                || state
-                    .visible_image_playbacks
-                    .iter()
-                    .any(|playback| playback.running(state.event_loop.rendering_time_ms() as u64))
-                || state.document_styles.values().any(|entry| {
-                    entry.resolver.as_ref().is_some_and(|resolver| {
-                        resolver.has_running_transitions() || resolver.has_running_animations()
-                    })
-                }));
-        // Completed downloads still need an opportunity to resume their promise.
-        let modules = !self.module_loader.pending.borrow().is_empty();
-        let workers = state.workers.values().any(|worker| {
-            let worker = worker.borrow();
-            !worker.terminated
-                && (!worker.outgoing.is_empty()
-                    || worker.startup_error.is_some()
-                    || worker.runtime.next_rendering() != NextRendering::Idle)
-        });
-        if visual_work || modules || workers || state.worklet.has_pending_render_work() {
-            return NextRendering::EveryFrame;
-        }
-        state
-            .event_loop
-            .next_timer_delay_ms()
-            .map(|delay| NextRendering::After(Duration::from_millis(delay)))
-            .unwrap_or(NextRendering::Idle)
     }
 }

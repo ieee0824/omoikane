@@ -3,14 +3,52 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq)]
+enum AnimationDirection {
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+impl AnimationDirection {
+    fn from_keyword(value: &str) -> Self {
+        match value {
+            "reverse" => Self::Reverse,
+            "alternate" => Self::Alternate,
+            "alternate-reverse" => Self::AlternateReverse,
+            _ => Self::Normal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum AnimationFill {
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+impl AnimationFill {
+    fn from_keyword(value: &str) -> Self {
+        match value {
+            "forwards" => Self::Forwards,
+            "backwards" => Self::Backwards,
+            "both" => Self::Both,
+            _ => Self::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct AnimationSpec {
     name: String,
     scope: Option<usize>,
     duration: f32,
     delay: f32,
     iterations: f32,
-    direction: String,
-    fill: String,
+    direction: AnimationDirection,
+    fill: AnimationFill,
     timing: String,
 }
 
@@ -35,13 +73,16 @@ impl AnimationSpec {
                 .max(0.0),
             delay: animation_seconds(properties.get(&PropertyId::AnimationDelay)).unwrap_or(0.0),
             iterations,
-            direction: keyword(PropertyId::AnimationDirection, "normal"),
-            fill: keyword(PropertyId::AnimationFillMode, "none"),
+            direction: AnimationDirection::from_keyword(&keyword(
+                PropertyId::AnimationDirection,
+                "normal",
+            )),
+            fill: AnimationFill::from_keyword(&keyword(PropertyId::AnimationFillMode, "none")),
             timing: keyword(PropertyId::AnimationTimingFunction, "ease"),
         }
     }
 
-    fn duration(&self) -> f32 {
+    fn active_duration(&self) -> f32 {
         if self.duration <= 0.0 {
             0.0
         } else {
@@ -52,11 +93,11 @@ impl AnimationSpec {
     fn progress(&self, elapsed: f32) -> Option<f32> {
         let active = elapsed - self.delay;
         if active < 0.0 {
-            return matches!(self.fill.as_str(), "backwards" | "both")
+            return matches!(self.fill, AnimationFill::Backwards | AnimationFill::Both)
                 .then(|| self.directed(0.0, 0));
         }
-        if active >= self.duration() {
-            if !matches!(self.fill.as_str(), "forwards" | "both") {
+        if active >= self.active_duration() {
+            if !matches!(self.fill, AnimationFill::Forwards | AnimationFill::Both) {
                 return None;
             }
             let count = self.iterations;
@@ -75,10 +116,10 @@ impl AnimationSpec {
     }
 
     fn directed(&self, progress: f32, iteration: u64) -> f32 {
-        let reverse = match self.direction.as_str() {
-            "reverse" => true,
-            "alternate" => iteration % 2 == 1,
-            "alternate-reverse" => iteration % 2 == 0,
+        let reverse = match self.direction {
+            AnimationDirection::Reverse => true,
+            AnimationDirection::Alternate => iteration % 2 == 1,
+            AnimationDirection::AlternateReverse => iteration % 2 == 0,
             _ => false,
         };
         if reverse { 1.0 - progress } else { progress }
@@ -103,7 +144,8 @@ impl AnimationState {
     }
     fn running(&self, now_ms: f64) -> bool {
         self.paused_elapsed_ms.is_none()
-            && (self.elapsed_ms(now_ms) / 1000.0) as f32 - self.spec.delay < self.spec.duration()
+            && (self.elapsed_ms(now_ms) / 1000.0) as f32 - self.spec.delay
+                < self.spec.active_duration()
     }
 }
 
@@ -238,7 +280,10 @@ impl StyleResolver {
             _ => String::new(),
         };
         let steps = self.keyframes_for(node, scope, &name);
-        let hidden = matches!(properties.get(&PropertyId::Display), Some(ComputedValue::Keyword(display)) if display == "none");
+        let hidden = matches!(
+            properties.get(&PropertyId::Display),
+            Some(ComputedValue::Keyword(display)) if display == "none"
+        );
         let Some(steps) = steps.filter(|_| !hidden) else {
             timeline
                 .borrow_mut()
@@ -247,7 +292,10 @@ impl StyleResolver {
             return;
         };
         let spec = AnimationSpec::from_properties(&name, scope, properties);
-        let paused = matches!(properties.get(&PropertyId::AnimationPlayState), Some(ComputedValue::Keyword(value)) if value == "paused");
+        let paused = matches!(
+            properties.get(&PropertyId::AnimationPlayState),
+            Some(ComputedValue::Keyword(value)) if value == "paused"
+        );
         let progress = timeline
             .borrow_mut()
             .sample(node.identity(), pseudo, spec.clone(), paused);
@@ -299,28 +347,15 @@ impl StyleResolver {
             if important.contains(name) {
                 continue;
             }
-            let lower = steps.iter().rev().find_map(|step| {
-                (step.offset <= progress)
-                    .then(|| {
-                        step.declarations
-                            .iter()
-                            .rev()
-                            .find(|d| d.name == name)
-                            .map(|d| (step.offset, &d.value))
-                    })
-                    .flatten()
-            });
-            let upper = steps.iter().find_map(|step| {
-                (step.offset >= progress)
-                    .then(|| {
-                        step.declarations
-                            .iter()
-                            .rev()
-                            .find(|d| d.name == name)
-                            .map(|d| (step.offset, &d.value))
-                    })
-                    .flatten()
-            });
+            let lower = steps
+                .iter()
+                .rev()
+                .filter(|step| step.offset <= progress)
+                .find_map(|step| declaration_in(step, name));
+            let upper = steps
+                .iter()
+                .filter(|step| step.offset >= progress)
+                .find_map(|step| declaration_in(step, name));
             let current = properties.get(name).cloned();
             let resolve = |entry: Option<(f32, &Value)>| {
                 entry
@@ -336,20 +371,32 @@ impl StyleResolver {
             };
             let start = lower.map(|entry| entry.0).unwrap_or(0.0);
             let end = upper.map(|entry| entry.0).unwrap_or(1.0);
-            let span = if end > start {
+            let linear_progress = if end > start {
                 ((progress - start) / (end - start)).clamp(0.0, 1.0)
             } else {
                 0.0
             };
-            let span = super::super::transition::animation_timing_progress(timing, span);
+            let eased_progress =
+                super::super::transition::animation_timing_progress(timing, linear_progress);
             if let (Some(lower), Some(upper)) = (resolve(lower), resolve(upper)) {
                 let value = super::super::transition::interpolate_custom_property(
-                    name, &lower, &upper, span,
+                    name,
+                    &lower,
+                    &upper,
+                    eased_progress,
                 )
-                .unwrap_or_else(|| if span < 0.5 { lower } else { upper });
+                .unwrap_or_else(|| if eased_progress < 0.5 { lower } else { upper });
                 let flow = logical_flow_from_properties(properties);
                 insert_computed_property(properties, name, value, flow);
             }
         }
     }
+}
+
+fn declaration_in<'a>(step: &'a KeyframeStep, name: &str) -> Option<(f32, &'a Value)> {
+    step.declarations
+        .iter()
+        .rev()
+        .find(|declaration| declaration.name == name)
+        .map(|declaration| (step.offset, &declaration.value))
 }

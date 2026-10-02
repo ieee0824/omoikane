@@ -81,6 +81,15 @@ thread_local! {
     static LAYOUT_ERROR_REPORTER: RefCell<Option<(Arc<ErrorReporter>, ExecutionSurface)>> = const { RefCell::new(None) };
 }
 
+/// Returns the document owning the current traversal's image requests.
+fn image_document_id() -> usize {
+    IMAGE_COOKIE_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map_or(0, |(_, _, document)| *document)
+    })
+}
+
 /// Runs layout with an optional destination for recoverable layout failures.
 pub(crate) fn with_error_reporter<T>(
     destination: Option<(Arc<ErrorReporter>, ExecutionSurface)>,

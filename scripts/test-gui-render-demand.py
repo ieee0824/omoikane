@@ -59,6 +59,7 @@ def click_page(gui):
 def verify_timer(gui, window, fixture, bounds, delay_ms=500):
     navigate(gui, window, fixture, '/timer.html', bounds)
     idle(gui, 'timer page before input')
+    # timer.html selects 1000ms with event.shiftKey, otherwise 500ms.
     if delay_ms == 1000:
         gui.command('xdotool', 'keydown', '--window', window, 'Shift_L')
     started = time.monotonic()
@@ -75,7 +76,7 @@ def verify_timer(gui, window, fixture, bounds, delay_ms=500):
     idle(gui, 'timer finished')
 
 
-def verify_motion(gui, window, fixture, bounds, path, activate=True):
+def verify_motion(gui, window, fixture, bounds, path, activate=True, minimum_colors=2):
     navigate(gui, window, fixture, path, bounds)
     if activate:
         click_page(gui)
@@ -85,7 +86,6 @@ def verify_motion(gui, window, fixture, bounds, path, activate=True):
         colors.append(pixel(gui, bounds))
         time.sleep(.08)
     count = paints(gui) - before
-    minimum_colors = 3 if path == '/keyframes.html' else 2
     assert len(set(colors)) >= minimum_colors, (path, colors)
     assert count >= 3, (path, 'animation stopped painting', count)
     gui.evidence.append({'step': path, 'colors': colors, 'paints': count})
@@ -142,7 +142,7 @@ def verify(binary, artifacts):
             verify_timer(gui, window, fixture, bounds, delay_ms=1000)
             verify_motion(gui, window, fixture, bounds, '/raf.html')
             verify_finite_motion(gui, window, fixture, bounds, '/transition.html', 1)
-            verify_motion(gui, window, fixture, bounds, '/keyframes.html')
+            verify_motion(gui, window, fixture, bounds, '/keyframes.html', minimum_colors=3)
             verify_motion(gui, window, fixture, bounds, '/gif.html', activate=False)
             verify_finite_motion(gui, window, fixture, bounds, '/smooth.html', .3)
             assert app.poll() is None, ('GUI exited', app.returncode)
@@ -157,16 +157,14 @@ def measure_idle(binary, artifacts, seconds):
             gui.command('xdotool', 'windowsize', '--sync', window, '1000', '700')
             gui.command('xdotool', 'windowmove', '--sync', window, '50', '50')
             bounds = geometry(gui, window)
-            def color():
-                image = ImageGrab.grab(xdisplay=gui.env['DISPLAY']).convert('RGB')
-                return image.getpixel((bounds['X'] + 700, bounds['Y'] + 400))
-            gui.wait_for('static page painted', color, lambda value: value == (10, 20, 30))
+            gui.wait_for('static page painted', lambda: pixel(gui, bounds),
+                         lambda value: value == (10, 20, 30))
             time.sleep(2)
             before_cpu, before_time = cpu_seconds(app.pid), time.monotonic()
             time.sleep(seconds)
             elapsed = time.monotonic() - before_time
             assert app.poll() is None, ("GUI exited during CPU measurement", app.returncode)
-            assert color() == (10, 20, 30), "static page disappeared during measurement"
+            assert pixel(gui, bounds) == (10, 20, 30), "static page disappeared during measurement"
             cpu = cpu_seconds(app.pid) - before_cpu
             result = {'pid': app.pid, 'interval_seconds': elapsed,
                       'cpu_seconds': cpu, 'cpu_percent_one_core': cpu / elapsed * 100}
