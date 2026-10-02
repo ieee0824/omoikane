@@ -282,7 +282,7 @@ impl StyleResolver {
         let steps = self.keyframes_for(node, scope, &name);
         let hidden = matches!(
             properties.get(&PropertyId::Display),
-            Some(ComputedValue::Keyword(display)) if display == "none"
+            Some(ComputedValue::Keyword(display)) if display.eq_ignore_ascii_case("none")
         );
         let Some(steps) = steps.filter(|_| !hidden) else {
             timeline
@@ -294,7 +294,7 @@ impl StyleResolver {
         let spec = AnimationSpec::from_properties(&name, scope, properties);
         let paused = matches!(
             properties.get(&PropertyId::AnimationPlayState),
-            Some(ComputedValue::Keyword(value)) if value == "paused"
+            Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("paused")
         );
         let progress = timeline
             .borrow_mut()
